@@ -22,49 +22,12 @@ import numpy as np
 import scipy.special as spc
 from torch import fft
 import torch.nn.functional as F
-from torch.nn.functional import interpolate
+from torch.nn.functional import interpolate, pad
 
 from graphviz import Digraph
 from VLT_pupil import PupilVLT, CircPupil
 import torch
 
-
-#%%
-
-x = torch.tensor([1,2,3], dtype=torch.float32).T
-#B0 = torch.tensor([[0,1,2], [3,4,5], [6,7,8]], dtype=torch.float32)
-#B1 = torch.tensor([[0,1,2], [3,4,5], [6,1,8]], dtype=torch.float32, requires_grad=True)
-
-M1 = torch.diag(torch.range(1,3))
-
-def f(s,x):
-    #B = torch.tensor([[0,s[1],2+s[0]], [3*s[0],4,5+s[1]], [6,1,8]])
-    #return torch.linalg.pinv(B) @ x
-
-    return torch.tensor([s[0]**2, s[1], 2.0]) * x
-
-s0 = torch.tensor([1.0, 1.0])
-s1 = torch.tensor([2.0, 0.5], requires_grad=True)
-
-A = f(s0,x)
-
-loss_fn = nn.MSELoss()
-optimizer = optim.LBFGS([s1],
-                        history_size=10,
-                        max_iter=4,
-                        line_search_fn="strong_wolfe")
-h_lbfgs = []
-for i in range(10):
-    optimizer.zero_grad()
-    objective = loss_fn(A, f(s1,x))
-    objective.backward(retain_graph=True)
-    optimizer.step(lambda: loss_fn(A, f(s1,x)))
-    print(objective.item())
-
-#print(B1)
-
-
-#%%
 
 def iter_graph(root, callback):
     queue = [root]
@@ -165,7 +128,7 @@ D       = 8.1 #[m] ????? 8.1 or 8
 wvl     = 728e-9 #[m]
 psInMas = 25.0 #[mas]
 nPix    = 200 #128
-pitch   = 0.22 #[m]
+pitch   = 0.2 #[m] 0.22?
 h_DM    = 0.0 # ????? what is h_DM?
 nDM     = 1
 kc      = 1/(2*pitch) #TODO: kc is not consistent with vanilla TIPTOP
@@ -195,7 +158,7 @@ sampling_factor = int(np.ceil(2.0/pixels_per_l_D)) # check how much it is less t
 sampling = sampling_factor * pixels_per_l_D
 nOtf = nPix * sampling_factor
 
-dk = np.min(1/D/sampling) # PSD spatial frequency step
+dk = 1/D/sampling # PSD spatial frequency step
 cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 
 with torch.no_grad():
@@ -206,33 +169,44 @@ with torch.no_grad():
     k2 = kx**2 + ky**2
     k = np.sqrt(k2)
 
-    M_mask = torch.zeros([600,600,nGS,nGS])
+    nOtf_AO = int(2*kc/dk)
+    corrected_ROI = slice(nOtf//2-nOtf_AO//2, nOtf//2+nOtf_AO//2)
+    corrected_ROI = (corrected_ROI,corrected_ROI)
+
+    kx_AO = kx[corrected_ROI]
+    ky_AO = ky[corrected_ROI]
+    k_AO  = k [corrected_ROI]
+    k2_AO = k2[corrected_ROI]
+
+    M_mask = torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS])
     for j in range(nGS):
         M_mask[:,:,j,j] += 1.
 
-    kx_nGs_nGs = torch.ones([1,1,nGS,nGS]) * torch.unsqueeze(torch.unsqueeze(kx,2),3) * M_mask
-    ky_nGs_nGs = torch.ones([1,1,nGS,nGS]) * torch.unsqueeze(torch.unsqueeze(ky,2),3) * M_mask
-    k_nGs_nGs  = torch.ones([1,1,nGS,nGS]) * torch.unsqueeze(torch.unsqueeze(k,2),3)  * M_mask
-    kx_nGs_nL  = torch.ones([1,1,nGS,nL])  * torch.unsqueeze(torch.unsqueeze(kx,2),3)
-    ky_nGs_nL  = torch.ones([1,1,nGS,nL])  * torch.unsqueeze(torch.unsqueeze(ky,2),3)
+    kx_nGs_nGs = torch.ones([1,1,nGS,nGS]) * torch.unsqueeze(torch.unsqueeze(kx_AO,2),3) * M_mask
+    ky_nGs_nGs = torch.ones([1,1,nGS,nGS]) * torch.unsqueeze(torch.unsqueeze(ky_AO,2),3) * M_mask
+    k_nGs_nGs  = torch.ones([1,1,nGS,nGS]) * torch.unsqueeze(torch.unsqueeze(k_AO, 2),3) * M_mask
+    kx_nGs_nL  = torch.ones([1,1,nGS,nL])  * torch.unsqueeze(torch.unsqueeze(kx_AO,2),3)
+    ky_nGs_nL  = torch.ones([1,1,nGS,nL])  * torch.unsqueeze(torch.unsqueeze(ky_AO,2),3)
 
-    dim_expander_nGS_nL = torch.ones([nOtf,nOtf,nGS,nL])
-    noise_nGs_nGs = torch.normal(mean=torch.zeros([nOtf,nOtf,nGS,nGS]), std=torch.ones([nOtf,nOtf,nGS,nGS])*0.1)
+    dim_expander_nGS_nL = torch.ones([nOtf_AO,nOtf_AO,nGS,nL])
+    noise_nGs_nGs = torch.normal(mean=torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS]), std=torch.ones([nOtf_AO,nOtf_AO,nGS,nGS])*0.1) #TODO: remove noise, do proper matrix inversion
 
     # Piston filter
-    x = (np.pi*D*k).numpy()
+    x = (np.pi*D*k_AO).numpy()
     R = spc.j1(x)/x
     piston_filter = torch.tensor(1.0-4*R**2)
-    piston_filter[nOtf//2,nOtf//2] *= 0.0
+    piston_filter[nOtf_AO//2,nOtf_AO//2] *= 0.0
 
     mask = torch.ones_like(k2)
     mask[k2 <= kc**2] = 0
-    mask_AO = 1.0 - mask
+    mask_corrected = 1.0-mask
+    mask_AO = mask[corrected_ROI]
+    mask_corrected_AO = mask_corrected[corrected_ROI]
 
     # Initialize OTF frequencines
     U,V = torch.meshgrid(
-        torch.linspace(-1, 1-2/nOtf, nOtf),
-        torch.linspace(-1, 1-2/nOtf, nOtf) )
+        torch.linspace(-1, 1, nOtf),
+        torch.linspace(-1, 1, nOtf) )
     U2  = U**2
     V2  = V**2
     UV  = U*V
@@ -243,161 +217,169 @@ with torch.no_grad():
     #OTF_J = Gauss2D(torch.tensor([1.0, 0.0, 0.0, 0.1]))
 
     #pupil = torch.tensor(PupilVLT(nPix, vangle=[0,0], petal_modes=False))
-    pupil = torch.tensor(CircPupil(nPix)*1.0)
+    nPix_pupil = np.round(nOtf/sampling)
+    nPix_pupil += nPix_pupil % 2
+    nPix_pupil = int(nPix_pupil)
 
+    pupil = torch.tensor(CircPupil(nPix_pupil)*1.0)
     pupil_padded = torch.zeros([nOtf, nOtf])
-    pupil_padded[nOtf//2-nPix//2:nOtf//2+nPix//2,nOtf//2-nPix//2:nOtf//2+nPix//2] = pupil
+    pupil_padded[
+        nOtf//2-nPix_pupil//2:nOtf//2+nPix_pupil//2,
+        nOtf//2-nPix_pupil//2:nOtf//2+nPix_pupil//2
+    ] = pupil
+
     fftAutoCorr = lambda x: fft.ifft2(fft.fft2(x)*torch.conj(fft.fft2(x)))/(x.size(0)*x.size(1))
     OTF_static = torch.real( fft.fftshift(fftAutoCorr(pupil_padded)) )
     OTF_static = OTF_static / OTF_static.max()
 
+    padder = torch.nn.ZeroPad2d((nOtf-nOtf_AO)//2)
 
-#%
-L0 = torch.tensor([47.93], requires_grad=True)
-r0 = torch.tensor([0.10539785053590676], requires_grad=False)
+#%%
+#L0 = torch.tensor([47.93], requires_grad=True)
+#r0 = torch.tensor([0.10539785053590676], requires_grad=False)
 
+#--------------------------------------------------
 
+def NoisePSD(r0, L0):
+    h_buf = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(h,0),0),0) * dim_expander_nGS_nL
+    GS_dirs_x_buf = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_x,0),0),3) * dim_expander_nGS_nL
+    GS_dirs_y_buf = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_y,0),0),3) * dim_expander_nGS_nL
+    
+    '''
+    M = torch.zeros([nOtf, nOtf, nGS, nGS], dtype=torch.complex64)
+    P = torch.zeros([nOtf, nOtf, nGS, nL],  dtype=torch.complex64)
+    for j in range(nGS):
+        M[:, :, j, j] = 2j*np.pi*k*torch.sinc(WFS_d_sub*kx) * torch.sinc(WFS_d_sub*ky)
+        for n in range(nL):
+            P[:, :, j, n] = torch.exp(2j*np.pi*h[n]*(kx*GS_directions[0,j] + ky*GS_directions[1,j]))
+    '''
 
-h_buf = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(h,0),0),0) * dim_expander_nGS_nL
-GS_dirs_x_buf = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_x,0),0),3) * dim_expander_nGS_nL
-GS_dirs_y_buf = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_y,0),0),3) * dim_expander_nGS_nL
+    M = 2j*np.pi*k_nGs_nGs*torch.sinc(WFS_d_sub*kx_nGs_nGs) * torch.sinc(WFS_d_sub*ky_nGs_nGs)
+    P = torch.exp(2j*np.pi*h_buf*(kx_nGs_nL*GS_dirs_x_buf + ky_nGs_nL*GS_dirs_y_buf))
 
-#M = torch.zeros([nOtf, nOtf, nGS, nGS], dtype=torch.complex64)
-#P = torch.zeros([nOtf, nOtf, nGS, nL],  dtype=torch.complex64)
-#for j in range(nGS):
-#    M[:, :, j, j] = 2j*np.pi*k*torch.sinc(WFS_d_sub*kx) * torch.sinc(WFS_d_sub*ky)
-#    for n in range(nL):
-#        P[:, :, j, n] = torch.exp(2j*np.pi*h[n]*(kx*GS_directions[0,j] + ky*GS_directions[1,j]))
+    MP = M @ P
+    MP_t = torch.conj(torch.permute(MP, (0,1,3,2)))
 
-M = 2j*np.pi*k_nGs_nGs*torch.sinc(WFS_d_sub*kx_nGs_nGs) * torch.sinc(WFS_d_sub*ky_nGs_nGs)
-P = torch.exp(2j*np.pi*h_buf*(kx_nGs_nL*GS_dirs_x_buf + ky_nGs_nL*GS_dirs_y_buf))
+    Cb = torch.ones((nOtf_AO,nOtf_AO,nGS,nGS), dtype=torch.complex64) * torch.eye(4) * WFS_noise_var #torch.diag(WFS_noise_var)
+    kernel = torch.unsqueeze(torch.unsqueeze(r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6) * piston_filter, 2), 3)
+    C_phi  = kernel.repeat(1, 1, nL, nL) * torch.diag(Cn2_weights) + 0j
+    Wtomo  = (C_phi@MP_t) @ torch.linalg.pinv(MP @ C_phi @ MP_t + Cb + noise_nGs_nGs, rcond=1e-2)
 
-MP = M @ P
-MP_t = torch.conj(torch.permute(MP, (0,1,3,2)))
+    #TODO: in vanilla TIPTOP windspeeds are interpolated linearly if number of mod layers is changed!!!!!
 
-Cb = torch.ones((nOtf,nOtf,nGS,nGS), dtype=torch.complex64) * torch.eye(4) * WFS_noise_var #torch.diag(WFS_noise_var)
-kernel = torch.unsqueeze(torch.unsqueeze(r0**(-5/3)*cte*(k2 + 1/L0**2)**(-11/6) * piston_filter, 2), 3)
-C_phi  = kernel.repeat(1, 1, nL, nL) * torch.diag(Cn2_weights) + 0j
-Wtomo  = (C_phi@MP_t) @ torch.linalg.pinv(MP @ C_phi @ MP_t + Cb + noise_nGs_nGs, rcond=1e-2)
+    '''
+    DMS_opt_dir = torch.tensor([0.0, 0.0])
+    opt_weights = 1.0
 
-#TODO: in vanilla TIPTOP windspeeds are interpolated linearly if number of mod layers is changed!!!!!
+    theta_x = torch.tensor([DMS_opt_dir[0]/206264.8 * np.cos(DMS_opt_dir[1]*np.pi/180)])
+    theta_y = torch.tensor([DMS_opt_dir[0]/206264.8 * np.sin(DMS_opt_dir[1]*np.pi/180)])
 
-#%-----------------------------------------------------------------------------
+    P_L  = torch.zeros([nOtf, nOtf, 1, nL], dtype=torch.complex64)
+    fx = theta_x*kx
+    fy = theta_y*ky
+    P_DM = torch.unsqueeze(torch.unsqueeze(torch.exp(2j*np.pi*h_DM*(fx+fy))*mask_corrected,2),3)
+    P_DM_t = torch.conj(P_DM.permute(0,1,3,2))
+    for l in range(nL):
+        P_L[:,:,0,l] = torch.exp(2j*np.pi*h[l]*(fx+fy))*mask_corrected
+
+    P_opt = torch.linalg.pinv((P_DM_t @ P_DM)*opt_weights, rcond=1e-2) @ ((P_DM_t @ P_L)*opt_weights)
+
+    src_direction = torch.tensor([0,0])
+    fx = src_direction[0]*kx
+    fy = src_direction[1]*ky
+    PbetaDM = torch.unsqueeze(torch.unsqueeze(torch.exp(2j*np.pi*h_DM*(fx+fy))*mask_corrected,2),3)
+    '''
+
+    with torch.no_grad():
+        PbetaDM = torch.ones([Wtomo.shape[0], Wtomo.shape[1],1,1], dtype=torch.complex64)
+        P_opt   = torch.ones([Wtomo.shape[0], Wtomo.shape[1],1,2], dtype=torch.complex64)
+
+    PW = PbetaDM @ P_opt @ Wtomo
+
+    noisePSD = PW @ Cb @ torch.conj(PW.permute(0,1,3,2))
+    noisePSD = torch.squeeze(torch.squeeze(torch.abs(noisePSD))) * piston_filter * noise_gain * WFS_noise_var * mask_corrected_AO #torch.mean(WFS_noise_var) 
+    #plt.imshow(np.log(noisePSD2[255:345,255:345].detach().numpy()))
+    #plt.imshow(np.log(noisePSD.detach().numpy()))
+    return noisePSD
+
+#------------------------------------------------------------------
+
 '''
-DMS_opt_dir = torch.tensor([0.0, 0.0])
-opt_weights = 1.0
+Beta = [self.ao.src.direction[0,s],self.ao.src.direction[1,s]]
+PbetaL = np.zeros([nK, nK, 1, nH], dtype=complex)
+fx = Beta[0]*self.freq.kxAO_
+fy = Beta[1]*self.freq.kyAO_
+for j in range(nH):
+    freq_t = wDir_x[j]*self.freq.kxAO_+ wDir_y[j]*self.freq.kyAO_
+    delta_h = Hs[j]*(fx+fy) - deltaT*self.ao.atm.wSpeed[j]*freq_t
+    PbetaL[: , :, 0, j] = np.exp(i*2*np.pi*delta_h)
 
-theta_x = torch.tensor([DMS_opt_dir[0]/206264.8 * np.cos(DMS_opt_dir[1]*np.pi/180)])
-theta_y = torch.tensor([DMS_opt_dir[0]/206264.8 * np.sin(DMS_opt_dir[1]*np.pi/180)])
-
-P_L  = torch.zeros([nOtf, nOtf, 1, nL], dtype=torch.complex64)
-fx = theta_x*kx
-fy = theta_y*ky
-P_DM = torch.unsqueeze(torch.unsqueeze(torch.exp(2j*np.pi*h_DM*(fx+fy))*mask_AO,2),3)
-P_DM_t = torch.conj(P_DM.permute(0,1,3,2))
-for l in range(nL):
-    P_L[:,:,0,l] = torch.exp(2j*np.pi*h[l]*(fx+fy))*mask_AO
-
-P_opt = torch.linalg.pinv((P_DM_t @ P_DM)*opt_weights, rcond=1e-2) @ ((P_DM_t @ P_L)*opt_weights)
-
-src_direction = torch.tensor([0,0])
-fx = src_direction[0]*kx
-fy = src_direction[1]*ky
-PbetaDM = torch.unsqueeze(torch.unsqueeze(torch.exp(2j*np.pi*h_DM*(fx+fy))*mask_AO,2),3)
+proj = PbetaL - np.matmul(self.PbetaDM[s], self.Walpha)
+proj_t = np.conj(proj.transpose(0, 1, 3, 2))
+tmp = np.matmul(proj,np.matmul(self.Cphi, proj_t))
+psd[:, :, s] = self.freq.mskInAO_ * tmp[:, :, 0, 0]*self.freq.pistonFilterAO_
 '''
-with torch.no_grad():
-    PbetaDM = torch.ones([Wtomo.shape[0],Wtomo.shape[1],1,1], dtype=torch.complex64)
-    P_opt   = torch.ones([Wtomo.shape[0],Wtomo.shape[1],1,2], dtype=torch.complex64)
 
-PW = PbetaDM @ P_opt @ Wtomo
-
-noisePSD = PW @ Cb @ torch.conj(PW.permute(0,1,3,2))
-noisePSD = torch.squeeze(torch.squeeze(torch.abs(noisePSD))) * piston_filter * noise_gain * WFS_noise_var * mask_AO #torch.mean(WFS_noise_var) 
-
-
-Q = noisePSD.sum()
 '''
-external_grad = torch.tensor(1)
-Q.backward(gradient=external_grad)
-print(r0.grad)
-'''
+Q = NoisePSD(r0, L0).sum()
 get_dot = register_hooks(Q)
 Q.backward()
 dot = get_dot()
 #dot.save('tmp.dot') # to get .dot
 #dot.render('tmp') # to get SVG
 dot # in Jupyter, you can just render the variable
+'''
 
+#%%------------------------------------------------------------------------------
 
-#%%
+def VonKarmanPSD(r0, L0):
+    return cte*r0**(-5/3)*(k2 + 1/L0**2)**(-11/6) * mask
 
-plt.imshow(np.log(np.real(noisePSD[255:345,255:345])))
-
-#%%
-loss_fn = nn.L1Loss()
-
-#X0 = torch.tensor([.15, 20.0, 1.0, 0.0, 0.0], requires_grad=False)
-#X1 = torch.tensor([.50, 15.0, 1.0, 0.0, 0.0], requires_grad=True)
-
-r0 = torch.tensor(0.5, requires_grad=True)
-L0 = torch.tensor(50,  requires_grad=False)
+r0 = torch.tensor(0.105, requires_grad=True)
+L0 = torch.tensor(47.93, requires_grad=False)
 I  = torch.tensor(1.0, requires_grad=False)
 dx = torch.tensor(0.0, requires_grad=True)
 dy = torch.tensor(0.0, requires_grad=True)
 bg = torch.tensor(0.0, requires_grad=False)
 
-#X0 = torch.tensor([.15, 20.0], requires_grad=False)
-#X1 = torch.tensor([.50, 15.0], requires_grad=True)
+def PSD2PSF(r0, L0, I, dx, dy, bg):
+    r0 = torch.abs(r0)
+    L0 = torch.abs(L0)
 
-def vonKarmanPSF(r0, L0, I, dx, dy, bg):
-    PSD = cte*r0**(-5/3)*(k2 + 1/L0**2)**(-11/6)*mask
+    PSD = VonKarmanPSD(r0,L0) + padder(NoisePSD(r0,L0))
+    PSD *= (dk*wvl*1e9/2/np.pi)**2
+    
     cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD)))
     SF  = torch.abs(cov).max()-cov
-    
-    fftPhasor = torch.exp(-sampling_factor*np.pi*1j*(U*dx+V*dy))
+
+    fftPhasor = torch.exp(-np.pi*1j*sampling_factor*(U*dx+V*dy))
     OTF_turb = torch.exp(-0.5*SF*(2*np.pi*1e-9/wvl)**2)
-    OTF = OTF_turb * OTF_static * fftPhasor
-    #return OTF
+    OTF = OTF_turb * fftPhasor * OTF_static
     PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) )*I + bg
     PSF = torch.unsqueeze(torch.unsqueeze(PSF, dim=0), dim=0)
     PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area')
-    return PSF_out.squeeze(0).squeeze(0) * 1e4
+    return PSF_out.squeeze(0).squeeze(0) * 1e6
 
-PSF_0 = vonKarmanPSF(0.15, 20.0, 1.0, 0.0, 1.0, 0.0) #X0)
-#PSF_0 = PSF_0/PSF_0.sum()
-PSF_1 = vonKarmanPSF(r0, L0, I, dx, dy, bg) #X1)
+PSF_0 = PSD2PSF(
+    torch.tensor(0.155), torch.tensor(47.93),
+    torch.tensor(1.0),
+    torch.tensor(1.0), torch.tensor(2.0),
+    torch.tensor(0.0)
+)
+PSF_1 = PSD2PSF(r0, L0, I, dx, dy, bg)
 
 '''
-zoom = PSF_0.detach().cpu().numpy()
 crop = 64
-zoom = zoom[nPix//2-crop:nPix//2+crop,nPix//2-crop:nPix//2+crop]
-#plt.imshow(np.log(zoom))
-plt.imshow(zoom)
+zoomed = slice(nPix//2-crop, nPix//2+crop)
+zoomed = (zoomed, zoomed)
+
+plt.imshow(torch.abs(PSF_0-PSF_1).detach().cpu().numpy()[zoomed])
 plt.show()
-'''
-
-#plt.imshow(torch.abs(PSF_0))
-
-#%%
-#plt.imshow(np.log((PSF_1).detach().cpu().numpy()))
+#plt.imshow(torch.abs(PSF_1).detach().cpu().numpy()[zoomed])
 #plt.show()
+'''
 
 #%
-'''
-def GetCenter(img):
-    buf = img.detach().cpu().numpy()
-    max_id = np.unravel_index(np.argmax(buf), buf.shape)
-    return max_id
-print(GetCenter(PSF_1))
-'''
-
-'''
-plt.imshow(np.log(PSF_0.detach().numpy()))
-plt.show()
-plt.imshow(np.log(PSF_1.detach().numpy()))
-plt.show()
-'''
-
 '''
 loss_fn = nn.MSELoss()
 Q = loss_fn(PSF_0, PSF_1)
@@ -407,37 +389,32 @@ dot = get_dot()
 #dot.save('tmp.dot') # to get .dot
 #dot.render('tmp') # to get SVG
 dot # in Jupyter, you can just render the variable
-'''
 
 '''
-Q = loss_fn(PSF_0, PSF_1)
-external_grad = torch.tensor(1)
-Q.backward(gradient=external_grad)
-print(X1.grad)
-'''
-
-#%
+#%%
 niter = 500
-loss_fn = nn.MSELoss()
+#loss_fn = nn.MSELoss()
+loss_fn = nn.L1Loss()
 
-#def loss_fn_2(A,B):
-#    return loss_fn(A,B) + 0.1*torch.abs(A.max()-B.max())
+#optimizer = optim.SGD([r0, L0, I, dx, dy, bg], lr=1e-3) #, momentum=0.9)
+optimizer = optim.LBFGS([r0, L0, I, dx, dy, bg], history_size=20, max_iter=10, line_search_fn="strong_wolfe")
 
-optimizer = optim.SGD([r0, L0, I, dx, dy, bg], lr=1e-4) #, momentum=0.9)
-#optimizer = optim.LBFGS([X1],
-#                        history_size=10,
-#                        max_iter=4,
-#                        line_search_fn="strong_wolfe")
-
-for _ in range(0, niter):
+for iteration in range(0, niter):
     optimizer.zero_grad()
-    loss = loss_fn( vonKarmanPSF(r0, L0, I, dx, dy, bg), PSF_0 )
+    loss = loss_fn( PSD2PSF(r0, L0, I, dx, dy, bg), PSF_0 )
     loss.backward()
+    #if not iteration % 10:
     print(loss)
-    optimizer.step() # lambda: loss_fn(vonKarmanPSF(X1), PSF_0) )
+    #optimizer.step()
+    optimizer.step( lambda: loss_fn(PSD2PSF(r0, L0, I, dx, dy, bg), PSF_0) )
 
-print(loss.data)
-print(r0, L0, I, dx, dy, bg)
+#print(loss.data)
+
+print('-------------------------------------------------------------')
+print('r0: ', r0.data.item())
+print('L0: ', L0.data.item())
+print('I, bg: ', I.data.item(),',',bg.data.item())
+print('dx/dy: (', dx.data.item(),',',dy.data.item(),')')
 
 
 #%% ==================================================================================================================================
@@ -450,9 +427,9 @@ def Scan(X_inp, scan_range, id, loss):
         delta = torch.zeros_like(X_inp)
         delta[id] += i
         X_buf = X_inp + delta
-        #PSF_buf = torch.abs( vonKarmanPSF(X_buf) )
+        #PSF_buf = torch.abs( PSD2PSF(X_buf) )
         #loss_val.append(loss(PSF_buf, PSF_0))
-        loss_val.append(lossPSF(vonKarmanPSF(X0), vonKarmanPSF(X_buf)))
+        loss_val.append(lossPSF(PSD2PSF(X0), PSD2PSF(X_buf)))
     return np.array(loss_val)
 
 loss_dy = Scan(X0,torch.linspace(-10,10,100),3, loss=loss_fn)
@@ -831,7 +808,7 @@ from skimage.transform import resize
 
 X0 = np.array([.15, 20., 1.0, 20.0, 0.0])
 X1 = np.array([.50, 20., 1.0, 0.0, 0.0])
-def vonKarmanPSF(X):
+def PSD2PSF(X):
     PSD = cte*X[0]**(-5/3)*(k2 + 1/X[1]**2)**(-11/6)*mask
     cov = 2*np.fft.fftshift(np.fft.fft2(np.fft.fftshift(PSD)))
     SF  = np.real(cov).max()-cov
@@ -843,8 +820,8 @@ def vonKarmanPSF(X):
 
     return PSF * 1e4
 
-PSF_0 = vonKarmanPSF(X0) #reference
-PSF_1 = vonKarmanPSF(X1)
+PSF_0 = PSD2PSF(X0) #reference
+PSF_1 = PSD2PSF(X1)
 
 #%%
 
@@ -859,7 +836,7 @@ class CostClass(object):
 
     def __call__(self, y):
         self.iter += 1
-        im_est = vonKarmanPSF(y)
+        im_est = PSD2PSF(y)
         return (im_norm - im_est).reshape(-1)
 
 cost = CostClass()
