@@ -143,7 +143,7 @@ print(start.elapsed_time(end))
 # CPU time = 0.1627281904220581 [s]
 
 #cuda  = torch.device('cuda') # Default CUDA device
-cuda  = torch.device('cpu')
+cuda  = torch.device('cuda')
 start = torch.cuda.Event(enable_timing=True)
 end   = torch.cuda.Event(enable_timing=True)
 
@@ -288,6 +288,7 @@ with torch.cuda.device(0):
     OTF_static = OTF_static / OTF_static.max()
 
     PSD_padder = torch.nn.ZeroPad2d((nOtf-nOtf_AO)//2)
+
 #%%
 
 #L0 = torch.tensor([47.93], requires_grad=True)
@@ -296,7 +297,6 @@ with torch.cuda.device(0):
 #--------------------------------------------------
 
 def TomographicReconstructors(r0, L0):
-
     M = 2j*np.pi*k_nGs_nGs*torch.sinc(WFS_d_sub*kx_nGs_nGs) * torch.sinc(WFS_d_sub*ky_nGs_nGs)
     P = torch.exp(2j*np.pi*h*(kx_nGs_nL*GS_dirs_x_nGs_nL + ky_nGs_nL*GS_dirs_y_nGs_nL))
 
@@ -385,7 +385,6 @@ def NoisePSD(W, P_beta_DM, C_b):
 def VonKarmanPSD(r0, L0):
     return cte*r0**(-5/3)*(k2 + 1/L0**2)**(-11/6) * mask
 
-#------------------------------------------------------------------
 
 '''
 Q = NoisePSD(r0, L0).sum()
@@ -406,7 +405,8 @@ def PSD2PSF(r0, L0, I, dx, dy, bg):
     W, W_alpha, P_beta_DM, C_phi, C_b, freq_t = TomographicReconstructors(r0, L0)
 
     PSD = VonKarmanPSD(r0,L0) + PSD_padder(
-            NoisePSD(W, P_beta_DM, C_b) + SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t)
+            NoisePSD(W, P_beta_DM, C_b) + \
+            SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t)
         )
 
     PSD *= (dk*wvl*1e9/2/np.pi)**2
@@ -419,12 +419,12 @@ def PSD2PSF(r0, L0, I, dx, dy, bg):
     PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) )*I + bg
     PSF = torch.unsqueeze(torch.unsqueeze(PSF, dim=0), dim=0)
     PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area')
-    return PSF_out.squeeze(0).squeeze(0) * 1e6
+    return PSF_out.squeeze(0).squeeze(0) * 1e3 #6
 
 
 start.record()
 PSF_0 = PSD2PSF(
-    torch.tensor(0.105, device=cuda), torch.tensor(47.93, device=cuda),
+    torch.tensor(0.155, device=cuda), torch.tensor(47.93, device=cuda),
     torch.tensor(1.0, device=cuda),
     torch.tensor(1.0, device=cuda), torch.tensor(2.0, device=cuda),
     torch.tensor(0.0, device=cuda)
@@ -454,7 +454,7 @@ plt.imshow(torch.log(torch.abs(PSF_0-PSF_1)).detach().cpu().numpy()[zoomed])
 plt.show()
 '''
 #%
-
+'''
 loss_fn = nn.MSELoss()
 Q = loss_fn(PSF_0, PSF_1)
 get_dot = register_hooks(Q)
@@ -463,7 +463,7 @@ dot = get_dot()
 #dot.save('tmp.dot') # to get .dot
 #dot.render('tmp') # to get SVG
 dot # in Jupyter, you can just render the variable
-
+'''
 #%%
 niter = 500
 #loss_fn = nn.MSELoss()
@@ -472,9 +472,9 @@ loss_fn = nn.L1Loss()
 #optimizer = optim.SGD([r0, L0, I, dx, dy, bg], lr=1e-3) #, momentum=0.9)
 optimizer = optim.LBFGS(
     [r0, L0, I, dx, dy, bg],
-    history_size=20,
-    max_iter=10,
-    line_search_fn="strong_wolfe"
+    history_size = 20,
+    max_iter = 10,
+    line_search_fn = "strong_wolfe"
 )
 
 for iteration in range(0, niter):
@@ -482,11 +482,10 @@ for iteration in range(0, niter):
     loss = loss_fn( PSD2PSF(r0, L0, I, dx, dy, bg), PSF_0 )
     loss.backward()
     #if not iteration % 10:
-    print(loss)
+    print(loss.item())
     #optimizer.step()
     optimizer.step( lambda: loss_fn(PSD2PSF(r0, L0, I, dx, dy, bg), PSF_0) )
 
-#print(loss.data)
 
 print('-------------------------------------------------------------')
 print('r0: ', r0.data.item())
@@ -496,6 +495,15 @@ print('dx/dy: (', dx.data.item(),',',dy.data.item(),')')
 
 
 #%% ==================================================================================================================================
+#=====================================================================================================================================
+#=====================================================================================================================================
+#=====================================================================================================================================
+#=====================================================================================================================================
+#=====================================================================================================================================
+#=====================================================================================================================================
+#=====================================================================================================================================
+#=====================================================================================================================================
+#=====================================================================================================================================
 #=====================================================================================================================================
 
 
@@ -649,16 +657,17 @@ plt.legend()
 plt.show()
 
 #%%
-
 import torch
 import torch.optim as optim
 import matplotlib.pyplot as plt
+
+cuda = torch.device('cuda')
 
 def f(x):
     return (1 - x[0])**2 + 100 * (x[1] - x[0]**2)**2
 
 # L-BFGS
-x_lbfgs = 10*torch.ones(2, 1)
+x_lbfgs = 10*torch.ones(2, 1, device=cuda)
 x_lbfgs.requires_grad = True
 
 optimizer = optim.LBFGS([x_lbfgs],
