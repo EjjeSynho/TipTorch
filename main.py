@@ -164,12 +164,20 @@ with torch.cuda.device(0):
     zenith_angle  = torch.tensor(42.4, device=cuda) # [deg]
     airmass       = 1.0 / torch.cos(zenith_angle * deg2rad)
 
-    GS_angle      = 7.5/rad2arc #[rad]
+    GS_wvl        = 589e-9 #[m]
+    GS_angle      = 7.5 / rad2arc #[rad]
+    GS_angle_delta = 2.0 / rad2arc #[rad]
     GS_height     = 90e3*airmass #[m]
-    GS_directions = torch.tensor([[GS_angle, 0, -GS_angle, 0], [0, GS_angle, 0, -GS_angle]], device=cuda) #[rad]
+
+    #GS_dirs_x     = torch.tensor([GS_angle+GS_angle_delta, 0, -GS_angle, GS_angle_delta], device=cuda) #[rad]
+    #GS_dirs_y     = torch.tensor([GS_angle_delta, GS_angle-GS_angle_delta, -GS_angle_delta, -GS_angle+GS_angle_delta], device=cuda) #[rad]
+    
+    #GS_dirs_x     = torch.tensor([GS_angle+GS_angle_delta, 0, -GS_angle, 0], device=cuda) #[rad]
+    #GS_dirs_y     = torch.tensor([0, GS_angle-GS_angle_delta, 0, -GS_angle+GS_angle_delta], device=cuda) #[rad]
+
     GS_dirs_x     = torch.tensor([GS_angle, 0, -GS_angle, 0], device=cuda) #[rad]
     GS_dirs_y     = torch.tensor([0, GS_angle, 0, -GS_angle], device=cuda) #[rad]
-    nGS           = GS_directions.size(1)
+    nGS           = GS_dirs_y.size(0)
 
     wind_speed  = torch.tensor([4., 4.1],  device=cuda)
     wind_dir    = torch.tensor([4.5, 4.7], device=cuda)
@@ -230,27 +238,20 @@ with torch.cuda.device(0):
     ky_1_1 = torch.unsqueeze(torch.unsqueeze(ky_AO,2),3)
     k_1_1  = torch.unsqueeze(torch.unsqueeze(k_AO, 2),3)
 
-    dim_N_N_nGS_nL     = torch.ones([nOtf_AO,nOtf_AO,nGS,nL], device=cuda)
-    dim_N_N_1_nL       = torch.ones([nOtf_AO,nOtf_AO,1,nL], device=cuda)
-    dim_1_nL_to_nGS_nL = torch.ones([1,1,nGS,1], device=cuda)
-    dim_1_1_to_1_nL    = torch.ones([1,1,1,nL], device=cuda)
-    dim_1_1_to_nGS_nL  = torch.ones([1,1,nGS,nL], device=cuda)
-    dim_1_1_to_nGS_nGS = torch.ones([1,1,nGS,nGS], device=cuda)
-
-    kx_nGs_nGs = dim_1_1_to_nGS_nGS * kx_1_1 * M_mask
-    ky_nGs_nGs = dim_1_1_to_nGS_nGS * ky_1_1 * M_mask
-    k_nGs_nGs  = dim_1_1_to_nGS_nGS * k_1_1  * M_mask
-    kx_nGs_nL  = dim_1_1_to_nGS_nL  * kx_1_1
-    ky_nGs_nL  = dim_1_1_to_nGS_nL  * ky_1_1
-    k_nGs_nL   = dim_1_1_to_nGS_nL  * k_1_1
-    kx_1_nL    = dim_1_1_to_1_nL    * kx_1_1
-    ky_1_nL    = dim_1_1_to_1_nL    * ky_1_1
+    kx_nGs_nGs = kx_1_1.repeat([1,1,nGS,nGS]) * M_mask
+    ky_nGs_nGs = ky_1_1.repeat([1,1,nGS,nGS]) * M_mask
+    k_nGs_nGs  = k_1_1.repeat([1,1,nGS,nGS])  * M_mask
+    kx_nGs_nL  = kx_1_1.repeat([1,1,nGS,nL])
+    ky_nGs_nL  = ky_1_1.repeat([1,1,nGS,nL])
+    k_nGs_nL   = k_1_1.repeat([1,1,nGS,nL])
+    kx_1_nL    = kx_1_1.repeat([1,1,1,nL])
+    ky_1_nL    = ky_1_1.repeat([1,1,1,nL])
 
     noise_nGs_nGs = torch.normal(mean=torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS]), std=torch.ones([nOtf_AO,nOtf_AO,nGS,nGS])*0.1) #TODO: remove noise, do proper matrix inversion
     noise_nGs_nGs = noise_nGs_nGs.to(cuda)
 
-    GS_dirs_x_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_x, 0),0),3) * dim_N_N_nGS_nL
-    GS_dirs_y_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_y, 0),0),3) * dim_N_N_nGS_nL
+    GS_dirs_x_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_x, 0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
+    GS_dirs_y_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_y, 0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
 
     # Piston filter
     x = (np.pi*D*k_AO).cpu().numpy() #TODO: find besel analog for pytorch
@@ -335,22 +336,22 @@ def TomographicReconstructors(r0, L0):
 
     with torch.no_grad(): # an easier initialization for MUSE NFM
         P_beta_DM = torch.ones([W_tomo.shape[0], W_tomo.shape[1],1,1], dtype=torch.complex64, device=cuda) * mask_corrected_AO_1_1
-        P_opt     = torch.ones([W_tomo.shape[0], W_tomo.shape[1],1,2], dtype=torch.complex64, device=cuda) * (mask_corrected_AO_1_1*dim_1_1_to_1_nL)
+        P_opt     = torch.ones([W_tomo.shape[0], W_tomo.shape[1],1,2], dtype=torch.complex64, device=cuda) * (mask_corrected_AO_1_1.repeat([1,1,1,nL])) #*dim_1_1_to_1_nL)
 
     W = P_opt @ W_tomo
 
-    wDir_x = torch.cos(wind_dir*np.pi/180.)
-    wDir_y = torch.sin(wind_dir*np.pi/180.)
+    wDir_x = torch.cos(wind_dir*np.pi/180.0)
+    wDir_y = torch.sin(wind_dir*np.pi/180.0)
 
     freq_t = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(wDir_x,0),0),0)*kx_1_nL + \
              torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(wDir_y,0),0),0)*ky_1_nL
 
-    samp_time = 1./HOloop_rate
-    www = 2j*torch.pi*k_nGs_nL* torch.sinc(samp_time*WFS_det_clock_rate * (wind_speed*freq_t*dim_1_nL_to_nGS_nL))
+    samp_time = 1.0 / HOloop_rate
+    www = 2j*torch.pi*k_nGs_nL * torch.sinc(samp_time*WFS_det_clock_rate*wind_speed*freq_t).repeat([1,1,nGS,1]) #* dim_1_nL_to_nGS_nL
 
     #MPalphaL = www*np.sinc(WFS_d_sub*kx_nGs_nL)*np.sinc(WFS_d_sub*kx_nGs_nL)\
     #                                *torch.exp(2j*np.pi*h*(kx_nGs_nL*GS_dirs_x_nGs_nL + ky_nGs_nL*GS_dirs_y_nGs_nL))
-    MP_alpha_L = www * torch.sinc(WFS_d_sub*kx_nGs_nL) * torch.sinc(WFS_d_sub*ky_nGs_nL)*P
+    MP_alpha_L = www * P * ( torch.sinc(WFS_d_sub*kx_1_1)*torch.sinc(WFS_d_sub*ky_1_1) )
     W_alpha = (W @ MP_alpha_L)
 
     return W, W_alpha, P_beta_DM, C_phi, C_b, freq_t
@@ -387,6 +388,37 @@ def VonKarmanPSD(r0, L0):
 
 
 '''
+n_times = min(4,max(2,int(np.ceil(nOtf/nOtf_AO/2))))
+
+Av = torch.sinc(WFS_d_sub*kx_AO)*torch.sinc(WFS_d_sub*ky_AO) * torch.exp(1j*np.pi*WFS_d_sub*(kx_AO+ky_AO))
+
+SxAv = 2j*np.pi*kx_AO*WFS_d_sub*Av
+SyAv = 2j*np.pi*ky_AO*WFS_d_sub*Av
+
+W_atm = cte*r0**(-5/3)*(k2_AO + 1/L0**2)**(-11/6)*(wvl/GS_wvl)**2
+gPSD = torch.abs(SxAv)**2 + torch.abs(SyAv)**2 + MV*Wn/W_atm
+Rx = torch.conj(SxAv)/gPSD
+Ry = torch.conj(SyAv)/gPSD
+
+psd = np.zeros((self.freq.resAO,self.freq.resAO))
+i = complex(0,1)
+d = self.ao.wfs.optics[0].dsub
+clock_rate = np.array([self.ao.wfs.detector[j].clock_rate for j in range(self.nGs)])
+T = np.mean(clock_rate/self.ao.rtc.holoop['rate'])
+td = T * self.ao.rtc.holoop['delay']
+vx = self.ao.atm.wSpeed*np.cos(self.ao.atm.wDir*np.pi/180)
+vy = self.ao.atm.wSpeed*np.sin(self.ao.atm.wDir*np.pi/180)
+weights = self.ao.atm.weights
+w = 2*i*np.pi*d
+
+if hasattr(self, 'Rx') == False:
+    self.reconstructionFilter()
+Rx = self.Rx*w
+Ry = self.Ry*w
+'''
+
+
+'''
 Q = NoisePSD(r0, L0).sum()
 get_dot = register_hooks(Q)
 Q.backward()
@@ -397,6 +429,13 @@ dot # in Jupyter, you can just render the variable
 '''
 
 #%------------------------------------------------------------------------------
+
+W, W_alpha, P_beta_DM, C_phi, C_b, freq_t = TomographicReconstructors(0.105, 47.93)
+PSD = SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t)
+
+plt.imshow(np.log(PSD.detach().cpu().numpy()))
+
+#%%
 
 def PSD2PSF(r0, L0, I, dx, dy, bg):
     r0 = torch.abs(r0) # non-negative reparametrization
@@ -421,7 +460,6 @@ def PSD2PSF(r0, L0, I, dx, dy, bg):
     PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area')
     return PSF_out.squeeze(0).squeeze(0) * 1e3 #6
 
-
 start.record()
 PSF_0 = PSD2PSF(
     torch.tensor(0.155, device=cuda), torch.tensor(47.93, device=cuda),
@@ -443,6 +481,12 @@ end.record()
 
 torch.cuda.synchronize()
 print(start.elapsed_time(end))
+
+#%%
+
+#import pickle
+#with open('C:\\Users\\akuznets\\Desktop\\buf\\.pickle', 'wb') as handle:
+#    pickle.dump([PSF_1.detach().cpu().numpy()], handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 '''
