@@ -21,11 +21,9 @@ from torch import fft
 import numpy as np
 import scipy.special as spc
 from torch import fft
-import torch.nn.functional as F
 from torch.nn.functional import interpolate
 
 from graphviz import Digraph
-from zmq import device
 from VLT_pupil import PupilVLT, CircPupil
 import torch
 
@@ -142,8 +140,8 @@ print(start.elapsed_time(end))
 
 # CPU time = 0.1627281904220581 [s]
 
-#cuda  = torch.device('cuda') # Default CUDA device
-cuda  = torch.device('cuda')
+cuda  = torch.device('cuda') # Default CUDA device
+#cuda  = torch.device('cpu')
 start = torch.cuda.Event(enable_timing=True)
 end   = torch.cuda.Event(enable_timing=True)
 
@@ -189,12 +187,12 @@ with torch.cuda.device(0):
     nL          = Cn2_heights.size(0)
 
     WFS_d_sub     = 0.2
-    WFS_noise_var = 5.69594009 #torch.tensor([5.69594009]*GS_directions.size(1)) TODO: calculate it from imput data
-    noise_gain    = 0.6
+    WFS_noise_var = 5.69594009 #TODO: calculate it from imput data
     WFS_det_clock_rate = 1. # [(?)]
 
     HOloop_rate = 500.0 # [Hz] (?)
     HOloop_delay = 2 # [ms] (?)
+    HOloop_gain = 0.5
 
     pixels_per_l_D = wvl*rad2mas / (psInMas*D)
     sampling_factor = int(np.ceil(2.0/pixels_per_l_D)) # check how much it is less than Nyquist
@@ -217,6 +215,20 @@ with torch.cuda.device(0):
     mask_corrected = 1.0-mask
 
     nOtf_AO = int(2*kc/dk)
+    
+    # Comb samples involved in antialising
+    n_times = min(4,max(2,int(np.ceil(nOtf/nOtf_AO/2))))
+    ids = []
+    for mi in range(-n_times,n_times):
+        for ni in range(-n_times,n_times):
+            if mi or ni: #exclude (0,0)
+                ids.append([mi,ni])
+    ids = np.array(ids)
+
+    m = torch.tensor(ids[:,0], device=cuda)
+    n = torch.tensor(ids[:,1], device=cuda)
+    N_combs = m.shape[0]
+
     corrected_ROI = slice(nOtf//2-nOtf_AO//2, nOtf//2+nOtf_AO//2)
     corrected_ROI = (corrected_ROI,corrected_ROI)
 
@@ -233,7 +245,7 @@ with torch.cuda.device(0):
     for j in range(nGS):
         M_mask[:,:,j,j] += 1.0
 
-    # Matrix repetitions and dimensions expansion in order to respect 
+    # Matrix repetitions and dimensions expansion to avoid in in runtime
     kx_1_1 = torch.unsqueeze(torch.unsqueeze(kx_AO,2),3)
     ky_1_1 = torch.unsqueeze(torch.unsqueeze(ky_AO,2),3)
     k_1_1  = torch.unsqueeze(torch.unsqueeze(k_AO, 2),3)
@@ -247,17 +259,15 @@ with torch.cuda.device(0):
     kx_1_nL    = kx_1_1.repeat([1,1,1,nL])
     ky_1_nL    = ky_1_1.repeat([1,1,1,nL])
 
+    # For NGS-like alising 2nd dimension is used to store combs information
+    km = kx_1_1.repeat([1,1,N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(m/WFS_d_sub,0),0),3)
+    kn = ky_1_1.repeat([1,1,N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(n/WFS_d_sub,0),0),3)
+
     noise_nGs_nGs = torch.normal(mean=torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS]), std=torch.ones([nOtf_AO,nOtf_AO,nGS,nGS])*0.1) #TODO: remove noise, do proper matrix inversion
     noise_nGs_nGs = noise_nGs_nGs.to(cuda)
 
-    GS_dirs_x_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_x, 0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
-    GS_dirs_y_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_y, 0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
-
-    # Piston filter
-    x = (np.pi*D*k_AO).cpu().numpy() #TODO: find besel analog for pytorch
-    R = spc.j1(x)/x
-    piston_filter = torch.tensor(1.0-4*R**2, device=cuda)
-    piston_filter[nOtf_AO//2,nOtf_AO//2] *= 0.0
+    GS_dirs_x_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_x,0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
+    GS_dirs_y_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_y,0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
 
     # Initialize OTF frequencines
     U,V = torch.meshgrid(
@@ -290,12 +300,77 @@ with torch.cuda.device(0):
 
     PSD_padder = torch.nn.ZeroPad2d((nOtf-nOtf_AO)//2)
 
+    # Piston filter
+    def PistonFilter(f):
+        x = (np.pi*D*f).cpu().numpy() #TODO: find Bessel analog for pytorch
+        R = spc.j1(x)/x
+        piston_filter = torch.tensor(1.0-4*R**2, device=cuda)
+        if len(f.shape) == 2:
+            piston_filter[nOtf_AO//2,nOtf_AO//2] *= 0.0
+        elif len(f.shape) == 3:
+            piston_filter[nOtf_AO//2,nOtf_AO//2,:] *= 0.0
+        elif len(f.shape) == 4:
+            piston_filter[nOtf_AO//2,nOtf_AO//2,:,:] *= 0.0
+        return piston_filter
+
+    piston_filter = PistonFilter(k_AO)
+    PR = PistonFilter(torch.hypot(km,kn))
+
+
 #%%
+def Controller(nF=1000):
+    #nTh = 1
+    Ts = 1.0 / HOloop_rate # samplingTime
+    delay = HOloop_delay #latency
+    loopGain = HOloop_gain
 
-#L0 = torch.tensor([47.93], requires_grad=True)
-#r0 = torch.tensor([0.10539785053590676], requires_grad=False)
+    def TransferFunctions(freq):
+        z = torch.exp(-2j*np.pi*freq*Ts)
+        hInt = loopGain/(1.0 - z**(-1.0))
+        rtfInt = 1.0/(1 + hInt*z**(-delay))
+        atfInt = hInt * z**(-delay)*rtfInt
+        ntfInt = atfInt / z
+        return hInt, rtfInt, atfInt, ntfInt
 
-#--------------------------------------------------
+    f = torch.logspace(-3, torch.log10(torch.tensor([0.5/Ts])).item(), nF)
+    _, _, _, ntfInt = TransferFunctions(f)
+    noise_gain = torch.trapz(torch.abs(ntfInt)**2, f)*2*Ts
+
+    thetaWind = torch.tensor(0.0) #torch.linspace(0, 2*np.pi-2*np.pi/nTh, nTh)
+    costh = torch.cos(thetaWind)
+    
+    vx = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(wind_speed*torch.cos(wind_dir*np.pi/180.),0),0),0)
+    vy = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(wind_speed*torch.sin(wind_dir*np.pi/180.),0),0),0)
+    fi = -vx*kx_1_1*costh - vy*ky_1_1*costh
+    _, _, atfInt, ntfInt = TransferFunctions(fi)
+
+    # AO transfer function
+    h1 = Cn2_weights * atfInt #/nTh
+    h2 = Cn2_weights * abs(atfInt)**2 #/nTh
+    hn = Cn2_weights * abs(ntfInt)**2 #/nTh
+
+    h1 = torch.sum(h1,axis=(2,3))
+    h2 = torch.sum(h2,axis=(2,3))
+    hn = torch.sum(hn,axis=(2,3))
+    return h1, h2, hn, noise_gain
+
+
+def ReconstructionFilter(r0, L0):
+    Av = torch.sinc(WFS_d_sub*kx_AO)*torch.sinc(WFS_d_sub*ky_AO) * torch.exp(1j*np.pi*WFS_d_sub*(kx_AO+ky_AO))
+    SxAv = 2j*np.pi*kx_AO*WFS_d_sub*Av
+    SyAv = 2j*np.pi*ky_AO*WFS_d_sub*Av
+
+    MV = 0
+    Wn = WFS_noise_var/(2*kc)**2
+
+    W_atm = cte*r0**(-5/3)*(k2_AO + 1/L0**2)**(-11/6)*(wvl/GS_wvl)**2
+    gPSD = torch.abs(SxAv)**2 + torch.abs(SyAv)**2 + MV*Wn/W_atm
+    Rx = torch.conj(SxAv) / gPSD
+    Ry = torch.conj(SyAv) / gPSD
+    Rx[nOtf_AO//2, nOtf_AO//2] *= 0
+    Ry[nOtf_AO//2, nOtf_AO//2] *= 0
+    return Rx, Ry
+
 
 def TomographicReconstructors(r0, L0):
     M = 2j*np.pi*k_nGs_nGs*torch.sinc(WFS_d_sub*kx_nGs_nGs) * torch.sinc(WFS_d_sub*ky_nGs_nGs)
@@ -307,7 +382,7 @@ def TomographicReconstructors(r0, L0):
     C_b = torch.ones((nOtf_AO,nOtf_AO,nGS,nGS), dtype=torch.complex64, device=cuda) * torch.eye(4, device=cuda) * WFS_noise_var #torch.diag(WFS_noise_var)
     kernel = torch.unsqueeze(torch.unsqueeze(r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6) * piston_filter, 2), 3)
     C_phi  = kernel.repeat(1, 1, nL, nL) * torch.diag(Cn2_weights) + 0j
-    W_tomo  = (C_phi @ MP_t) @ torch.linalg.pinv(MP @ C_phi @ MP_t + C_b + noise_nGs_nGs, rcond=1e-2)
+    W_tomo = (C_phi @ MP_t) @ torch.linalg.pinv(MP @ C_phi @ MP_t + C_b + noise_nGs_nGs, rcond=1e-2)
 
     #TODO: in vanilla TIPTOP windspeeds are interpolated linearly if number of mod layers is changed!!!!!
 
@@ -353,7 +428,6 @@ def TomographicReconstructors(r0, L0):
     #                                *torch.exp(2j*np.pi*h*(kx_nGs_nL*GS_dirs_x_nGs_nL + ky_nGs_nL*GS_dirs_y_nGs_nL))
     MP_alpha_L = www * P * ( torch.sinc(WFS_d_sub*kx_1_1)*torch.sinc(WFS_d_sub*ky_1_1) )
     W_alpha = (W @ MP_alpha_L)
-
     return W, W_alpha, P_beta_DM, C_phi, C_b, freq_t
 
 
@@ -372,80 +446,109 @@ def SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t):
     proj = P_beta_L - P_beta_DM @ W_alpha
     proj_t = torch.conj(torch.permute(proj,(0,1,3,2)))
     psd_ST = torch.squeeze(torch.squeeze(torch.abs((proj @ C_phi @ proj_t)))) * piston_filter * mask_corrected_AO
-    
     return psd_ST
 
 
-def NoisePSD(W, P_beta_DM, C_b):
+def NoisePSD(W, P_beta_DM, C_b, noise_gain):
     PW = P_beta_DM @ W
     noisePSD = PW @ C_b @ torch.conj(PW.permute(0,1,3,2))
     noisePSD = torch.squeeze(torch.squeeze(torch.abs(noisePSD))) * piston_filter * noise_gain * WFS_noise_var * mask_corrected_AO #torch.mean(WFS_noise_var) 
     return noisePSD
 
 
+def AliasingPSD(Rx, Ry, h1, r0, L0):
+    T = WFS_det_clock_rate / HOloop_rate
+    td = T * HOloop_delay
+    vx = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(wind_speed*torch.cos(wind_dir*np.pi/180.),0),0),0)
+    vy = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(wind_speed*torch.sin(wind_dir*np.pi/180.),0),0),0)
+
+    Rx1 = torch.unsqueeze(torch.unsqueeze(2j*np.pi*WFS_d_sub * Rx,2),3)
+    Ry1 = torch.unsqueeze(torch.unsqueeze(2j*np.pi*WFS_d_sub * Ry,2),3)
+
+    W_mn = (km**2 + kn**2 + 1/L0**2)**(-11/6)
+    Q = (Rx1*km + Ry1*kn) * torch.sinc(WFS_d_sub*km) * torch.sinc(WFS_d_sub*kn)
+
+    tf = torch.unsqueeze(torch.unsqueeze(h1,2),3)
+
+    avr = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(Cn2_weights,0),0),0) * \
+        (torch.sinc(km*vx*T) * torch.sinc(kn*vy*T) * \
+        torch.exp(2j*np.pi*km*vx*td) * torch.exp(2j*np.pi*kn*vy*td) * tf.repeat([1,1,N_combs,nL]))
+
+    aliasing_PSD = torch.sum(PR*W_mn*abs(Q*avr.sum(axis=3,keepdim=True))**2, axis=(2,3) )*cte*r0**(-5/3) * mask_corrected_AO
+    return aliasing_PSD
+
+
 def VonKarmanPSD(r0, L0):
     return cte*r0**(-5/3)*(k2 + 1/L0**2)**(-11/6) * mask
 
 
+def ChromatismPSD(r0, L0):
+    wvlRef = wvl #TODO: polychromatic support
+    W_atm = r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6) * piston_filter #TODO: W_phi and vK spectrum
+    IOR = lambda lmbd: 23.7+6839.4/(130-(lmbd*1.e6)**(-2))+45.47/(38.9-(lmbd*1.e6)**(-2))
+    n2 = IOR(GS_wvl)
+    n1 = IOR(wvlRef)
+    chromatic_PSD = ((n2-n1)/n2)**2 * W_atm
+    return chromatic_PSD
+
+#%
 '''
-n_times = min(4,max(2,int(np.ceil(nOtf/nOtf_AO/2))))
+r0 = torch.tensor([0.10539785053590676])
 
-Av = torch.sinc(WFS_d_sub*kx_AO)*torch.sinc(WFS_d_sub*ky_AO) * torch.exp(1j*np.pi*WFS_d_sub*(kx_AO+ky_AO))
+WFS_psInMas = 1214
+WFS_pixel_scale  = WFS_psInMas / 1e3 # [asec]
+WFS_excess = 1.0
+WFS_spotFWHM = torch.tensor([0.0, 0.0])
 
-SxAv = 2j*np.pi*kx_AO*WFS_d_sub*Av
-SyAv = 2j*np.pi*ky_AO*WFS_d_sub*Av
+ron = 3
+nph = 500
+fovInPix = 592
+n_lenslets = 40
+nPix = fovInPix / n_lenslets
 
-W_atm = cte*r0**(-5/3)*(k2_AO + 1/L0**2)**(-11/6)*(wvl/GS_wvl)**2
-gPSD = torch.abs(SxAv)**2 + torch.abs(SyAv)**2 + MV*Wn/W_atm
-Rx = torch.conj(SxAv)/gPSD
-Ry = torch.conj(SyAv)/gPSD
-
-psd = np.zeros((self.freq.resAO,self.freq.resAO))
-i = complex(0,1)
-d = self.ao.wfs.optics[0].dsub
-clock_rate = np.array([self.ao.wfs.detector[j].clock_rate for j in range(self.nGs)])
-T = np.mean(clock_rate/self.ao.rtc.holoop['rate'])
-td = T * self.ao.rtc.holoop['delay']
-vx = self.ao.atm.wSpeed*np.cos(self.ao.atm.wDir*np.pi/180)
-vy = self.ao.atm.wSpeed*np.sin(self.ao.atm.wDir*np.pi/180)
-weights = self.ao.atm.weights
-w = 2*i*np.pi*d
-
-if hasattr(self, 'Rx') == False:
-    self.reconstructionFilter()
-Rx = self.Rx*w
-Ry = self.Ry*w
-'''
-
+# read-out noise calculation
+nD = torch.tensor([1, rad2arc * wvl/WFS_d_sub/WFS_pixel_scale]).max()  #spot FWHM in pixels and without turbulence
+varRON = np.pi**2/3*(ron**2 /nph**2) * (nPix**2/nD)**2
+#if varRON > 3:
+#    print('The read-out noise variance is very high (%.1f >3 rd^2), there is certainly smth wrong with your inputs, set to 0'%(varRON))
+#    varRON = 0
+# photo-noise calculation
+nT = torch.tensor( [1, torch.hypot(WFS_spotFWHM.max()/1e3, rad2arc*wvl/r0)/WFS_pixel_scale] ).max()
+varShot = np.pi**2/(2*nph)*(nT/nD)**2
+#if varShot > 3:
+#    print('The shot noise variance is very high (%.1f >3 rd^2), there is certainly smth wrong with your inputs, set to 0'%(varShot))
+#    varShot = 0
+WFS_noise_var = WFS_excess * (varRON+varShot)
 
 '''
-Q = NoisePSD(r0, L0).sum()
-get_dot = register_hooks(Q)
-Q.backward()
-dot = get_dot()
-#dot.save('tmp.dot') # to get .dot
-#dot.render('tmp') # to get SVG
-dot # in Jupyter, you can just render the variable
-'''
+#%%
 
 #%------------------------------------------------------------------------------
+#L0 = torch.tensor([47.93], requires_grad=True, device=cuda)
+#r0 = torch.tensor([0.10539785053590676], requires_grad=False, device=cuda)
 
-W, W_alpha, P_beta_DM, C_phi, C_b, freq_t = TomographicReconstructors(0.105, 47.93)
-PSD = SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t)
+#h1, h2, hn, noise_gain = Controller()
+#Rx, Ry = ReconstructionFilter()
 
-plt.imshow(np.log(PSD.detach().cpu().numpy()))
+#W, W_alpha, P_beta_DM, C_phi, C_b, freq_t = TomographicReconstructors(r0, L0)
+#PSD = SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t)
+
 
 #%%
 
-def PSD2PSF(r0, L0, I, dx, dy, bg):
+def PSD2PSF(r0, L0, F, dx, dy, bg):
     r0 = torch.abs(r0) # non-negative reparametrization
     L0 = torch.abs(L0) # non-negative reparametrization
 
     W, W_alpha, P_beta_DM, C_phi, C_b, freq_t = TomographicReconstructors(r0, L0)
+    h1, _, _, noise_gain = Controller()
+    Rx, Ry = ReconstructionFilter(r0, L0)
 
     PSD = VonKarmanPSD(r0,L0) + PSD_padder(
-            NoisePSD(W, P_beta_DM, C_b) + \
-            SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t)
+            NoisePSD(W, P_beta_DM, C_b, noise_gain) + \
+            SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t) + \
+            AliasingPSD(Rx, Ry, h1, r0, L0) + \
+            ChromatismPSD(r0, L0)
         )
 
     PSD *= (dk*wvl*1e9/2/np.pi)**2
@@ -455,39 +558,57 @@ def PSD2PSF(r0, L0, I, dx, dy, bg):
     fftPhasor = torch.exp(-np.pi*1j*sampling_factor*(U*dx+V*dy))
     OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/wvl)**2)
     OTF = OTF_turb * fftPhasor * OTF_static
-    PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) )*I + bg
+    PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) )
     PSF = torch.unsqueeze(torch.unsqueeze(PSF, dim=0), dim=0)
     PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area')
-    return PSF_out.squeeze(0).squeeze(0) * 1e3 #6
+    return (PSF_out.squeeze(0).squeeze(0)/PSF.sum() * F + bg) * 1e4
 
 start.record()
 PSF_0 = PSD2PSF(
     torch.tensor(0.155, device=cuda), torch.tensor(47.93, device=cuda),
     torch.tensor(1.0, device=cuda),
-    torch.tensor(1.0, device=cuda), torch.tensor(2.0, device=cuda),
+    torch.tensor(1.0, device=cuda), torch.tensor(-2.0, device=cuda),
     torch.tensor(0.0, device=cuda)
 )
+end.record()
 
+def BackgroundEstimate(im, radius=75):
+    buf_x, buf_y = torch.meshgrid(
+        torch.linspace(-nPix//2, nPix//2, nPix, device=cuda),
+        torch.linspace(-nPix//2, nPix//2, nPix, device=cuda)
+    )
+    mask_noise = buf_x**2 + buf_y**2
+    mask_noise[mask_noise < radius**2] = 0.0
+    mask_noise[mask_noise > 0.0] = 1.0
+    return torch.median(im[mask_noise>0.]).data
+
+noise = torch.abs(torch.normal(mean=torch.zeros_like(PSF_0), std=torch.ones_like(PSF_0) * 1e-2))
+PSF_0 += noise #+ PSF_0.max()*noise_pow # add artificial noise
+PSF_0 -= BackgroundEstimate(PSF_0)
+plt.imshow(torch.log(PSF_0).detach().cpu())
+
+
+#%
+'''
+import pickle
+with open('C:\\Users\\akuznets\\Desktop\\buf\\im.pickle', 'rb') as handle:
+    PSF_real = pickle.load(handle)
+PSF_0 = torch.tensor(PSF_real / PSF_real.sum(), device=cuda) * 1e3
+PSF_0 -= BackgroundEstimate(PSF_0)
+'''
+#%
 # Optimized parameters
-r0 = torch.tensor(0.105, requires_grad=True,  device=cuda)
+r0 = torch.tensor(0.105, requires_grad=True, device=cuda)
 L0 = torch.tensor(47.93, requires_grad=False, device=cuda)
-I  = torch.tensor(1.0,   requires_grad=False, device=cuda)
-dx = torch.tensor(0.0,   requires_grad=True,  device=cuda)
-dy = torch.tensor(0.0,   requires_grad=True,  device=cuda)
+F  = torch.tensor(1.0,   requires_grad=True, device=cuda)
+dx = torch.tensor(0.0,   requires_grad=True, device=cuda)
+dy = torch.tensor(0.0,   requires_grad=True, device=cuda)
 bg = torch.tensor(0.0,   requires_grad=False, device=cuda)
 
-PSF_1 = PSD2PSF(r0, L0, I, dx, dy, bg)
-end.record()
+PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg)
 
 torch.cuda.synchronize()
 print(start.elapsed_time(end))
-
-#%%
-
-#import pickle
-#with open('C:\\Users\\akuznets\\Desktop\\buf\\.pickle', 'wb') as handle:
-#    pickle.dump([PSF_1.detach().cpu().numpy()], handle, protocol=pickle.HIGHEST_PROTOCOL)
-
 
 '''
 crop = 32
@@ -497,7 +618,7 @@ zoomed = (zoomed, zoomed)
 plt.imshow(torch.log(torch.abs(PSF_0-PSF_1)).detach().cpu().numpy()[zoomed])
 plt.show()
 '''
-#%
+
 '''
 loss_fn = nn.MSELoss()
 Q = loss_fn(PSF_0, PSF_1)
@@ -508,35 +629,58 @@ dot = get_dot()
 #dot.render('tmp') # to get SVG
 dot # in Jupyter, you can just render the variable
 '''
+
 #%%
-niter = 500
+niter = 26
 #loss_fn = nn.MSELoss()
 loss_fn = nn.L1Loss()
+#loss_fn = nn.CrossEntropyLoss()
 
 #optimizer = optim.SGD([r0, L0, I, dx, dy, bg], lr=1e-3) #, momentum=0.9)
 optimizer = optim.LBFGS(
-    [r0, L0, I, dx, dy, bg],
+    [r0, L0, F, dx, dy, bg],
     history_size = 20,
-    max_iter = 10,
+    max_iter = 4,
     line_search_fn = "strong_wolfe"
 )
 
 for iteration in range(0, niter):
     optimizer.zero_grad()
-    loss = loss_fn( PSD2PSF(r0, L0, I, dx, dy, bg), PSF_0 )
+    loss = loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg), PSF_0 )
     loss.backward()
     #if not iteration % 10:
     print(loss.item())
     #optimizer.step()
-    optimizer.step( lambda: loss_fn(PSD2PSF(r0, L0, I, dx, dy, bg), PSF_0) )
-
+    optimizer.step( lambda: loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg), PSF_0 ) )
 
 print('-------------------------------------------------------------')
 print('r0: ', r0.data.item())
 print('L0: ', L0.data.item())
-print('I, bg: ', I.data.item(),',',bg.data.item())
+print('I, bg: ', F.data.item(),',',bg.data.item())
 print('dx/dy: (', dx.data.item(),',',dy.data.item(),')')
 
+#%%
+
+def radial_profile(data, center=None):
+    if center is None:
+        center = (data.shape[0]//2, data.shape[1]//2)
+    y, x = np.indices((data.shape))
+    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
+    r = r.astype('int')
+
+    tbin = np.bincount(r.ravel(), data.ravel())
+    nr = np.bincount(r.ravel())
+    radialprofile = tbin / nr
+    return radialprofile 
+
+PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg)
+
+plt.plot(radial_profile(PSF_1.detach().cpu().numpy()), label='Estimate')
+plt.plot(radial_profile(PSF_0.detach().cpu().numpy()), label='Data')
+plt.legend()
+plt.yscale('log')
+plt.grid()
+plt.show()
 
 #%% ==================================================================================================================================
 #=====================================================================================================================================
@@ -549,7 +693,8 @@ print('dx/dy: (', dx.data.item(),',',dy.data.item(),')')
 #=====================================================================================================================================
 #=====================================================================================================================================
 #=====================================================================================================================================
-
+#%% ==================================================================================================================================
+import torch.nn.functional as F
 
 X = torch.tensor([.5, 30], requires_grad=True)
 PSD = cte*X[0]**(-5/3)*(k2 + 1/X[1]**2)**(-11/6)*mask
