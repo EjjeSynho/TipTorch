@@ -305,12 +305,13 @@ with torch.cuda.device(0):
         x = (np.pi*D*f).cpu().numpy() #TODO: find Bessel analog for pytorch
         R = spc.j1(x)/x
         piston_filter = torch.tensor(1.0-4*R**2, device=cuda)
-        if len(f.shape) == 2:
-            piston_filter[nOtf_AO//2,nOtf_AO//2] *= 0.0
-        elif len(f.shape) == 3:
-            piston_filter[nOtf_AO//2,nOtf_AO//2,:] *= 0.0
-        elif len(f.shape) == 4:
-            piston_filter[nOtf_AO//2,nOtf_AO//2,:,:] *= 0.0
+        piston_filter[nOtf_AO//2,nOtf_AO//2,...] *= 0.0
+        #if len(f.shape) == 2:
+        #    piston_filter[nOtf_AO//2,nOtf_AO//2] *= 0.0
+        #elif len(f.shape) == 3:
+        #    piston_filter[nOtf_AO//2,nOtf_AO//2,:] *= 0.0
+        #elif len(f.shape) == 4:
+        #    piston_filter[nOtf_AO//2,nOtf_AO//2,:,:] *= 0.0
         return piston_filter
 
     piston_filter = PistonFilter(k_AO)
