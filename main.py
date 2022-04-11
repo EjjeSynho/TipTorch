@@ -546,25 +546,22 @@ WFS_noise_var = WFS_excess * (varRON+varShot)
 
 #%%
 '''
-Jx = 20
-Jy = 40
-
-T = 1
 xx, yy = torch.meshgrid(
-    torch.linspace(-nOtf/2-1, nOtf/2, nOtf, device=cuda)*T,
-    torch.linspace(-nOtf/2-1, nOtf/2, nOtf, device=cuda)*T)
-
+    torch.linspace(-nOtf/2-1, nOtf/2, nOtf, device=cuda),
+    torch.linspace(-nOtf/2-1, nOtf/2, nOtf, device=cuda))
 delta = yy.diff().mean()
 
-u_max = sampling*D/wvl/(3600*180*1e3/np.pi)
-norm_fact = u_max**2 * (2*np.sqrt(2*np.log(2)))**2
+xx = xx[nOtf//2-60:nOtf//2+60, nOtf//2-60:nOtf//2+60]
+yy = yy[nOtf//2-60:nOtf//2+60, nOtf//2-60:nOtf//2+60]
 
-Jf = lambda Jx,Jy: torch.exp(-0.5*norm_fact*(Jx**2 * U2/T**2 + Jy**2 * V2/T**2))
 
 def Js(Jx,Jy):
+    u_max = sampling*D/wvl/(3600*180*1e3/np.pi)
+    norm_fact = u_max**2 * (2*np.sqrt(2*np.log(2)))**2
     C = (2*np.pi*0.5)**2/2/norm_fact
     B = np.sqrt(2*np.pi/norm_fact) * (1/Jx/Jy) * delta**2 * np.pi/np.sqrt(2)
-    return B * torch.exp(-C*( (xx/Jx)**2 + (yy/Jy)**2 )) 
+    kernel = B * torch.exp(-C*( (xx/Jx)**2 + (yy/Jy)**2 ))
+    return torch.unsqueeze(torch.unsqueeze(kernel, dim=0), dim=0)
 '''
 
 def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy):
@@ -589,27 +586,24 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy):
     fftPhasor = torch.exp(-np.pi*1j*sampling_factor*(U*dx+V*dy))
     OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/wvl)**2)
 
-    jitter_filter = JitterCore(Jx,Jy)
-    OTF = OTF_turb * fftPhasor * OTF_static * jitter_filter
-    #OTF = jitter_filter
+    OTF = OTF_turb * fftPhasor * OTF_static * JitterCore(Jx,Jy)
     PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) )
     PSF = torch.unsqueeze(torch.unsqueeze(PSF, dim=0), dim=0)
     PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area')
-    return (PSF_out.squeeze(0).squeeze(0)/PSF_out.sum() * F + bg) * 1e4
+    return (PSF_out.squeeze(0).squeeze(0)/PSF_out.sum() * F + bg) * 1e2
 
 start.record()
 PSF_0 = PSD2PSF(
     torch.tensor(0.105, device=cuda), torch.tensor(47.93, device=cuda),
     torch.tensor(1.0,   device=cuda),
-    torch.tensor(1,     device=cuda), torch.tensor(-2, device=cuda),
-    torch.tensor(0.0,   device=cuda),
+    torch.tensor(1.0, device=cuda), torch.tensor(-2.0, device=cuda),
+    torch.tensor(1e-5,  device=cuda), #bg
     torch.tensor(5.0,   device=cuda),
-    torch.tensor(20.0,  device=cuda),
-    torch.tensor(30.0,  device=cuda)
+    torch.tensor(50.0,  device=cuda), torch.tensor(60.0,  device=cuda)
 )
 end.record()
 
-def BackgroundEstimate(im, radius=75):
+def BackgroundEstimate(im, radius=90):
     buf_x, buf_y = torch.meshgrid(
         torch.linspace(-nPix//2, nPix//2, nPix, device=cuda),
         torch.linspace(-nPix//2, nPix//2, nPix, device=cuda)
@@ -622,39 +616,43 @@ def BackgroundEstimate(im, radius=75):
 #noise = torch.abs(torch.normal(mean=torch.zeros_like(PSF_0), std=torch.ones_like(PSF_0) * 1e-2))
 #PSF_0 += noise #+ PSF_0.max()*noise_pow # add artificial noise
 #PSF_0 -= BackgroundEstimate(PSF_0)
-plt.imshow(torch.log(PSF_0).detach().cpu())
+#plt.imshow(torch.log(PSF_0).detach().cpu())
 
 #%
 
-'''
 import pickle
 with open('C:\\Users\\akuznets\\Desktop\\buf\\im.pickle', 'rb') as handle:
     PSF_real = pickle.load(handle)
-PSF_0 = torch.tensor(PSF_real / PSF_real.sum(), device=cuda) * 1e3
+PSF_0 = torch.tensor(PSF_real / PSF_real.sum(), device=cuda) * 1e2
 #PSF_0 -= BackgroundEstimate(PSF_0)
 plt.imshow(torch.log(PSF_0).detach().cpu())
-'''
+
 #%
 # Optimized parameters
-r0 = torch.tensor(0.155, requires_grad=True, device=cuda)
+
+def Center(im):
+    return np.array(np.unravel_index(im.argmax().item(), im.shape))-np.array(im.shape)//2
+
+r0 = torch.tensor(0.155, requires_grad=True,  device=cuda)
 L0 = torch.tensor(47.93, requires_grad=False, device=cuda)
 F  = torch.tensor(1.0,   requires_grad=True, device=cuda)
-dx = torch.tensor(0.0,   requires_grad=True, device=cuda)
-dy = torch.tensor(0.0,   requires_grad=True, device=cuda)
+dx = torch.tensor(float(Center(PSF_0)[0]), requires_grad=True, device=cuda)
+dy = torch.tensor(float(Center(PSF_0)[1]), requires_grad=True, device=cuda)
 bg = torch.tensor(0.0,   requires_grad=False, device=cuda)
-n  = torch.tensor(5.0,   requires_grad=True, device=cuda)
-Jx = torch.tensor(10.0,  requires_grad=True, device=cuda)
-Jy = torch.tensor(10.0,  requires_grad=True, device=cuda)
+n  = torch.tensor(5.0,   requires_grad=True,  device=cuda)
+Jx = torch.tensor(10.0,  requires_grad=False, device=cuda)
+Jy = torch.tensor(10.0,  requires_grad=False, device=cuda)
 
 PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy)
 
 torch.cuda.synchronize()
 #print(start.elapsed_time(end))
 
-loss_fn = nn.L1Loss()
+loss_fn = nn.L1Loss(reduction='sum')
 print(loss_fn(PSF_1, PSF_0))
 
-#%
+
+#%%
 '''
 crop = 32
 zoomed = slice(nPix//2-crop, nPix//2+crop)
@@ -663,6 +661,7 @@ zoomed = (zoomed, zoomed)
 plt.imshow(torch.log(torch.abs(PSF_0-PSF_1)).detach().cpu().numpy()[zoomed])
 plt.show()
 '''
+
 
 '''
 loss_fn = nn.L1Loss()
@@ -682,36 +681,108 @@ dot # in Jupyter, you can just render the variable
 '''
 
 #%%
-niter = 26
-#loss_fn = nn.MSELoss()
-loss_fn = nn.L1Loss(reduction='sum')
 #loss_fn = nn.CrossEntropyLoss()
+#loss_fn = nn.MSELoss(reduction='sum')
 
-#optimizer = optim.SGD([r0, L0, F, dx, dy, bg, n, Jx, Jy], lr=1e0) #, momentum=0.9)
-optimizer = optim.LBFGS(
-    [r0, L0, F, dx, dy, bg, n, Jx, Jy],
-    history_size = 20,
-    max_iter = 4,
-    line_search_fn = "strong_wolfe"
-)
+#optimizer = optim.SGD([r0, L0, F, dx, dy, bg, n, Jx, Jy], lr=1e-3) #, momentum=0.9)
+for i in range(2):
 
-for iteration in range(0, niter):
-    optimizer.zero_grad()
-    loss = loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 )
-    loss.backward()
-    #if not iteration % 10:
-    print(loss.item())
-    #optimizer.step()
-    optimizer.step( lambda: loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 ) )
+    r0.requires_grad = True
+    L0.requires_grad = False 
+    F .requires_grad = True
+    dx.requires_grad = True
+    dy.requires_grad = True
+    bg.requires_grad = False 
+    n .requires_grad = True 
+    Jx.requires_grad = False
+    Jy.requires_grad = False
 
-print('-------------------------------------------------------------')
-print('r0: ', r0.data.item())
-print('L0: ', L0.data.item())
-print('I, bg: ', F.data.item(),',',bg.data.item())
-print('dx/dy: (', dx.data.item(),',',dy.data.item(),')')
-print('WFS noise: ', n.data.item())
-print('Jx/Jy: (', Jx.data.item(),',',Jy.data.item(),')')
+    loss_fn = nn.L1Loss(reduction='sum')
+    optimizer = optim.LBFGS(
+        [r0, L0, F, dx, dy, bg, n, Jx, Jy],
+        history_size = 20,
+        max_iter = 4,
+        line_search_fn = "strong_wolfe"
+    )
 
+    for iteration in range(0, 15):
+        optimizer.zero_grad()
+        loss = loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 )
+        loss.backward()
+        #if not iteration % 10:
+        print(loss.item())
+        #optimizer.step()
+        optimizer.step( lambda: loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 ) )
+
+    r0.requires_grad = False
+    L0.requires_grad = False 
+    F .requires_grad = False
+    dx.requires_grad = False
+    dy.requires_grad = False
+    bg.requires_grad = True 
+    n .requires_grad = False 
+    Jx.requires_grad = False
+    Jy.requires_grad = False
+
+    optimizer = optim.LBFGS(
+        [r0, L0, F, dx, dy, bg, n, Jx, Jy],
+        history_size = 20,
+        max_iter = 4,
+        line_search_fn = "strong_wolfe"
+    )
+
+    for iteration in range(0, 5):
+        optimizer.zero_grad()
+        loss = loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 )
+        loss.backward()
+        print(loss.item())
+        optimizer.step( lambda: loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 ) )
+
+    bg.requires_grad = False 
+    Jx.requires_grad = True
+    Jy.requires_grad = True
+
+    loss_fn = nn.MSELoss(reduction='sum')
+    optimizer = optim.LBFGS(
+        [r0, L0, F, dx, dy, bg, n, Jx, Jy],
+        history_size = 20,
+        max_iter = 4,
+        line_search_fn = "strong_wolfe"
+    )
+
+    for iteration in range(0, 15):
+        optimizer.zero_grad()
+        loss = loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 )
+        loss.backward()
+        print(loss.item())
+        optimizer.step( lambda: loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 ) )
+
+
+print("r0,L0: ({:.3f}, {:.2f})".format(r0.data.item(), L0.data.item()))
+print("I,bg:  ( ",F.data.item(), ' ', bg.data.item(), ')')
+print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
+print("Jx,Jy: ({:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item()))
+print("WFS noise: {:.2f}".format(n.data.item()))
+
+
+
+#%%
+def f(r0, L0, F, dx, dy, bg, n, Jx, Jy):
+    return loss_fn(PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0)
+
+#sensetivity = torch.autograd.functional.jacobian(f, (r0, L0, F, dx, dy, bg, n, Jx, Jy))
+sensetivity = torch.autograd.functional.hessian(f, (r0, L0, F, dx, dy, bg, n, Jx, Jy))
+sensetivity = torch.tensor(sensetivity)
+sensetivity = np.array(sensetivity)
+
+from matplotlib import colors
+norm=colors.LogNorm(vmin=1e-7, vmax=sensetivity.max())
+
+fig = plt.figure()
+ax = fig.add_subplot(111)
+ax.set_xticklabels(['', '$r_0$','$L_0$','F','dx','dy','bg','n','$J_x$','$J_y$'])
+ax.set_yticklabels(['', '$r_0$','$L_0$','F','dx','dy','bg','n','$J_x$','$J_y$'])
+cax = ax.matshow(np.abs(sensetivity), norm=norm)
 
 #%%
 
@@ -731,6 +802,7 @@ PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy)
 
 plt.plot(radial_profile(PSF_1.detach().cpu().numpy()), label='Estimate')
 plt.plot(radial_profile(PSF_0.detach().cpu().numpy()), label='Data')
+
 plt.legend()
 plt.yscale('log')
 plt.grid()
