@@ -150,7 +150,7 @@ with torch.cuda.device(0):
     rad2arc = rad2mas / 1000
     deg2rad = np.pi / 180.0
 
-    D       = 8.114 #[m] ?????
+    D       = 8#.114 #[m] ?????
     wvl     = 7.27969434e-07 #728e-9 #[m]
     psInMas = 25.0 #[mas]
     nPix    = 200 #128
@@ -303,6 +303,16 @@ with torch.cuda.device(0):
     fftAutoCorr = lambda x: fft.ifft2(fft.fft2(x)*torch.conj(fft.fft2(x)))/(x.size(0)*x.size(1))
     OTF_static = torch.real( fft.fftshift(fftAutoCorr(pupil_padded)) )
     OTF_static = OTF_static / OTF_static.max()
+
+    import pickle
+    with open('C:\\Users\\akuznets\\Desktop\\buf\\OTF.pickle', 'rb') as handle:
+        OTF_test = torch.tensor(pickle.load(handle), device=cuda)
+
+    plt.imshow(torch.abs(OTF_static-OTF_test).detach().cpu()) #[290:310,290:310])
+    plt.colorbar()
+    plt.show()
+
+#%%
 
     PSD_padder = torch.nn.ZeroPad2d((nOtf-nOtf_AO)//2)
 
@@ -681,7 +691,7 @@ profile_0 = radial_profile(PSF_0.detach().cpu().numpy())
 profile_1 = radial_profile(PSF_1.detach().cpu().numpy())
 profile_diff = np.abs(profile_1-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
 
-fig = plt.figure(figsize=(6,4), dpi=300)
+fig = plt.figure(figsize=(6,4), dpi=100)
 ax = fig.add_subplot(111)
 ax.set_title('TipToy fitting')
 l2 = ax.plot(profile_0, label='TIPTOP')
