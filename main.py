@@ -30,6 +30,10 @@ from graphviz import Digraph
 from VLT_pupil import PupilVLT, CircPupil
 import torch
 import pickle
+import os
+from os import path
+from parameterParser import parameterParser
+from MUSE import MUSEcube
 
 
 def iter_graph(root, callback):
@@ -139,6 +143,41 @@ print(start.elapsed_time(end))
 #   # do something
 #print(prof)
 
+#%%
+
+path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
+path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/muse_ltao.ini'))
+
+# Load image
+data_dir = path.normpath('C:/Users/akuznets/Data/MUSE/DATA/')
+listData = os.listdir(data_dir)
+sample_id = 5
+sample_name = listData[sample_id]
+path_im = path.join(data_dir, sample_name)
+angle = np.zeros([len(listData)])
+angle[0] = -46
+angle[5] = -44
+angle = angle[sample_id]
+
+data_cube = MUSEcube(path_im, angle)
+im, _, wvl = data_cube.Layer(5)
+obs_info = data_cube.obs_info
+
+# Load and correct AO system parameters
+parser = parameterParser(path_root, path_ini)
+params = parser.params
+
+airmass = obs_info['AIRMASS']
+
+params['atmosphere']['Seeing'] = obs_info['SPTSEEIN']
+params['atmosphere']['L0']     = obs_info['SPTL0']
+params['atmosphere']['WindSpeed']     = [obs_info['WINDSP']] * len(params['atmosphere']['Cn2Heights'])
+params['atmosphere']['WindDirection'] = [obs_info['WINDIR']] * len(params['atmosphere']['Cn2Heights'])
+params['sources_science']['Wavelength'] = [wvl]
+params['sensor_science']['FieldOfView'] = im.shape[0]
+params['sensor_science']['Zenith']      = [90.0-obs_info['TELALT']]
+params['sensor_science']['Azimuth']     = [obs_info['TELAZ']]
+params['sensor_HO']['NoiseVariance'] = 5.0
 
 #%%
 cuda  = torch.device('cuda') # Default CUDA device
