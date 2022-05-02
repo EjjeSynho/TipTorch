@@ -177,7 +177,8 @@ params['sources_science']['Wavelength'] = [wvl]
 params['sensor_science']['FieldOfView'] = im.shape[0]
 params['sensor_science']['Zenith']      = [90.0-obs_info['TELALT']]
 params['sensor_science']['Azimuth']     = [obs_info['TELAZ']]
-params['sensor_HO']['NoiseVariance'] = 5.0
+params['sensor_HO']['NoiseVariance']    = 5.0
+
 
 #%%
 cuda  = torch.device('cuda') # Default CUDA device
@@ -185,200 +186,196 @@ cuda  = torch.device('cuda') # Default CUDA device
 start = torch.cuda.Event(enable_timing=True)
 end   = torch.cuda.Event(enable_timing=True)
 
-with torch.cuda.device(0):
-    rad2mas = 3600 * 180 * 1000 / np.pi
-    rad2arc = rad2mas / 1000
-    deg2rad = np.pi / 180.0
+rad2mas = 3600 * 180 * 1000 / np.pi
+rad2arc = rad2mas / 1000
+deg2rad = np.pi / 180
+asec2rad = np.pi / 180 / 3600
 
-    D       = 8#.114 #[m] ?????
-    wvl     = 7.27969434e-07 #728e-9 #[m]
-    psInMas = 25.0 #[mas]
-    nPix    = 200 #128
-    pitch   = 0.2 #[m] 0.22?
-    h_DM    = 0.0 # ????? what is h_DM?
-    nDM     = 1
-    kc      = 1/(2*pitch) #TODO: kc is not consistent with vanilla TIPTOP
+seeing = lambda rₒ, λ: rad2arc*0.976*λ/rₒ # [arcs]
+rₒ = lambda seeing, λ: rad2arc*0.976*λ/seeing # [m]
+rₒ_new = lambda rₒ, λ, λₒ: rₒ*(λ/λₒ)**1.2 # [m]
 
-    zenith_angle  = torch.tensor(42.36855766857, device=cuda) # [deg]
-    airmass       = 1.0 / torch.cos(zenith_angle * deg2rad)
+D       = params['telescope']['TelescopeDiameter']
+wvl     = wvl
+psInMas = params['sensor_science']['PixelScale'] #[mas]
+nPix    = params['sensor_science']['FieldOfView']
+pitch   = params['DM']['DmPitchs'][0] #[m]
+h_DM    = params['DM']['DmHeights'][0] # ????? what is h_DM?
+nDM     = 1
+kc      = 1/(2*pitch) #TODO: kc is not consistent with vanilla TIPTOP
 
-    GS_wvl        = 589e-9 #[m]
-    GS_angle      = 7.5 / rad2arc #[rad]
-    GS_angle_delta = 2.0 / rad2arc #[rad]
-    GS_height     = 90e3*airmass #[m]
+zenith_angle  = torch.tensor(params['telescope']['ZenithAngle'], device=cuda) # [deg]
+airmass       = 1.0 / torch.cos(zenith_angle * deg2rad)
 
-    #GS_dirs_x     = torch.tensor([GS_angle+GS_angle_delta, 0, -GS_angle, GS_angle_delta], device=cuda) #[rad]
-    #GS_dirs_y     = torch.tensor([GS_angle_delta, GS_angle-GS_angle_delta, -GS_angle_delta, -GS_angle+GS_angle_delta], device=cuda) #[rad]
-    
-    #GS_dirs_x     = torch.tensor([GS_angle+GS_angle_delta, 0, -GS_angle, 0], device=cuda) #[rad]
-    #GS_dirs_y     = torch.tensor([0, GS_angle-GS_angle_delta, 0, -GS_angle+GS_angle_delta], device=cuda) #[rad]
+GS_wvl     = params['sources_HO']['Wavelength'][0] #[m]
+GS_height  = params['sources_HO']['Height'] * airmass #[m]
+GS_angle   = torch.tensor(params['sources_HO']['Zenith'],  device=cuda) / rad2arc
+GS_azimuth = torch.tensor(params['sources_HO']['Azimuth'], device=cuda) * deg2rad
+GS_dirs_x  = torch.tan(GS_angle) * torch.cos(GS_azimuth)
+GS_dirs_y  = torch.tan(GS_angle) * torch.sin(GS_azimuth)
+nGS = GS_dirs_y.size(0)
 
-    GS_dirs_x     = torch.tensor([GS_angle, 0, -GS_angle, 0], device=cuda) #[rad]
-    GS_dirs_y     = torch.tensor([0, GS_angle, 0, -GS_angle], device=cuda) #[rad]
-    nGS           = GS_dirs_y.size(0)
+wind_speed  = torch.tensor(params['atmosphere']['WindSpeed'], device=cuda)
+wind_dir    = torch.tensor(params['atmosphere']['WindDirection'], device=cuda)
+Cn2_weights = torch.tensor(params['atmosphere']['Cn2Weights'], device=cuda)
+Cn2_heights = torch.tensor(params['atmosphere']['Cn2Heights'], device=cuda) * airmass #[m]
+stretch     = 1.0 / (1.0-Cn2_heights/GS_height)
+h           = Cn2_heights * stretch
+nL          = Cn2_heights.size(0)
 
-    wind_speed  = torch.tensor([4., 4.],  device=cuda)
-    wind_dir    = torch.tensor([4.5, 4.5], device=cuda)
+WFS_d_sub = np.mean(params['sensor_HO']['SizeLenslets'])
+WFS_det_clock_rate = np.mean(params['sensor_HO']['ClockRate']) # [(?)]
 
-    Cn2_weights = torch.tensor([0.91, 0.09], device=cuda)
-    Cn2_heights = torch.tensor([0.0, 1e4],   device=cuda) * airmass #[m]
-    stretch     = 1.0 / (1.0-Cn2_heights/GS_height)
-    h           = Cn2_heights * stretch
-    nL          = Cn2_heights.size(0)
+HOloop_rate  = np.mean(params['RTC']['SensorFrameRate_HO']) # [Hz] (?)
+HOloop_delay = params['RTC']['LoopDelaySteps_HO'] # [ms] (?)
+HOloop_gain  = params['RTC']['LoopGain_HO']
 
-    WFS_d_sub     = 0.2
-    #WFS_noise_var = 5.69594009 #TODO: calculate it from imput data
-    WFS_det_clock_rate = 1. # [(?)]
+#-------------------------------------------------------
+pixels_per_l_D = wvl*rad2mas / (psInMas*D)
+sampling_factor = int(np.ceil(2.0/pixels_per_l_D)) # check how much it is less than Nyquist
+sampling = sampling_factor * pixels_per_l_D
+nOtf = nPix * sampling_factor
 
-    HOloop_rate = 500.0 # [Hz] (?)
-    HOloop_delay = 2 # [ms] (?)
-    HOloop_gain = 0.5
+dk = 1/D/sampling # PSD spatial frequency step
+cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 
-    pixels_per_l_D = wvl*rad2mas / (psInMas*D)
-    sampling_factor = int(np.ceil(2.0/pixels_per_l_D)) # check how much it is less than Nyquist
-    sampling = sampling_factor * pixels_per_l_D
-    nOtf = nPix * sampling_factor
+#with torch.no_grad():
+# Initialize spatial frequencies
+kx, ky = torch.meshgrid(
+    torch.linspace(-nOtf/2, nOtf/2-1, nOtf, device=cuda)*dk + 1e-10,
+    torch.linspace(-nOtf/2, nOtf/2-1, nOtf, device=cuda)*dk + 1e-10)
+k2 = kx**2 + ky**2
+k = torch.sqrt(k2)
 
-    dk = 1/D/sampling # PSD spatial frequency step
-    cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
+mask = torch.ones_like(k2, device=cuda)
+mask[k2 <= kc**2] = 0
+mask_corrected = 1.0-mask
 
-    #with torch.no_grad():
-    # Initialize spatial frequencies
-    kx, ky = torch.meshgrid(
-        torch.linspace(-nOtf/2, nOtf/2-1, nOtf, device=cuda)*dk + 1e-10,
-        torch.linspace(-nOtf/2, nOtf/2-1, nOtf, device=cuda)*dk + 1e-10)
-    k2 = kx**2 + ky**2
-    k = torch.sqrt(k2)
+#with open('C:\\Users\\akuznets\\Desktop\\buf\\masks.pickle', 'rb') as handle:
+#    masks = pickle.load(handle)
 
-    mask = torch.ones_like(k2, device=cuda)
-    mask[k2 <= kc**2] = 0
-    mask_corrected = 1.0-mask
+#mask = torch.tensor(masks['out'], device=cuda)
+#mask_corrected = torch.tensor(masks['in'], device=cuda)
+nOtf_AO = int(2*kc/dk)
 
-    #with open('C:\\Users\\akuznets\\Desktop\\buf\\masks.pickle', 'rb') as handle:
-    #    masks = pickle.load(handle)
+# Comb samples involved in antialising
+n_times = min(4,max(2,int(np.ceil(nOtf/nOtf_AO/2))))
+ids = []
+for mi in range(-n_times,n_times):
+    for ni in range(-n_times,n_times):
+        if mi or ni: #exclude (0,0)
+            ids.append([mi,ni])
+ids = np.array(ids)
 
-    #mask = torch.tensor(masks['out'], device=cuda)
-    #mask_corrected = torch.tensor(masks['in'], device=cuda)
-    nOtf_AO = int(2*kc/dk)
-    
-    # Comb samples involved in antialising
-    n_times = min(4,max(2,int(np.ceil(nOtf/nOtf_AO/2))))
-    ids = []
-    for mi in range(-n_times,n_times):
-        for ni in range(-n_times,n_times):
-            if mi or ni: #exclude (0,0)
-                ids.append([mi,ni])
-    ids = np.array(ids)
+m = torch.tensor(ids[:,0], device=cuda)
+n = torch.tensor(ids[:,1], device=cuda)
+N_combs = m.shape[0]
 
-    m = torch.tensor(ids[:,0], device=cuda)
-    n = torch.tensor(ids[:,1], device=cuda)
-    N_combs = m.shape[0]
+corrected_ROI = slice(nOtf//2-nOtf_AO//2, nOtf//2+nOtf_AO//2)
+corrected_ROI = (corrected_ROI,corrected_ROI)
 
-    corrected_ROI = slice(nOtf//2-nOtf_AO//2, nOtf//2+nOtf_AO//2)
-    corrected_ROI = (corrected_ROI,corrected_ROI)
+#mask_AO = torch.tensor(masks['out_ao'], device=cuda)
+#mask_corrected_AO = torch.tensor(masks['in_ao'], device=cuda)
+mask_AO = mask[corrected_ROI]
+mask_corrected_AO = mask_corrected[corrected_ROI]
+mask_corrected_AO_1_1  = torch.unsqueeze(torch.unsqueeze(mask_corrected_AO,2),3)
 
-    #mask_AO = torch.tensor(masks['out_ao'], device=cuda)
-    #mask_corrected_AO = torch.tensor(masks['in_ao'], device=cuda)
-    mask_AO = mask[corrected_ROI]
-    mask_corrected_AO = mask_corrected[corrected_ROI]
-    mask_corrected_AO_1_1  = torch.unsqueeze(torch.unsqueeze(mask_corrected_AO,2),3)
+kx_AO = kx[corrected_ROI]
+ky_AO = ky[corrected_ROI]
+k_AO  = k [corrected_ROI]
+k2_AO = k2[corrected_ROI]
 
-    kx_AO = kx[corrected_ROI]
-    ky_AO = ky[corrected_ROI]
-    k_AO  = k [corrected_ROI]
-    k2_AO = k2[corrected_ROI]
+M_mask = torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS], device=cuda)
+for j in range(nGS):
+    M_mask[:,:,j,j] += 1.0
 
-    M_mask = torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS], device=cuda)
-    for j in range(nGS):
-        M_mask[:,:,j,j] += 1.0
+# Matrix repetitions and dimensions expansion to avoid in in runtime
+kx_1_1 = torch.unsqueeze(torch.unsqueeze(kx_AO,2),3)
+ky_1_1 = torch.unsqueeze(torch.unsqueeze(ky_AO,2),3)
+k_1_1  = torch.unsqueeze(torch.unsqueeze(k_AO, 2),3)
 
-    # Matrix repetitions and dimensions expansion to avoid in in runtime
-    kx_1_1 = torch.unsqueeze(torch.unsqueeze(kx_AO,2),3)
-    ky_1_1 = torch.unsqueeze(torch.unsqueeze(ky_AO,2),3)
-    k_1_1  = torch.unsqueeze(torch.unsqueeze(k_AO, 2),3)
+kx_nGs_nGs = kx_1_1.repeat([1,1,nGS,nGS]) * M_mask
+ky_nGs_nGs = ky_1_1.repeat([1,1,nGS,nGS]) * M_mask
+k_nGs_nGs  = k_1_1.repeat([1,1,nGS,nGS])  * M_mask
+kx_nGs_nL  = kx_1_1.repeat([1,1,nGS,nL])
+ky_nGs_nL  = ky_1_1.repeat([1,1,nGS,nL])
+k_nGs_nL   = k_1_1.repeat([1,1,nGS,nL])
+kx_1_nL    = kx_1_1.repeat([1,1,1,nL])
+ky_1_nL    = ky_1_1.repeat([1,1,1,nL])
 
-    kx_nGs_nGs = kx_1_1.repeat([1,1,nGS,nGS]) * M_mask
-    ky_nGs_nGs = ky_1_1.repeat([1,1,nGS,nGS]) * M_mask
-    k_nGs_nGs  = k_1_1.repeat([1,1,nGS,nGS])  * M_mask
-    kx_nGs_nL  = kx_1_1.repeat([1,1,nGS,nL])
-    ky_nGs_nL  = ky_1_1.repeat([1,1,nGS,nL])
-    k_nGs_nL   = k_1_1.repeat([1,1,nGS,nL])
-    kx_1_nL    = kx_1_1.repeat([1,1,1,nL])
-    ky_1_nL    = ky_1_1.repeat([1,1,1,nL])
+# For NGS-like alising 2nd dimension is used to store combs information
+km = kx_1_1.repeat([1,1,N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(m/WFS_d_sub,0),0),3)
+kn = ky_1_1.repeat([1,1,N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(n/WFS_d_sub,0),0),3)
 
-    # For NGS-like alising 2nd dimension is used to store combs information
-    km = kx_1_1.repeat([1,1,N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(m/WFS_d_sub,0),0),3)
-    kn = ky_1_1.repeat([1,1,N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(n/WFS_d_sub,0),0),3)
+noise_nGs_nGs = torch.normal(mean=torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS]), std=torch.ones([nOtf_AO,nOtf_AO,nGS,nGS])*0.001) #TODO: remove noise, do proper matrix inversion
+noise_nGs_nGs = noise_nGs_nGs.to(cuda)
 
-    noise_nGs_nGs = torch.normal(mean=torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS]), std=torch.ones([nOtf_AO,nOtf_AO,nGS,nGS])*0.001) #TODO: remove noise, do proper matrix inversion
-    noise_nGs_nGs = noise_nGs_nGs.to(cuda)
+GS_dirs_x_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_x,0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
+GS_dirs_y_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_y,0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
 
-    GS_dirs_x_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_x,0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
-    GS_dirs_y_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_y,0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
+# Initialize OTF frequencines
+U,V = torch.meshgrid(
+    torch.linspace(0, nOtf-1, nOtf, device=cuda),
+    torch.linspace(0, nOtf-1, nOtf, device=cuda) )
 
-    # Initialize OTF frequencines
-    U,V = torch.meshgrid(
-        torch.linspace(0, nOtf-1, nOtf, device=cuda),
-        torch.linspace(0, nOtf-1, nOtf, device=cuda) )
+U = (U-nOtf/2) * 2/nOtf
+V = (V-nOtf/2) * 2/nOtf
 
-    U = (U-nOtf/2) * 2/nOtf
-    V = (V-nOtf/2) * 2/nOtf
+U2  = U**2
+V2  = V**2
+UV  = U*V
+UV2 = U**2 + V**2
 
-    U2  = U**2
-    V2  = V**2
-    UV  = U*V
-    UV2 = U**2 + V**2
+pupil_path = "C:/Users/akuznets/Projects/TIPTOP/P3/aoSystem/data/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits"
+pupil = torch.tensor(fits.getdata(pupil_path).astype('float'), device=cuda)
+#pupil = torch.tensor( PupilVLT(int(nOtf//sampling)) )
 
-    pupil_path = "C:/Users/akuznets/Projects/TIPTOP/P3/aoSystem/data/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits"
-    pupil = torch.tensor(fits.getdata(pupil_path).astype('float'), device=cuda)
-    #pupil = torch.tensor( PupilVLT(int(nOtf//sampling)) )
+pupil_pix  = pupil.shape[0]
+#padded_pix = nOtf
+padded_pix = int(pupil_pix*sampling)
 
-    pupil_pix  = pupil.shape[0]
-    #padded_pix = nOtf
-    padded_pix = int(pupil_pix*sampling)
-    
-    pupil_padded = torch.zeros([padded_pix, padded_pix], device=cuda)
-    pupil_padded[
-        padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2,
-        padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2
-    ] = pupil
+pupil_padded = torch.zeros([padded_pix, padded_pix], device=cuda)
+pupil_padded[
+    padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2,
+    padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2
+] = pupil
 
-    def fftAutoCorr(x):
-        x_fft = fft.fft2(x)
-        return fft.fftshift( fft.ifft2(x_fft*torch.conj(x_fft))/x.size(0)*x.size(1) )
+def fftAutoCorr(x):
+    x_fft = fft.fft2(x)
+    return fft.fftshift( fft.ifft2(x_fft*torch.conj(x_fft))/x.size(0)*x.size(1) )
 
-    OTF_static = torch.real( fftAutoCorr(pupil_padded) ).unsqueeze(0).unsqueeze(0)
-    OTF_static = interpolate(OTF_static, size=(nOtf,nOtf), mode='bilinear').squeeze(0).squeeze(0)
-    OTF_static = OTF_static / OTF_static.max()
+OTF_static = torch.real( fftAutoCorr(pupil_padded) ).unsqueeze(0).unsqueeze(0)
+OTF_static = interpolate(OTF_static, size=(nOtf,nOtf), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
+OTF_static = OTF_static / OTF_static.max()
 
-    #import pickle #TODO: remove it
-    #with open('C:\\Users\\akuznets\\Desktop\\buf\\OTF.pickle', 'rb') as handle:
-    #    OTF_test = torch.tensor(pickle.load(handle), device=cuda)
-    #OTF_test = OTF_test / OTF_test.max()
-    #OTF_static = OTF_test
+#import pickle #TODO: remove it
+#with open('C:\\Users\\akuznets\\Desktop\\buf\\OTF.pickle', 'rb') as handle:
+#    OTF_test = torch.tensor(pickle.load(handle), device=cuda)
+#OTF_test = OTF_test / OTF_test.max()
+#OTF_static = OTF_test
 
-    #plt.imshow(torch.abs(OTF_test).detach().cpu()[280:320,280:320])
-    #plt.colorbar()
-    #plt.show()
+#plt.imshow(torch.abs(OTF_test).detach().cpu()[280:320,280:320])
+#plt.colorbar()
+#plt.show()
 
-    PSD_padder = torch.nn.ZeroPad2d((nOtf-nOtf_AO)//2)
+PSD_padder = torch.nn.ZeroPad2d((nOtf-nOtf_AO)//2)
 
-    # Piston filter
-    def PistonFilter(f):
-        x = (np.pi*D*f).cpu().numpy() #TODO: find Bessel analog for pytorch
-        R = spc.j1(x)/x
-        piston_filter = torch.tensor(1.0-4*R**2, device=cuda)
-        piston_filter[nOtf_AO//2,nOtf_AO//2,...] *= 0.0
-        #if len(f.shape) == 2:
-        #    piston_filter[nOtf_AO//2,nOtf_AO//2] *= 0.0
-        #elif len(f.shape) == 3:
-        #    piston_filter[nOtf_AO//2,nOtf_AO//2,:] *= 0.0
-        #elif len(f.shape) == 4:
-        #    piston_filter[nOtf_AO//2,nOtf_AO//2,:,:] *= 0.0
-        return piston_filter
+# Piston filter
+def PistonFilter(f):
+    x = (np.pi*D*f).cpu().numpy() #TODO: find Bessel analog for pytorch
+    R = spc.j1(x)/x
+    piston_filter = torch.tensor(1.0-4*R**2, device=cuda)
+    piston_filter[nOtf_AO//2,nOtf_AO//2,...] *= 0.0
+    #if len(f.shape) == 2:
+    #    piston_filter[nOtf_AO//2,nOtf_AO//2] *= 0.0
+    #elif len(f.shape) == 3:
+    #    piston_filter[nOtf_AO//2,nOtf_AO//2,:] *= 0.0
+    #elif len(f.shape) == 4:
+    #    piston_filter[nOtf_AO//2,nOtf_AO//2,:,:] *= 0.0
+    return piston_filter
 
-    piston_filter = PistonFilter(k_AO)
-    PR = PistonFilter(torch.hypot(km,kn))
+piston_filter = PistonFilter(k_AO)
+PR = PistonFilter(torch.hypot(km,kn))
 
 
 #%%
@@ -652,11 +649,11 @@ def BackgroundEstimate(im, radius=90):
 #PSF_0 -= BackgroundEstimate(PSF_0)
 #plt.imshow(torch.log(PSF_0).detach().cpu())
 
-#with open('C:\\Users\\akuznets\\Desktop\\buf\\cube_1.pickle', 'rb') as handle:
-#    cube_real = pickle.load(handle)
-with open('C:\\Users\\akuznets\\Desktop\\buf\\test_synth_PSF.pickle', 'rb') as handle:
-    PSF_real = pickle.load(handle)
-#PSF_real = cube_real[:,:,5]
+with open('C:\\Users\\akuznets\\Desktop\\buf\\cube_1.pickle', 'rb') as handle:
+    cube_real = pickle.load(handle)
+#with open('C:\\Users\\akuznets\\Desktop\\buf\\test_synth_PSF.pickle', 'rb') as handle:
+#    PSF_real = pickle.load(handle)
+PSF_real = cube_real[:,:,5]
 PSF_0 = torch.tensor(PSF_real / PSF_real.sum(), device=cuda) #* 1e2
 #PSF_0 -= BackgroundEstimate(PSF_0)
 plt.imshow(torch.log(PSF_0).detach().cpu())
