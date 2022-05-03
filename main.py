@@ -144,7 +144,6 @@ print(start.elapsed_time(end))
 #print(prof)
 
 #%%
-
 path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
 path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/muse_ltao.ini'))
 
@@ -441,13 +440,13 @@ def TomographicReconstructors(r0, L0, WFS_noise_var):
     MP_t = torch.conj(torch.permute(MP, (0,1,3,2)))
 
     C_b = torch.ones((nOtf_AO,nOtf_AO,nGS,nGS), dtype=torch.complex64, device=cuda) * torch.eye(4, device=cuda) * WFS_noise_var #torch.diag(WFS_noise_var)
-    #C_b_inv = torch.ones((nOtf_AO,nOtf_AO,nGS,nGS), dtype=torch.complex64, device=cuda) * torch.eye(4, device=cuda) * 1./WFS_noise_var #torch.diag(WFS_noise_var)
+    C_b_inv = torch.ones((nOtf_AO,nOtf_AO,nGS,nGS), dtype=torch.complex64, device=cuda) * torch.eye(4, device=cuda) * 1./WFS_noise_var #torch.diag(WFS_noise_var)
 
     kernel = torch.unsqueeze(torch.unsqueeze(r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6) * piston_filter, 2), 3)
-    #kernel_inv = torch.unsqueeze(torch.unsqueeze(1.0/ (r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6)), 2), 3)
+    kernel_inv = torch.unsqueeze(torch.unsqueeze(1.0/ (r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6)), 2), 3)
     
     C_phi  = kernel.repeat(1, 1, nL, nL) * torch.diag(Cn2_weights) + 0j
-    #C_phi_inv = kernel_inv.repeat(1, 1, nL, nL) * torch.diag(1.0/Cn2_weights) + 0j
+    C_phi_inv = kernel_inv.repeat(1, 1, nL, nL) * torch.diag(1.0/Cn2_weights) + 0j
 
     W_tomo = (C_phi @ MP_t) @ torch.linalg.pinv(MP @ C_phi @ MP_t + C_b + noise_nGs_nGs, rcond=1e-2)
     
@@ -505,9 +504,9 @@ def TomographicReconstructors(r0, L0, WFS_noise_var):
     samp_time = 1.0 / HOloop_rate
     www = 2j*torch.pi*k_nGs_nL * torch.sinc(samp_time*WFS_det_clock_rate*wind_speed*freq_t).repeat([1,1,nGS,1]) #* dim_1_nL_to_nGS_nL
 
-    MP_alpha_L = www*torch.sinc(WFS_d_sub*kx_1_1)*torch.sinc(WFS_d_sub*ky_1_1)\
-                                    *torch.exp(2j*np.pi*h*(kx_nGs_nL*GS_dirs_x_nGs_nL + ky_nGs_nL*GS_dirs_y_nGs_nL))
-    #MP_alpha_L = www * P * ( torch.sinc(WFS_d_sub*kx_1_1)*torch.sinc(WFS_d_sub*ky_1_1) )
+    #MP_alpha_L = www*torch.sinc(WFS_d_sub*kx_1_1)*torch.sinc(WFS_d_sub*ky_1_1)\
+    #                                *torch.exp(2j*np.pi*h*(kx_nGs_nL*GS_dirs_x_nGs_nL + ky_nGs_nL*GS_dirs_y_nGs_nL))
+    MP_alpha_L = www * P * ( torch.sinc(WFS_d_sub*kx_1_1)*torch.sinc(WFS_d_sub*ky_1_1) )
     W_alpha = (W @ MP_alpha_L)
 
     #with open('C:\\Users\\akuznets\\Desktop\\buf\\Walpha.pickle', 'rb') as handle:
@@ -649,12 +648,11 @@ def BackgroundEstimate(im, radius=90):
 #PSF_0 -= BackgroundEstimate(PSF_0)
 #plt.imshow(torch.log(PSF_0).detach().cpu())
 
-with open('C:\\Users\\akuznets\\Desktop\\buf\\cube_1.pickle', 'rb') as handle:
-    cube_real = pickle.load(handle)
+
 #with open('C:\\Users\\akuznets\\Desktop\\buf\\test_synth_PSF.pickle', 'rb') as handle:
 #    PSF_real = pickle.load(handle)
-PSF_real = cube_real[:,:,5]
-PSF_0 = torch.tensor(PSF_real / PSF_real.sum(), device=cuda) #* 1e2
+
+PSF_0 = torch.tensor(im/im.sum(), device=cuda) #* 1e2
 #PSF_0 -= BackgroundEstimate(PSF_0)
 plt.imshow(torch.log(PSF_0).detach().cpu())
 
@@ -686,17 +684,17 @@ Jx = torch.tensor(10.0,  requires_grad=True, device=cuda)
 Jy = torch.tensor(10.0,  requires_grad=True, device=cuda)
 '''
 
-r0 = torch.tensor(0.15539785053590676, requires_grad=True,  device=cuda)
+r0 = torch.tensor(0.10539785053590676, requires_grad=True,  device=cuda)
 L0 = torch.tensor(47.93, requires_grad=False, device=cuda)
 F  = torch.tensor(1.0,   requires_grad=True, device=cuda)
 dx = torch.tensor(0.0,   requires_grad=True,  device=cuda)
 dy = torch.tensor(0.0,   requires_grad=True,  device=cuda)
-bg = torch.tensor(0.0,  requires_grad=True, device=cuda)
-n  = torch.tensor(5.0,   requires_grad=False, device=cuda)
+bg = torch.tensor(0.0,   requires_grad=True, device=cuda)
+n  = torch.tensor(5.0,   requires_grad=True, device=cuda)
 Jx = torch.tensor(10.0,  requires_grad=True, device=cuda)
 Jy = torch.tensor(10.0,  requires_grad=True, device=cuda)
 
-
+"""
 PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy)
 #plt.imshow(torch.log(torch.abs(PSF_1-PSF_0)).detach().cpu())
 plt.imshow(torch.log(torch.abs(PSF_1)).detach().cpu())
@@ -714,7 +712,6 @@ def radial_profile(data, center=None):
     return radialprofile[0:10]
 
 PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy)
-
 profile_0 = radial_profile(PSF_0.detach().cpu().numpy())
 profile_1 = radial_profile(PSF_1.detach().cpu().numpy())
 profile_diff = np.abs(profile_1-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
@@ -740,6 +737,7 @@ labs = [l.get_label() for l in ls]
 ax2.legend(ls, labs, loc=0)
 
 plt.show()
+"""
 
 #%%
 '''
@@ -770,53 +768,45 @@ dot # in Jupyter, you can just render the variable
 
 #%%
 
-def OptimParams(loss_fun, params, iterations, verbous=True):
-    optimizer = optim.LBFGS(params, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-    #optimizer = optim.SGD(params, lr=1e-6) #, momentum=0.9)
+def OptimParams(loss_fun, params, iterations, method='LBFGS', verbous=True):
+    if method == 'LBFGS':
+        optimizer = optim.LBFGS(params, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
+    elif method == 'Adam':
+        optimizer = optim.Adam(params, lr=1e-2)
+
     history = []
     for _ in range(iterations):
         optimizer.zero_grad()
         loss = loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 )
         loss.backward()
-        if verbous: print(loss.item())
+        if verbous:
+            if method == 'LBFGS':
+                print(loss.item())
+            elif method == 'Adam':
+                if not i % 10: print(loss.item())
+
         history.append(loss.item())
-        if len(history) > 3:
-            if np.abs(loss.item()-history[-2]) < 1e-4 and np.abs(loss.item()-history[-3]) < 1e-4:
+        if len(history) > 2:
+            if np.abs(loss.item()-history[-1]) < 1e-4 and np.abs(loss.item()-history[-2]) < 1e-4:
                 break
-        optimizer.step( lambda: loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 ) )
-        #optimizer.step()
+        if method == 'LBFGS':
+            optimizer.step( lambda: loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 ) )
+        elif method == 'Adam':
+            optimizer.step()
 
-params = [
-        {"params": r0, "lr": 1e-4},
-        {"params": Jx, "lr": 1e3},
-        {"params": Jy, "lr": 1e3},
-        {"params": n,  "lr": 2e-1},
-        {"params": dx, "lr": 1e-4},
-        {"params": dy, "lr": 1e-4},
-        {"params": F,  "lr": 1e-3}
-    ]
-
-'''
-{"params": r0, "lr": 1e-4},
-{"params": Jx, "lr": 1e4},
-{"params": Jy, "lr": 1e4},
-{"params": n,  "lr": 2e-0},
-{"params": dx, "lr": 1e-3},
-{"params": dy, "lr": 1e-3},
-{"params": F,  "lr": 1e-4}
-'''
 
 loss_fn = nn.L1Loss(reduction='sum')
-for i in range(5):
-    OptimParams(loss_fn, [r0, L0, F, dx, dy, n], 10)
-    OptimParams(loss_fn, [bg], 5)
-    OptimParams(loss_fn, [Jx, Jy], 5)
+for i in range(10):
+    OptimParams(loss_fn, [r0, F, dx, dy], 5)
+    OptimParams(loss_fn, [n], 5)
+    OptimParams(loss_fn, [Jx, Jy], 3)
+    OptimParams(loss_fn, [bg], 3)
     #optimizer = optim.SGD(params, lr=1e-5, momentum=0.9)
-    #for i in range(40):
+    #for i in range(10):
     #    optimizer.zero_grad()
     #    loss = loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 )
     #    loss.backward()
-    #    if not i % 10: print(loss.item())
+    #    #if not i % 10: print(loss.item())
     #    optimizer.step()
 
 print("r0,L0: ({:.3f}, {:.2f})".format(r0.data.item(), L0.data.item()))
@@ -837,15 +827,6 @@ params = [
         {"params": F,  "lr": 1e-3}
     ]
 
-#params = [
-#        {"params": r0, "lr": 1e-5},
-#        {"params": Jx, "lr": 1e3},
-#        {"params": Jy, "lr": 1e3},
-#        {"params": n,  "lr": 2e-1},
-#        {"params": dx, "lr": 1e-4},
-#        {"params": dy, "lr": 1e-4},
-#        {"params": F,  "lr": 1e-5}
-#    ]
 
 #1e-5},
 #1e3},
@@ -854,15 +835,47 @@ params = [
 #1e-4},
 #1e-4},
 #1e-5}
+'''
 
-optimizer = optim.SGD(params, lr=1e-4, momentum=0.9)
-for i in range(1000):
+r0 = torch.tensor(0.09593427181243896, requires_grad=True, device=cuda)
+L0 = torch.tensor(47.93, requires_grad=False, device=cuda)
+F  = torch.tensor(0.9126381278038025, requires_grad=True, device=cuda)
+dx = torch.tensor(-0.00, requires_grad=True, device=cuda)
+dy = torch.tensor(-0.01, requires_grad=True, device=cuda)
+bg = torch.tensor(2.1817661490786122e-06, requires_grad=True, device=cuda)
+n  = torch.tensor(4.50, requires_grad=True, device=cuda)
+Jx = torch.tensor(45.2, requires_grad=True, device=cuda)
+Jy = torch.tensor(49.1, requires_grad=True, device=cuda)
+
+grad_coef = 1
+
+params = [
+        {"params": r0, "lr": 1e-2*grad_coef},
+        {"params": Jx, "lr": 1e-2*grad_coef},
+        {"params": Jy, "lr": 1e-2*grad_coef},
+        {"params": n,  "lr": 1e-2*grad_coef},
+        #{"params": dx, "lr": 1e-2*grad_coef},
+        #{"params": dy, "lr": 1e-2*grad_coef},
+        {"params": F,  "lr": 1e-2*grad_coef}
+    ]
+
+#params = [r0, Jx, Jy, n , dx, dy, F]
+#optimizer = optim.SGD(params, lr=1e-5, momentum=0.9)
+
+OptimParams(loss_fn, [r0, F, dx, dy], 100)
+
+
+'''
+optimizer = optim.Adam(params, lr=1e-2)
+for i in range(100):
     optimizer.zero_grad()
     loss = loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 )
     loss.backward()
-    if not i % 10: print(loss.item())
+    if not i % 10: 
+        print(loss.item())
     optimizer.step()
 '''
+
 #%%
 '''
 def f(r0, L0, F, dx, dy, bg, n, Jx, Jy):
