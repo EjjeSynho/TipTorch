@@ -1,18 +1,4 @@
 #%%
-#from math import factorial
-#from turtle import shape
-#from importlib_metadata import requires
-#from torch.nn import Module
-#from torch.nn.parameter import Parameter
-#from torchinfo import summary
-#from torch.autograd import gradcheck
-#import cupy as cp
-#from cupyx.scipy.signal import convolve2d
-#from scipy import signal as sg
-#from tqdm import tqdm
-#from torch import Tensor , complex128, real
-#from torch.autograd import Variable, Function
-#import profile
 import torch
 import numpy as np
 from torch import nn
@@ -159,7 +145,7 @@ angle[5] = -44
 angle = angle[sample_id]
 
 data_cube = MUSEcube(path_im, angle)
-im, _, wvl = data_cube.Layer(5)
+im, _, wvl = data_cube.Layer(3)
 obs_info = data_cube.obs_info
 
 # Load and correct AO system parameters
@@ -189,9 +175,9 @@ rad2arc = rad2mas / 1000
 deg2rad = np.pi / 180
 asec2rad = np.pi / 180 / 3600
 
-seeing = lambda rₒ, λ: rad2arc*0.976*λ/rₒ # [arcs]
-rₒ = lambda seeing, λ: rad2arc*0.976*λ/seeing # [m]
-rₒ_new = lambda rₒ, λ, λₒ: rₒ*(λ/λₒ)**1.2 # [m]
+seeing_from_r0 = lambda r0, λ: rad2arc*0.976*λ/r0 # [arcs]
+r0_from_seeing = lambda seeing, λ: rad2arc*0.976*λ/seeing # [m]
+r0_rescale     = lambda r0, λ, λₒ: r0*(λ/λₒ)**1.2 # [m] 
 
 D       = params['telescope']['TelescopeDiameter']
 wvl     = wvl
@@ -256,12 +242,8 @@ mask = torch.ones_like(k2, device=cuda)
 mask[k2 <= kc**2] = 0
 mask_corrected = 1.0-mask
 
-#with open('C:\\Users\\akuznets\\Desktop\\buf\\masks.pickle', 'rb') as handle:
-#    masks = pickle.load(handle)
-
-#mask = torch.tensor(masks['out'], device=cuda)
-#mask_corrected = torch.tensor(masks['in'], device=cuda)
 nOtf_AO = int(2*kc/dk)
+nOtf_AO += nOtf_AO % 2
 
 # Comb samples involved in antialising
 n_times = min(4,max(2,int(np.ceil(nOtf/nOtf_AO/2))))
@@ -279,8 +261,6 @@ N_combs = m.shape[0]
 corrected_ROI = slice(nOtf//2-nOtf_AO//2, nOtf//2+nOtf_AO//2)
 corrected_ROI = (corrected_ROI,corrected_ROI)
 
-#mask_AO = torch.tensor(masks['out_ao'], device=cuda)
-#mask_corrected_AO = torch.tensor(masks['in_ao'], device=cuda)
 mask_AO = mask[corrected_ROI]
 mask_corrected_AO = mask_corrected[corrected_ROI]
 mask_corrected_AO_1_1  = torch.unsqueeze(torch.unsqueeze(mask_corrected_AO,2),3)
@@ -321,7 +301,8 @@ GS_dirs_y_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_y,0),
 # Initialize OTF frequencines
 U,V = torch.meshgrid(
     torch.linspace(0, nOtf-1, nOtf, device=cuda),
-    torch.linspace(0, nOtf-1, nOtf, device=cuda) )
+    torch.linspace(0, nOtf-1, nOtf, device=cuda),
+    indexing = 'ij')
 
 U = (U-nOtf/2) * 2/nOtf
 V = (V-nOtf/2) * 2/nOtf
@@ -801,12 +782,15 @@ def OptimParams(loss_fun, params, iterations, method='LBFGS', verbous=True):
             optimizer.step()
 
 
-loss_fn = nn.L1Loss(reduction='sum')
+loss_fn1 = nn.L1Loss(reduction='sum')
+def loss_fn(A,B):
+    return loss_fn1(A,B) + torch.max(torch.abs(A-B)) + torch.abs(torch.max(A)-torch.max(B))
+
 for i in range(10):
     OptimParams(loss_fn, [r0, F, dx, dy], 5)
     OptimParams(loss_fn, [n], 5)
-    OptimParams(loss_fn, [Jx, Jy], 3)
     OptimParams(loss_fn, [bg], 3)
+    OptimParams(loss_fn, [Jx, Jy], 3)
     #optimizer = optim.SGD(params, lr=1e-5, momentum=0.9)
     #for i in range(10):
     #    optimizer.zero_grad()

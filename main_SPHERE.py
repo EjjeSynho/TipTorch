@@ -133,11 +133,6 @@ mask = torch.ones_like(k2, device=cuda)
 mask[k2 <= kc**2] = 0
 mask_corrected = 1.0-mask
 
-#with open('C:\\Users\\akuznets\\Desktop\\buf\\masks.pickle', 'rb') as handle:
-#    masks = pickle.load(handle)
-
-#mask = torch.tensor(masks['out'], device=cuda)
-#mask_corrected = torch.tensor(masks['in'], device=cuda)
 nOtf_AO = int(2*kc/dk)
 nOtf_AO += nOtf_AO % 2
 
@@ -157,8 +152,6 @@ N_combs = m.shape[0]
 corrected_ROI = slice(nOtf//2-nOtf_AO//2, nOtf//2+nOtf_AO//2)
 corrected_ROI = (corrected_ROI,corrected_ROI)
 
-#mask_AO = torch.tensor(masks['out_ao'], device=cuda)
-#mask_corrected_AO = torch.tensor(masks['in_ao'], device=cuda)
 mask_AO = mask[corrected_ROI]
 mask_corrected_AO = mask_corrected[corrected_ROI]
 mask_corrected_AO_1_1  = torch.unsqueeze(torch.unsqueeze(mask_corrected_AO,2),3)
