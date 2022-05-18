@@ -1,8 +1,6 @@
 #%%
-from multiprocessing.sharedctypes import Value
 import os
 from os import path
-import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -10,11 +8,12 @@ from astropy.io import fits
 from astropy.time import Time
 from astropy.coordinates import SkyCoord
 from astropy import units as u
+from tqdm import tqdm
 from query_eso_archive import query_simbad
 import pickle
+import re
 
 #%%
-
 class SPHERE_loader():
 
     def FilterNoiseBG(self, img, center, radius=80):
@@ -129,7 +128,7 @@ class SPHERE_loader():
                     df = pd.read_csv(path_sub + "/" + file_name)
                     if 'No data' not in [col for col in df.columns][0]:
                         id_min, id_max = find_closest(df, date, T_exp)
-                        SPARTA_data['n_ph'] = GetEntryValue(df, 'flux_VisLoop[#photons/aperture/frame]', id_min, id_max)/n_subap   
+                        SPARTA_data['n_ph'] = GetEntryValue(df, 'flux_VisLoop[#photons/aperture/frame]', id_min, id_max)/n_subap
                         SPARTA_data['rate'] = GetEntryValue(df, 'Frame rate [Hz]', id_min, id_max)
 
                 # Get the atmospheric parameters (SPARTA)
@@ -167,6 +166,18 @@ class SPHERE_loader():
                         MASSDIMM_data['temperature'] = GetEntryValue(df, 'air_temperature_30m[deg]', id_min, id_max)
                         MASSDIMM_data['winddir']     = GetEntryValue(df, 'winddir_30m', id_min, id_max)
                         MASSDIMM_data['windspeed']   = GetEntryValue(df, 'windspeed_30m', id_min, id_max)
+
+                # Get the ambient parameters asm?)
+                tmp = [file for file in os.listdir(path_sub) if "asm" in file]
+                if len(tmp)>0:
+                    file_name = tmp[0]
+                    df = pd.read_csv(path_sub + "/" + file_name)
+                    if 'No data' not in [col for col in df.columns][0]:
+                        id_min, id_max = find_closest(df, date, T_exp)
+                        MASSDIMM_data['temperature'] = GetEntryValue(df, 'air_temperature_30m[deg]', id_min, id_max)
+                        MASSDIMM_data['winddir']     = GetEntryValue(df, 'winddir_30m', id_min, id_max)
+                        MASSDIMM_data['windspeed']   = GetEntryValue(df, 'windspeed_30m', id_min, id_max)
+
 
         return SPARTA_data, MASSDIMM_data
 
@@ -260,6 +271,11 @@ class SPHERE_loader():
                 'ron': ron
             },
 
+            'WFS': {
+                'Nph vis': SPARTA_data['n_ph'],
+                'rate':    SPARTA_data['rate']
+            },
+
             'observation': {
                 'name': OB_NAME,
                 'date': self.hdr[0].header['DATE-OBS'],
@@ -282,6 +298,7 @@ class SPHERE_loader():
         self.hdr = fits.open(self.filename)
         self.data = self.LoadObservationData()
         self.im, self.var, self.bg_median, self.n_frames = self.LoadImage()
+        self.hdr.close()
         self.data['image'] = self.im
         self.data['variance'] = self.var
         self.data['bg_median'] = self.bg_median
@@ -294,55 +311,92 @@ class SPHERE_loader():
         if self.filename is not None:
             self.Load(fits_filename)
 
-    def save(self, path):
+    def save(self, path, prefix=''):
         path = os.path.normpath(path)
         if os.path.exists(path):
             file = os.path.split(self.filename)[-1][:-5]
-            path_new = os.path.join(path, file+'.pickle')
+            path_new = os.path.join(path, prefix+file+'.pickle')
             with open(path_new, 'wb') as handle:
                 pickle.dump(self.data, handle, protocol=pickle.HIGHEST_PROTOCOL)
         else:
             raise ValueError('Wrong path is specified!')
 
-
-#%%
+#%% =============== Save massively reduced data as pickle dictionaries ===============
 data_path = 'C:/Users/akuznets/Data/SPHERE/SPHERE_DC_DATA/'
 path_dtts = 'C:/Users/akuznets/Data/SPHERE/DATA/DTTS/'
 
 folders = os.listdir(data_path)
-
-
 fits_files = []
 for folder in folders:
     files = os.listdir(path.join(data_path,folder))
     for file in files:
         fits_files.append(path.join(data_path,folder,file))
 
-id = 420
-fits_filename = fits_files[id]
+loader = SPHERE_loader(path_dtts)
 
-loader = SPHERE_loader(path_dtts,fits_filename)
+corrupted_ids = []
+error_ids = []
+wrong_key_ids = []
 
-loader.save('C:\\Users\\akuznets\\Data\\SPHERE\\test')
-plt.imshow(loader.data['image'])
+for id in tqdm(range(len(fits_files))):
+    fits_filename = fits_files[id]
+    try:
+        loader.Load(fits_filename)
+        loader.save('C:\\Users\\akuznets\\Data\\SPHERE\\test', prefix=str(id)+'_')
+    except KeyError:
+        print('Ooops! Wrong key encountered while reading .fits file')
+        wrong_key_ids.append(id)
+    except OSError:
+        print('Ooops! Corrupted one')
+        corrupted_ids.append(id)
+    except ValueError:
+        print('Ooops! Something wrong for this one')
+        error_ids.append(id)
 
-plt.show()
+#plt.imshow(loader.data['image'])
+#plt.show()
 
 #%%
-datas = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\SPHER.2017-05-15T04.48.44.108IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-with open(datas, 'rb') as handle:
-    testo = pickle.load(handle)
+loader.Load(fits_files[corrupted_ids[0]])
+# %% =============== Visualize data and save plot into temporary folder ===============
 
+dir_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\'
 
-#%%
-import yaml
-print(yaml.dump(testo))
+files = os.listdir(dir_test)
+file = files[0]
 
-# %%
+crop = slice(128-32, 128+32)
+crop = (crop,crop)
 
+for file in tqdm(files):
+    with open(os.path.join(dir_test, file), 'rb') as handle:
+        data = pickle.load(handle)
+    plt.imshow(np.log(data['image'][crop]))
+    plt.savefig('C:\\Users\\akuznets\\Data\\SPHERE\\temp\\'+file.split('_')[0]+'.png')
 
-params['atmosphere']['Seeing'] = seeing
-params['atmosphere']['WindSpeed'] = [wSpeed]
-params['atmosphere']['WindDirection'] = [wDir]
-params['sensor_science']['SigmaRON'] = ron
-params['sensor_science']['Gain'] = gain
+#%% =============== Ones bad files are selected with pictures, move them to another folder ===============
+import shutil
+
+files = os.listdir('C:\\Users\\akuznets\\Data\\SPHERE\\temp\\')
+valid_ids = []
+for file in files:
+    valid_ids.append(int(file.split('.')[0]))
+valid_ids = set(valid_ids)
+
+all_ids = []
+files = os.listdir('C:\\Users\\akuznets\\Data\\SPHERE\\test\\')
+for file in files:
+    all_ids.append(int(file.split('_')[0]))
+all_ids = set(all_ids)
+
+invalid_ids = all_ids-valid_ids
+
+files_dir = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\'
+target_dir = 'C:\\Users\\akuznets\\Data\\SPHERE\\test_invalid\\'
+files = os.listdir(files_dir)
+
+for file in files:
+    id = int(file.split('_')[0])
+    if id in invalid_ids:
+        #print(id)
+        shutil.move(os.path.join(files_dir, file), target_dir)
