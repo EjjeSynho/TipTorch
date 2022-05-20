@@ -145,7 +145,7 @@ angle[5] = -44
 angle = angle[sample_id]
 
 data_cube = MUSEcube(path_im, angle)
-im, _, wvl = data_cube.Layer(3)
+im, _, wvl = data_cube.Layer(5)
 obs_info = data_cube.obs_info
 
 # Load and correct AO system parameters
@@ -162,7 +162,7 @@ params['sources_science']['Wavelength'] = [wvl]
 params['sensor_science']['FieldOfView'] = im.shape[0]
 params['sensor_science']['Zenith']      = [90.0-obs_info['TELALT']]
 params['sensor_science']['Azimuth']     = [obs_info['TELAZ']]
-params['sensor_HO']['NoiseVariance']    = 5.0
+params['sensor_HO']['NoiseVariance']    = 4.5
 
 #%%
 cuda  = torch.device('cuda') # Default CUDA device
@@ -226,6 +226,12 @@ pixels_per_l_D = wvl*rad2mas / (psInMas*D)
 sampling_factor = int(np.ceil(2.0/pixels_per_l_D)) # check how much it is less than Nyquist
 sampling = sampling_factor * pixels_per_l_D
 nOtf = nPix * sampling_factor
+
+#pixels_per_l_D = wvl*rad2mas / (psInMas*D)
+#sampling_factor = 2.0/pixels_per_l_D # check how much it is less than Nyquist
+#sampling = sampling_factor * pixels_per_l_D
+#nOtf = np.round(nPix * sampling_factor, 0).astype('uint')
+#nOtf += nOtf%2
 
 dk = 1/D/sampling # PSD spatial frequency step
 cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
@@ -333,6 +339,9 @@ def fftAutoCorr(x):
 OTF_static = torch.real( fftAutoCorr(pupil_padded) ).unsqueeze(0).unsqueeze(0)
 OTF_static = interpolate(OTF_static, size=(nOtf,nOtf), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
 OTF_static = OTF_static / OTF_static.max()
+
+
+#%%
 
 #import pickle #TODO: remove it
 #with open('C:\\Users\\akuznets\\Desktop\\buf\\OTF.pickle', 'rb') as handle:
@@ -592,32 +601,42 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy):
         ChromatismPSD(r0, L0)
     )
 
-    dk = 2*kc/nOtf_AO
-    PSD *= (dk*wvl*1e9/2/np.pi)**2
+    dk = 2*kc/nOtf_AO #* 1.005
+    #PSD *= (dk*wvl*1e9/2/np.pi)**2
+    A = (dk*wvl*1e9/2/np.pi)**2
     cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD)))
     SF  = torch.abs(cov).max()-cov
+    SF *= A
+    #print(SF.abs().max(), A, dk)
     fftPhasor = torch.exp(-np.pi*1j*sampling_factor*(U*dx+V*dy))
     OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/wvl)**2)
-
     OTF = OTF_turb * OTF_static * fftPhasor * JitterCore(Jx,Jy)
+    #plt.imshow(OTF_turb)
+    #print(JitterCore(Jx,Jy).abs().max())
     PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) ).unsqueeze(0).unsqueeze(0)
     PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area').squeeze(0).squeeze(0)
     return (PSF_out/PSF_out.sum() * F + bg) #* 1e2
 
 start.record()
 
-'''
 PSF_0 = PSD2PSF(
-    torch.tensor(0.105, device=cuda), torch.tensor(47.93, device=cuda),
+    torch.tensor(0.1, device=cuda), torch.tensor(47.93, device=cuda),
     torch.tensor(1.0,   device=cuda),
-    torch.tensor(1.0,   device=cuda), torch.tensor(-2.0, device=cuda),
-    torch.tensor(1e-6,  device=cuda), #bg
-    torch.tensor(5.0,   device=cuda),
-    torch.tensor(20.0,  device=cuda), torch.tensor(20.0,  device=cuda)
+    torch.tensor(0.0,   device=cuda), torch.tensor(0.0, device=cuda),
+    torch.tensor(0.0,  device=cuda), #bg
+    torch.tensor(4.5,   device=cuda),
+    torch.tensor(10.0,  device=cuda), torch.tensor(10.0,  device=cuda)
 )
-'''
+
 end.record()
 torch.cuda.synchronize()
+
+
+plt.imshow(torch.log(PSF_0).cpu().detach())
+plt.colorbar()
+plt.show()
+
+#%%
 #print(start.elapsed_time(end))
 
 def BackgroundEstimate(im, radius=90):
