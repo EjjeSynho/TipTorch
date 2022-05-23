@@ -1,20 +1,15 @@
 #%%
 import torch
 import numpy as np
-from torch import nn
-from torch import optim
+from torch import nn, optim, fft
 import matplotlib.pyplot as plt
-from torch import fft
-import numpy as np
 import scipy.special as spc
-from torch import fft
 from scipy.ndimage import center_of_mass
 from torch.nn.functional import interpolate
 from astropy.io import fits
 from skimage.transform import resize
 from graphviz import Digraph
 from VLT_pupil import PupilVLT, CircPupil
-import torch
 import pickle
 import os
 from os import path
@@ -145,7 +140,7 @@ angle[5] = -44
 angle = angle[sample_id]
 
 data_cube = MUSEcube(path_im, angle)
-im, _, wvl = data_cube.Layer(5)
+im, _, wvl = data_cube.Layer(9)
 obs_info = data_cube.obs_info
 
 # Load and correct AO system parameters
@@ -226,12 +221,18 @@ pixels_per_l_D = wvl*rad2mas / (psInMas*D)
 sampling_factor = int(np.ceil(2.0/pixels_per_l_D)) # check how much it is less than Nyquist
 sampling = sampling_factor * pixels_per_l_D
 nOtf = nPix * sampling_factor
+nOtf += nOtf%2
+sampling_factor = nOtf/nPix
+sampling = sampling_factor * pixels_per_l_D
+
+#nOtf = 800
+#sampling_factor = nOtf / nPix
+#sampling = sampling_factor * pixels_per_l_D
 
 #pixels_per_l_D = wvl*rad2mas / (psInMas*D)
 #sampling_factor = 2.0/pixels_per_l_D # check how much it is less than Nyquist
 #sampling = sampling_factor * pixels_per_l_D
 #nOtf = np.round(nPix * sampling_factor, 0).astype('uint')
-#nOtf += nOtf%2
 
 dk = 1/D/sampling # PSD spatial frequency step
 cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
@@ -298,7 +299,7 @@ ky_1_nL    = ky_1_1.repeat([1,1,1,nL])
 km = kx_1_1.repeat([1,1,N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(m/WFS_d_sub,0),0),3)
 kn = ky_1_1.repeat([1,1,N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(n/WFS_d_sub,0),0),3)
 
-noise_nGs_nGs = torch.normal(mean=torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS]), std=torch.ones([nOtf_AO,nOtf_AO,nGS,nGS])*0.001) #TODO: remove noise, do proper matrix inversion
+noise_nGs_nGs = torch.normal(mean=torch.zeros([nOtf_AO,nOtf_AO,nGS,nGS]), std=torch.ones([nOtf_AO,nOtf_AO,nGS,nGS])*0.01) #TODO: remove noise, do proper matrix inversion
 noise_nGs_nGs = noise_nGs_nGs.to(cuda)
 
 GS_dirs_x_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(GS_dirs_x,0),0),3).repeat([nOtf_AO,nOtf_AO,1,nL])# * dim_N_N_nGS_nL
@@ -340,8 +341,6 @@ OTF_static = torch.real( fftAutoCorr(pupil_padded) ).unsqueeze(0).unsqueeze(0)
 OTF_static = interpolate(OTF_static, size=(nOtf,nOtf), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
 OTF_static = OTF_static / OTF_static.max()
 
-
-#%%
 
 #import pickle #TODO: remove it
 #with open('C:\\Users\\akuznets\\Desktop\\buf\\OTF.pickle', 'rb') as handle:
@@ -574,14 +573,14 @@ def ChromatismPSD(r0, L0):
     return chromatic_PSD
 
 
-def JitterCore(Jx, Jy): #, Jxy):
+def JitterCore(Jx, Jy, Jxy):
     u_max = sampling*D/wvl/(3600*180*1e3/np.pi)
     norm_fact = u_max**2 * (2*np.sqrt(2*np.log(2)))**2
-    Djitter = norm_fact * (Jx**2 * U2 + Jy**2 * V2) #+ 2*Jxy*UV)
+    Djitter = norm_fact * (Jx**2 * U2 + Jy**2 * V2 + 2*Jxy*UV)
     return torch.exp(-0.5*Djitter) #TODO: cover Nyquist sampled case
 
 #%%
-def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy):
+def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
     # non-negative reparametrization
     r0 = torch.abs(r0)
     L0 = torch.abs(L0)
@@ -601,39 +600,38 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy):
         ChromatismPSD(r0, L0)
     )
 
-    dk = 2*kc/nOtf_AO #* 1.005
-    #PSD *= (dk*wvl*1e9/2/np.pi)**2
-    A = (dk*wvl*1e9/2/np.pi)**2
+    dk = 2*kc/nOtf_AO
     cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD)))
     SF  = torch.abs(cov).max()-cov
-    SF *= A
-    #print(SF.abs().max(), A, dk)
+    SF *= (dk*wvl*1e9/2/np.pi)**2
+
     fftPhasor = torch.exp(-np.pi*1j*sampling_factor*(U*dx+V*dy))
     OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/wvl)**2)
-    OTF = OTF_turb * OTF_static * fftPhasor * JitterCore(Jx,Jy)
+    OTF = OTF_turb * OTF_static * fftPhasor * JitterCore(Jx,Jy,Jxy)
+    #OTF = OTF[1:,1:]
     #plt.imshow(OTF_turb)
     #print(JitterCore(Jx,Jy).abs().max())
+    
+    #plt.imshow(torch.log(OTF[290:310,290:310]).abs().cpu().detach())
+    #plt.show()
     PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) ).unsqueeze(0).unsqueeze(0)
-    PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area').squeeze(0).squeeze(0)
+    PSF_out = interpolate(PSF, size=(nPix,nPix), mode='bilinear').squeeze(0).squeeze(0)
     return (PSF_out/PSF_out.sum() * F + bg) #* 1e2
 
+
 start.record()
-
 PSF_0 = PSD2PSF(
-    torch.tensor(0.1, device=cuda), torch.tensor(47.93, device=cuda),
-    torch.tensor(1.0,   device=cuda),
-    torch.tensor(0.0,   device=cuda), torch.tensor(0.0, device=cuda),
+    torch.tensor(0.1,  device=cuda), torch.tensor(47.93, device=cuda),
+    torch.tensor(1.0,  device=cuda),
+    torch.tensor(0.0,  device=cuda), torch.tensor(0.0, device=cuda),
     torch.tensor(0.0,  device=cuda), #bg
-    torch.tensor(4.5,   device=cuda),
-    torch.tensor(10.0,  device=cuda), torch.tensor(10.0,  device=cuda)
+    torch.tensor(4.5,  device=cuda),
+    torch.tensor(10.0, device=cuda), torch.tensor(10.0,  device=cuda), torch.tensor(5.0,  device=cuda)
 )
-
 end.record()
 torch.cuda.synchronize()
 
-
-plt.imshow(torch.log(PSF_0).cpu().detach())
-plt.colorbar()
+plt.imshow(torch.log(PSF_0.cpu().detach()))
 plt.show()
 
 #%%
@@ -649,12 +647,6 @@ def BackgroundEstimate(im, radius=90):
     mask_noise[mask_noise > 0.0] = 1.0
     return torch.median(im[mask_noise>0.]).data
 
-#noise = torch.abs(torch.normal(mean=torch.zeros_like(PSF_0), std=torch.ones_like(PSF_0) * 1e-2))
-#PSF_0 += noise #+ PSF_0.max()*noise_pow # add artificial noise
-#PSF_0 -= BackgroundEstimate(PSF_0)
-#plt.imshow(torch.log(PSF_0).detach().cpu())
-
-
 #with open('C:\\Users\\akuznets\\Desktop\\buf\\test_synth_PSF.pickle', 'rb') as handle:
 #    PSF_real = pickle.load(handle)
 
@@ -667,101 +659,25 @@ def Center(im):
     center = np.array(np.unravel_index(im.argmax().item(), im.shape))-np.array(im.shape)//2
     return center
 
-'''
-r0 = torch.tensor(0.10539785053590676, requires_grad=True,  device=cuda)
-L0 = torch.tensor(47.93, requires_grad=False, device=cuda)
-F  = torch.tensor(1.0,   requires_grad=True, device=cuda)
-dx = torch.tensor(0.0,   requires_grad=True, device=cuda)
-dy = torch.tensor(0.0,   requires_grad=True, device=cuda)
-bg = torch.tensor(0.0,   requires_grad=True, device=cuda)
-n  = torch.tensor(5.0,   requires_grad=True,  device=cuda)
-Jx = torch.tensor(0.0,  requires_grad=True, device=cuda)
-Jy = torch.tensor(0.0,  requires_grad=True, device=cuda)
-'''
-'''
-r0 = torch.tensor(0.1, requires_grad=True,  device=cuda)
-L0 = torch.tensor(47.93, requires_grad=False, device=cuda)
-F  = torch.tensor(0.8,   requires_grad=True, device=cuda)
-dx = torch.tensor(float(Center(PSF_0)[0]),   requires_grad=True,  device=cuda)
-dy = torch.tensor(float(Center(PSF_0)[1]),   requires_grad=True,  device=cuda)
-bg = torch.tensor(BackgroundEstimate(PSF_0, radius=120),  requires_grad=True, device=cuda)
-n  = torch.tensor(4.0,   requires_grad=True, device=cuda)
-Jx = torch.tensor(10.0,  requires_grad=True, device=cuda)
-Jy = torch.tensor(10.0,  requires_grad=True, device=cuda)
-'''
+r0  = torch.tensor(0.1,   requires_grad=True,  device=cuda)
+L0  = torch.tensor(47.93, requires_grad=False, device=cuda)
+F   = torch.tensor(1.0,   requires_grad=True, device=cuda)
+dx  = torch.tensor(0.0,   requires_grad=True,  device=cuda)
+dy  = torch.tensor(0.0,   requires_grad=True,  device=cuda)
+bg  = torch.tensor(0.0,   requires_grad=True, device=cuda)
+n   = torch.tensor(4.5,   requires_grad=True, device=cuda)
+Jx  = torch.tensor(10.0,  requires_grad=True, device=cuda)
+Jy  = torch.tensor(10.0,  requires_grad=True, device=cuda)
+Jxy = torch.tensor(5.0,   requires_grad=True, device=cuda)
 
-r0 = torch.tensor(0.1,   requires_grad=True,  device=cuda)
-L0 = torch.tensor(47.93, requires_grad=False, device=cuda)
-F  = torch.tensor(1.0,   requires_grad=True, device=cuda)
-dx = torch.tensor(0.0,   requires_grad=True,  device=cuda)
-dy = torch.tensor(0.0,   requires_grad=True,  device=cuda)
-bg = torch.tensor(0.0,   requires_grad=True, device=cuda)
-n  = torch.tensor(4.5,   requires_grad=True, device=cuda)
-Jx = torch.tensor(10.0,  requires_grad=True, device=cuda)
-Jy = torch.tensor(10.0,  requires_grad=True, device=cuda)
-
-"""
-PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy)
-#plt.imshow(torch.log(torch.abs(PSF_1-PSF_0)).detach().cpu())
-plt.imshow(torch.log(torch.abs(PSF_1)).detach().cpu())
-
-def radial_profile(data, center=None):
-    if center is None:
-        center = (data.shape[0]//2, data.shape[1]//2)
-    y, x = np.indices((data.shape))
-    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
-    r = r.astype('int')
-
-    tbin = np.bincount(r.ravel(), data.ravel())
-    nr = np.bincount(r.ravel())
-    radialprofile = tbin / nr
-    return radialprofile[0:10]
-
-PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy)
-profile_0 = radial_profile(PSF_0.detach().cpu().numpy())
-profile_1 = radial_profile(PSF_1.detach().cpu().numpy())
-profile_diff = np.abs(profile_1-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
-
-fig = plt.figure(figsize=(6,4), dpi=100)
-ax = fig.add_subplot(111)
-ax.set_title('TipToy fitting')
-l2 = ax.plot(profile_0, label='TIPTOP')
-l1 = ax.plot(profile_1, label='TipToy')
-ax.set_xlabel('Pixels')
-ax.set_ylabel('Relative intensity')
-#ax.set_yscale('log')
-ax.set_xlim([0, len(profile_1)])
-ax.grid()
-
-ax2 = ax.twinx()
-l3 = ax2.plot(profile_diff, label='Difference', color='green')
-ax2.set_ylim([0, profile_diff.max()*1.5])
-ax2.set_ylabel('Difference [%]')
-
-ls = l1+l2+l3
-labs = [l.get_label() for l in ls]
-ax2.legend(ls, labs, loc=0)
-
-plt.show()
-"""
 
 #%%
-'''
-crop = 32
-zoomed = slice(nPix//2-crop, nPix//2+crop)
-zoomed = (zoomed, zoomed)
-
-plt.imshow(torch.log(torch.abs(PSF_0-PSF_1)).detach().cpu().numpy()[zoomed])
-plt.show()
-'''
 
 '''
-loss_fn = nn.L1Loss()
-external_grad = torch.tensor(1)
-loss_fn(PSF_0,PSF_1).backward(gradient=external_grad)
-'''
+#loss_fn = nn.L1Loss()
+#external_grad = torch.tensor(1)
+#loss_fn(PSF_0,PSF_1).backward(gradient=external_grad)
 
-'''
 loss_fn = nn.L1Loss()
 Q = loss_fn(PSF_0, PSF_1)
 get_dot = register_hooks(Q)
@@ -783,7 +699,7 @@ def OptimParams(loss_fun, params, iterations, method='LBFGS', verbous=True):
     history = []
     for i in range(iterations):
         optimizer.zero_grad()
-        loss = loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 )
+        loss = loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), PSF_0 )
         loss.backward()
         if verbous:
             if method == 'LBFGS':
@@ -796,7 +712,7 @@ def OptimParams(loss_fun, params, iterations, method='LBFGS', verbous=True):
             if np.abs(loss.item()-history[-1]) < 1e-4 and np.abs(loss.item()-history[-2]) < 1e-4:
                 break
         if method == 'LBFGS':
-            optimizer.step( lambda: loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 ) )
+            optimizer.step( lambda: loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), PSF_0 ) )
         elif method == 'Adam':
             optimizer.step()
 
@@ -809,11 +725,11 @@ for i in range(10):
     OptimParams(loss_fn, [r0, F, dx, dy], 5)
     OptimParams(loss_fn, [n], 5)
     OptimParams(loss_fn, [bg], 3)
-    OptimParams(loss_fn, [Jx, Jy], 3)
+    OptimParams(loss_fn, [Jx, Jy, Jxy], 3)
     #optimizer = optim.SGD(params, lr=1e-5, momentum=0.9)
     #for i in range(10):
     #    optimizer.zero_grad()
-    #    loss = loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy), PSF_0 )
+    #    loss = loss_fn( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), PSF_0 )
     #    loss.backward()
     #    #if not i % 10: print(loss.item())
     #    optimizer.step()
@@ -821,12 +737,11 @@ for i in range(10):
 print("r0,L0: ({:.3f}, {:.2f})".format(r0.data.item(), L0.data.item()))
 print("I,bg:  ( ",F.data.item(), ' ', bg.data.item(), ')')
 print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
-print("Jx,Jy: ({:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item()))
+print("Jx,Jy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item(), Jxy.data.item()))
 print("WFS noise: {:.2f}".format(n.data.item()))
 
 #%%
 '''
-params = [
         {"params": r0, "lr": 1e-3},
         {"params": Jx, "lr": 1e4},
         {"params": Jy, "lr": 1e4},
@@ -834,9 +749,6 @@ params = [
         {"params": dx, "lr": 1e-4},
         {"params": dy, "lr": 1e-4},
         {"params": F,  "lr": 1e-3}
-    ]
-
-
 #1e-5},
 #1e3},
 #1e3},
@@ -906,10 +818,17 @@ def radial_profile(data, center=None):
     radialprofile = tbin / nr
     return radialprofile[0:data.shape[0]//2]
 
-PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy)
+PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+
+id_max = np.unravel_index(PSF_0.argmax().cpu().numpy(), PSF_0.shape)
+PSF_1[id_max] = PSF_0.max()
 
 profile_0 = radial_profile(PSF_0.detach().cpu().numpy())
 profile_1 = radial_profile(PSF_1.detach().cpu().numpy())
+
+#profile_0 = radial_profile(buffalo)
+#profile_1 = radial_profile(buffalo1)
+
 profile_diff = np.abs(profile_1-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
 
 fig = plt.figure(figsize=(6,4), dpi=300)
