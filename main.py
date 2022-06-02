@@ -4,6 +4,7 @@ import numpy as np
 from torch import nn, optim, fft
 import matplotlib.pyplot as plt
 import scipy.special as spc
+from scipy.optimize import least_squares
 from scipy.ndimage import center_of_mass
 from torch.nn.functional import interpolate
 from astropy.io import fits
@@ -658,7 +659,6 @@ def Center(im):
     return center
 
 #%%
-from scipy.optimize import least_squares
 
 def wrapper(X):
     r0, F, dx, dy, bg, n, Jx, Jy, Jxy = torch.tensor(X, dtype=torch.float32, device=cuda)
@@ -705,7 +705,6 @@ dot # in Jupyter, you can just render the variable
 '''
 
 #%%
-
 def OptimParams(loss_fun, params, iterations, method='LBFGS', verbous=True):
     if method == 'LBFGS':
         optimizer = optim.LBFGS(params, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
@@ -941,84 +940,6 @@ plt.plot( PSF_conv[center2[0],center2[1]:], label='Conv' )
 plt.legend()
 plt.grid()
 '''
-
-#%% --------------------------------------------
-
-import torch
-import torch.optim as optim
-import matplotlib.pyplot as plt
-
-def f(x):
-    return (1 - x[0])**2 + 100 * (x[1] - x[0]**2)**2
-
-# Gradient descent
-x_gd = 10*torch.ones(2, 1)
-x_gd.requires_grad = True
-
-optimizer = optim.SGD([x_gd], lr=1e-5)
-h_gd = []
-for i in range(100):
-    optimizer.zero_grad()
-    objective = f(x_gd)
-    objective.backward()
-    optimizer.step()
-    h_gd.append(objective.item())
-
-# L-BFGS
-x_lbfgs = 10*torch.ones(2, 1)
-x_lbfgs.requires_grad = True
-
-optimizer = optim.LBFGS([x_lbfgs],
-                        history_size=10,
-                        max_iter=4,
-                        line_search_fn="strong_wolfe")
-h_lbfgs = []
-for i in range(100):
-    optimizer.zero_grad()
-    objective = f(x_lbfgs)
-    objective.backward()
-    optimizer.step(lambda: f(x_lbfgs))
-    h_lbfgs.append(objective.item())
-
-
-# Plotting
-plt.semilogy(h_gd, label='GD')
-plt.semilogy(h_lbfgs, label='L-BFGS')
-plt.legend()
-plt.show()
-
-#%%
-import torch
-import torch.optim as optim
-import matplotlib.pyplot as plt
-
-cuda = torch.device('cuda')
-
-def f(x):
-    return (1 - x[0])**2 + 100 * (x[1] - x[0]**2)**2
-
-# L-BFGS
-x_lbfgs = 10*torch.ones(2, 1, device=cuda)
-x_lbfgs.requires_grad = True
-
-optimizer = optim.LBFGS([x_lbfgs],
-                        history_size=10,
-                        max_iter=4,
-                        line_search_fn="strong_wolfe")
-h_lbfgs = []
-for i in range(100):
-    optimizer.zero_grad()
-    objective = f(x_lbfgs)
-    objective.backward()
-    optimizer.step(lambda: f(x_lbfgs))
-    #print(objective.item())
-    h_lbfgs.append(objective.item())
-
-
-# Plotting
-plt.semilogy(h_lbfgs, label='L-BFGS')
-plt.legend()
-plt.show()
 
 #%%
 

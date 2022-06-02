@@ -518,7 +518,6 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
     fftPhasor = torch.exp(-np.pi*1j*sampling_factor.unsqueeze(1).unsqueeze(2) * (U*dx+V*dy))
     OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/wavelengths.unsqueeze(1).unsqueeze(2))**2)
     OTF = OTF_turb * OTFs_static * fftPhasor * JitterCore(Jx,Jy,Jxy)
-    #OTF = OTF[:,1:,1:]
 
     PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) ).unsqueeze(0)
     PSF_out = interpolate(PSF, size=(nPix,nPix), mode='bilinear').squeeze(0).squeeze(0)
@@ -546,9 +545,9 @@ F   = torch.ones ([len(wavelengths),1,1], requires_grad=True,  device=cuda)
 norm_factor = poly_cube.sum(axis=(0,1))
 cube_0 = torch.tensor(poly_cube/norm_factor, device=cuda).permute(2,0,1) #* 1e2
 
-#%% ---------------------------------------------------------------------
+'''
+#% ---------------------------------------------------------------------
 from scipy.optimize import least_squares
-
 def wrapper(X):
     L0 = torch.tensor(47.93, dtype=torch.float32, device=cuda)
     r0,dx,dy,n,Jx,Jy,Jxy = torch.tensor(X[:7], dtype=torch.float32, device=cuda)
@@ -561,7 +560,7 @@ X1 = np.hstack([
     F.flatten().detach().cpu().numpy(),
     bg.flatten().detach().cpu().numpy()])
 
-#%%
+#%
 func = lambda x: (cube_0-wrapper(x)).detach().cpu().numpy().reshape(-1)
 result = least_squares(func, X1, method = 'trf',
                        ftol=1e-9, xtol=1e-9, gtol=1e-9,
@@ -571,6 +570,7 @@ L0 = torch.tensor(47.93, dtype=torch.float32, device=cuda)
 r0,dx,dy,n,Jx,Jy,Jxy = torch.tensor(X1[:7], dtype=torch.float32, device=cuda)
 F  = torch.tensor(X1[7:7+len(wavelengths)], dtype=torch.float32, device=cuda).unsqueeze(1).unsqueeze(2)
 bg = torch.tensor(X1[7+len(wavelengths):7+2*len(wavelengths)], dtype=torch.float32, device=cuda).unsqueeze(1).unsqueeze(2)
+'''
 
 #%% --------------------------------------------------------------------------------
 """
@@ -626,13 +626,14 @@ def restore_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy):
 
 def OptimParams(loss_fun, params, iterations, verbous=True):
     optimizer = optim.LBFGS(params, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
+
     for i in range(iterations):
         optimizer.zero_grad()
         loss = loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), cube_0 )
         set_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, init_to_backup=True)
         loss.backward()
         if verbous:
-            print(loss.item())
+            print(loss.item(), end='\r', flush=True)
         optimizer.step( lambda: loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), cube_0 ) )
         restore_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
 
@@ -644,6 +645,7 @@ for i in range(10):
     OptimParams(loss_fn, [n], 5)
     OptimParams(loss_fn, [bg], 3)
     OptimParams(loss_fn, [Jx, Jy, Jxy], 3)
+
 
 print("r0,L0: ({:.3f}, {:.2f})".format(r0.data.item(), L0.data.item()))
 print("I,bg:  ( ",F.data.item(), ' ', bg.data.item(), ')')

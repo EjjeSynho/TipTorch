@@ -338,7 +338,7 @@ corrupted_ids = []
 error_ids = []
 wrong_key_ids = []
 
-for id in tqdm(range(len(fits_files))):
+for id in tqdm(range(0,len(fits_files))):
     fits_filename = fits_files[id]
     try:
         loader.Load(fits_filename)
@@ -356,9 +356,10 @@ for id in tqdm(range(len(fits_files))):
 #plt.imshow(loader.data['image'])
 #plt.show()
 
-#%%
-loader.Load(fits_files[corrupted_ids[0]])
 # %% =============== Visualize data and save plot into temporary folder ===============
+import matplotlib
+current_cmap = matplotlib.cm.get_cmap()
+current_cmap.set_bad(color='red')
 
 dir_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\'
 

@@ -1,18 +1,24 @@
 #%%
 import torch
-import numpy as np
 from torch import nn, optim, fft
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy
+import scipy.special as spc
+from scipy.ndimage import center_of_mass
 from torch.nn.functional import interpolate
-from parameterParser import parameterParser
 from astropy.io import fits
+from skimage.transform import resize
+import torch
 import pickle
 from os import path
+from parameterParser import parameterParser
 import sys
-import scipy.special as spc
 
 #%% ------------------------ Managing paths ------------------------
 path_test = sys.argv[1]
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\170_SPHER.2017-02-06T00.46.00.939IRD_FLUX_CALIB_CORO_RAW_left.pickle'
+#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\0_SPHER.2016-08-27T23.59.07.572IRD_FLUX_CALIB_CORO_RAW_left.pickle'
+
 
 with open(path_test, 'rb') as handle:
     data_test = pickle.load(handle)
@@ -42,6 +48,7 @@ params['sensor_HO']['NumberPhotons'] = data_test['WFS']['Nph vis']
 
 #%%
 cuda  = torch.device('cuda') # Default CUDA device
+#cuda  = torch.device('cpu')
 start = torch.cuda.Event(enable_timing=True)
 end   = torch.cuda.Event(enable_timing=True)
 
@@ -50,9 +57,9 @@ rad2arc = rad2mas / 1000
 deg2rad = np.pi / 180
 asec2rad = np.pi / 180 / 3600
 
-seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
-r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
-r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
+seeing = lambda r0, λ: rad2arc*0.976*λ/r0 # [arcs]
+r0 = lambda seeing, λ: rad2arc*0.976*λ/seeing # [m]
+r0_new = lambda r0, λ, λ0: r0*(λ/λ0)**1.2 # [m]
 
 D       = params['telescope']['TelescopeDiameter']
 wvl     = wvl
@@ -106,6 +113,7 @@ nOtf = nPix * sampling_factor
 dk = 1/D/sampling # PSD spatial frequency step
 cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 
+#with torch.no_grad():
 # Initialize spatial frequencies
 kx, ky = torch.meshgrid(
     torch.linspace(-nOtf/2, nOtf/2-1, nOtf, device=cuda)*dk + 1e-10,
@@ -138,8 +146,6 @@ N_combs = m.shape[0]
 corrected_ROI = slice(nOtf//2-nOtf_AO//2, nOtf//2+nOtf_AO//2)
 corrected_ROI = (corrected_ROI,corrected_ROI)
 
-#mask_AO = torch.tensor(masks['out_ao'], device=cuda)
-#mask_corrected_AO = torch.tensor(masks['in_ao'], device=cuda)
 mask_AO = mask[corrected_ROI]
 mask_corrected_AO = mask_corrected[corrected_ROI]
 mask_corrected_AO_1_1  = torch.unsqueeze(torch.unsqueeze(mask_corrected_AO,2),3)
@@ -198,6 +204,7 @@ pupil    = torch.tensor(fits.getdata(pupil_path).astype('float'), device=cuda)
 apodizer = torch.tensor(fits.getdata(pupil_apodizer).astype('float'), device=cuda)
 
 pupil_pix  = pupil.shape[0]
+#padded_pix = nOtf
 padded_pix = int(pupil_pix*sampling)
 
 pupil_padded = torch.zeros([padded_pix, padded_pix], device=cuda)
@@ -341,8 +348,7 @@ def JitterCore(Jx, Jy, Jxy):
 
 def NoiseVariance(r0): #TODO: do input of actual r0 and rescale it inside
     WFS_nPix = WFS_FOV / WFS_n_sub
-    WFS_pixelScale = WFS_psInMas / 1e3 # [asec]
-
+    WFS_pixelScale = WFS_psInMas / 1e3 # [arcsec]
     # Read-out noise calculation
     nD = torch.tensor([1.0, rad2arc*wvl/WFS_d_sub/WFS_pixelScale]).max() #spot FWHM in pixels and without turbulence
     varRON = np.pi**2/3 * (WFS_RON**2/WFS_Nph**2) * (WFS_nPix**2/nD)**2
@@ -355,6 +361,12 @@ def NoiseVariance(r0): #TODO: do input of actual r0 and rescale it inside
 
 
 #%% -------------------------------------------------------------
+def DLPSF():
+    PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF_static))) ).unsqueeze(0).unsqueeze(0)
+    PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area').squeeze(0).squeeze(0)
+    return (PSF_out/PSF_out.sum())
+
+
 def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
     # non-negative reparametrization
     r0  = torch.abs(r0)
@@ -387,49 +399,88 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
     PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area').squeeze(0).squeeze(0)
     return (PSF_out/PSF_out.sum() * F + bg) #* 1e2
 
+el_croppo = slice(256//2-32, 256//2+32)
+el_croppo = (el_croppo,el_croppo)
+
+def BackgroundEstimate(im, radius=90):
+    buf_x, buf_y = torch.meshgrid(
+        torch.linspace(-nPix//2, nPix//2, nPix, device=cuda),
+        torch.linspace(-nPix//2, nPix//2, nPix, device=cuda),
+        indexing = 'ij'
+    )
+    mask_noise = buf_x**2 + buf_y**2
+    mask_noise[mask_noise < radius**2] = 0.0
+    mask_noise[mask_noise > 0.0] = 1.0
+    return torch.median(im[mask_noise>0.]).data
+
 param = im.sum()
-PSF_0 = torch.tensor(im/param, device=cuda)
+PSF_0 = torch.tensor(im/param, device=cuda, dtype=torch.float32)
+
+#plt.imshow(torch.log(PSF_0[el_croppo]).detach().cpu())
+#plt.show()
+
+def Center(im):
+    WoG_ROI = 16
+    center = np.array(np.unravel_index(im.argmax().item(), im.shape))
+    crop = slice(center[0]-WoG_ROI//2, center[1]+WoG_ROI//2)
+    crop = (crop, crop)
+    buf = PSF_0[crop].detach().cpu().numpy()
+    WoG = np.array(center_of_mass(buf)) + im.shape[0]//2-WoG_ROI//2
+    return (WoG-np.array(im.shape)//2).astype('float')
 
 r0_scaled = r0_new(data_test['r0'], wvl, 0.5e-6)
 r0_scaled_WFS = r0_new(data_test['r0'], 0.64e-6, 0.5e-6)
-noise_var = NoiseVariance(torch.tensor(r0_scaled_WFS, device=cuda)).clip(0.1, 0.3).item()
+noise_var = NoiseVariance(torch.tensor(r0_scaled_WFS, device=cuda)).clip(0.1, 1.0).item()
 
-r0  = torch.tensor(r0_scaled,  requires_grad=True,  device=cuda)
+dx_0, dy_0 = Center(PSF_0)
+r0  = torch.tensor(r0_scaled, requires_grad=True,  device=cuda)
 L0  = torch.tensor(25.0, requires_grad=False, device=cuda)
 F   = torch.tensor(1.0,  requires_grad=True,  device=cuda)
-dx  = torch.tensor(0.0,  requires_grad=True,  device=cuda)
-dy  = torch.tensor(0.0,  requires_grad=True,  device=cuda)
+dx  = torch.tensor(dx_0,   requires_grad=True,  device=cuda, dtype=torch.float32)
+dy  = torch.tensor(dy_0,   requires_grad=True,  device=cuda, dtype=torch.float32)
 bg  = torch.tensor(0.0,  requires_grad=True,  device=cuda)
 n   = torch.tensor(noise_var, requires_grad=True, device=cuda)
 Jx  = torch.tensor(10.0, requires_grad=True,  device=cuda)
 Jy  = torch.tensor(10.0, requires_grad=True,  device=cuda)
 Jxy = torch.tensor(2.0, requires_grad=True,  device=cuda)
 
+PSF_DL = DLPSF()
+
 #%%
-def OptimParams(loss_fun, params, iterations, verbous=True):
+def OptimParams(loss_fun, params, iterations, method='LBFGS', verbous=True):
     optimizer = optim.LBFGS(params, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
+
+    history = []
     for i in range(iterations):
         optimizer.zero_grad()
         loss = loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), PSF_0 )
         loss.backward()
-        if verbous: print('Loss:', loss.item(), end="\r")
+        if verbous: print('Loss:', loss.item(), end="\r", flush=True)
+
+        history.append(loss.item())
+        if len(history) > 2:
+            if np.abs(loss.item()-history[-1]) < 1e-4 and np.abs(loss.item()-history[-2]) < 1e-4:
+                break
         optimizer.step( lambda: loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), PSF_0 ) )
 
+
 loss_fn = nn.L1Loss(reduction='sum')
-for i in range(26):
-    OptimParams(loss_fn, [F, dx, dy], 5)
-    OptimParams(loss_fn, [r0], 5)
+for i in range(20):
+    OptimParams(loss_fn, [F, dx, dy, r0], 5)
     OptimParams(loss_fn, [n], 5)
     OptimParams(loss_fn, [bg], 2)
     OptimParams(loss_fn, [Jx, Jy, Jxy], 3)
+
+PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+#SR = PSF_1.max()/PSF_DL.max() * PSF_DL.sum()/PSF_1.sum()
+SR = lambda PSF: PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()
 
 #%%
 def FitGauss2D(PSF):
     nPix_crop = 16
     crop = slice(nPix//2-nPix_crop//2, nPix//2+nPix_crop//2)
-    PSF_cropped = torch.tensor(PSF[crop,crop].clone().detach(), requires_grad=False, device=cuda)
+    PSF_cropped = torch.tensor(PSF[crop,crop], requires_grad=False, device=cuda)
     PSF_cropped = PSF_cropped / PSF_cropped.max()
-    PSF_cropped = PSF_cropped.to(torch.float32)
 
     px, py = torch.meshgrid(
         torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=cuda),
@@ -451,18 +502,13 @@ def FitGauss2D(PSF):
         optimizer.step(lambda: loss_fn(Gauss2D(X0), PSF_cropped))
 
     FWHM = lambda x: 2*np.sqrt(2*np.log(2)) * np.abs(x)
-    return FWHM(X0[3].cpu().data), FWHM(X0[4].cpu().data)
+
+    return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
 
 
-def DLPSF():
-    PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF_static))) ).unsqueeze(0).unsqueeze(0)
-    PSF_out = interpolate(PSF, size=(nPix,nPix), mode='area').squeeze(0).squeeze(0)
-    return (PSF_out/PSF_out.sum())
+#la chignon et tarte
 
-PSF_DL = DLPSF()
-PSF_1  = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
-SR = lambda PSF: PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()
-
+# %%
 save_data = {
     'F':   F.item(),
     'dx':  dx.item(),

@@ -104,7 +104,7 @@ dataframe = pd.DataFrame(data={
 fig = plt.figure(figsize=(12, 8))
 ax1 = plt.subplot2grid((4, 6), (0, 0), colspan=4, rowspan=4)
 plt.grid()
-
+'''
 flag = 'SR'
 #if flag == 'SR':
 s = pd.Series([0,1,2])
@@ -113,26 +113,24 @@ sns.scatterplot(x='SR fit', y='SR data', hue='Wavelength ($\mu m$)', data=datafr
 #plt.title('Strehl ratio TIPTOP vs. data')
 ax1.set_ylim([0, 1.0])
 ax1.set_xlim([0, 1.0])
-
-#fig = plt.figure(figsize=(5, 5))
+'''
 #sns.scatterplot(x='SR fit', y='SR SPARTA', hue='Wavelength ($\mu m$)', data=dataframe)
 #s = pd.Series([0,1,2])
 #s.plot.line(linewidth=1., color='gray', linestyle='--')
-#plt.title('Strehl ratio TIPTOP vs. SPARTA')
-#plt.ylim([0, 1.0])
-#plt.xlim([0, 1.0])
-#plt.grid()
+#ax1.set_ylim([0, 1.0])
+#ax1.set_xlim([0, 1.0])
+
+
+#elif flag == 'r0':
+sns.scatterplot(x='$r_0$ SPARTA @ 500 [nm]', y='$r_0$ fitted @ 500 [nm]', hue='Wavelength ($\mu m$)', data=dataframe)
+#sns.scatterplot(x='Seeing SPARTA [asec]', y='Seeing fitted [asec]', hue='Wavelength ($\mu m$)', data=dataframe)
+s = pd.Series([0,1,2])
+s.plot.line(linewidth=1., color='gray', linestyle='--')
+ax1.set_ylim([0, 0.7])
+ax1.set_xlim([0, 0.7])
+
+
 '''
-elif flag == 'r0':
-    sns.scatterplot(x='$r_0$ SPARTA @ 500 [nm]', y='$r_0$ fitted @ 500 [nm]', hue='Wavelength ($\mu m$)', data=dataframe)
-    #sns.scatterplot(x='Seeing SPARTA [asec]', y='Seeing fitted [asec]', hue='Wavelength ($\mu m$)', data=dataframe)
-    s = pd.Series([0,1,2])
-    s.plot.line(linewidth=1., color='gray', linestyle='--')
-    plt.title(r"$r_0$ fitted vs SPARTA")
-    plt.ylim([0, 0.7])
-    plt.xlim([0, 0.7])
-    plt.grid()
-   
 elif flag == 'FWHM':
     sns.scatterplot(x='FWHM fit', y='FWHM data', hue='Wavelength ($\mu m$)', data=dataframe)
     s = pd.Series([0,1,2,3,4,5,6])
