@@ -322,10 +322,8 @@ UV2 = U**2 + V**2
 
 pupil_path = "C:/Users/akuznets/Projects/TIPTOP/P3/aoSystem/data/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits"
 pupil = torch.tensor(fits.getdata(pupil_path).astype('float'), device=cuda)
-#pupil = torch.tensor( PupilVLT(int(nOtf//sampling)) )
 
 pupil_pix  = pupil.shape[0]
-#padded_pix = nOtf
 padded_pix = int(pupil_pix*sampling)
 
 pupil_padded = torch.zeros([padded_pix, padded_pix], device=cuda)
@@ -341,10 +339,6 @@ def fftAutoCorr(x):
 OTF_static = torch.real( fftAutoCorr(pupil_padded) ).unsqueeze(0).unsqueeze(0)
 OTF_static = interpolate(OTF_static, size=(nOtf,nOtf), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
 OTF_static = OTF_static / OTF_static.max()
-
-#plt.imshow(torch.abs(OTF_test).detach().cpu()[280:320,280:320])
-#plt.colorbar()
-#plt.show()
 
 PSD_padder = torch.nn.ZeroPad2d((nOtf-nOtf_AO)//2)
 
@@ -421,7 +415,7 @@ def ReconstructionFilter(r0, L0, WFS_noise_var):
     return Rx, Ry
 
 
-def TomographicReconstructors(r0, L0, WFS_noise_var):
+def TomographicReconstructors(r0, L0, WFS_noise_var, inv_method='fast'):
     M = 2j*np.pi*k_nGs_nGs*torch.sinc(WFS_d_sub*kx_nGs_nGs) * torch.sinc(WFS_d_sub*ky_nGs_nGs)
     P = torch.exp(2j*np.pi*h*(kx_nGs_nL*GS_dirs_x_nGs_nL + ky_nGs_nL*GS_dirs_y_nGs_nL))
 
@@ -432,30 +426,26 @@ def TomographicReconstructors(r0, L0, WFS_noise_var):
     C_b_inv = torch.ones((nOtf_AO,nOtf_AO,nGS,nGS), dtype=torch.complex64, device=cuda) * torch.eye(4, device=cuda) * 1./WFS_noise_var #torch.diag(WFS_noise_var)
     #TODO: ro at WFS wvl!
     #kernel = torch.unsqueeze(torch.unsqueeze(r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6) * piston_filter, 2), 3)
-    #kernel_inv = torch.unsqueeze(torch.unsqueeze(1.0/ (r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6)), 2), 3)
     kernel = torch.unsqueeze(torch.unsqueeze(r0_rescale(r0, 589e-9, 500e-9)**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6) * piston_filter, 2), 3)
-    kernel_inv = torch.unsqueeze(torch.unsqueeze(1.0/(r0_rescale(r0, 589e-9, 500e-9)**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6)), 2), 3)
-    
     C_phi  = kernel.repeat(1, 1, nL, nL) * torch.diag(Cn2_weights) + 0j
-    C_phi_inv = kernel_inv.repeat(1, 1, nL, nL) * torch.diag(1.0/Cn2_weights) + 0j
-
-    #W_tomo = (C_phi @ MP_t) @ torch.linalg.pinv(MP @ C_phi @ MP_t + C_b + noise_nGs_nGs, rcond=1e-2)
     
-    W_tomo = torch.linalg.pinv(MP_t @ C_b_inv @ MP + C_phi_inv, rcond=1e-2) @ (MP_t @ C_b_inv) * \
-        torch.unsqueeze(torch.unsqueeze(piston_filter,2),3).repeat(1,1,nL,nGS)
+    if inv_method == 'fast' or inv_method == 'lstsq':
+        #kernel_inv = torch.unsqueeze(torch.unsqueeze(1.0/ (r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6)), 2), 3)
+        kernel_inv = torch.unsqueeze(torch.unsqueeze(1.0/(r0_rescale(r0, 589e-9, 500e-9)**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6)), 2), 3)
+        C_phi_inv = kernel_inv.repeat(1, 1, nL, nL) * torch.diag(1.0/Cn2_weights) + 0j
 
-    #W_tomo = torch.linalg.lstsq(MP_t @ C_b_inv  @MP + C_phi_inv, MP_t @ C_b_inv).solution * \
-    #    torch.unsqueeze(torch.unsqueeze(piston_filter,2),3).repeat(1,1,2,4)
+    if inv_method == 'standart':
+        W_tomo = (C_phi @ MP_t) @ torch.linalg.pinv(MP @ C_phi @ MP_t + C_b + noise_nGs_nGs, rcond=1e-2)
+
+    elif inv_method == 'fast':
+        W_tomo = torch.linalg.pinv(MP_t @ C_b_inv @ MP + C_phi_inv, rcond=1e-2) @ (MP_t @ C_b_inv) * \
+            torch.unsqueeze(torch.unsqueeze(piston_filter,2),3).repeat(1,1,nL,nGS)
+            
+    elif inv_method == 'lstsq':
+        W_tomo = torch.linalg.lstsq(MP_t @ C_b_inv @ MP + C_phi_inv, MP_t @ C_b_inv).solution * \
+            torch.unsqueeze(torch.unsqueeze(piston_filter,2),3).repeat(1,1,2,4)
 
     #TODO: in vanilla TIPTOP windspeeds are interpolated linearly if number of mod layers is changed!!!!!
-
-    #import pickle
-    #with open('C:\\Users\\akuznets\\Desktop\\buf\\Wtomo.pickle', 'rb') as handle:
-    #    W_tomo = pickle.load(handle)
-    #W_tomo = torch.tensor(W_tomo, dtype=torch.complex64, device=cuda)
-    #plt.imshow(torch.log(torch.abs(W_tomo[:,:,0,0]-W_tomo0[:,:,0,0])).detach().cpu())
-    #plt.colorbar()
-    #plt.show()
 
     '''
     DMS_opt_dir = torch.tensor([0.0, 0.0])
@@ -499,10 +489,6 @@ def TomographicReconstructors(r0, L0, WFS_noise_var):
     #                                *torch.exp(2j*np.pi*h*(kx_nGs_nL*GS_dirs_x_nGs_nL + ky_nGs_nL*GS_dirs_y_nGs_nL))
     MP_alpha_L = www * P * ( torch.sinc(WFS_d_sub*kx_1_1)*torch.sinc(WFS_d_sub*ky_1_1) )
     W_alpha = (W @ MP_alpha_L)
-
-    #with open('C:\\Users\\akuznets\\Desktop\\buf\\Walpha.pickle', 'rb') as handle:
-    #    W_alpha = pickle.load(handle)
-    #W_alpha = torch.tensor(W_alpha, dtype=torch.complex64, device=cuda)
 
     return W, W_alpha, P_beta_DM, C_phi, C_b, freq_t
 
@@ -551,7 +537,6 @@ def AliasingPSD(Rx, Ry, h1, r0, L0):
         torch.exp(2j*np.pi*km*vx*td) * torch.exp(2j*np.pi*kn*vy*td) * tf.repeat([1,1,N_combs,nL]))
 
     aliasing_PSD = torch.sum(PR*W_mn*abs(Q*avr.sum(axis=3,keepdim=True))**2, axis=(2,3))*cte*r0**(-5/3) * mask_corrected_AO
-    #aliasing_PSD = torch.sum(PR*W_mn*abs(Q*avr.sum(axis=3,keepdim=True))**2, axis=(2,3))*0.0229*r0**(-5/3) * mask_corrected_AO
     return aliasing_PSD
 
 
@@ -659,7 +644,6 @@ def Center(im):
     return center
 
 #%%
-
 def wrapper(X):
     r0, F, dx, dy, bg, n, Jx, Jy, Jxy = torch.tensor(X, dtype=torch.float32, device=cuda)
     L0 = torch.tensor(47.93, dtype=torch.float32, device=cuda)

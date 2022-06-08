@@ -5,11 +5,8 @@ from torch.nn.functional import interpolate
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.special as spc
-from scipy.ndimage import center_of_mass
 from astropy.io import fits
-from skimage.transform import resize
 from graphviz import Digraph
-from VLT_pupil import PupilVLT, CircPupil
 import pickle
 import os
 from os import path
@@ -109,7 +106,8 @@ angle[0] = -46
 angle[5] = -44
 angle = angle[sample_id]
 
-data_cube = MUSEcube(path_im, angle)
+data_cube = MUSEcube(path_im, crop_size=200, angle=angle)
+#spectrum = data_cube.GetSpectrum()
 im, _, wvl = data_cube.Layer(0)
 obs_info = data_cube.obs_info
 
@@ -118,6 +116,32 @@ cuda  = torch.device('cuda') # Default CUDA device
 
 poly_cube   = data_cube.cube_img
 wavelengths = torch.tensor(data_cube.wavelengths, device=cuda)
+'''
+def GetSpectrum(cube):
+    from scipy.ndimage import center_of_mass
+    def Center(im):
+        WoG_ROI = 16
+        center = np.array(np.unravel_index(np.argmax(im), im.shape))
+        crop = slice(center[0]-WoG_ROI//2, center[1]+WoG_ROI//2)
+        crop = (crop, crop)
+        WoG = np.array(center_of_mass(im[crop])) + im.shape[0]//2-WoG_ROI//2
+        return WoG
+
+    pix_radius = 7
+    xx,yy = np.meshgrid( np.arange(0,cube.shape[1]), np.arange(0,cube.shape[0]) )
+    spectrum = np.zeros(cube.shape[2])
+    photons  = np.zeros(cube.shape[2])
+
+    for i in range(cube.shape[2]):
+        mask = np.copy(cube[:,:,i])
+        ind = Center(mask)
+        mask[(yy-ind[0])**2 + (xx-ind[1])**2 > pix_radius**2] = 0.0
+        spectrum[i] = mask.sum() #/np.pi/pix_radius**2
+        photons[i] = cube[:,:,i].sum()
+    return spectrum/spectrum.max(), photons
+
+spectrum_core, photons = GetSpectrum(poly_cube)
+'''
 #%%
 # Load and correct AO system parameters
 parser = parameterParser(path_root, path_ini)
@@ -492,7 +516,7 @@ def JitterCore(Jx, Jy, Jxy):
 
 
 #%%
-def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
+def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy, tomo_factor):
     # non-negative reparametrization
     r0 = torch.abs(r0)
     L0 = torch.abs(L0)
@@ -506,14 +530,14 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
 
     PSD =  VonKarmanPSD(r0,L0) + \
     PSD_padder(
-        NoisePSD(W, P_beta_DM, C_b, noise_gain, WFS_noise_var) + \
-        SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t) + \
-        AliasingPSD(Rx, Ry, h1, r0, L0) + \
-        ChromatismPSD(r0, L0)
+        NoisePSD(W, P_beta_DM, C_b, noise_gain, WFS_noise_var).unsqueeze(0)*tomo_factor + \
+        SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t).unsqueeze(0)*tomo_factor + \
+        AliasingPSD(Rx, Ry, h1, r0, L0).unsqueeze(0) + \
+        ChromatismPSD(r0, L0).unsqueeze(0)
     )
     dk = 2*kc/nOtf_AO
     cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD))) # FFT axes are set to 1,2 by PyTorch by default
-    SF = (torch.abs(cov).max()-cov).unsqueeze(0) * (dk*500/2/np.pi)**2
+    SF = (torch.abs(cov).amax(dim=(1,2)).unsqueeze(1).unsqueeze(2)-cov) * (dk*500/2/np.pi)**2
 
     fftPhasor = torch.exp(-np.pi*1j*sampling_factor.unsqueeze(1).unsqueeze(2) * (U*dx+V*dy))
     OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/wavelengths.unsqueeze(1).unsqueeze(2))**2)
@@ -534,16 +558,18 @@ Jxy = torch.tensor(5.0,   requires_grad=True,  device=cuda)
 dx  = torch.tensor(0.0,   requires_grad=True,  device=cuda)
 dy  = torch.tensor(0.0,   requires_grad=True,  device=cuda)
 bg  = torch.zeros([len(wavelengths),1,1], requires_grad=True,  device=cuda)
-F   = torch.ones ([len(wavelengths),1,1], requires_grad=True,  device=cuda)
+#F   = torch.ones ([len(wavelengths),1,1], requires_grad=True,  device=cuda)
+F   = torch.tensor(1.0, requires_grad=True,  device=cuda)
+tomo_factor = torch.ones([len(wavelengths),1,1], requires_grad=True,  device=cuda)
 
-#start.record()
-#cube_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
-#end.record()
-#torch.cuda.synchronize()
-#print(start.elapsed_time(end))
+start.record()
+cube_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, tomo_factor)
+end.record()
+torch.cuda.synchronize()
+print(start.elapsed_time(end))
 
 norm_factor = poly_cube.sum(axis=(0,1))
-cube_0 = torch.tensor(poly_cube/norm_factor, device=cuda).permute(2,0,1) #* 1e2
+cube_0 = torch.tensor(poly_cube/norm_factor, device=cuda).permute(2,0,1)
 
 '''
 #% ---------------------------------------------------------------------
@@ -594,8 +620,9 @@ n1   = torch.clone(n)
 Jx1  = torch.clone(Jx)
 Jy1  = torch.clone(Jy)
 Jxy1 = torch.clone(Jxy)
+tomo_factor1 = torch.clone(tomo_factor)
 
-def set_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, init_to_backup):
+def set_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, tomo_factor, init_to_backup):
     if init_to_backup:
         r01  = torch.clone(r0)
         L01  = torch.clone(L0)
@@ -607,6 +634,7 @@ def set_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, init_to_backup):
         Jx1  = torch.clone(Jx)
         Jy1  = torch.clone(Jy)
         Jxy1 = torch.clone(Jxy)
+        tomo_factor1 = torch.clone(tomo_factor)
     if not init_to_backup:
         r0  = torch.clone(r01)
         L0  = torch.clone(L01)
@@ -618,9 +646,10 @@ def set_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, init_to_backup):
         Jx  = torch.clone(Jx1)
         Jy  = torch.clone(Jy1)
         Jxy = torch.clone(Jxy1)
+        tomo_factor = torch.clone(tomo_factor1)
 
-def restore_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy):
-    if np.any(np.isnan((r0+L0+F+dx+dy+bg+n+Jx+Jy+Jxy).detach().cpu().numpy())):
+def restore_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, tomo_factor):
+    if np.any(np.isnan((r0+L0+F+dx+dy+bg+n+Jx+Jy+Jxy+tomo_factor).detach().cpu().numpy())):
         set_params(init_to_backup=False)
 
 
@@ -629,20 +658,20 @@ def OptimParams(loss_fun, params, iterations, verbous=True):
 
     for i in range(iterations):
         optimizer.zero_grad()
-        loss = loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), cube_0 )
-        set_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, init_to_backup=True)
+        loss = loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, tomo_factor), cube_0 )
+        set_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, tomo_factor, init_to_backup=True)
         loss.backward()
         if verbous:
             print(loss.item(), end='\r', flush=True)
-        optimizer.step( lambda: loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), cube_0 ) )
-        restore_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+        optimizer.step( lambda: loss_fun( PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, tomo_factor), cube_0 ) )
+        restore_params(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, tomo_factor)
 
 
 loss_fn = nn.L1Loss(reduction='sum')
 
 for i in range(10):
     OptimParams(loss_fn, [r0, F, dx, dy], 5)
-    OptimParams(loss_fn, [n], 5)
+    OptimParams(loss_fn, [tomo_factor, n], 5)
     OptimParams(loss_fn, [bg], 3)
     OptimParams(loss_fn, [Jx, Jy, Jxy], 3)
 
@@ -668,13 +697,13 @@ def radial_profile(data, center=None):
     radialprofile = tbin / nr
     return radialprofile[0:data.shape[0]//2]
 
-cube_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+cube_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, tomo_factor)
 norm_factor_1 = torch.tensor(norm_factor, device=cuda).unsqueeze(1).unsqueeze(2)
 PSF_0 = torch.sum(cube_0*norm_factor_1, dim=0)
 PSF_1 = torch.sum(cube_1*norm_factor_1, dim=0)
 
-id_max = np.unravel_index(PSF_0.argmax().cpu().numpy(), PSF_0.shape)
-PSF_1[id_max] = PSF_0.max()
+#id_max = np.unravel_index(PSF_0.argmax().cpu().numpy(), PSF_0.shape)
+#PSF_1[id_max] = PSF_0.max()
 
 profile_0 = radial_profile(PSF_0.detach().cpu().numpy())
 profile_1 = radial_profile(PSF_1.detach().cpu().numpy())

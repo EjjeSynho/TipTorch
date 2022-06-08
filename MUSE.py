@@ -45,6 +45,29 @@ class MUSEcube():
         return PSF_background, mask_empty*noise_stats_mask
 
 
+    def Center(self,im):
+        WoG_ROI = 16
+        center = np.array(np.unravel_index(np.argmax(im), im.shape))
+        crop = slice(center[0]-WoG_ROI//2, center[1]+WoG_ROI//2)
+        crop = (crop, crop)
+        WoG = np.array(center_of_mass(im[crop])) + im.shape[0]//2-WoG_ROI//2
+        return WoG
+
+
+    def GetSpectrum(self):
+        pix_radius = 7
+        xx,yy = np.meshgrid( np.arange(0,self.cube_img.shape[1]), np.arange(0,self.cube_img.shape[0]) )
+        fluxes = np.zeros(self.cube_img.shape[2])
+
+        for i in range(self.cube_img.shape[2]):
+            mask = np.copy(self.cube_img[:,:,i])
+            ind = self.Center(mask)
+            mask[np.sqrt((yy-ind[0])**2 + (xx-ind[1])**2) > pix_radius] = 0.0
+            fluxes[i] = mask.sum()
+
+        return fluxes / fluxes.max()
+
+
     def MaskAO(self, img, radius):
         xx,yy = np.meshgrid( np.arange(0,img.shape[1]), np.arange(0,img.shape[0]) )
 
@@ -58,7 +81,7 @@ class MUSEcube():
         return mask
 
 
-    def __init__(self, path_im, angle=0):
+    def __init__(self, path_im, crop_size, angle=0):
         cube_img = []
         cube_var = []
         wavelengths = []
@@ -82,8 +105,8 @@ class MUSEcube():
         polychrome = cube_img.sum(axis=2)
 
         #Find maximum of the composite PSF to crop it
-        crop_size = 200
-        ind = np.unravel_index(np.argmax(polychrome, axis=None), polychrome.shape) 
+        ind = np.unravel_index(np.argmax(polychrome, axis=None), polychrome.shape)
+
         win_x = [ ind[0]-crop_size//2, ind[0]+crop_size//2 ]
         win_y = [ ind[1]-crop_size//2, ind[1]+crop_size//2 ]
 
@@ -101,15 +124,15 @@ class MUSEcube():
         meaningful_masks = np.dstack(meaningful_masks)
 
         #Crop image cubes
-        crop_x = slice(win_x[0], win_x[1])
-        crop_y = slice(win_y[0], win_y[1])
+        crop_x = slice(int(win_x[0]), int(win_x[1]))
+        crop_y = slice(int(win_y[0]), int(win_y[1]))
 
         self.cube_img   = cube_img  [crop_x, crop_y, :] #- medians
         self.cube_var   = cube_var  [crop_x, crop_y, :]
         self.polychrome = polychrome[crop_x, crop_y]
         self.meaningful_masks = meaningful_masks[ crop_x, crop_y, :]
 
-        self.radii = np.linspace(12,19,10) # approximate AO-cutoff radius
+        self.radii = np.linspace(12,19,10) # approximate AO-cutoff radius (empirical)
 
 
     def Layer(self, wvl_id):

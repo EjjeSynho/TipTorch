@@ -424,7 +424,7 @@ def Center(im):
     center = np.array(np.unravel_index(im.argmax().item(), im.shape))
     crop = slice(center[0]-WoG_ROI//2, center[1]+WoG_ROI//2)
     crop = (crop, crop)
-    buf = PSF_0[crop].detach().cpu().numpy()
+    buf = im[crop].detach().cpu().numpy()
     WoG = np.array(center_of_mass(buf)) + im.shape[0]//2-WoG_ROI//2
     return (WoG-np.array(im.shape)//2).astype('float')
 
