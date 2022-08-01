@@ -18,7 +18,7 @@ import sys
 #%% ------------------------ Managing paths ------------------------
 path_test = sys.argv[1]
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\0_SPHER.2016-08-27T23.59.07.572IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-
+#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\102_SPHER.2017-06-17T00.24.09.582IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 
 with open(path_test, 'rb') as handle:
     data_test = pickle.load(handle)
@@ -57,9 +57,9 @@ rad2arc = rad2mas / 1000
 deg2rad = np.pi / 180
 asec2rad = np.pi / 180 / 3600
 
-seeing = lambda r0, λ: rad2arc*0.976*λ/r0 # [arcs]
-r0 = lambda seeing, λ: rad2arc*0.976*λ/seeing # [m]
-r0_new = lambda r0, λ, λ0: r0*(λ/λ0)**1.2 # [m]
+seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
+r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
+r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 
 D       = params['telescope']['TelescopeDiameter']
 wvl     = wvl
@@ -466,8 +466,8 @@ def OptimParams(loss_fun, params, iterations, method='LBFGS', verbous=True):
 
 loss_fn = nn.L1Loss(reduction='sum')
 for i in range(20):
-    OptimParams(loss_fn, [F, dx, dy, r0], 5)
-    OptimParams(loss_fn, [n], 5)
+    OptimParams(loss_fn, [F, dx, dy], 5)
+    OptimParams(loss_fn, [r0, n], 5)
     OptimParams(loss_fn, [bg], 2)
     OptimParams(loss_fn, [Jx, Jy, Jxy], 3)
 

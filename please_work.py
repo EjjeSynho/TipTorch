@@ -13,7 +13,7 @@ from mpl_toolkits.axes_grid1 import make_axes_locatable
 
 
 #%%
-path_fitted = 'C:\\Users\\akuznets\\Data\\SPHERE\\fitted\\'
+path_fitted = 'C:\\Users\\akuznets\\Data\\SPHERE\\fitted 2\\'
 path_input  = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\'
 
 files_input  = os.listdir(path_input)
@@ -122,7 +122,9 @@ ax1 = plt.subplot2grid((5, 10), (0, 0), colspan=4, rowspan=4)
 plt.grid()
 
 
+#flag = 'SR SPARTA'
 flag = 'r0'
+
 if flag == 'SR':
     s = pd.Series([0,1,2])
     s.plot.line(linewidth=1., color='gray', linestyle='--')
@@ -134,6 +136,13 @@ elif flag == 'SR SPARTA':
     s = pd.Series([0,1,2])
     s.plot.line(linewidth=1., color='gray', linestyle='--')
     sns.scatterplot(x='SR fit', y='SR SPARTA', hue='Wavelength ($\mu m$)', data=dataframe, picker=4)
+    ax1.set_ylim([0, 1.0])
+    ax1.set_xlim([0, 1.0])
+
+elif flag == 'seeing':
+    s = pd.Series([0,1,2])
+    s.plot.line(linewidth=1., color='gray', linestyle='--')
+    sns.scatterplot(x='Seeing fitted [asec]', y='Seeing SPARTA [asec]', hue='Wavelength ($\mu m$)', data=dataframe, picker=4)
     ax1.set_ylim([0, 1.0])
     ax1.set_xlim([0, 1.0])
 
@@ -286,6 +295,7 @@ def onpick(event):
 
         ax1.set_title(str(sample_id))
         print("Picked: "+str(sample_id))
+        
         plt.pause(0.01)
 
 ax1.figure.canvas.mpl_connect("pick_event", onpick)
@@ -319,3 +329,6 @@ ax1.figure.canvas.mpl_connect("pick_event", onpick)
 fig.canvas.mpl_connect('key_press_event', on_press)
 '''
 # %%
+
+
+

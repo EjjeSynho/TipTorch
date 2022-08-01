@@ -140,7 +140,7 @@ angle[0] = -46
 angle[5] = -44
 angle = angle[sample_id]
 
-data_cube = MUSEcube(path_im, angle)
+data_cube = MUSEcube(path_im, crop_size=200, angle=angle)
 im, _, wvl = data_cube.Layer(5)
 obs_info = data_cube.obs_info
 
@@ -594,7 +594,7 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
 
     PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) ).unsqueeze(0).unsqueeze(0)
     PSF_out = interpolate(PSF, size=(nPix,nPix), mode='bilinear').squeeze(0).squeeze(0)
-    return (PSF_out/PSF_out.sum() * F + bg) #* 1e2
+    return (PSF_out/PSF_out.sum() * F + bg)
 
 '''
 N_rescale = lambda n, l0, l: n*l/l0
@@ -616,7 +616,7 @@ PSF_0 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
 
 #end.record()
 #torch.cuda.synchronize()
-# #print(start.elapsed_time(end))
+#print(start.elapsed_time(end))
 
 #plt.imshow(torch.log(PSF_0.cpu().detach()))
 #plt.show()
@@ -673,12 +673,13 @@ L0 = torch.tensor(47.93, dtype=torch.float32, device=cuda)
 
 #%%
 
-'''
+
 #loss_fn = nn.L1Loss()
 #external_grad = torch.tensor(1)
 #loss_fn(PSF_0,PSF_1).backward(gradient=external_grad)
 
 loss_fn = nn.L1Loss()
+PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
 Q = loss_fn(PSF_0, PSF_1)
 get_dot = register_hooks(Q)
 Q.backward()
@@ -686,7 +687,7 @@ dot = get_dot()
 #dot.save('tmp.dot') # to get .dot
 #dot.render('tmp') # to get SVG
 dot # in Jupyter, you can just render the variable
-'''
+
 
 #%%
 def OptimParams(loss_fun, params, iterations, method='LBFGS', verbous=True):
