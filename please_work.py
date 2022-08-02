@@ -31,67 +31,44 @@ for file in files_input:
             data_fitted = pickle.load(handle)
         data.append((data_input, data_fitted, id_file))
 
-# %%
+#%%
 rad2mas = 3600 * 180 * 1000 / np.pi
 rad2arc = rad2mas / 1000
 
 images_data = []
 images_fit  = []
 
-FWHM_fit    = np.zeros([len(data),2])
-FWHM_data   = np.zeros([len(data),2])
-SR_fit      = np.zeros(len(data))
-SR_data     = np.zeros(len(data))
-SR_SPARTA   = np.zeros(len(data))
-r0_data     = np.zeros(len(data))
-r0_fit      = np.zeros(len(data))
-jitters     = np.zeros([len(data),3])
-noise       = np.zeros(len(data))
-indexes     = np.zeros(len(data))
-wvls        = np.zeros(len(data))
-seeing_data = np.zeros(len(data))
-
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 
+dataframe = []
+
 for id in range(len(data)):
+    wvl = data[id][0]['spectrum']['lambda']
     images_data.append(data[id][1]['Img. data'])
     images_fit.append(data[id][1]['Img. fit'])
-    FWHM_fit [id][:] = np.array(data[id][1]['FWHM fit'])
-    FWHM_data[id][:] = np.array(data[id][1]['FWHM data'])
-    noise[id]        = data[id][1]['n']
-    SR_fit[id]       = data[id][1]['SR fit']
-    SR_data[id]      = data[id][1]['SR data']
-    SR_SPARTA[id]    = data[id][0]['Strehl']
-    r0_data[id]      = data[id][0]['r0']
-    r0_fit[id]       = data[id][1]['r0']
-    jitters[id,:]    = np.array([ data[id][1]['Jx'], data[id][1]['Jy'], data[id][1]['Jxy'] ])
-    wvls[id]         = data[id][0]['spectrum']['lambda']
-    seeing_data[id]  = data[id][0]['seeing']['SPARTA']
-    indexes[id]      = data[id][2]
 
-#r0_data1 = r0_new(r0_data, wvls, 500e-9)
-r0_fit1  = r0_new(r0_fit, 500e-9, wvls)
+    dataframe_buf = {}
+    dataframe_buf['FWHM fit']  = np.hypot(data[id][1]['FWHM fit'][0], data[id][1]['FWHM fit'][1])
+    dataframe_buf['FWHM data'] = np.hypot(data[id][1]['FWHM data'][0], data[id][1]['FWHM data'][1])
+    dataframe_buf['index']     = data[id][2]
+    dataframe_buf['SR fit']    = data[id][1]['SR fit']
+    dataframe_buf['SR data']   = data[id][1]['SR data']
+    dataframe_buf['SR SPARTA'] = data[id][0]['Strehl']
+    dataframe_buf['Jx']  = data[id][1]['Jx']
+    dataframe_buf['Jy']  = data[id][1]['Jy']
+    dataframe_buf['Jxy'] = data[id][1]['Jxy']
+    dataframe_buf['WFS noise'] = data[id][1]['n']
+    dataframe_buf['$r_0$ SPARTA @ 500 [nm]'] = data[id][0]['r0']
+    dataframe_buf['$r_0$ fitted @ 500 [nm]'] = r0_new(data[id][1]['r0'], 500e-9, wvl)
+    dataframe_buf['Seeing fitted [asec]'] = seeing(r0_new(data[id][1]['r0'], 500e-9, wvl), 500e-9)
+    dataframe_buf['Seeing SPARTA [asec]'] = data[id][0]['seeing']['SPARTA']
+    dataframe_buf['Wavelength ($\mu m$)'] = np.round(wvl*1e6,3)
+    dataframe.append(dataframe_buf)
 
-dataframe = pd.DataFrame(data={
-    'FWHM fit':  np.hypot(FWHM_fit[:,0], FWHM_fit[:,1]),
-    'FWHM data': np.hypot(FWHM_data[:,0], FWHM_data[:,1]),
-    'index': indexes,
-    'SR fit': SR_fit,
-    'SR data': SR_data,
-    'SR SPARTA': SR_SPARTA,
-    'Jx':  jitters[:,0],
-    'Jy':  jitters[:,1],
-    'Jxy': jitters[:,2],
-    'WFS noise': noise,
-    '$r_0$ SPARTA @ 500 [nm]':  r0_data,
-    '$r_0$ fitted @ 500 [nm]': r0_fit1,
-    'Seeing fitted [asec]': seeing(r0_fit1, 500e-9),
-    'Seeing SPARTA [asec]': seeing_data,
-    'Wavelength ($\mu m$)': np.round(wvls*1e6,2),
-    'Img data': images_data,
-    'Img fit': images_fit
-})
+dataframe = pd.DataFrame(dataframe)
+dataframe['Img data'] = images_data
+dataframe['Img fit']  = images_fit
 
 #dataframe = dataframe[:100]
 
@@ -99,90 +76,13 @@ dataframe = pd.DataFrame(data={
 #plt.xlim([-0.1,1.])
 #plt.ylim([-0.1,1.])
 #plt.grid()
+#%%
+
+for index, row in dataframe.iterrows():
+    print(index, row['index'])
+
 
 #%% --------------------------------------------------------------
-#fig = plt.figure(figsize=(5, 5), dpi=200)
-#sns.scatterplot(x='Seeing SPARTA [asec]', y='Seeing fitted [asec]', hue='Wavelength ($\mu m$)', data=dataframe)
-#s = pd.Series([0,1,2])
-#s.plot.line(linewidth=1., color='gray', linestyle='--')
-#plt.title(r"$r_0$ fitted vs SPARTA")
-#plt.ylim([0, 0.6])
-#plt.xlim([0, 0.6])
-#plt.grid()
-
-
-%matplotlib qt
-#%matplotlib inline
-
-current_cmap = matplotlib.cm.get_cmap()
-current_cmap.set_bad(color='darkslateblue')
-
-fig = plt.figure(figsize=(14, 7))
-ax1 = plt.subplot2grid((5, 10), (0, 0), colspan=4, rowspan=4)
-plt.grid()
-
-
-#flag = 'SR SPARTA'
-flag = 'r0'
-
-if flag == 'SR':
-    s = pd.Series([0,1,2])
-    s.plot.line(linewidth=1., color='gray', linestyle='--')
-    sns.scatterplot(x='SR fit', y='SR data', hue='Wavelength ($\mu m$)', data=dataframe, picker=4)
-    ax1.set_ylim([0, 1.0])
-    ax1.set_xlim([0, 1.0])
-
-elif flag == 'SR SPARTA':
-    s = pd.Series([0,1,2])
-    s.plot.line(linewidth=1., color='gray', linestyle='--')
-    sns.scatterplot(x='SR fit', y='SR SPARTA', hue='Wavelength ($\mu m$)', data=dataframe, picker=4)
-    ax1.set_ylim([0, 1.0])
-    ax1.set_xlim([0, 1.0])
-
-elif flag == 'seeing':
-    s = pd.Series([0,1,2])
-    s.plot.line(linewidth=1., color='gray', linestyle='--')
-    sns.scatterplot(x='Seeing fitted [asec]', y='Seeing SPARTA [asec]', hue='Wavelength ($\mu m$)', data=dataframe, picker=4)
-    ax1.set_ylim([0, 1.0])
-    ax1.set_xlim([0, 1.0])
-
-elif flag == 'r0':
-    sns.scatterplot(x='$r_0$ SPARTA @ 500 [nm]', y='$r_0$ fitted @ 500 [nm]', hue='Wavelength ($\mu m$)', data=dataframe, picker=4)
-    #sns.scatterplot(x='Seeing SPARTA [asec]', y='Seeing fitted [asec]', hue='Wavelength ($\mu m$)', data=dataframe, picker=4)
-    s = pd.Series([0,1,2])
-    s.plot.line(linewidth=1., color='gray', linestyle='--')
-    ax1.set_ylim([0, 0.7])
-    ax1.set_xlim([0, 0.7])
-    ax1.grid()
-
-elif flag == 'FWHM':
-    sns.scatterplot(x='FWHM fit', y='FWHM data', hue='Wavelength ($\mu m$)', data=dataframe)
-    s = pd.Series([0,1,2,3,4,5,6])
-    s.plot.line(linewidth=1., color='gray', linestyle='--')
-    plt.title('FWHM TIPTOP vs. data')
-    plt.ylim([2.5, 6.0])
-    plt.xlim([2.5, 6.0])
-    plt.grid()
-
-
-ax2 = plt.subplot2grid((5, 10), (0, 4), colspan=2, rowspan=2)
-ax3 = plt.subplot2grid((5, 10), (0, 6), colspan=2, rowspan=2)
-ax4 = plt.subplot2grid((5, 10), (0, 8), colspan=2, rowspan=2)
-ax5 = plt.subplot2grid((5, 10), (2, 4), colspan=6, rowspan=3)
-ax6 = ax5.twinx()
-ax7 = plt.subplot2grid((5, 10), (4, 0), colspan=4, rowspan=1)
-ax7.axis('off')
-
-ax2.axes.get_xaxis().set_visible(False)
-ax2.axes.get_yaxis().set_visible(False)
-ax3.axes.get_xaxis().set_visible(False)
-ax3.axes.get_yaxis().set_visible(False)
-ax4.axes.get_xaxis().set_visible(False)
-ax4.axes.get_yaxis().set_visible(False)
-ax7.axes.get_xaxis().set_visible(False)
-ax7.axes.get_yaxis().set_visible(False)
-fig.subplots_adjust(hspace=0.5, wspace=0.6)
-
 
 def radial_profile(data, center=None):
     if center is None:
@@ -196,6 +96,57 @@ def radial_profile(data, center=None):
     radialprofile = tbin / nr
     return radialprofile[0:data.shape[0]//2]
 
+
+%matplotlib qt
+#%matplotlib inline
+
+current_cmap = matplotlib.cm.get_cmap()
+current_cmap.set_bad(color='darkslateblue')
+fig = plt.figure(figsize=(14, 7))
+ax1 = plt.subplot2grid((5, 10), (0, 0), colspan=4, rowspan=4)
+plt.grid()
+
+def set_lim(axx, lim):
+    if hasattr(lim, '__len__()'):
+        axx.set_ylim([lim[0], lim[1]])
+        axx.set_xlim([lim[0], lim[1]])   
+    else:
+        axx.set_ylim([0, lim])
+        axx.set_xlim([0, lim])
+
+s = pd.Series([0,1,2,3,4,5,6])
+s.plot.line(linewidth=1., color='gray', linestyle='--')
+set_lim(ax1, 1.0)
+ax1.grid()
+
+#flag = 'SR SPARTA'
+flag = 'r0'
+
+choice = {
+    'SR': ('SR fit', 'SR data', 1.0),
+    'SR SPARTA': ('SR fit', 'SR SPARTA', 1.0),
+    'seeing': ('Seeing fitted [asec]', 'Seeing SPARTA [asec]', 2.0),
+    'r0': ('$r_0$ SPARTA @ 500 [nm]', '$r_0$ fitted @ 500 [nm]', 1.0),
+    'FWHM': ('FWHM fit', 'FWHM data', [2.5, 6.0])
+}
+
+sns.scatterplot(x=choice[flag][0], y=choice[flag][1], hue='Wavelength ($\mu m$)', data=dataframe, picker=4)
+set_lim(ax1, choice[flag][2])
+
+ax2 = plt.subplot2grid((5, 10), (0, 4), colspan=2, rowspan=2)
+ax3 = plt.subplot2grid((5, 10), (0, 6), colspan=2, rowspan=2)
+ax4 = plt.subplot2grid((5, 10), (0, 8), colspan=2, rowspan=2)
+ax5 = plt.subplot2grid((5, 10), (2, 4), colspan=6, rowspan=3)
+ax6 = ax5.twinx()
+ax7 = plt.subplot2grid((5, 10), (4, 0), colspan=4, rowspan=1)
+ax7.axis('off')
+
+for axx in [ax2, ax3, ax4, ax7]:
+    axx.axes.get_xaxis().set_visible(False)
+    axx.axes.get_yaxis().set_visible(False)
+
+fig.subplots_adjust(hspace=0.5, wspace=0.6)
+
 # Fancy picker ------------------------------------------
 prev_ind   = np.array([0])
 img_switch = True
@@ -204,23 +155,21 @@ im_fit     = None
 im_diff    = None
 sample_cnt = 0
 
+evento = None
 
 def onpick(event):
-    global sample_cnt
-    global prev_ind
-    global img_switch
-    global im_sky
-    global im_fit
-    global im_diff
+    global sample_cnt, prev_ind, img_switch, im_sky, im_fit, im_diff, evento
 
     if len(event.ind) > 0:
-        if prev_ind.all() == event.ind.all():
-            sample_cnt += 1
-            sample_cnt = sample_cnt % len(event.ind)
-        else:
-            prev_ind = np.copy(event.ind)
-            sample_cnt = 0
+        #if prev_ind.all() == event.ind.all():
+        #    sample_cnt += 1
+        #    sample_cnt = sample_cnt % len(event.ind)
+        #else:
+        #    prev_ind = np.copy(event.ind)
+        #    sample_cnt = 0
         
+        sample_cnt = 0
+
         ax5.clear()
         ax6.clear()
         ax7.clear()
@@ -232,15 +181,7 @@ def onpick(event):
         im_fit  = np.copy(dataframe['Img fit' ][selected_id])
         im_diff = np.abs(im_sky-im_fit)
 
-        #flag = True
-        #if flag == 'SR':
-        #    ax1.scatter(x=dataframe['SR fit'][selected_id], y=dataframe['SR data'][selected_id], s=10, c='red')
-        #if flag == 'r0':
-        #    ax1.scatter(x=dataframe['$r_0$ SPARTA @ 500 [nm]'][selected_id], y=dataframe['$r_0$ fitted @ 500 [nm]'][selected_id], s=10, c='red')
-        #elif flag == 'FWHM':
-        #    ax1.scatter(x=dataframe['FWHM fit'][selected_id], y=dataframe['FWHM data'][selected_id], s=10, c='red')
-        #else:
-        #    pass
+        #ax1.scatter(choice[flag][0][selected_id], choice[flag][1][selected_id], s=10, c='red')
 
         profile_0 = radial_profile(im_sky)[:32]
         profile_1 = radial_profile(im_fit)[:32]
@@ -297,8 +238,14 @@ def onpick(event):
         print("Picked: "+str(sample_id))
         
         plt.pause(0.01)
+        evento = event
 
 ax1.figure.canvas.mpl_connect("pick_event", onpick)
+
+A = evento
+
+print(A)
+
 
 #%%
 '''

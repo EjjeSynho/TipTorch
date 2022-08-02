@@ -36,14 +36,6 @@ add_after = "".join([
 code = "".join([add_before, code.replace('#Cut', '\'\'\''), add_after])
 
 #%
-#files = os.listdir(path_base)
-#file = files[10]
-#path_data = path.join(path_base,file)
-#sys.argv = [path_data, path_data]
-#
-#exec(code)
-
-#%
 files = os.listdir(path_base)
 for file in files:
     path_data = path.join(path_base,file)
