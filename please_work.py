@@ -6,11 +6,12 @@ from os import path
 import os
 import seaborn as sns
 import pandas as pd
+from astropy.io import fits
 from matplotlib import colors
 import matplotlib
 import sys
 from mpl_toolkits.axes_grid1 import make_axes_locatable
-
+from utils import Photometry
 
 #%%
 path_fitted = 'C:\\Users\\akuznets\\Data\\SPHERE\\fitted 2\\'
@@ -30,6 +31,30 @@ for file in files_input:
         with open(os.path.join(path_fitted, str(id_file)+'.pickle'), 'rb') as handle:
             data_fitted = pickle.load(handle)
         data.append((data_input, data_fitted, id_file))
+
+#%%
+
+pupil = fits.getdata('C:\\Users\\akuznets\\Projects\\TIPTOP\\P3\\aoSystem\\data\\VLT_CALIBRATION\VLT_PUPIL\\ALC2LyotStop_measured.fits').astype('float')
+relative_area = pupil.sum() / (np.pi*(pupil.shape[0]//2-6.5)**2)
+true_area = np.pi * 8**2 * relative_area
+
+#%%
+#for i in data[123][0]:
+#    print(i)
+
+i = 0
+
+r0      = 3600*180/np.pi*0.976*0.5e-6 / data[i][0]['seeing']['SPARTA'] # [m]
+tau0    = data[i][0]['tau0']['SPARTA']
+wspeed  = data[i][0]['Wind speed']['MASSDIMM']
+wdir    = data[i][0]['Wind direction']['MASSDIMM']
+airmass = data[i][0]['telescope']['airmass']
+Nph     = np.log10(data[i][0]['WFS']['Nph vis']*data[i][0]['WFS']['rate']*1240) - 6.0
+
+input = np.array([r0, tau0, wspeed, wdir, airmass, Nph])
+inp_normalizer = np.array([2., 50., 1./20.0, 1./360, 1./1.5])
+
+print(input * inp_normalizer)
 
 #%%
 rad2mas = 3600 * 180 * 1000 / np.pi
@@ -71,16 +96,6 @@ dataframe['Img data'] = images_data
 dataframe['Img fit']  = images_fit
 
 #dataframe = dataframe[:100]
-
-#plt.scatter(r0_data, r0_fit1)
-#plt.xlim([-0.1,1.])
-#plt.ylim([-0.1,1.])
-#plt.grid()
-#%%
-
-for index, row in dataframe.iterrows():
-    print(index, row['index'])
-
 
 #%% --------------------------------------------------------------
 
@@ -183,8 +198,8 @@ def onpick(event):
 
         #ax1.scatter(choice[flag][0][selected_id], choice[flag][1][selected_id], s=10, c='red')
 
-        profile_0 = radial_profile(im_sky)[:32]
-        profile_1 = radial_profile(im_fit)[:32]
+        profile_0 = radial_profile(im_sky)[:64]
+        profile_1 = radial_profile(im_fit)[:64]
         profile_diff = np.abs(profile_1-profile_0)/im_sky.max()*100 #[%]
 
         ax5.set_title('TipToy fitting')
