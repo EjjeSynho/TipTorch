@@ -499,53 +499,6 @@ def Center(im):
     return WoG-np.array(im.shape)//2
 
 
-#%%
-class Gnosis(torch.nn.Module):
-        def __init__(self, input_size, hidden_size, psf_model, device):
-            self.device = device
-            super(Gnosis, self).__init__()
-            self.input_size  = input_size
-            self.hidden_size = hidden_size
-
-            self.fc1  = torch.nn.Linear(self.input_size, self.hidden_size, device=self.device)
-            self.relu1 = torch.nn.ReLU()
-            self.fc2  = torch.nn.Linear(self.hidden_size, 7, device=self.device)
-            #self.relu2 = torch.nn.ReLU()
-  
-            self.inp_normalizer = torch.ones(self.input_size, device=self.device)
-            self.out_normalizer = torch.ones(7, device=self.device)
-            self.inp_bias = torch.zeros(self.input_size, device=self.device)
-            self.out_bias = torch.zeros(7, device=self.device)
-
-            self.psf_model = psf_model
-
-        def forward(self, x, c):
-            hidden = self.fc1( (x+self.inp_bias)*self.inp_normalizer )
-            relu1 = self.relu1(hidden)
-            model_inp = (self.fc2(relu1).abs() + self.out_bias) * self.out_normalizer
-
-            return model_inp
-            #r0  = model_inp[0]
-            #L0  = model_inp[1]
-            #F   = model_inp[2]
-            #n   = model_inp[3]
-            #Jx  = model_inp[4]
-            #Jy  = model_inp[5]
-            #Jxy = model_inp[6]
-            #return self.psf_model(r0, L0, F, self.dx, self.dy, self.bg, n, Jx, Jy, Jxy)
-
-            #return self.psf_model(
-            #    model_inp[0],  #r0,
-            #    model_inp[1],  #L0,
-            #    model_inp[2],  #F,
-            #    model_inp[3],  #n,
-            #    model_inp[4],  #Jx,
-            #    model_inp[5],  #Jy,
-            #    model_inp[6],  #Jxy
-            #    c[0],  #dx
-            #    c[1],  #dy
-            #    c[2])  #bg
-
 #%% -------------------------------------------------------------
 toy = TipToy(config_file, data_test, 'CUDA')
 
@@ -670,6 +623,8 @@ print(str(len(bad_samples))+' samples were filtered, '+str(len(database.data))+'
 #%%
 
 def GetInputs(data_sample):
+    #FWHM    = database[0]['input']['FWHM']
+    wvl     = data_sample['input']['spectrum']['lambda']
     r_0     = 3600*180/np.pi*0.976*0.5e-6 / data_sample['input']['seeing']['SPARTA'] # [m]
     tau0    = data_sample['input']['tau0']['SPARTA']
     wspeed  = data_sample['input']['Wind speed']['MASSDIMM']
@@ -677,7 +632,7 @@ def GetInputs(data_sample):
     airmass = data_sample['input']['telescope']['airmass']
     Nph = np.log10(
         data_sample['input']['WFS']['Nph vis'] * data_sample['input']['WFS']['rate']*1240)
-    input = np.array([r_0, tau0, wspeed, wdir, airmass, Nph])
+    input = np.array([r_0, tau0, wspeed, wdir, airmass, Nph, wvl])
     const = np.array([data_sample['fitted']['dx'],
                       data_sample['fitted']['dy'],
                       data_sample['fitted']['bg']])
@@ -717,24 +672,72 @@ X_train, C_train, y_train = GenerateDataset(database_train)
 X_val, C_val, y_val = GenerateDataset(database_val)
 
 #%%
-gnosis = Gnosis(input_size=6, hidden_size=20, psf_model=toy, device=toy.device)
-gnosis.inp_normalizer = torch.tensor([2., 10., 1./20., 1./360, 10., 1.], device=toy.device)
-gnosis.inp_bias = torch.tensor([0.0, 0.0, 0.0, 0.0, -1.0, -6.0],   device=toy.device)
-loss_fn = nn.L1Loss() #reduction='sum')
+class Gnosis(torch.nn.Module):
+        def __init__(self, input_size, hidden_size, psf_model, device):
+            self.device = device
+            super(Gnosis, self).__init__()
+            self.input_size  = input_size
+            self.hidden_size = hidden_size
 
-#sample = data[num_id]
-#gnosis.psf_model.Update(sample[0], reinit_grids=True)
-#input, const = GetInputs(sample)
-#test = gnosis(input, const)
-#output = torch.stack((r0,L0,F,n,Jx,Jy,Jxy)).detach()
+            self.fc1  = torch.nn.Linear(self.input_size, self.hidden_size*2, device=self.device)
+            self.relu1 = torch.nn.ReLU()
+            self.fc2  = torch.nn.Linear(self.hidden_size*2, hidden_size, device=self.device)
+            self.relu2 = torch.nn.ReLU()
+            self.fc3  = torch.nn.Linear(self.hidden_size, 7, device=self.device)
+  
+            self.inp_normalizer = torch.ones(self.input_size, device=self.device)
+            self.out_normalizer = torch.ones(7, device=self.device)
+            self.inp_bias = torch.zeros(self.input_size, device=self.device)
+            self.out_bias = torch.zeros(7, device=self.device)
 
+            self.psf_model = psf_model
+
+        def forward(self, x, c):
+            hidden1   = self.fc1( (x+self.inp_bias) * self.inp_normalizer )
+            relu1     = self.relu1(hidden1)
+            hidden2   = self.fc2(relu1)
+            relu2     = self.relu2(hidden2)
+            model_inp = (self.fc3(relu2).abs() + self.out_bias) * self.out_normalizer
+
+            return model_inp
+'''
+r0  = model_inp[0]
+L0  = model_inp[1]
+F   = model_inp[2]
+n   = model_inp[3]
+Jx  = model_inp[4]
+Jy  = model_inp[5]
+Jxy = model_inp[6]
+return self.psf_model(r0, L0, F, self.dx, self.dy, self.bg, n, Jx, Jy, Jxy)
+
+return self.psf_model(
+    model_inp[0],  #r0,
+    model_inp[1],  #L0,
+    model_inp[2],  #F,
+    model_inp[3],  #n,
+    model_inp[4],  #Jx,
+    model_inp[5],  #Jy,
+    model_inp[6],  #Jxy
+    c[0],  #dx
+    c[1],  #dy
+    c[2])  #bg
+'''
+
+gnosis = Gnosis(input_size=7, hidden_size=20, psf_model=toy, device=toy.device)
+gnosis.inp_normalizer = torch.tensor([2., 10., 1./20., 1./360, 10., 1., 0.5e6], device=toy.device)
+gnosis.inp_bias = torch.tensor([0.0, 0.0, 0.0, 0.0, -1.0, -6.0, 0.0],   device=toy.device)
+loss_fn = nn.MSELoss() #reduction='sum')
+
+
+#%%
 optimizer = optim.SGD([{'params': gnosis.fc1.parameters()},
                        {'params': gnosis.relu1.parameters()},
-                       {'params': gnosis.fc2.parameters()}], lr=1e-4, momentum=0.9)
+                       {'params': gnosis.fc2.parameters()},
+                       {'params': gnosis.relu2.parameters()},
+                       {'params': gnosis.fc3.parameters()}], lr=1e-4, momentum=0.9)
 
 #optimizer = optim.LBFGS([gnosis.fc1.weight, gnosis.fc1.bias, gnosis.fc2.weight, gnosis.fc2.bias], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
 
-#%%
 for i in range(40000):
     optimizer.zero_grad()
     #x,c = GetInputs(data, i)
@@ -743,11 +746,24 @@ for i in range(40000):
     if i % 1000: print(loss.item())
     optimizer.step() # lambda: loss_fn(gnosis(X,C), y))
 
-#print('Validation accuracy: '+str(loss_fn(gnosis(X_val, C_val), y_val).item()))
+print('Validation accuracy: '+str(loss_fn(gnosis(X_val, C_val), y_val).item()))
 #torch.save(gnosis.state_dict(), "buf_weights.dict")
 
 
 #%%
+
+def radial_profile(data, center=None):
+    if center is None:
+        center = (data.shape[0]//2, data.shape[1]//2)
+    y, x = np.indices((data.shape))
+    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
+    r = r.astype('int')
+
+    tbin = np.bincount(r.ravel(), data.ravel())
+    nr = np.bincount(r.ravel())
+    radialprofile = tbin / nr
+    return radialprofile[0:data.shape[0]//2]
+
 
 data_sample = database_val[3] #find(200)
 
@@ -805,6 +821,16 @@ fit_diff = []
 gnosis_diff = []
 direct_diff = []
 
+PSF_0s = []
+PSF_1s = []
+PSF_2s = []
+PSF_3s = []
+
+profile_0s = []
+profile_1s = []
+profile_2s = []
+profile_3s = []
+
 for i in range(len(database_val)):
     data_sample = database_val[i]
     PSF_0, PSF_1, PSF_2, PSF_3 = PSFcomparator(data_sample)
@@ -812,12 +838,64 @@ for i in range(len(database_val)):
     gnosis_diff.append(loss_fn(PSF_0, PSF_2).item())
     direct_diff.append(loss_fn(PSF_0, PSF_3).item())
 
+    PSF_0s.append(PSF_0)
+    PSF_1s.append(PSF_1)
+    PSF_2s.append(PSF_2)
+    PSF_3s.append(PSF_3)
+
+    profile_0s.append( radial_profile(PSF_0.detach().cpu().numpy())[:32] )
+    profile_1s.append( radial_profile(PSF_1.detach().cpu().numpy())[:32] )
+    profile_2s.append( radial_profile(PSF_2.detach().cpu().numpy())[:32] )
+    profile_3s.append( radial_profile(PSF_3.detach().cpu().numpy())[:32] )
+
 fit_diff = np.array(fit_diff)
 gnosis_diff = np.array(gnosis_diff)
 direct_diff = np.array(direct_diff)
 
+PSF_0s = torch.dstack(PSF_0s)
+PSF_1s = torch.dstack(PSF_1s)
+PSF_2s = torch.dstack(PSF_2s)
+PSF_3s = torch.dstack(PSF_3s)
+
+profile_0s = np.vstack(profile_0s)
+profile_1s = np.vstack(profile_1s)
+profile_2s = np.vstack(profile_2s)
+profile_3s = np.vstack(profile_3s)
+
+c = profile_0s.mean(axis=0).max()
+
+profile_0s /= c * 0.01
+profile_1s /= c * 0.01
+profile_2s /= c * 0.01
+profile_3s /= c * 0.01
+
 #%%
 
+fig = plt.figure(figsize=(6,4), dpi=150)
+plt.grid()
+
+def plot_std(x,y, label, color, style):
+    y_m = y.mean(axis=0)
+    y_s = y.std(axis=0)
+    lower_bound = y_m-y_s
+    upper_bound = y_m+y_s
+
+    plt.fill_between(x, lower_bound, upper_bound, color=color, alpha=0.3)
+    plt.plot(x, y_m, label=label, color=color, linestyle=style)
+
+x = np.arange(32)
+plot_std(x, np.abs(profile_0s-profile_1s), '$\Delta$ Fit', 'royalblue', '--')
+plot_std(x, np.abs(profile_0s-profile_2s), '$\Delta$ Gnosis', 'darkgreen', ':')
+plot_std(x, np.abs(profile_0s-profile_3s), '$\Delta$ Direct', 'orchid', 'dashdot')
+
+plt.title('Accuracy comparison (avg. for validation dataset)')
+plt.yscale('symlog')
+plt.xlim([x.min(), x.max()])
+plt.legend()
+plt.ylabel('Abs. relative diff., [%]')
+plt.xlabel('Pixels')
+
+#%%
 fd = fit_diff.mean()
 gd = gnosis_diff.mean()
 dd = direct_diff.mean()
@@ -826,22 +904,12 @@ print('Fitting: '+str(np.round(dd/fd*100-100).astype('int'))+'% improvement comp
 print('Gnosis: ' +str(np.round(dd/gd*100-100).astype('int'))+'% improvement compared to direct prediction')
 
 #%% ==========================================================================================
-def radial_profile(data, center=None):
-    if center is None:
-        center = (data.shape[0]//2, data.shape[1]//2)
-    y, x = np.indices((data.shape))
-    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
-    r = r.astype('int')
 
-    tbin = np.bincount(r.ravel(), data.ravel())
-    nr = np.bincount(r.ravel())
-    radialprofile = tbin / nr
-    return radialprofile[0:data.shape[0]//2]
+profile_0 = radial_profile(PSF_0.detach().cpu().numpy())[:32]
+profile_1 = radial_profile(PSF_1.detach().cpu().numpy())[:32]
+profile_2 = radial_profile(PSF_2.detach().cpu().numpy())[:32]
+profile_3 = radial_profile(PSF_3.detach().cpu().numpy())[:32]
 
-profile_0 = radial_profile(PSF_0.clone().detach().cpu().numpy())[:32]
-profile_1 = radial_profile(PSF_1.clone().detach().cpu().numpy())[:32]
-profile_2 = radial_profile(PSF_2.clone().detach().cpu().numpy())[:32]
-profile_3 = radial_profile(PSF_3.clone().detach().cpu().numpy())[:32]
 profile_diff1 = np.abs(profile_1-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
 profile_diff2 = np.abs(profile_2-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
 profile_diff3 = np.abs(profile_3-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
