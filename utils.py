@@ -1,6 +1,28 @@
 #%%
 import numpy as np
+import torch
+from graphviz import Digraph
+from astropy.io import fits
 
+
+rad2mas  = 3600 * 180 * 1000 / np.pi
+rad2arc  = rad2mas / 1000
+deg2rad  = np.pi / 180
+asec2rad = np.pi / 180 / 3600
+
+seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
+r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
+r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
+
+
+def VLTpupilArea(instrument='SPHERE'): # [m2]
+    if instrument == 'SPHERE':
+        pupil = fits.getdata('C:/Users/akuznets/Projects/TIPTOP/P3/aoSystem/data/VLT_CALIBRATION\VLT_PUPIL/ALC2LyotStop_measured.fits').astype('float')
+    else:
+        raise NotImplementedError
+    relative_area = pupil.sum() / (np.pi*(pupil.shape[0]//2-6.5)**2)
+    true_area = np.pi * 8**2 * relative_area
+    return true_area
 
 class Photometry:
     def __init__(self):
@@ -88,3 +110,82 @@ class Photometry:
         else:
             print('Incorrect input: "'+inp+'"')
             return None             
+
+
+def iter_graph(root, callback):
+    queue = [root]
+    seen = set()
+    while queue:
+        fn = queue.pop()
+        if fn in seen:
+            continue
+        seen.add(fn)
+        for next_fn, _ in fn.next_functions:
+            if next_fn is not None:
+                queue.append(next_fn)
+        callback(fn)
+
+
+def register_hooks(var):
+    fn_dict = {}
+    def hook_c_b(fn):
+        def register_grad(grad_input, grad_output):
+            fn_dict[fn] = grad_input
+        fn.register_hook(register_grad)
+    iter_graph(var.grad_fn, hook_c_b)
+
+    def is_bad_grad(grad_output):
+        if grad_output is None:
+            return False
+        return grad_output.isnan().any() or (grad_output.abs() >= 1e6).any()
+
+    def make_dot():
+        node_attr = dict(style='filled',
+                        shape='box',
+                        align='left',
+                        fontsize='12',
+                        ranksep='0.1',
+                        height='0.2')
+        dot = Digraph(node_attr=node_attr, graph_attr=dict(size="12,12"))
+
+        def size_to_str(size):
+            return '('+(', ').join(map(str, size))+')'
+
+        def build_graph(fn):
+            if hasattr(fn, 'variable'):  # if GradAccumulator
+                u = fn.variable
+                node_name = 'Variable\n ' + size_to_str(u.size())
+                dot.node(str(id(u)), node_name, fillcolor='lightblue')
+            else:
+                def grad_ord(x):
+                    mins = ""
+                    maxs = ""
+                    y = [buf for buf in x if buf is not None]
+                    for buf in y:
+                        min_buf = torch.abs(buf).min().cpu().numpy().item()
+                        max_buf = torch.abs(buf).max().cpu().numpy().item()
+
+                        if min_buf < 0.1 or min_buf > 99:
+                            mins += "{:.1e}".format(min_buf) + ', '
+                        else:
+                            mins += str(np.round(min_buf,1)) + ', '
+                        if max_buf < 0.1 or max_buf > 99:
+                            maxs += "{:.1e}".format(max_buf) + ', '
+                        else:
+                            maxs += str(np.round(max_buf,1)) + ', '
+                    return mins[:-2] + ' | ' + maxs[:-2]
+
+                assert fn in fn_dict, fn
+                fillcolor = 'white'
+                if any(is_bad_grad(gi) for gi in fn_dict[fn]):
+                    fillcolor = 'red'
+                dot.node(str(id(fn)), str(type(fn).__name__)+'\n'+grad_ord(fn_dict[fn]), fillcolor=fillcolor)
+            for next_fn, _ in fn.next_functions:
+                if next_fn is not None:
+                    next_id = id(getattr(next_fn, 'variable', next_fn))
+                    dot.edge(str(next_id), str(id(fn)))
+        iter_graph(var.grad_fn, build_graph)
+        return dot
+
+    return make_dot
+

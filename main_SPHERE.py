@@ -114,7 +114,7 @@ WFS_det_clock_rate = np.mean(params['sensor_HO']['ClockRate']) # [(?)]
 WFS_FOV = params['sensor_HO']['FieldOfView']
 WFS_RON = params['sensor_HO']['SigmaRON']
 WFS_psInMas = params['sensor_HO']['PixelScale']
-WFS_wvl = torch.tensor(640e-9, device=cuda) #TODO: clarify this
+WFS_wvl = torch.tensor(GS_wvl, device=cuda) #TODO: clarify this
 WFS_spot_FWHM = torch.tensor(params['sensor_HO']['SpotFWHM'][0], device=cuda)
 WFS_excessive_factor = params['sensor_HO']['ExcessNoiseFactor']
 
@@ -402,11 +402,8 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
     Jy  = torch.abs(Jy)
     Jxy = torch.abs(Jxy)
 
-    #r0_scaled = r0_new(data_test['r0'], wvl, 0.5e-6)
-    #r0_scaled_WFS = r0_new(data_test['r0'], 0.64e-6, 0.5e-6)
-
     #WFS_noise_var = torch.abs(WFS_noise_var)
-    WFS_noise_var2 = ( WFS_noise_var + NoiseVariance(r0_new(r0, 0.64e-6, wvl)) ).abs()
+    WFS_noise_var2 = ( WFS_noise_var + NoiseVariance(r0_new(r0, GS_wvl, wvl)) ).abs()
 
     h1, h2, _, noise_gain = Controller()
     Rx, Ry, SxAv, SyAv, W_atm = ReconstructionFilter(r0, L0, WFS_noise_var2)
@@ -462,8 +459,7 @@ def Center(im):
     return WoG-np.array(im.shape)//2
 
 r0_scaled = r0_new(data_test['r0'], wvl, 0.5e-6) #* (1+0.25*(np.random.random_sample()-0.5))
-r0_scaled_WFS = r0_new(data_test['r0'], 0.64e-6, 0.5e-6)
-noise_var = NoiseVariance(torch.tensor(r0_scaled_WFS, device=cuda)).item()#.clip(0.05, 1.0).item()
+noise_var = NoiseVariance(torch.tensor(r0_new(data_test['r0'], GS_wvl, 0.5e-6), device=cuda)).item()#.clip(0.05, 1.0).item()
 
 dx_0, dy_0 = Center(PSF_0)
 r0  = torch.tensor(r0_scaled, requires_grad=True,  device=cuda)
@@ -548,8 +544,8 @@ SR = lambda PSF: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
 
 #%%
 #Cut
-n_result = (n + NoiseVariance(r0_new(r0, 0.64e-6, wvl)) ).abs().data.item()
-n_init = NoiseVariance(torch.tensor(r0_new(data_test['r0'], 0.64e-6, 0.5e-6), device=cuda)).item()
+n_result = (n + NoiseVariance(r0_new(r0, GS_wvl, wvl)) ).abs().data.item()
+n_init = NoiseVariance(torch.tensor(r0_new(data_test['r0'], GS_wvl, 0.5e-6), device=cuda)).item()
 
 print("".join(['_']*52))
 print('Loss:', loss_fn(PSF_1, PSF_0).item())

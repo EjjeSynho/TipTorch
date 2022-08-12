@@ -12,6 +12,10 @@ from tqdm import tqdm
 from query_eso_archive import query_simbad
 import pickle
 import re
+from copy import deepcopy, copy
+
+
+ROOT = 'C:/Users/akuznets/Data/SPHERE/'
 
 #%%
 class SPHERE_loader():
@@ -321,85 +325,160 @@ class SPHERE_loader():
         else:
             raise ValueError('Wrong path is specified!')
 
-#%% =============== Save massively reduced data as pickle dictionaries ===============
-data_path = 'C:/Users/akuznets/Data/SPHERE/SPHERE_DC_DATA/'
-path_dtts = 'C:/Users/akuznets/Data/SPHERE/DATA/DTTS/'
+#%%
 
-folders = os.listdir(data_path)
-fits_files = []
-for folder in folders:
-    files = os.listdir(path.join(data_path,folder))
-    for file in files:
-        fits_files.append(path.join(data_path,folder,file))
+class SPHERE_database:
+    def __init__(self, path_input, path_fitted):
+        files_input  = os.listdir(path_input)
+        files_fitted = os.listdir(path_fitted)
 
-loader = SPHERE_loader(path_dtts)
+        # Some samples were skipped during fittin. Check which ones were not by their id
+        ids_fitted = set( [int(re.findall('[0-9]+', file)[0]) for file in files_fitted] )
+        self.file_ids = []
+        self.data = []
 
-corrupted_ids = []
-error_ids = []
-wrong_key_ids = []
+        print('Loading input data from '+path_input+'...\nLoading fitted data from '+path_fitted+'...')
+        for file in tqdm(files_input):
+            file_id = int(re.findall('[0-9]+', file)[0])
+            if file_id in ids_fitted:
+                try:
+                    with open(os.path.join(path_input, file), 'rb') as handle:
+                        data_input = pickle.load(handle)
+                    with open(os.path.join(path_fitted, str(file_id)+'.pickle'), 'rb') as handle:
+                        data_fitted = pickle.load(handle)
+                    self.data.append((data_input, data_fitted, file_id))
+                    self.file_ids.append(file_id)
 
-for id in tqdm(range(0,len(fits_files))):
-    fits_filename = fits_files[id]
-    try:
-        loader.Load(fits_filename)
-        loader.save('C:\\Users\\akuznets\\Data\\SPHERE\\test', prefix=str(id)+'_')
-    except KeyError:
-        print('Ooops! Wrong key encountered while reading .fits file')
-        wrong_key_ids.append(id)
-    except OSError:
-        print('Ooops! Corrupted one')
-        corrupted_ids.append(id)
-    except ValueError:
-        print('Ooops! Something wrong for this one')
-        error_ids.append(id)
+                except OSError:
+                    print('Cannot read a file with such name! Skipping...')
 
-#plt.imshow(loader.data['image'])
-#plt.show()
+    def find(self,sample_id):
+        try: #file_id is the identifier of a sample in the database, id is just an index in array
+            id = self.file_ids.index(sample_id)
+        except ValueError:
+            print('Cannot find sample with such index!')
+            return None
+        return {'input': self.data[id][0], 'fitted': self.data[id][1], 'index': id}
 
-# %% =============== Visualize data and save plot into temporary folder ===============
-import matplotlib
-current_cmap = matplotlib.cm.get_cmap()
-current_cmap.set_bad(color='red')
+    def __getitem__(self, key):
+        return {'input': self.data[key][0], 'fitted': self.data[key][1], 'file_id': self.data[key][2] }
 
-dir_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\'
+    def pop(self, id): #removes by file index
+        if hasattr(id, '__iter__'):
+            for i in id:
+                self.data.pop(i)
+                self.file_ids.pop(i)
+        else:
+            self.data.pop(id)
+            self.file_ids.pop(id)
+    
+    def remove(self, file_id): #removes by file id
+        if hasattr(id, '__iter__'):
+            for i in file_id:
+                buf = self.find(i)
+                self.data.pop(buf['index'])
+                self.file_ids.pop(buf['index'])
+        else:
+            buf = self.find(file_id)
+            self.data.pop(buf['index'])
+            self.file_ids.pop(buf['index'])
 
-files = os.listdir(dir_test)
-file = files[0]
+    def __len__(self):
+        return len(self.data)
 
-crop = slice(128-32, 128+32)
-crop = (crop,crop)
+    def __iter__(self):
+        for sample in self.data:
+            yield {'input': sample[0], 'fitted': sample[1], 'file_id': sample[2]}
 
-for file in tqdm(files):
-    with open(os.path.join(dir_test, file), 'rb') as handle:
-        data = pickle.load(handle)
-    plt.imshow(np.log(data['image'][crop]))
-    plt.savefig('C:\\Users\\akuznets\\Data\\SPHERE\\temp\\'+file.split('_')[0]+'.png')
+    def subset(self, ids):
+        buf = copy(self)
+        if hasattr(ids, '__iter__') or hasattr(ids, '__len__'):
+            buf.data = [self.data[i] for i in ids]
+            buf.file_ids = [self.file_ids[i] for i in ids]
+        else:
+            buf.data = [self.data[ids]]
+            buf.file_ids = [self.file_ids[ids]]
+        return buf
+
+    def split(self, ids):
+        exclude_ids = set(ids)
+        inlude_ids  = set(range(len(self.data))) - exclude_ids
+        return self.subset(inlude_ids), self.subset(exclude_ids)
+
+
+# =============== Save massively reduced data as pickle files with dictionaries ===============
+def ProcessRawData():
+    data_path = ROOT + 'SPHERE_DC_DATA/'
+    path_dtts = ROOT + 'SPHERE/DATA/DTTS/'
+
+    folders = os.listdir(data_path)
+    fits_files = []
+    for folder in folders:
+        files = os.listdir(path.join(data_path,folder))
+        for file in files:
+            fits_files.append(path.join(data_path,folder,file))
+
+    loader = SPHERE_loader(path_dtts)
+
+    corrupted_ids = []
+    wrong_key_ids = []
+    error_ids = []
+
+    for id in tqdm(range(0,len(fits_files))):
+        fits_filename = fits_files[id]
+        try:
+            loader.Load(fits_filename)
+            loader.save(ROOT + 'test', prefix=str(id)+'_')
+        except KeyError:
+            print('Ooops! Wrong key encountered while reading .fits file')
+            wrong_key_ids.append(id)
+        except OSError:
+            print('Ooops! Corrupted one')
+            corrupted_ids.append(id)
+        except ValueError:
+            print('Ooops! Something wrong for this one')
+            error_ids.append(id)
+
+
+# =============== Visualize PSFs and save them into temporary folder ===============
+# So that it will be possible to look at bthem and filter them manually
+def SaveDatasetImages():
+    import matplotlib
+    current_cmap = matplotlib.cm.get_cmap()
+    current_cmap.set_bad(color='red')
+
+    dir_test = ROOT + 'test'
+    dir_save = ROOT + 'temp'
+
+    files = os.listdir(dir_test)
+    crop = slice(128-32, 128+32)
+    crop = (crop,crop)
+
+    for file in tqdm(files):
+        with open(os.path.join(dir_test, file), 'rb') as handle:
+            data = pickle.load(handle)
+        plt.imshow(np.log(data['image'][crop]))
+        plt.savefig(dir_save + file.split('_')[0]+'.png')
+
 
 #%% =============== Ones bad files are selected with pictures, move them to another folder ===============
-import shutil
+# This code reads the names of PSFs present in folders with pictures
 
-files = os.listdir('C:\\Users\\akuznets\\Data\\SPHERE\\temp\\')
-valid_ids = []
-for file in files:
-    valid_ids.append(int(file.split('.')[0]))
-valid_ids = set(valid_ids)
+def FilterSelectedDatasamples():
+    import shutil
+    valid_ids = set( [int(file.split('.')[0]) for file in os.listdir(ROOT + 'temp/')] )
+    all_ids   = set( [int(file.split('_')[0]) for file in os.listdir(ROOT + 'test/')] )
+    invalid_ids = all_ids-valid_ids
 
-all_ids = []
-files = os.listdir('C:\\Users\\akuznets\\Data\\SPHERE\\test\\')
-for file in files:
-    all_ids.append(int(file.split('_')[0]))
-all_ids = set(all_ids)
+    files_dir  = ROOT + 'test/'
+    target_dir = ROOT + 'test_invalid/'
 
-invalid_ids = all_ids-valid_ids
+    files = os.listdir(files_dir)
+    for file in files:
+        id = int(file.split('_')[0])
+        if id in invalid_ids: shutil.move(os.path.join(files_dir, file), target_dir)
 
-files_dir = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\'
-target_dir = 'C:\\Users\\akuznets\\Data\\SPHERE\\test_invalid\\'
-files = os.listdir(files_dir)
-
-for file in files:
-    id = int(file.split('_')[0])
-    if id in invalid_ids:
-        #print(id)
-        shutil.move(os.path.join(files_dir, file), target_dir)
-
-# %%
+#%%  Let it run!
+#ProcessRawData()
+#SaveDatasetImages()
+#FilterSelectedDatasamples()

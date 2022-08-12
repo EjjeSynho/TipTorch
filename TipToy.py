@@ -1,111 +1,23 @@
 #%%
-import matplotlib
 import torch
 from torch import nn, optim, fft
 from torch.nn import ParameterDict, ParameterList, Parameter
+from torch.nn.functional import interpolate
 
 import numpy as np
-import time
 import matplotlib.pyplot as plt
 import scipy.special as spc
-import scipy
-from scipy.optimize import least_squares
 from scipy.ndimage import center_of_mass
-from torch.nn.functional import interpolate
 from astropy.io import fits
-from graphviz import Digraph
-import torch
 import pickle
+import time
 import os
 from os import path
 from parameterParser import parameterParser
 import re
-
-def iter_graph(root, callback):
-    queue = [root]
-    seen = set()
-    while queue:
-        fn = queue.pop()
-        if fn in seen:
-            continue
-        seen.add(fn)
-        for next_fn, _ in fn.next_functions:
-            if next_fn is not None:
-                queue.append(next_fn)
-        callback(fn)
-
-def register_hooks(var):
-    fn_dict = {}
-    def hook_c_b(fn):
-        def register_grad(grad_input, grad_output):
-            fn_dict[fn] = grad_input
-        fn.register_hook(register_grad)
-    iter_graph(var.grad_fn, hook_c_b)
-
-    def is_bad_grad(grad_output):
-        if grad_output is None:
-            return False
-        return grad_output.isnan().any() or (grad_output.abs() >= 1e6).any()
-
-    def make_dot():
-        node_attr = dict(style='filled',
-                        shape='box',
-                        align='left',
-                        fontsize='12',
-                        ranksep='0.1',
-                        height='0.2')
-        dot = Digraph(node_attr=node_attr, graph_attr=dict(size="12,12"))
-
-        def size_to_str(size):
-            return '('+(', ').join(map(str, size))+')'
-
-        def build_graph(fn):
-            if hasattr(fn, 'variable'):  # if GradAccumulator
-                u = fn.variable
-                node_name = 'Variable\n ' + size_to_str(u.size())
-                dot.node(str(id(u)), node_name, fillcolor='lightblue')
-            else:
-                def grad_ord(x):
-                    mins = ""
-                    maxs = ""
-                    y = [buf for buf in x if buf is not None]
-                    for buf in y:
-                        min_buf = torch.abs(buf).min().cpu().numpy().item()
-                        max_buf = torch.abs(buf).max().cpu().numpy().item()
-
-                        if min_buf < 0.1 or min_buf > 99:
-                            mins += "{:.1e}".format(min_buf) + ', '
-                        else:
-                            mins += str(np.round(min_buf,1)) + ', '
-                        if max_buf < 0.1 or max_buf > 99:
-                            maxs += "{:.1e}".format(max_buf) + ', '
-                        else:
-                            maxs += str(np.round(max_buf,1)) + ', '
-                    return mins[:-2] + ' | ' + maxs[:-2]
-
-                assert fn in fn_dict, fn
-                fillcolor = 'white'
-                if any(is_bad_grad(gi) for gi in fn_dict[fn]):
-                    fillcolor = 'red'
-                dot.node(str(id(fn)), str(type(fn).__name__)+'\n'+grad_ord(fn_dict[fn]), fillcolor=fillcolor)
-            for next_fn, _ in fn.next_functions:
-                if next_fn is not None:
-                    next_id = id(getattr(next_fn, 'variable', next_fn))
-                    dot.edge(str(next_id), str(id(fn)))
-        iter_graph(var.grad_fn, build_graph)
-        return dot
-
-    return make_dot
-
-
-rad2mas  = 3600 * 180 * 1000 / np.pi
-rad2arc  = rad2mas / 1000
-deg2rad  = np.pi / 180
-asec2rad = np.pi / 180 / 3600
-
-seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
-r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
-r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
+from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
+from tqdm import tqdm
+from SPHERE_data import SPHERE_database
 
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\210_SPHER.2017-09-19T00.38.31.896IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\13_SPHER.2016-09-28T06.29.29.592IRD_FLUX_CALIB_CORO_RAW_left.pickle'
@@ -115,30 +27,37 @@ r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\102_SPHER.2017-06-17T00.24.09.582IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 
 num = 444
+path_samples = 'C:/Users/akuznets/Data/SPHERE/test/'
+files = os.listdir(path_samples)
+sample_nums = []
+for file in files: sample_nums.append( int(re.findall(r'[0-9]+', file)[0]) )
 
-files = os.listdir('C:/Users/akuznets/Data/SPHERE/test/')
-for file in files:
-    sample_num = re.findall(r'[0-9]+', file)[0]
-    if int(sample_num) == num:
-        path_test = 'C:/Users/akuznets/Data/SPHERE/test/' + file
-        break
 
-with open(path_test, 'rb') as handle:
-    data_test = pickle.load(handle)
+def LoadSampleByNum(sample_num):
+    try: id = sample_nums.index(sample_num)
+    except ValueError:
+        print('No sample with such id')
+        return np.nan
+        
+    with open(path_samples+files[id], 'rb') as handle:
+        sample = pickle.load(handle)
+    return id,sample
 
-im  = data_test['image']
+num_id, data_test = LoadSampleByNum(num)
+im = data_test['image']
 
 path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
 path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/irdis.ini'))
 
-config_file =  parameterParser(path_root, path_ini).params
+config_file = parameterParser(path_root, path_ini).params
 
 
 #%% ------------------------ Managing paths ------------------------
 class TipToy(torch.nn.Module):
 
     def SetDataSample(self, data_sample):
-        self.wvl = data_test['spectrum']['lambda']
+        # Reading parameters from the file
+        self.wvl = data_sample['spectrum']['lambda']
 
         self.AO_config['atmosphere']['Seeing']          = data_sample['seeing']
         self.AO_config['atmosphere']['WindSpeed']       = [data_sample['Wind speed']['header']]
@@ -153,8 +72,7 @@ class TipToy(torch.nn.Module):
         self.AO_config['RTC']['SensorFrameRate_HO']  = data_sample['WFS']['rate']
         self.AO_config['sensor_HO']['NumberPhotons'] = data_sample['WFS']['Nph vis']
 
-
-    def InitAOsystemConfigs(self):
+        # Setting internal parameters
         self.D       = self.AO_config['telescope']['TelescopeDiameter']
         self.psInMas = self.AO_config['sensor_science']['PixelScale'] #[mas]
         self.nPix    = self.AO_config['sensor_science']['FieldOfView']
@@ -188,7 +106,7 @@ class TipToy(torch.nn.Module):
         self.WFS_FOV = self.AO_config['sensor_HO']['FieldOfView']
         self.WFS_RON = self.AO_config['sensor_HO']['SigmaRON']
         self.WFS_psInMas = self.AO_config['sensor_HO']['PixelScale']
-        self.WFS_wvl = torch.tensor(640e-9, device=self.device) #TODO: clarify this
+        self.WFS_wvl = torch.tensor(self.GS_wvl, device=self.device) #TODO: clarify this
         self.WFS_spot_FWHM = torch.tensor(self.AO_config['sensor_HO']['SpotFWHM'][0], device=self.device)
         self.WFS_excessive_factor = self.AO_config['sensor_HO']['ExcessNoiseFactor']
         self.WFS_Nph = torch.tensor(self.AO_config['sensor_HO']['NumberPhotons'], device=self.device)
@@ -198,10 +116,9 @@ class TipToy(torch.nn.Module):
         self.HOloop_gain  = self.AO_config['RTC']['LoopGain_HO']
 
 
-    def InitGrids(self, pixels_per_l_D=None):
-        if pixels_per_l_D is None:
+    def InitGrids(self):
+        if self.pixels_per_l_D is None:
             self.pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
-        else: self.pixels_per_l_D = pixels_per_l_D
 
         self.sampling_factor = int(np.ceil(2.0/self.pixels_per_l_D)) # check how much it is less than Nyquist
         self.sampling = self.sampling_factor * self.pixels_per_l_D
@@ -252,23 +169,23 @@ class TipToy(torch.nn.Module):
         self.k_AO  = self.k [corrected_ROI]
         self.k2_AO = self.k2[corrected_ROI]
 
-        M_mask = torch.zeros([self.nOtf_AO,self.nOtf_AO,self.nGS,self.nGS], device=self.device)
-        for j in range(self.nGS):
-            M_mask[:,:,j,j] += 1.0
+        #M_mask = torch.zeros([self.nOtf_AO,self.nOtf_AO,self.nGS,self.nGS], device=self.device)
+        #for j in range(self.nGS):
+        #    M_mask[:,:,j,j] += 1.0
 
         # Matrix repetitions and dimensions expansion to avoid in runtime
         self.kx_1_1 = torch.unsqueeze(torch.unsqueeze(self.kx_AO,2),3)
         self.ky_1_1 = torch.unsqueeze(torch.unsqueeze(self.ky_AO,2),3)
         self.k_1_1  = torch.unsqueeze(torch.unsqueeze(self.k_AO, 2),3)
 
-        self.kx_nGs_nGs = self.kx_1_1.repeat([1,1,self.nGS,self.nGS]) * M_mask
-        self.ky_nGs_nGs = self.ky_1_1.repeat([1,1,self.nGS,self.nGS]) * M_mask
-        self.k_nGs_nGs  = self.k_1_1.repeat([1,1,self.nGS,self.nGS])  * M_mask
-        self.kx_nGs_nL  = self.kx_1_1.repeat([1,1,self.nGS,self.nL])
-        self.ky_nGs_nL  = self.ky_1_1.repeat([1,1,self.nGS,self.nL])
-        self.k_nGs_nL   = self.k_1_1.repeat([1,1,self.nGS,self.nL])
-        self.kx_1_nL    = self.kx_1_1.repeat([1,1,1,self.nL])
-        self.ky_1_nL    = self.ky_1_1.repeat([1,1,1,self.nL])
+        #self.kx_nGs_nGs = self.kx_1_1.repeat([1,1,self.nGS,self.nGS]) * M_mask
+        #self.ky_nGs_nGs = self.ky_1_1.repeat([1,1,self.nGS,self.nGS]) * M_mask
+        #self.k_nGs_nGs  = self.k_1_1.repeat([1,1,self.nGS,self.nGS])  * M_mask
+        #self.kx_nGs_nL  = self.kx_1_1.repeat([1,1,self.nGS,self.nL])
+        #self.ky_nGs_nL  = self.ky_1_1.repeat([1,1,self.nGS,self.nL])
+        #self.k_nGs_nL   = self.k_1_1.repeat([1,1,self.nGS,self.nL])
+        #self.kx_1_nL    = self.kx_1_1.repeat([1,1,1,self.nL])
+        #self.ky_1_nL    = self.ky_1_1.repeat([1,1,1,self.nL])
 
         # For NGS-like alising 2nd dimension is used to store combs information
         self.km = self.kx_1_1.repeat([1,1,self.N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(m/self.WFS_d_sub,0),0),3)
@@ -329,7 +246,12 @@ class TipToy(torch.nn.Module):
         self.PR = PistonFilter(torch.hypot(self.km,self.kn))
 
 
-    def __init__(self, AO_config, data_sample, device=None):
+    def Update(self, data_sample, reinit_grids=True):
+        self.SetDataSample(data_sample)
+        if reinit_grids: self.InitGrids()
+
+
+    def __init__(self, AO_config, data_sample, device=None, pixels_per_l_D=None):
         if device is None or device == 'cpu' or device == 'CPU':
             self.device = torch.device('cpu')
             self.is_gpu = False
@@ -343,9 +265,9 @@ class TipToy(torch.nn.Module):
         super().__init__()
 
         # Read data and initialize AO system
+        self.pixels_per_l_D = pixels_per_l_D
         self.AO_config = AO_config
         self.SetDataSample(data_sample)
-        self.InitAOsystemConfigs()
         self.InitGrids()
 
 
@@ -391,7 +313,7 @@ class TipToy(torch.nn.Module):
         MV = 0
         Wn = WFS_noise_var/(2*self.kc)**2
 
-        self.W_atm = self.cte*r0**(-5/3)*(self.k2_AO + 1/L0**2)**(-11/6)*(self.wvl/self.GS_wvl)**2
+        self.W_atm = self.cte*r0**(-5/3)*(self.k2_AO + 1/L0**2)**(-11/6)*(self.wvl/self.GS_wvl)**2 #TODO: check for SPHERE
         gPSD = torch.abs(self.SxAv)**2 + torch.abs(self.SyAv)**2 + MV*Wn/self.W_atm
         self.Rx = torch.conj(self.SxAv) / gPSD
         self.Ry = torch.conj(self.SyAv) / gPSD
@@ -407,7 +329,7 @@ class TipToy(torch.nn.Module):
 
 
     def NoisePSD(self, WFS_noise_var):
-        noisePSD = abs(self.Rx**2 + self.Ry**2) /(2*self.kc)**2
+        noisePSD = abs(self.Rx**2 + self.Ry**2) / (2*self.kc)**2
         noisePSD = noisePSD * self.piston_filter * self.noise_gain * WFS_noise_var * self.mask_corrected_AO
         return noisePSD
 
@@ -474,9 +396,7 @@ class TipToy(torch.nn.Module):
 
 
     def PSD2PSF(self, r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy):
-
-        WFS_noise_var2 = torch.abs( n + self.NoiseVariance(r0_new(r0.abs(), 0.64e-6, self.wvl)) )
-
+        WFS_noise_var2 = torch.abs( n + self.NoiseVariance(r0_new(r0.abs(), self.GS_wvl, self.wvl)) )
         self.vx = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.wind_speed*torch.cos(self.wind_dir*np.pi/180.),0),0),0)
         self.vy = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.wind_speed*torch.sin(self.wind_dir*np.pi/180.),0),0),0)
 
@@ -505,7 +425,7 @@ class TipToy(torch.nn.Module):
         return (PSF_out/PSF_out.sum() * F + bg)
 
 
-    def forward(self, r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy):
+    def forward(self, r0, L0, F, n, Jx, Jy, Jxy, dx, dy, bg): # Warning!!! params switched
         return self.PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
 
 
@@ -575,25 +495,56 @@ def Center(im):
     crop = slice(center[0]-WoG_ROI//2, center[1]+WoG_ROI//2)
     crop = (crop, crop)
     buf = im[crop].detach().cpu().numpy()
-    WoG = np.array(scipy.ndimage.center_of_mass(buf)) + im.shape[0]//2-WoG_ROI//2
+    WoG = np.array(center_of_mass(buf)) + im.shape[0]//2-WoG_ROI//2
     return WoG-np.array(im.shape)//2
 
 
 #%%
-class Nozzle(torch.nn.Module):
-        def __init__(self, input_size, hidden_size, num_params, tiptoy):
-            super(Nozzle, self).__init__()
-            self.input_size = input_size
-            self.hidden_size  = hidden_size
-            self.fc1  = torch.nn.Linear(self.input_size, self.hidden_size)
-            self.relu = torch.nn.ReLU()
-            self.fc2  = torch.nn.Linear(self.hidden_size, num_params)
+class Gnosis(torch.nn.Module):
+        def __init__(self, input_size, hidden_size, psf_model, device):
+            self.device = device
+            super(Gnosis, self).__init__()
+            self.input_size  = input_size
+            self.hidden_size = hidden_size
 
-        def forward(self, x):
-            hidden = self.fc1(x)
-            relu = self.relu(hidden)
-            output = self.fc2(relu)
-            return output
+            self.fc1  = torch.nn.Linear(self.input_size, self.hidden_size, device=self.device)
+            self.relu1 = torch.nn.ReLU()
+            self.fc2  = torch.nn.Linear(self.hidden_size, 7, device=self.device)
+            #self.relu2 = torch.nn.ReLU()
+  
+            self.inp_normalizer = torch.ones(self.input_size, device=self.device)
+            self.out_normalizer = torch.ones(7, device=self.device)
+            self.inp_bias = torch.zeros(self.input_size, device=self.device)
+            self.out_bias = torch.zeros(7, device=self.device)
+
+            self.psf_model = psf_model
+
+        def forward(self, x, c):
+            hidden = self.fc1( (x+self.inp_bias)*self.inp_normalizer )
+            relu1 = self.relu1(hidden)
+            model_inp = (self.fc2(relu1).abs() + self.out_bias) * self.out_normalizer
+
+            return model_inp
+            #r0  = model_inp[0]
+            #L0  = model_inp[1]
+            #F   = model_inp[2]
+            #n   = model_inp[3]
+            #Jx  = model_inp[4]
+            #Jy  = model_inp[5]
+            #Jxy = model_inp[6]
+            #return self.psf_model(r0, L0, F, self.dx, self.dy, self.bg, n, Jx, Jy, Jxy)
+
+            #return self.psf_model(
+            #    model_inp[0],  #r0,
+            #    model_inp[1],  #L0,
+            #    model_inp[2],  #F,
+            #    model_inp[3],  #n,
+            #    model_inp[4],  #Jx,
+            #    model_inp[5],  #Jy,
+            #    model_inp[6],  #Jxy
+            #    c[0],  #dx
+            #    c[1],  #dy
+            #    c[2])  #bg
 
 #%% -------------------------------------------------------------
 toy = TipToy(config_file, data_test, 'CUDA')
@@ -605,7 +556,7 @@ param = im.sum()
 PSF_0 = torch.tensor(im/param, device=toy.device)
 
 dx_0, dy_0 = Center(PSF_0)
-r0  = torch.tensor(r0_new(data_test['r0'], toy.wvl, 0.5e-6), requires_grad=True,  device=toy.device)
+r0  = torch.tensor(r0_new(data_test['r0'], toy.wvl, 0.5e-6), requires_grad=True, device=toy.device)
 L0  = torch.tensor(25.0, requires_grad=False, device=toy.device)
 F   = torch.tensor(1.0,  requires_grad=True,  device=toy.device)
 dx  = torch.tensor(dx_0, requires_grad=True,  device=toy.device)
@@ -618,7 +569,7 @@ Jxy = torch.tensor(2.0,  requires_grad=True,  device=toy.device)
 
 
 toy.StartTimer()
-PSF_1 = toy(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+PSF_1 = toy(r0, L0, F, n, Jx, Jy, Jxy, dx, dy, bg)
 print(toy.EndTimer())
 
 plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
@@ -629,26 +580,25 @@ PSF_DL = toy.DLPSF()
 #%%
 def OptimParams(model, loss_fun, params, iterations, verbous=True):
     last_loss = 1e16
-    #trigger_times = 0
+    trigger_times = 0
 
     optimizer = optim.LBFGS(params, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
 
-    #history = []
     for i in range(iterations):
         optimizer.zero_grad()
-        loss = loss_fun( model(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), PSF_0 )
+        loss = loss_fun( model(r0, L0, F, n, Jx, Jy, Jxy, dx, dy, bg), PSF_0 )
         loss.backward()
 
-        optimizer.step( lambda: loss_fun( model(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), PSF_0) )
+        optimizer.step( lambda: loss_fun( model(r0, L0, F, n, Jx, Jy, Jxy, dx, dy, bg), PSF_0) )
         if verbous:
             print('Loss:', loss.item(), end="\r", flush=True)
 
         # Early stop check
-        if np.round(loss.item(),4) == np.round(last_loss,4): return
-        #    trigger_times += 1
-        #    if trigger_times > 1:
-        #        print('Nah')
-        #        return
+        if np.round(loss.item(),4) >= np.round(last_loss,4):
+            trigger_times += 1
+            if trigger_times > 1:
+                #print('Nah')
+                return
         last_loss = loss.item()    
 
 
@@ -661,25 +611,221 @@ for i in range(20):
 PSF_1 = toy.PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
 SR = lambda PSF: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
 
+#%
+#n_result = (n + toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)) ).abs().data.item()
+#n_init = toy.NoiseVariance(torch.tensor(r0_new(data_test['r0'], toy.GS_wvl, 0.5e-6), device=toy.device)).item()
+#
+#print("".join(['_']*52))
+#print('Loss:', loss_fn(PSF_1, PSF_0).item())
+#print("r0,r0': ({:.3f}, {:.2f})".format(data_test['r0'], r0_new(r0.data.item(), 0.5e-6, toy.wvl)))
+#print("I,bg:  ({:.3f}, {:.1E} )".format(F.data.item(), bg.data.item()))
+#print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
+#print("Jx,Jy, Jxy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item(), Jxy.data.item()))
+#print("n, n': ({:.2f},{:.2f})".format(n_init, n_result))
+#
+#plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
+#plt.show()
+
+#%% =============================== MAKE DATASET ================================================
+### ================================================================================================
+### ================================================================================================
+
+# Load the SPHERE PSF database
+path_fitted = 'C:/Users/akuznets/Data/SPHERE/fitted 2/'
+path_input  = 'C:/Users/akuznets/Data/SPHERE/test/'
+
+database = SPHERE_database(path_input, path_fitted)
+
+# Filter bad samples
+bad_samples = []
+for sample in database:
+    buf = np.array([sample['fitted']['r0'],
+                    sample['fitted']['F'],
+                    sample['fitted']['n'],
+                    sample['fitted']['Jx'],
+                    sample['fitted']['Jy'],
+                    sample['fitted']['Jxy'],
+                    sample['fitted']['dx'],
+                    sample['fitted']['dy'],
+                    sample['fitted']['bg']])
+
+    wvl = sample['input']['spectrum']['lambda']
+    r0_500 = r0_new(np.abs(sample['fitted']['r0']), 0.5e-6, wvl)
+    
+    toy.Update(sample['input'], reinit_grids=False)
+    WFS_noise_var = toy.NoiseVariance(r0_new(sample['fitted']['r0'], toy.GS_wvl, toy.wvl)).cpu().item()
+    n = sample['fitted']['n']
+
+    if np.any(np.isnan(buf)) or \
+       np.isnan(sample['input']['WFS']['Nph vis']) or \
+       np.abs(r0_500) > 4*sample['input']['r0'] or \
+       np.abs(n + WFS_noise_var) > 2:
+       bad_samples.append(sample['file_id']) 
+
+for bad_sample in bad_samples:
+    database.remove(bad_sample)
+
+print(str(len(bad_samples))+' samples were filtered, '+str(len(database.data))+' samples remained')
+
 #%%
-n_result = (n + toy.NoiseVariance(r0_new(r0, 0.64e-6, toy.wvl)) ).abs().data.item()
-n_init = toy.NoiseVariance(torch.tensor(r0_new(data_test['r0'], 0.64e-6, 0.5e-6), device=toy.device)).item()
 
-print("".join(['_']*52))
-print('Loss:', loss_fn(PSF_1, PSF_0).item())
-print("r0,r0': ({:.3f}, {:.2f})".format(data_test['r0'], r0_new(r0.data.item(), 0.5e-6, toy.wvl)))
-print("I,bg:  ({:.3f}, {:.1E} )".format(F.data.item(), bg.data.item()))
-print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
-print("Jx,Jy, Jxy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item(), Jxy.data.item()))
-print("n, n': ({:.2f},{:.2f})".format(n_init, n_result))
+def GetInputs(data_sample):
+    r_0     = 3600*180/np.pi*0.976*0.5e-6 / data_sample['input']['seeing']['SPARTA'] # [m]
+    tau0    = data_sample['input']['tau0']['SPARTA']
+    wspeed  = data_sample['input']['Wind speed']['MASSDIMM']
+    wdir    = data_sample['input']['Wind direction']['MASSDIMM']
+    airmass = data_sample['input']['telescope']['airmass']
+    Nph = np.log10(
+        data_sample['input']['WFS']['Nph vis'] * data_sample['input']['WFS']['rate']*1240)
+    input = np.array([r_0, tau0, wspeed, wdir, airmass, Nph])
+    const = np.array([data_sample['fitted']['dx'],
+                      data_sample['fitted']['dy'],
+                      data_sample['fitted']['bg']])
+    return input, const
+
+def GetLabels(data_sample):
+    toy.Update(data_sample['input'], reinit_grids=False)
+    r0_500 = r0_new(np.abs(data_sample['fitted']['r0']), 0.5e-6, toy.wvl)
+    #WFS_noise_var = torch.abs(data_sample['fitted']['n'] + toy.NoiseVariance(r0_new(data_sample['fitted']['r0'], toy.GS_wvl, toy.wvl)) )
+    WFS_noise_var = data_sample['fitted']['n'] 
+    buf =  np.array([r0_500, 25.0,
+                     data_sample['fitted']['F'],
+                     WFS_noise_var, #.cpu().item(),
+                     data_sample['fitted']['Jx'],
+                     data_sample['fitted']['Jy'],
+                     data_sample['fitted']['Jxy']])
+    return buf
+
+def GenerateDataset(dataset):
+    X = [] # inputs
+    C = [] # constant data
+    y = [] # labels
+
+    for sample in dataset:
+        input, const = GetInputs(sample)
+        label = GetLabels(sample)
+        X.append(torch.tensor(input, device=toy.device).float())
+        C.append(torch.tensor(const, device=toy.device).float())
+        y.append(torch.tensor(label, device=toy.device).float())
+
+    return torch.vstack(X), torch.vstack(C), torch.vstack(y)
+
+validation_ids = np.unique(np.random.randint(0, high=len(database.data), size=50, dtype=int)).tolist()
+database_train, database_val = database.split(validation_ids)
+
+X_train, C_train, y_train = GenerateDataset(database_train)
+X_val, C_val, y_val = GenerateDataset(database_val)
+
+#%%
+gnosis = Gnosis(input_size=6, hidden_size=20, psf_model=toy, device=toy.device)
+gnosis.inp_normalizer = torch.tensor([2., 10., 1./20., 1./360, 10., 1.], device=toy.device)
+gnosis.inp_bias = torch.tensor([0.0, 0.0, 0.0, 0.0, -1.0, -6.0],   device=toy.device)
+loss_fn = nn.L1Loss() #reduction='sum')
+
+#sample = data[num_id]
+#gnosis.psf_model.Update(sample[0], reinit_grids=True)
+#input, const = GetInputs(sample)
+#test = gnosis(input, const)
+#output = torch.stack((r0,L0,F,n,Jx,Jy,Jxy)).detach()
+
+optimizer = optim.SGD([{'params': gnosis.fc1.parameters()},
+                       {'params': gnosis.relu1.parameters()},
+                       {'params': gnosis.fc2.parameters()}], lr=1e-4, momentum=0.9)
+
+#optimizer = optim.LBFGS([gnosis.fc1.weight, gnosis.fc1.bias, gnosis.fc2.weight, gnosis.fc2.bias], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
+
+#%%
+for i in range(40000):
+    optimizer.zero_grad()
+    #x,c = GetInputs(data, i)
+    loss = loss_fn(gnosis(X_train, C_train), y_train)
+    loss.backward()
+    if i % 1000: print(loss.item())
+    optimizer.step() # lambda: loss_fn(gnosis(X,C), y))
+
+#print('Validation accuracy: '+str(loss_fn(gnosis(X_val, C_val), y_val).item()))
+#torch.save(gnosis.state_dict(), "buf_weights.dict")
 
 
-plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
+#%%
+
+data_sample = database_val[3] #find(200)
+
+def PSFcomparator(data_sample):
+    toy2 = TipToy(config_file, data_sample['input'], 'CUDA')
+
+    x_test, c_test = GetInputs(data_sample)
+    x_test = torch.tensor(x_test, device=toy2.device).float()
+    c_test = torch.tensor(c_test, device=toy2.device).float()
+    y2 = gnosis(x_test, c_test)
+    #y1 = torch.tensor(GetLabels(data_sample), device=toy2.device)
+
+    def ReturnPSFfromPred(y,c):
+        r0_, L0_, F_, n_, Jx_, Jy_, Jxy_ = y.detach()
+        dx_, dy_, bg_ = c.detach()
+        r0_ = r0_new(r0_, toy2.wvl, 0.5e-6)
+        return toy2.PSD2PSF(r0_new(r0_, toy2.wvl, 0.5e-6), L0_, F_, dx_, dy_, bg_, n_, Jx_, Jy_, Jxy_)
+
+    #PSF_1 = ReturnPSFfromPred(y1, c_test)
+    PSF_2 = ReturnPSFfromPred(y2, c_test)
+
+    A = torch.tensor(data_sample['input']['image'], device=toy2.device)
+    C = torch.tensor(data_sample['fitted']['Img. fit'], device=toy2.device)
+    PSF_0 = A/A.sum()
+    PSF_1 = C/C.sum()
+
+    dx_0, dy_0 = Center(PSF_0)
+    bg_0 = BackgroundEstimate(PSF_0, radius=90)
+    WFS_n = toy2.NoiseVariance(r0_new(data_sample['input']['r0'], toy2.GS_wvl, toy2.wvl))
+    r0  = torch.tensor(r0_new(data_sample['input']['r0'], toy2.wvl, 0.5e-6), requires_grad=True, device=toy2.device)
+    L0  = torch.tensor(25.0,  requires_grad=False, device=toy2.device)
+    F   = torch.tensor(1.0,   requires_grad=True,  device=toy2.device)
+    dx  = torch.tensor(dx_0,  requires_grad=True,  device=toy2.device)
+    dy  = torch.tensor(dy_0,  requires_grad=True,  device=toy2.device)
+    bg  = torch.tensor(bg_0,  requires_grad=True,  device=toy2.device)
+    n   = torch.tensor(WFS_n, requires_grad=True,  device=toy2.device)
+    Jx  = torch.tensor(10.0,  requires_grad=True,  device=toy2.device)
+    Jy  = torch.tensor(10.0,  requires_grad=True,  device=toy2.device)
+    Jxy = torch.tensor(2.0,   requires_grad=True,  device=toy2.device)
+
+    PSF_3 = toy2.PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+    return PSF_0, PSF_1, PSF_2, PSF_3
+
+'''
+plt.imshow(torch.log((PSF_2-PSF_0).abs()[el_croppo].cpu()))
 plt.show()
-#Cut
+plt.imshow(torch.log((PSF_1-PSF_0).abs()[el_croppo].cpu()))
+plt.show()
+'''
+
+
+loss_fn = nn.L1Loss()
+
+fit_diff = []
+gnosis_diff = []
+direct_diff = []
+
+for i in range(len(database_val)):
+    data_sample = database_val[i]
+    PSF_0, PSF_1, PSF_2, PSF_3 = PSFcomparator(data_sample)
+    fit_diff.append(loss_fn(PSF_0, PSF_1).item())
+    gnosis_diff.append(loss_fn(PSF_0, PSF_2).item())
+    direct_diff.append(loss_fn(PSF_0, PSF_3).item())
+
+fit_diff = np.array(fit_diff)
+gnosis_diff = np.array(gnosis_diff)
+direct_diff = np.array(direct_diff)
 
 #%%
-#Cut
+
+fd = fit_diff.mean()
+gd = gnosis_diff.mean()
+dd = direct_diff.mean()
+
+print('Fitting: '+str(np.round(dd/fd*100-100).astype('int'))+'% improvement compared to direct prediction')
+print('Gnosis: ' +str(np.round(dd/gd*100-100).astype('int'))+'% improvement compared to direct prediction')
+
+#%% ==========================================================================================
 def radial_profile(data, center=None):
     if center is None:
         center = (data.shape[0]//2, data.shape[1]//2)
@@ -692,17 +838,21 @@ def radial_profile(data, center=None):
     radialprofile = tbin / nr
     return radialprofile[0:data.shape[0]//2]
 
-PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
-
 profile_0 = radial_profile(PSF_0.clone().detach().cpu().numpy())[:32]
 profile_1 = radial_profile(PSF_1.clone().detach().cpu().numpy())[:32]
-profile_diff = np.abs(profile_1-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
+profile_2 = radial_profile(PSF_2.clone().detach().cpu().numpy())[:32]
+profile_3 = radial_profile(PSF_3.clone().detach().cpu().numpy())[:32]
+profile_diff1 = np.abs(profile_1-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
+profile_diff2 = np.abs(profile_2-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
+profile_diff3 = np.abs(profile_3-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
 
 fig = plt.figure(figsize=(6,4), dpi=150)
 ax = fig.add_subplot(111)
-ax.set_title('TipToy fitting')
-l2 = ax.plot(profile_0, label='Data')
-l1 = ax.plot(profile_1, label='TipToy')
+ax.set_title('Fitting vs. Gnosis vs. Direct pred.')
+l0 = ax.plot(profile_0, label='Data')
+l1 = ax.plot(profile_1, label='Fit')
+l2 = ax.plot(profile_2, label='Gnosis', color='g')
+l3 = ax.plot(profile_3, label='Direct', color='black')
 ax.set_xlabel('Pixels')
 ax.set_ylabel('Relative intensity')
 ax.set_yscale('log')
@@ -710,15 +860,19 @@ ax.set_xlim([0, len(profile_1)])
 ax.grid()
 
 ax2 = ax.twinx()
-l3 = ax2.plot(profile_diff, label='Difference', color='green')
-ax2.set_ylim([0, profile_diff.max()*1.5])
+l3 = ax2.plot(profile_diff1, label='$\Delta$ Fit', color='tab:orange', linestyle='dashdot')
+l4 = ax2.plot(profile_diff2, label='$\Delta$ Gnosis', color='g', linestyle=':')
+l5 = ax2.plot(profile_diff3, label='$\Delta$ Direct', color='black', linestyle='--')
+ax2.set_ylim([0, max([profile_diff1.max(), profile_diff2.max(), profile_diff3.max()])*1.25])
 ax2.set_ylabel('Difference [%]')
 
-ls = l1+l2+l3
-labs = [l.get_label() for l in ls]
-ax2.legend(ls, labs, loc=0)
+ls = l0+l1+l2+l3+l4+l5
+labels = [l.get_label() for l in ls]
+ax2.legend(ls, labels, loc=0)
 
 plt.show()
 #Cut
 
 #la chignon et tarte
+
+# %%
