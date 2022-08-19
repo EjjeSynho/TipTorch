@@ -7,20 +7,22 @@ from torch.nn.functional import interpolate
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.special as spc
+from scipy.optimize import least_squares
 from scipy import signal
 from astropy.io import fits
 import pickle
 import time
 import os
 from os import path
-from parameterParser import parameterParser
 import re
+from tqdm import tqdm
+
+from parameterParser import parameterParser
 from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask
 from utils import register_hooks, iter_graph
-from tqdm import tqdm
+from utils import OptimizeTRF, OptimizeLBFGS
 from SPHERE_data import SPHERE_database
-from tqdm import tqdm
 
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\210_SPHER.2017-09-19T00.38.31.896IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\13_SPHER.2016-09-28T06.29.29.592IRD_FLUX_CALIB_CORO_RAW_left.pickle'
@@ -339,6 +341,9 @@ ratio = torch.tensor(1.0,  requires_grad=True,  device=psfao.device) # Phase PSD
 theta = torch.tensor(0.0,  requires_grad=True,  device=psfao.device) # Phase PSD Moffat angle
 beta  = torch.tensor(1.6,  requires_grad=True,  device=psfao.device) # Phase PSD Moffat beta power law
 
+parameters = [r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta]
+
+
 el_croppo = slice(256//2-32, 256//2+32)
 el_croppo = (el_croppo, el_croppo)
 
@@ -349,47 +354,32 @@ dx_0, dy_0 = Center(PSF_0)
 bg_0 = BackgroundEstimate(PSF_0, radius=90)
 
 psfao.StartTimer()
-PSF_1 = psfao(r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta)
+PSF_1 = psfao(*parameters)
 print(psfao.EndTimer())
 
 plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 
  
 #%%
-def OptimParams(model, loss_fun, params, iterations, verbous=True):
-    last_loss = 1e16
-    trigger_times = 0
-
-    optimizer = optim.LBFGS(params, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-
-    for i in range(iterations):
-        optimizer.zero_grad()
-        loss = loss_fun( model(r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta), PSF_0 )
-        loss.backward()
-
-        optimizer.step( lambda: loss_fun( model(r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta), PSF_0) )
-        if verbous:
-            print('Loss:', loss.item(), end="\r", flush=True)
-
-        # Early stop check
-        if np.round(loss.item(),4) >= np.round(last_loss,4):
-            trigger_times += 1
-            if trigger_times > 1:
-                #print('Yea')
-                return
-        last_loss = loss.item()    
-
 
 loss_fn = nn.L1Loss(reduction='sum')
 
 for i in range(20):
-    OptimParams(psfao, loss_fn, [F, dx, dy], 2)
-    OptimParams(psfao, loss_fn, [bg], 2)
-    OptimParams(psfao, loss_fn, [b], 2)
-    OptimParams(psfao, loss_fn, [r0, amp, alpha, beta], 5)
-    OptimParams(psfao, loss_fn, [ratio, theta], 5)
+    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [F, dx, dy], 2)
+    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [bg], 2)
+    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [b], 2)
+    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [r0, amp, alpha, beta], 5)
+    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [ratio, theta], 5)
 
-PSF_1 = psfao(r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta)
+PSF_1 = psfao(*parameters)
+
+#%%
+optimizer_trf = OptimizeTRF(psfao, parameters)
+optimizer_trf.Optimize(PSF_0)
+
+PSF_1 = psfao(*parameters)
+
+r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta = parameters
 
 #%%
 #n_result = (n + toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)) ).abs().data.item()

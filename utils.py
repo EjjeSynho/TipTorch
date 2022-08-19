@@ -1,9 +1,13 @@
 #%%
 import numpy as np
 import torch
-from graphviz import Digraph
+from torch import optim, nn
 from astropy.io import fits
 from scipy.ndimage import center_of_mass
+from scipy.optimize import least_squares
+from graphviz import Digraph
+from skimage.transform import resize
+import matplotlib.pyplot as plt
 
 rad2mas  = 3600 * 180 * 1000 / np.pi
 rad2arc  = rad2mas / 1000
@@ -11,8 +15,8 @@ deg2rad  = np.pi / 180
 asec2rad = np.pi / 180 / 3600
 
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
-r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
+r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
 
 def VLTpupilArea(instrument='SPHERE'): # [m2]
@@ -223,3 +227,217 @@ def CircularMask(img, center, radius):
     mask_PSF = np.ones(img.shape[0:2])
     mask_PSF[np.sqrt((yy-center[0])**2 + (xx-center[1])**2) < radius] = 0.0
     return mask_PSF
+
+
+def OptimizeLBFGS(model, loss_fun, PSF_ref, params, to_optimize, steps, verbous=True):
+    last_loss = 1e16
+    trigger_times = 0
+
+    optimizer = optim.LBFGS(to_optimize, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
+
+    for i in range(steps):
+        optimizer.zero_grad()
+        loss = loss_fun( model(*params), PSF_ref )
+        loss.backward()
+
+        optimizer.step( lambda: loss_fun(model(*params), PSF_ref) )
+        if verbous:
+            print('Loss:', loss.item(), end="\r", flush=True)
+
+        # Early stop check
+        if np.round(loss.item(),4) >= np.round(last_loss,4):
+            trigger_times += 1
+            if trigger_times > 1:
+                #print('Yea')
+                return
+        last_loss = loss.item()    
+
+
+class OptimizeTRF():
+    def __init__(self, model, parameters) -> None:
+        self.model = model
+        self.parameters = parameters
+        self.free_params = []
+
+    def __unpack_params(self, X):
+        to_optimize = torch.tensor(X, dtype=torch.float32, device=self.model.device)
+        for free_param, param in zip(self.free_params, to_optimize):
+            self.parameters[free_param] = param
+
+    def __wrapper(self,X):
+        self.__unpack_params(X)
+        return self.model(*self.parameters)
+
+    def Optimize(self, PSF_ref):
+        self.free_params = np.where(
+            np.array([param.requires_grad for param in self.parameters]))[0].tolist()
+
+        X0 = torch.stack(
+            [param for param in self.parameters if param.requires_grad]).detach().cpu().numpy()
+            
+        func = lambda x: (PSF_ref-self.__wrapper(x)).detach().cpu().numpy().reshape(-1)
+
+        iterations = 3
+        for _ in range(iterations):
+            result = least_squares(func, X0, method='trf',
+                                ftol=1e-9, xtol=1e-9, gtol=1e-9,
+                                max_nfev=1000, verbose=1, loss="linear")
+            X0 = result.x
+        
+        self.__unpack_params(X0)
+
+        for free_param in self.free_params: # restore intial requires_grad from PyTorch
+            self.parameters[free_param].requires_grad = True
+
+
+    def FitGauss2D(self, PSF):
+        nPix_crop = 16
+        crop = slice(PSF.shape[0]//2-PSF.shape[0]//2, PSF.shape[0]//2+nPix_crop//2)
+        PSF_cropped = torch.tensor(PSF[crop,crop], requires_grad=False, device=PSF.device)
+        PSF_cropped = PSF_cropped / PSF_cropped.max()
+
+        px, py = torch.meshgrid(
+            torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=PSF.device),
+            torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=PSF.device),
+            indexing = 'ij')
+
+        def Gauss2D(X):
+            return X[0]*torch.exp( -((px-X[1])/(2*X[3]))**2 - ((py-X[2])/(2*X[4]))**2 )
+
+        X0 = torch.tensor([1.0, 0.0, 0.0, 1.1, 1.1], requires_grad=True, device=PSF.device)
+
+        loss_fn = nn.MSELoss()
+        optimizer = optim.LBFGS([X0], history_size=10, max_iter=4, line_search_fn="strong_wolfe")
+
+        for _ in range(20):
+            optimizer.zero_grad()
+            loss = loss_fn(Gauss2D(X0), PSF_cropped)
+            loss.backward()
+            optimizer.step(lambda: loss_fn(Gauss2D(X0), PSF_cropped))
+
+        FWHM = lambda x: 2*np.sqrt(2*np.log(2)) * np.abs(x)
+
+        return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
+
+# Function to draw the radial profile of a PSF
+def radial_profile(data, center=None):
+    if center is None:
+        center = (data.shape[0]//2, data.shape[1]//2)
+    y, x = np.indices((data.shape))
+    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
+    r = r.astype('int')
+
+    tbin = np.bincount(r.ravel(), data.ravel())
+    nr = np.bincount(r.ravel())
+    radialprofile = tbin / nr
+    return radialprofile[0:data.shape[0]//2]
+
+
+def CircPupil(samples, D=8.0, centralObstruction=1.12):
+    x      = np.linspace(-1/2, 1/2, samples)*D
+    xx,yy  = np.meshgrid(x,x)
+    circle = np.sqrt(xx**2 + yy**2)
+    obs    = circle >= centralObstruction/2
+    pupil  = circle < D/2 
+    return pupil * obs
+
+
+def PupilVLT(samples, vangle=[0,0], petal_modes=False):
+    pupil_diameter = 8.0	  # pupil diameter [m]
+    secondary_diameter = 1.12 # diameter of central obstruction [m] 1.12
+    alpha = 101				  # spider angle [degrees]
+    spider_width = 0.039	  # spider width [m] 0.039;  spider is 39 mm
+    # wide excepted on small areas where 50 mm width are reached over a length 
+    # of 80 mm,near the centre of the spider (before GRAVITY modification?), 
+    # see VLT-DWG-AES-11310-101010
+
+    shx = np.cos(np.deg2rad(vangle[1]))* 101.4*np.tan(np.deg2rad(vangle[0]/60))  # shift of the obscuration on the entrance pupil [m]
+    shx = np.cos(np.deg2rad(vangle[1]))* 101.4*np.tan(np.deg2rad(vangle[0]/60))  # shift of the obscuration on the entrance pupil [m]
+    shy = np.sin(np.deg2rad(vangle[1]))* 101.4*np.tan(np.deg2rad(vangle[0]/60))  # shift of the obscuration on the entrance pupil [m]
+    delta = pupil_diameter/samples # distance between samples [m]
+    ext = 2*np.max(np.fix(np.abs(np.array([shx, shy]))))+1
+
+    # create coordinate matrices
+    x1_min = -(pupil_diameter+ext - 2*delta)/2
+    x1_max = (pupil_diameter + ext)/2
+    num_grid = int((x1_max-x1_min)/delta)+1
+
+    x1 = np.linspace(x1_min, x1_max, num_grid) #int(1/delta))
+    x, y = np.meshgrid(x1, x1)
+
+    #  Member data
+    mask = np.ones([num_grid, num_grid], dtype='bool')
+    mask[ np.where( np.sqrt( (x-shx)**2 + (y-shy)**2 ) > pupil_diameter/2 ) ] = False
+    mask[ np.where( np.sqrt( x**2 + y**2 ) < secondary_diameter/2 ) ] = False
+
+    # Spiders
+    alpha_rad = alpha * np.pi / 180
+    slope     = np.tan( alpha_rad/2 )
+
+    petal_1 = np.zeros([num_grid, num_grid], dtype='bool')
+    petal_2 = np.zeros([num_grid, num_grid], dtype='bool')
+    petal_3 = np.zeros([num_grid, num_grid], dtype='bool')
+    petal_4 = np.zeros([num_grid, num_grid], dtype='bool')
+
+    #North
+    petal_1[ np.where(   
+        (( -y > 0.039/2 + slope*(-x - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x<0)  & (y<=0)) | \
+        (( -y > 0.039/2 + slope*( x - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x>=0) & (y<=0)) )] = True
+    petal_1 *= mask
+
+    #East 
+    petal_2[ np.where(   
+        (( -y < 0.039/2 + slope*( x - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x>0) & (y<=0)) | \
+        ((  y < 0.039/2 + slope*( x - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x>0) & (y>0)) )] = True
+    petal_2 *= mask
+        
+    #South
+    petal_3[ np.where(   
+        ((  y > 0.039/2 + slope*(-x - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x<=0) & (y>0)) | \
+        ((  y > 0.039/2 + slope*( x - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x>0)  & (y>0)) )] = True
+    petal_3 *= mask
+        
+    #West
+    petal_4[ np.where(   
+        (( -y < 0.039/2 + slope*(-x - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x<0) & (y<0)) |\
+        ((  y < 0.039/2 + slope*(-x - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x<0) & (y>=0)) )] = True
+    petal_4 *= mask
+        
+    lim_x = [ ( np.fix((shy+ext/2)/delta) ).astype('int'), ( -np.fix((-shy+ext/2)/delta) ).astype('int') ]
+    lim_y = [ ( np.fix((shx+ext/2)/delta) ).astype('int'), ( -np.fix((-shx+ext/2)/delta) ).astype('int') ]
+
+    petal_1 = resize(petal_1[ lim_x[0]:-1+lim_x[1], lim_y[0]:-1+lim_y[1] ], (samples, samples), anti_aliasing=False)
+    petal_2 = resize(petal_2[ lim_x[0]:-1+lim_x[1], lim_y[0]:-1+lim_y[1] ], (samples, samples), anti_aliasing=False)
+    petal_3 = resize(petal_3[ lim_x[0]:-1+lim_x[1], lim_y[0]:-1+lim_y[1] ], (samples, samples), anti_aliasing=False)
+    petal_4 = resize(petal_4[ lim_x[0]:-1+lim_x[1], lim_y[0]:-1+lim_y[1] ], (samples, samples), anti_aliasing=False)
+
+    if petal_modes:
+        xx1, yy1 = np.meshgrid(np.linspace( -0.5, 0.5,  samples), np.linspace(-0.25, 0.75, samples))
+        xx2, yy2 = np.meshgrid(np.linspace(-0.75, 0.25, samples), np.linspace( -0.5, 0.5,  samples))
+        xx3, yy3 = np.meshgrid(np.linspace( -0.5, 0.5,  samples), np.linspace(-0.75, 0.25, samples))
+        xx4, yy4 = np.meshgrid(np.linspace(-0.25, 0.75, samples), np.linspace( -0.5, 0.5,  samples))
+
+        def normalize_petal_mode(petal, coord):
+            mode = petal.astype('double') * coord
+            mode -= mode.min()
+            mode /= (mode.max()+mode.min())
+            mode -= 0.5
+            mode[np.where(petal==False)] = 0.0
+            mode[np.where(petal==True)] -= mode[np.where(petal==True)].mean()
+            mode /= mode[np.where(petal==True)].std()
+            return mode
+
+        tip_1 = normalize_petal_mode(petal_1, yy1)
+        tip_2 = normalize_petal_mode(petal_2, yy2)
+        tip_3 = normalize_petal_mode(petal_3, yy3)
+        tip_4 = normalize_petal_mode(petal_4, yy4)
+
+        tilt_1 = normalize_petal_mode(petal_1, xx1)
+        tilt_2 = normalize_petal_mode(petal_2, xx2)
+        tilt_3 = normalize_petal_mode(petal_3, xx3)
+        tilt_4 = normalize_petal_mode(petal_4, xx4)
+
+        return np.dstack( [petal_1, petal_2, petal_3, petal_4, tip_1, tip_2, tip_3, tip_4, tilt_1, tilt_2, tilt_3, tilt_4] )
+
+    else:
+        return petal_1 + petal_2 + petal_3 + petal_4

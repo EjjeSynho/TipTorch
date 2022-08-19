@@ -4,6 +4,7 @@ from torch import nn, optim, fft
 from torch.nn import ParameterDict, ParameterList, Parameter
 from torch.nn.functional import interpolate
 
+from tqdm import tqdm
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.special as spc
@@ -13,14 +14,15 @@ import pickle
 import time
 import os
 from os import path
-from parameterParser import parameterParser
 import re
+
+from parameterParser import parameterParser
+from SPHERE_data import SPHERE_database
 from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask
 from utils import register_hooks, iter_graph
-from tqdm import tqdm
-from SPHERE_data import SPHERE_database
-from tqdm import tqdm
+from utils import OptimizeTRF, OptimizeLBFGS
+from utils import radial_profile
 
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\210_SPHER.2017-09-19T00.38.31.896IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\13_SPHER.2016-09-28T06.29.29.592IRD_FLUX_CALIB_CORO_RAW_left.pickle'
@@ -29,7 +31,7 @@ from tqdm import tqdm
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\422_SPHER.2017-05-20T10.28.56.559IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\102_SPHER.2017-06-17T00.24.09.582IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 
-num = 26
+num = 422
 path_samples = 'C:/Users/akuznets/Data/SPHERE/test/'
 files = os.listdir(path_samples)
 sample_nums = []
@@ -449,110 +451,48 @@ class TipToy(torch.nn.Module):
             return (self.end-self.start)*1000.0 # in [ms]
 
 
-    def FitGauss2D(self, PSF):
-        nPix_crop = 16
-        crop = slice(self.nPix//2-nPix_crop//2, self.nPix//2+nPix_crop//2)
-        PSF_cropped = torch.tensor(PSF[crop,crop], requires_grad=False, device=self.device)
-        PSF_cropped = PSF_cropped / PSF_cropped.max()
-
-        px, py = torch.meshgrid(
-            torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=self.device),
-            torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=self.device),
-            indexing = 'ij')
-
-        def Gauss2D(X):
-            return X[0]*torch.exp( -((px-X[1])/(2*X[3]))**2 - ((py-X[2])/(2*X[4]))**2 )
-
-        X0 = torch.tensor([1.0, 0.0, 0.0, 1.1, 1.1], requires_grad=True, device=self.device)
-
-        loss_fn = nn.MSELoss()
-        optimizer = optim.LBFGS([X0], history_size=10, max_iter=4, line_search_fn="strong_wolfe")
-
-        for _ in range(20):
-            optimizer.zero_grad()
-            loss = loss_fn(Gauss2D(X0), PSF_cropped)
-            loss.backward()
-            optimizer.step(lambda: loss_fn(Gauss2D(X0), PSF_cropped))
-
-        FWHM = lambda x: 2*np.sqrt(2*np.log(2)) * np.abs(x)
-
-        return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
-
-
 #%% -------------------------------------------------------------
 toy = TipToy(config_file, data_test, 'CUDA')
 
-el_croppo = slice(256//2-32, 256//2+32)
+el_croppo = slice(im.shape[0]//2-32, im.shape[1]//2+32)
 el_croppo = (el_croppo, el_croppo)
 
-param = im.sum()
-PSF_0 = torch.tensor(im/param, device=toy.device)
-
+PSF_0 = torch.tensor(im/im.sum(), device=toy.device)
 dx_0, dy_0 = Center(PSF_0)
 
 bg_0 = BackgroundEstimate(PSF_0, radius=90)
 WFS_n = toy.NoiseVariance(r0_new(data_test['r0'], toy.GS_wvl, 0.5e-6))
 
 r0  = torch.tensor(r0_new(data_test['r0'], toy.wvl, 0.5e-6), requires_grad=True, device=toy.device)
-L0  = torch.tensor(25.0, requires_grad=False, device=toy.device)
-F   = torch.tensor(1.0,  requires_grad=True,  device=toy.device)
-dx  = torch.tensor(dx_0, requires_grad=True,  device=toy.device)
-dy  = torch.tensor(dy_0, requires_grad=True,  device=toy.device)
-bg  = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
-n   = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
-Jx  = torch.tensor(10.0, requires_grad=True,  device=toy.device)
-Jy  = torch.tensor(10.0, requires_grad=True,  device=toy.device)
-Jxy = torch.tensor(2.0,  requires_grad=True,  device=toy.device)
+L0  = torch.tensor(25.0,  requires_grad=False, device=toy.device)
+F   = torch.tensor(1.0,   requires_grad=True,  device=toy.device)
+dx  = torch.tensor(dx_0,  requires_grad=True,  device=toy.device)
+dy  = torch.tensor(dy_0,  requires_grad=True,  device=toy.device)
+bg  = torch.tensor(0.0,   requires_grad=True,  device=toy.device)
+n   = torch.tensor(WFS_n, requires_grad=True,  device=toy.device)
+Jx  = torch.tensor(10.0,  requires_grad=True,  device=toy.device)
+Jy  = torch.tensor(10.0,  requires_grad=True,  device=toy.device)
+Jxy = torch.tensor(2.0,   requires_grad=True,  device=toy.device)
+
+parameters = [r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy]
 
 toy.StartTimer()
-PSF_1 = toy(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+PSF_1 = toy(*parameters)
 print(toy.EndTimer())
 PSF_DL = toy.DLPSF()
 plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 
-#%%
- 
+''' 
 mask = 1.0 - CircularMask(im, Center(PSF_0, centered=False), 20)
-
-# mode='same' is there to enforce the same output shape as input arrays
-# (ie avoid border effects)
-
 t = np.linspace(-10, 10, 30)
 bump = np.exp(-0.5*t**2)
 bump /= np.trapz(bump) # normalize the integral to 1
 kernel = bump[:, np.newaxis] * bump[np.newaxis, :]
 mask = signal.fftconvolve(mask, kernel, mode='same')
 mask /= mask.max()
-
 img3 = 1.0 - torch.tensor( mask, device=toy.device )
-
 plt.imshow(torch.log(PSF_0.abs()*img3).cpu())
-
-#%%
-def OptimParams(model, loss_fun, params, iterations, verbous=True):
-    last_loss = 1e16
-    trigger_times = 0
-
-    optimizer = optim.LBFGS(params, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-
-    for i in range(iterations):
-        optimizer.zero_grad()
-        loss = loss_fun( model(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), PSF_0 )
-        loss.backward()
-
-        optimizer.step( lambda: loss_fun( model(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy), PSF_0) )
-        if verbous:
-            print('Loss:', loss.item(), end="\r", flush=True)
-
-        # Early stop check
-        if np.round(loss.item(),4) >= np.round(last_loss,4):
-            trigger_times += 1
-            if trigger_times > 1:
-                #print('Yea')
-                return
-        last_loss = loss.item()    
-
-
+'''
 #%%
 #loss_fn = nn.L1Loss(reduction='sum')
 loss = nn.L1Loss(reduction='sum')
@@ -567,19 +507,25 @@ def loss_fn(a,b):
         window_loss(n+toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)), 1.5)
     return z
 
-x = torch.linspace(-10,10,200)
-y = window_loss(x, 1.0)
-plt.plot(x,y)
-plt.ylim([0,10])
+#x = torch.linspace(-10,10,200)
+#y = window_loss(x, 1.0)
+#plt.plot(x,y)
+#plt.ylim([0,10])
+
+
+for i in range(20):
+    OptimizeLBFGS(toy, loss_fn, PSF_0, parameters, [F, dx, dy, r0, n], 5)
+    OptimizeLBFGS(toy, loss_fn, PSF_0, parameters, [bg], 2)
+    OptimizeLBFGS(toy, loss_fn, PSF_0, parameters, [Jx, Jy, Jxy], 3)
+
+PSF_1 = toy.PSD2PSF(*parameters)
+SR = lambda PSF: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
 
 #%%
-for i in range(20):
-    OptimParams(toy, loss_fn, [F, dx, dy, r0, n], 5)
-    OptimParams(toy, loss_fn, [bg], 2)
-    OptimParams(toy, loss_fn, [Jx, Jy, Jxy], 3)
+optimizer_trf = OptimizeTRF(toy, parameters)
+optimizer_trf.Optimize(PSF_0)
 
-PSF_1 = toy.PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
-SR = lambda PSF: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
+PSF_1 = toy(*parameters)
 
 #%%
 n_result = (n + toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)) ).abs().data.item()
@@ -595,8 +541,6 @@ print("n, n': ({:.2f},{:.2f})".format(n_init, n_result))
 
 plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 plt.show()
-
-
 
 
 
@@ -829,18 +773,6 @@ print('Validation accuracy: '+str(loss_fn(gnosis(X_val, C_val), y_val).item()))
 #    gnosis.fc3.bias.copy_(gnosis2.fc3.bias)
 
 #%%
-def radial_profile(data, center=None):
-    if center is None:
-        center = (data.shape[0]//2, data.shape[1]//2)
-    y, x = np.indices((data.shape))
-    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
-    r = r.astype('int')
-
-    tbin = np.bincount(r.ravel(), data.ravel())
-    nr = np.bincount(r.ravel())
-    radialprofile = tbin / nr
-    return radialprofile[0:data.shape[0]//2]
-
 def PSFcomparator(data_sample):
     toy2 = TipToy(config_file, data_sample['input'], 'CUDA')
 

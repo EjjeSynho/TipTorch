@@ -14,12 +14,14 @@ from VLT_pupil import PupilVLT, CircPupil
 import pickle
 import os
 from os import path
+
 from parameterParser import parameterParser
 from MUSE import MUSEcube
 from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import iter_graph, register_hooks
 from utils import Center, BackgroundEstimate
-
+from utils import OptimizeTRF, OptimizeLBFGS
+from utils import radial_profile
 
 path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
 path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/muse_ltao.ini'))
@@ -450,22 +452,20 @@ def JitterCore(Jx, Jy, Jxy):
 #%%
 def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
     # non-negative reparametrization
-    r0 = torch.abs(r0)
-    L0 = torch.abs(L0)
     Jx = torch.abs(Jx)
     Jy = torch.abs(Jy)
     WFS_noise_var = torch.abs(WFS_noise_var)
 
-    W, W_alpha, P_beta_DM, C_phi, C_b, freq_t = TomographicReconstructors(r0, L0, WFS_noise_var)
+    W, W_alpha, P_beta_DM, C_phi, C_b, freq_t = TomographicReconstructors(r0.abs(), L0.abs(), WFS_noise_var)
     h1, _, _, noise_gain = Controller()
-    Rx, Ry = ReconstructionFilter(r0, L0, WFS_noise_var)
+    Rx, Ry = ReconstructionFilter(r0.abs(), L0.abs(), WFS_noise_var)
 
-    PSD =  VonKarmanPSD(r0,L0) + \
+    PSD =  VonKarmanPSD(r0.abs(), L0.abs()) + \
     PSD_padder(
         NoisePSD(W, P_beta_DM, C_b, noise_gain, WFS_noise_var) + \
         SpatioTemporalPSD(W_alpha, P_beta_DM, C_phi, freq_t) + \
-        AliasingPSD(Rx, Ry, h1, r0, L0) + \
-        ChromatismPSD(r0, L0)
+        AliasingPSD(Rx, Ry, h1, r0.abs(), L0.abs()) + \
+        ChromatismPSD(r0.abs(), L0.abs())
     )
 
     dk = 2*kc/nOtf_AO
@@ -476,7 +476,7 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
 
     fftPhasor = torch.exp(-np.pi*1j*sampling_factor*(U*dx+V*dy))
     OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/wvl)**2)
-    OTF = OTF_turb * OTF_static * fftPhasor * JitterCore(Jx,Jy,Jxy)
+    OTF = OTF_turb * OTF_static * fftPhasor * JitterCore(Jx.abs(),Jy.abs(),Jxy.abs())
     #OTF = OTF[1:,1:]
 
     PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) ).unsqueeze(0).unsqueeze(0)
@@ -512,13 +512,16 @@ Jx  = torch.tensor(5.0,   requires_grad=True,  device=cuda)
 Jy  = torch.tensor(5.0,   requires_grad=True,  device=cuda)
 Jxy = torch.tensor(2.0,   requires_grad=True,  device=cuda)
 
+parameters = [r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy]
+
 #end.record()
 #torch.cuda.synchronize()
-PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+PSF_1 = PSD2PSF(*parameters)
 #print(start.elapsed_time(end))
 
 PSF_0 = torch.tensor(im/im.sum(), device=cuda) #* 1e2
 plt.imshow(torch.log(PSF_0).detach().cpu())
+
 
 #%%
 def wrapper(X):
@@ -536,14 +539,13 @@ X1 = result.x
 r0, F, dx, dy, bg, n, Jx, Jy, Jxy = torch.tensor(X1, dtype=torch.float32, device=cuda)
 L0 = torch.tensor(47.93, dtype=torch.float32, device=cuda)
 
-print("r0,L0: ({:.3f}, {:.2f})".format(r0.data.item(), L0.data.item()))
-print("I,bg:  ({:.2f}, {:.1E})".format(F.data.item(), bg.data.item()))
-print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
-print("Jx,Jy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item(), Jxy.data.item()))
+print("r0,L0: ({:.3f}, {:.2f})".format(r0.abs().item(), L0.abs().item()))
+print("I,bg:  ({:.2f}, {:.1E})".format(F.item(), bg.item()))
+print("dx,dy: ({:.2f}, {:.2f})".format(dx.item(), dy.item()))
+print("Jx,Jy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.abs().item(), Jy.abs().item(), Jxy.abs().item()))
 print("WFS noise: {:.2f}".format(n.data.item()))
 
 #%%
-
 '''
 #loss_fn = nn.L1Loss()
 #external_grad = torch.tensor(1)
@@ -633,19 +635,6 @@ ax.set_xticklabels(['', '$r_0$','$L_0$','F','dx','dy','bg','n','$J_x$','$J_y$'])
 ax.set_yticklabels(['', '$r_0$','$L_0$','F','dx','dy','bg','n','$J_x$','$J_y$'])
 cax = ax.matshow(np.abs(sensetivity), norm=norm)
 '''
-
-def radial_profile(data, center=None):
-    if center is None:
-        center = (data.shape[0]//2, data.shape[1]//2)
-    y, x = np.indices((data.shape))
-    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
-    r = r.astype('int')
-
-    tbin = np.bincount(r.ravel(), data.ravel())
-    nr = np.bincount(r.ravel())
-    radialprofile = tbin / nr
-    return radialprofile[0:data.shape[0]//2]
-
 
 PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
 

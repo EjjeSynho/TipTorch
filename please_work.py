@@ -14,11 +14,14 @@ from astropy.io import fits
 import scipy
 
 import sys
-from utils import Photometry, seeing, r0_new, r0
 from scipy.stats import gaussian_kde
+
+from utils import Photometry, seeing, r0_new, r0
+from utils import radial_profile
 
 from ipywidgets import interact, interactive, fixed, interact_manual
 import ipywidgets as widgets
+
 
 #%%
 path_fitted = 'C:\\Users\\akuznets\\Data\\SPHERE\\fitted 2\\'
@@ -158,20 +161,6 @@ plt.ylim([0,ylim])
 
 %matplotlib qt
 #%matplotlib inline
-
-# Function to draw the radial profile of a PSF
-def radial_profile(data, center=None):
-    if center is None:
-        center = (data.shape[0]//2, data.shape[1]//2)
-    y, x = np.indices((data.shape))
-    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
-    r = r.astype('int')
-
-    tbin = np.bincount(r.ravel(), data.ravel())
-    nr = np.bincount(r.ravel())
-
-    radialprofile = tbin / nr
-    return radialprofile[0:data.shape[0]//2]
 
 # Fields that appear in dropdown menu
 choice_list = list(dataframe.columns)

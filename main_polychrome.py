@@ -12,6 +12,7 @@ import os
 from os import path
 from parameterParser import parameterParser
 from MUSE import MUSEcube
+from utils import radial_profile
 
 
 def iter_graph(root, callback):
@@ -685,18 +686,6 @@ print("WFS noise: {:.2f}".format(n.data.item()))
 #la chignon et tarte
 
 #%% -------------------------------------------------------------------------------------
-def radial_profile(data, center=None):
-    if center is None:
-        center = (data.shape[0]//2, data.shape[1]//2)
-    y, x = np.indices((data.shape))
-    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
-    r = r.astype('int')
-
-    tbin = np.bincount(r.ravel(), data.ravel())
-    nr = np.bincount(r.ravel())
-    radialprofile = tbin / nr
-    return radialprofile[0:data.shape[0]//2]
-
 cube_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy, tomo_factor)
 norm_factor_1 = torch.tensor(norm_factor, device=cuda).unsqueeze(1).unsqueeze(2)
 PSF_0 = torch.sum(cube_0*norm_factor_1, dim=0)
