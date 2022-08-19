@@ -3,7 +3,7 @@ import numpy as np
 import torch
 from graphviz import Digraph
 from astropy.io import fits
-
+from scipy.ndimage import center_of_mass
 
 rad2mas  = 3600 * 180 * 1000 / np.pi
 rad2arc  = rad2mas / 1000
@@ -189,3 +189,37 @@ def register_hooks(var):
 
     return make_dot
 
+
+def BackgroundEstimate(im, radius=90):
+    nPix = im.shape[0]
+    buf_x, buf_y = torch.meshgrid(
+        torch.linspace(-nPix//2, nPix//2, nPix, device=im.device),
+        torch.linspace(-nPix//2, nPix//2, nPix, device=im.device),
+        indexing = 'ij'
+    )
+    mask_noise = buf_x**2 + buf_y**2
+    mask_noise[mask_noise < radius**2] = 0.0
+    mask_noise[mask_noise > 0.0] = 1.0
+    return torch.median(im[mask_noise>0.]).data
+
+
+def Center(im, centered=True):
+    if type(im) == torch.Tensor:
+        if im.device == torch.device(type='cpu'):
+            im = im.detach().numpy()
+        else:
+            im = im.detach().cpu().numpy()
+    WoG_ROI = 16
+    center = np.array(np.unravel_index(np.argmax(im), im.shape))
+    crop = slice(center[0]-WoG_ROI//2, center[1]+WoG_ROI//2)
+    crop = (crop, crop)
+    buf = im[crop]
+    WoG = np.array(center_of_mass(buf)) + im.shape[0]//2-WoG_ROI//2
+    return WoG - np.array(im.shape)//2 * int(centered)
+
+
+def CircularMask(img, center, radius):
+    xx,yy = np.meshgrid( np.arange(0,img.shape[1]), np.arange(0,img.shape[0]) )
+    mask_PSF = np.ones(img.shape[0:2])
+    mask_PSF[np.sqrt((yy-center[0])**2 + (xx-center[1])**2) < radius] = 0.0
+    return mask_PSF

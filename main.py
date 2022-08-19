@@ -16,116 +16,11 @@ import os
 from os import path
 from parameterParser import parameterParser
 from MUSE import MUSEcube
+from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
+from utils import iter_graph, register_hooks
+from utils import Center, BackgroundEstimate
 
 
-def iter_graph(root, callback):
-    queue = [root]
-    seen = set()
-    while queue:
-        fn = queue.pop()
-        if fn in seen:
-            continue
-        seen.add(fn)
-        for next_fn, _ in fn.next_functions:
-            if next_fn is not None:
-                queue.append(next_fn)
-        callback(fn)
-
-def register_hooks(var):
-    fn_dict = {}
-    def hook_c_b(fn):
-        def register_grad(grad_input, grad_output):
-            fn_dict[fn] = grad_input
-        fn.register_hook(register_grad)
-    iter_graph(var.grad_fn, hook_c_b)
-
-    def is_bad_grad(grad_output):
-        if grad_output is None:
-            return False
-        return grad_output.isnan().any() or (grad_output.abs() >= 1e6).any()
-
-    def make_dot():
-        node_attr = dict(style='filled',
-                        shape='box',
-                        align='left',
-                        fontsize='12',
-                        ranksep='0.1',
-                        height='0.2')
-        dot = Digraph(node_attr=node_attr, graph_attr=dict(size="12,12"))
-
-        def size_to_str(size):
-            return '('+(', ').join(map(str, size))+')'
-
-        def build_graph(fn):
-            if hasattr(fn, 'variable'):  # if GradAccumulator
-                u = fn.variable
-                node_name = 'Variable\n ' + size_to_str(u.size())
-                dot.node(str(id(u)), node_name, fillcolor='lightblue')
-            else:
-                def grad_ord(x):
-                    mins = ""
-                    maxs = ""
-                    y = [buf for buf in x if buf is not None]
-                    for buf in y:
-                        min_buf = torch.abs(buf).min().cpu().numpy().item()
-                        max_buf = torch.abs(buf).max().cpu().numpy().item()
-
-                        if min_buf < 0.1 or min_buf > 99:
-                            mins += "{:.1e}".format(min_buf) + ', '
-                        else:
-                            mins += str(np.round(min_buf,1)) + ', '
-                        if max_buf < 0.1 or max_buf > 99:
-                            maxs += "{:.1e}".format(max_buf) + ', '
-                        else:
-                            maxs += str(np.round(max_buf,1)) + ', '
-                    return mins[:-2] + ' | ' + maxs[:-2]
-
-                assert fn in fn_dict, fn
-                fillcolor = 'white'
-                if any(is_bad_grad(gi) for gi in fn_dict[fn]):
-                    fillcolor = 'red'
-                dot.node(str(id(fn)), str(type(fn).__name__)+'\n'+grad_ord(fn_dict[fn]), fillcolor=fillcolor)
-            for next_fn, _ in fn.next_functions:
-                if next_fn is not None:
-                    next_id = id(getattr(next_fn, 'variable', next_fn))
-                    dot.edge(str(next_id), str(id(fn)))
-        iter_graph(var.grad_fn, build_graph)
-        return dot
-
-    return make_dot
-
-
-'''
-x = torch.randn(1, 4, requires_grad=True)
-y = torch.randn(1, 4, requires_grad=True)
-z = x * y
-z = z.sum() * 2
-get_dot = register_hooks(z)
-z.backward()
-dot = get_dot()
-#dot.save('tmp.dot') # to get .dot
-#dot.render('tmp') # to get SVG
-dot # in Jupyter, you can just render the variable
-'''
-
-'''
-start = torch.cuda.Event(enable_timing=True)
-end = torch.cuda.Event(enable_timing=True)
-
-start.record()
-z = x + y
-end.record()
-
-# Waits for everything to finish running
-torch.cuda.synchronize()
-
-print(start.elapsed_time(end))
-'''
-#with torch.autograd.profiler.profile(use_cuda=True) as prof:
-#   # do something
-#print(prof)
-
-#%%
 path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
 path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/muse_ltao.ini'))
 
@@ -165,15 +60,6 @@ cuda  = torch.device('cuda') # Default CUDA device
 #cuda  = torch.device('cpu')
 start = torch.cuda.Event(enable_timing=True)
 end   = torch.cuda.Event(enable_timing=True)
-
-rad2mas = 3600 * 180 * 1000 / np.pi
-rad2arc = rad2mas / 1000
-deg2rad = np.pi / 180
-asec2rad = np.pi / 180 / 3600
-
-seeing_from_r0 = lambda r0, λ: rad2arc*0.976*λ/r0 # [arcs]
-r0_from_seeing = lambda seeing, λ: rad2arc*0.976*λ/seeing # [m]
-r0_rescale     = lambda r0, λ, λₒ: r0*(λ/λₒ)**1.2 # [m] 
 
 D       = params['telescope']['TelescopeDiameter']
 wvl     = wvl
@@ -242,7 +128,8 @@ cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 # Initialize spatial frequencies
 kx, ky = torch.meshgrid(
     torch.linspace(-nOtf/2, nOtf/2-1, nOtf, device=cuda)*dk + 1e-10,
-    torch.linspace(-nOtf/2, nOtf/2-1, nOtf, device=cuda)*dk + 1e-10)
+    torch.linspace(-nOtf/2, nOtf/2-1, nOtf, device=cuda)*dk + 1e-10,
+    indexing = 'ij')
 k2 = kx**2 + ky**2
 k = torch.sqrt(k2)
 
@@ -426,12 +313,12 @@ def TomographicReconstructors(r0, L0, WFS_noise_var, inv_method='fast'):
     C_b_inv = torch.ones((nOtf_AO,nOtf_AO,nGS,nGS), dtype=torch.complex64, device=cuda) * torch.eye(4, device=cuda) * 1./WFS_noise_var #torch.diag(WFS_noise_var)
     #TODO: ro at WFS wvl!
     #kernel = torch.unsqueeze(torch.unsqueeze(r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6) * piston_filter, 2), 3)
-    kernel = torch.unsqueeze(torch.unsqueeze(r0_rescale(r0, 589e-9, 500e-9)**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6) * piston_filter, 2), 3)
+    kernel = torch.unsqueeze(torch.unsqueeze(r0_new(r0, 589e-9, 500e-9)**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6) * piston_filter, 2), 3)
     C_phi  = kernel.repeat(1, 1, nL, nL) * torch.diag(Cn2_weights) + 0j
     
     if inv_method == 'fast' or inv_method == 'lstsq':
         #kernel_inv = torch.unsqueeze(torch.unsqueeze(1.0/ (r0**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6)), 2), 3)
-        kernel_inv = torch.unsqueeze(torch.unsqueeze(1.0/(r0_rescale(r0, 589e-9, 500e-9)**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6)), 2), 3)
+        kernel_inv = torch.unsqueeze(torch.unsqueeze(1.0/(r0_new(r0, 589e-9, 500e-9)**(-5/3)*cte*(k2_AO + 1/L0**2)**(-11/6)), 2), 3)
         C_phi_inv = kernel_inv.repeat(1, 1, nL, nL) * torch.diag(1.0/Cn2_weights) + 0j
 
     if inv_method == 'standart':
@@ -597,8 +484,6 @@ def PSD2PSF(r0, L0, F, dx, dy, bg, WFS_noise_var, Jx, Jy, Jxy):
     return (PSF_out/PSF_out.sum() * F + bg)
 
 '''
-N_rescale = lambda n, l0, l: n*l/l0
-
 r0  = torch.tensor(0.064, requires_grad=True,  device=cuda)
 L0  = torch.tensor(47.93, requires_grad=False, device=cuda)
 F   = torch.tensor(1.0,   requires_grad=True,  device=cuda)
@@ -614,41 +499,8 @@ Jxy = torch.tensor(5.0,   requires_grad=True, device=cuda)
 PSF_0 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
 '''
 
-#end.record()
-#torch.cuda.synchronize()
-#print(start.elapsed_time(end))
-
-#plt.imshow(torch.log(PSF_0.cpu().detach()))
-#plt.show()
-
-#with open('C:/Users/akuznets/Desktop/buf/layer_'+str(np.round(wvl*1e9, 0).astype('uint'))+'.pickle', 'wb') as handle:
-#    pickle.dump(PSF_0.detach().cpu().numpy(), handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 #%%
-
-def BackgroundEstimate(im, radius=90):
-    buf_x, buf_y = torch.meshgrid(
-        torch.linspace(-nPix//2, nPix//2, nPix, device=cuda),
-        torch.linspace(-nPix//2, nPix//2, nPix, device=cuda)
-    )
-    mask_noise = buf_x**2 + buf_y**2
-    mask_noise[mask_noise < radius**2] = 0.0
-    mask_noise[mask_noise > 0.0] = 1.0
-    return torch.median(im[mask_noise>0.]).data
-
-PSF_0 = torch.tensor(im/im.sum(), device=cuda) #* 1e2
-plt.imshow(torch.log(PSF_0).detach().cpu())
-
-def Center(im):
-    center = np.array(np.unravel_index(im.argmax().item(), im.shape))-np.array(im.shape)//2
-    return center
-
-#%%
-def wrapper(X):
-    r0, F, dx, dy, bg, n, Jx, Jy, Jxy = torch.tensor(X, dtype=torch.float32, device=cuda)
-    L0 = torch.tensor(47.93, dtype=torch.float32, device=cuda)
-    return PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
-
 r0  = torch.tensor(0.1,   requires_grad=True,  device=cuda)
 L0  = torch.tensor(47.93, requires_grad=False, device=cuda)
 F   = torch.tensor(1.0,   requires_grad=True,  device=cuda)
@@ -660,9 +512,22 @@ Jx  = torch.tensor(5.0,   requires_grad=True,  device=cuda)
 Jy  = torch.tensor(5.0,   requires_grad=True,  device=cuda)
 Jxy = torch.tensor(2.0,   requires_grad=True,  device=cuda)
 
-X1 = torch.stack([r0,F,dx,dy,bg,n,Jx,Jy,Jxy]).detach().cpu().numpy()
+#end.record()
+#torch.cuda.synchronize()
+PSF_1 = PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+#print(start.elapsed_time(end))
+
+PSF_0 = torch.tensor(im/im.sum(), device=cuda) #* 1e2
+plt.imshow(torch.log(PSF_0).detach().cpu())
 
 #%%
+def wrapper(X):
+    r0, F, dx, dy, bg, n, Jx, Jy, Jxy = torch.tensor(X, dtype=torch.float32, device=cuda)
+    L0 = torch.tensor(47.93, dtype=torch.float32, device=cuda)
+    return PSD2PSF(r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy)
+
+X1 = torch.stack([r0,F,dx,dy,bg,n,Jx,Jy,Jxy]).detach().cpu().numpy()
+
 func = lambda x: (PSF_0-wrapper(x)).detach().cpu().numpy().reshape(-1)
 result = least_squares(func, X1, method = 'trf',
                        ftol=1e-9, xtol=1e-9, gtol=1e-9,
@@ -671,9 +536,15 @@ X1 = result.x
 r0, F, dx, dy, bg, n, Jx, Jy, Jxy = torch.tensor(X1, dtype=torch.float32, device=cuda)
 L0 = torch.tensor(47.93, dtype=torch.float32, device=cuda)
 
+print("r0,L0: ({:.3f}, {:.2f})".format(r0.data.item(), L0.data.item()))
+print("I,bg:  ({:.2f}, {:.1E})".format(F.data.item(), bg.data.item()))
+print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
+print("Jx,Jy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item(), Jxy.data.item()))
+print("WFS noise: {:.2f}".format(n.data.item()))
+
 #%%
 
-
+'''
 #loss_fn = nn.L1Loss()
 #external_grad = torch.tensor(1)
 #loss_fn(PSF_0,PSF_1).backward(gradient=external_grad)
@@ -687,9 +558,9 @@ dot = get_dot()
 #dot.save('tmp.dot') # to get .dot
 #dot.render('tmp') # to get SVG
 dot # in Jupyter, you can just render the variable
+'''
 
-
-#%%
+#%
 def OptimParams(loss_fun, params, iterations, method='LBFGS', verbous=True):
     if method == 'LBFGS':
         optimizer = optim.LBFGS(params, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
@@ -738,7 +609,7 @@ for i in range(10):
     OptimParams(loss_fn, [Jx, Jy, Jxy], 3)
 
 print("r0,L0: ({:.3f}, {:.2f})".format(r0.data.item(), L0.data.item()))
-print("I,bg:  ( ",F.data.item(), ' ', bg.data.item(), ')')
+print("I,bg:  ({:.2f}, {:.1E})".format(F.data.item(), bg.data.item()))
 print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
 print("Jx,Jy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item(), Jxy.data.item()))
 print("WFS noise: {:.2f}".format(n.data.item()))
@@ -813,12 +684,6 @@ plt.show()
 #=====================================================================================================================================
 #=====================================================================================================================================
 #=====================================================================================================================================
-#=====================================================================================================================================
-#=====================================================================================================================================
-#=====================================================================================================================================
-#=====================================================================================================================================
-#=====================================================================================================================================
-#=====================================================================================================================================
 #%% ==================================================================================================================================
 import torch.nn.functional as F
 
@@ -844,9 +709,7 @@ nput = torch.randn(16, 16, dtype=torch.double,requires_grad=True)
 test = gradcheck(fft.fft2(input), input, eps=1e-6, atol=1e-4)
 
 print(test)
-'''
 
-'''
 x = torch.randn((1, 1), requires_grad=True)
 with torch.autograd.profiler.profile() as prof:
     for _ in range(100):  # any normal python code, really!
@@ -970,103 +833,6 @@ X0 = torch.tensor([2.0, 1.0, -2.0, 2.0], requires_grad=False)
 noise = AddGaussianNoise(0., 0.1)
 b = noise(Gauss2D(X0))
 #b = Gauss2D(X0)
-
-plt.imshow(b)
-plt.show()
-
-niter = 10
-loss_fn = nn.MSELoss()
-optimizer = optim.LBFGS(model2.parameters(),
-                        history_size=10,
-                        max_iter=4,
-                        line_search_fn="strong_wolfe")
-
-for _ in range(0, niter):
-    optimizer.zero_grad()
-    loss = loss_fn(model2(xx, yy), b)
-    loss.backward()
-    optimizer.step(lambda: loss_fn(model2(xx, yy), b))
-
-print(loss.data)
-
-plt.imshow(model2(xx,yy).detach().numpy())
-plt.show()
-
-for i in model2.parameters():
-    print(i)
 """
-
-
-#%%
-
-import numpy as np
-from scipy.optimize import least_squares
-from psfFitting.confidenceInterval import confidence_interval
-
-# Initialize spatial frequencies
-kx, ky = np.meshgrid(
-    np.linspace(-nOtf/2-1, nOtf/2, nOtf)*dk,
-    np.linspace(-nOtf/2-1, nOtf/2, nOtf)*dk)
-k2 = kx**2 + ky**2
-
-mask = np.ones_like(k2)
-mask[nOtf//2, nOtf//2] = 0
-
-#la chignon et tarte
-U,V = np.meshgrid(
-    np.linspace(-1, 1-2/nOtf, nOtf),
-    np.linspace(-1, 1-2/nOtf, nOtf) )
-U2 = U**2
-V2 = V**2
-UV = U*V
-UV2 = U**2 + V**2
-
-#print(V.min(), V.max())
-
-#%%
-#la chignon et tarte
-
-from skimage.transform import resize
-
-X0 = np.array([.15, 20., 1.0, 20.0, 0.0])
-X1 = np.array([.50, 20., 1.0, 0.0, 0.0])
-def PSD2PSF(X):
-    PSD = cte*X[0]**(-5/3)*(k2 + 1/X[1]**2)**(-11/6)*mask
-    cov = 2*np.fft.fftshift(np.fft.fft2(np.fft.fftshift(PSD)))
-    SF  = np.real(cov).max()-cov
-    
-    fftPhasor = np.exp(-sampling_factor*np.pi*1j*(U*X[3]+V*X[4]))
-    OTF_turb = np.exp(-0.5*SF*(2*np.pi*1e-9/wvl)**2) * fftPhasor   
-    PSF = np.real( np.fft.fftshift(np.fft.ifft2(np.fft.fftshift(OTF_turb))) )
-    PSF = resize(PSF, (nPix,nPix), anti_aliasing=False)
-
-    return PSF * 1e4
-
-PSF_0 = PSD2PSF(X0) #reference
-PSF_1 = PSD2PSF(X1)
-
-#%%
-
-im_norm = PSF_0
-
-# Defining the cost functions
-class CostClass(object):
-    def __init__(self, alpha_positivity=None):
-        self.iter = 0
-        self.alpha_positivity = alpha_positivity
-
-
-    def __call__(self, y):
-        self.iter += 1
-        im_est = PSD2PSF(y)
-        return (im_norm - im_est).reshape(-1)
-
-cost = CostClass()
-
-result = least_squares(cost, X1,
-                       method = 'trf', ftol=1e-8, xtol=1e-8, gtol=1e-8,
-                       max_nfev = 1000, verbose = 1, loss = "linear")
-                               
-print(result.x)
 
 #la chignon et tarte
