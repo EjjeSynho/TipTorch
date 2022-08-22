@@ -22,6 +22,7 @@ from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask
 from utils import register_hooks, iter_graph
 from utils import OptimizeTRF, OptimizeLBFGS
+from utils import radial_profile, plot_radial_profile
 from SPHERE_data import SPHERE_database
 
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\210_SPHER.2017-09-19T00.38.31.896IRD_FLUX_CALIB_CORO_RAW_left.pickle'
@@ -31,7 +32,7 @@ from SPHERE_data import SPHERE_database
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\422_SPHER.2017-05-20T10.28.56.559IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\102_SPHER.2017-06-17T00.24.09.582IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 
-num = 26
+num = 450
 path_samples = 'C:/Users/akuznets/Data/SPHERE/test/'
 files = os.listdir(path_samples)
 sample_nums = []
@@ -358,29 +359,27 @@ PSF_1 = psfao(*parameters)
 print(psfao.EndTimer())
 
 plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
-
  
 #%%
 
 loss_fn = nn.L1Loss(reduction='sum')
+optimizer_lbfgs = OptimizeLBFGS(psfao, parameters, loss_fn)
 
 for i in range(20):
-    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [F, dx, dy], 2)
-    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [bg], 2)
-    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [b], 2)
-    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [r0, amp, alpha, beta], 5)
-    OptimizeLBFGS(psfao, loss_fn, PSF_0, parameters, [ratio, theta], 5)
+    optimizer_lbfgs.Optimize(PSF_0, [F, dx, dy], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [bg], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [b], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [r0, amp, alpha, beta], 5)
+    optimizer_lbfgs.Optimize(PSF_0, [ratio, theta], 5)
 
 PSF_1 = psfao(*parameters)
 
-#%%
+'''
 optimizer_trf = OptimizeTRF(psfao, parameters)
 optimizer_trf.Optimize(PSF_0)
-
 PSF_1 = psfao(*parameters)
-
 r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta = parameters
-
+'''
 #%%
 #n_result = (n + toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)) ).abs().data.item()
 #n_init = toy.NoiseVariance(torch.tensor(r0_new(data_test['r0'], toy.GS_wvl, 0.5e-6), device=toy.device)).item()
@@ -388,10 +387,17 @@ r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta = parameters
 #print("".join(['_']*52))
 #print('Loss:', loss_fn(PSF_1, PSF_0).item())
 #print("r0,r0': ({:.3f}, {:.2f})".format(data_test['r0'], r0_new(r0.data.item(), 0.5e-6, toy.wvl)))
-#print("I,bg:  ({:.3f}, {:.1E} )".format(F.data.item(), bg.data.item()))
+#print("I,bg:  ({:.3f}, {:.1E} )".format(F.data.item(), bg.data.item()))  v
 #print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
 #print("Jx,Jy, Jxy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item(), Jxy.data.item()))
 #print("n, n': ({:.2f},{:.2f})".format(n_init, n_result))
 
-plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
+plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 plt.show()
+
+#%%
+
+PSF_1 = psfao(*parameters)
+plot_radial_profile(PSF_0, PSF_1, 'PSF AO', title='IRDIS PSF')
+ 
+#la chignon et tarte

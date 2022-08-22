@@ -22,7 +22,7 @@ from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask
 from utils import register_hooks, iter_graph
 from utils import OptimizeTRF, OptimizeLBFGS
-from utils import radial_profile
+from utils import radial_profile, plot_radial_profile
 
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\210_SPHER.2017-09-19T00.38.31.896IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\13_SPHER.2016-09-28T06.29.29.592IRD_FLUX_CALIB_CORO_RAW_left.pickle'
@@ -31,7 +31,7 @@ from utils import radial_profile
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\422_SPHER.2017-05-20T10.28.56.559IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 #path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\102_SPHER.2017-06-17T00.24.09.582IRD_FLUX_CALIB_CORO_RAW_left.pickle'
 
-num = 422
+num = 450
 path_samples = 'C:/Users/akuznets/Data/SPHERE/test/'
 files = os.listdir(path_samples)
 sample_nums = []
@@ -450,7 +450,6 @@ class TipToy(torch.nn.Module):
             self.end = time.time()
             return (self.end-self.start)*1000.0 # in [ms]
 
-
 #%% -------------------------------------------------------------
 toy = TipToy(config_file, data_test, 'CUDA')
 
@@ -494,40 +493,41 @@ img3 = 1.0 - torch.tensor( mask, device=toy.device )
 plt.imshow(torch.log(PSF_0.abs()*img3).cpu())
 '''
 #%%
-#loss_fn = nn.L1Loss(reduction='sum')
+  
 loss = nn.L1Loss(reduction='sum')
 
 window_loss = lambda x, x_max: (x>0).float()*(0.01/x)**2 + (x<0).float()*100 + 100*(x>x_max).float()*(x-x_max)**2
+
 def loss_fn(a,b):
     z = loss(a,b) + \
-        window_loss(r0_new(r0, 0.5e-6, toy.wvl), 1.0) + \
+        window_loss(r0_new(r0, 0.5e-6, toy.wvl), 1.5) + \
         window_loss(Jx, 50) + \
         window_loss(Jy, 50) + \
-        window_loss(Jxy, 50) + \
+        window_loss(Jxy, 400) + \
         window_loss(n+toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)), 1.5)
     return z
 
 #x = torch.linspace(-10,10,200)
-#y = window_loss(x, 1.0)
+#y = window_loss(x, 1.5)
 #plt.plot(x,y)
 #plt.ylim([0,10])
 
+#%
+optimizer_lbfgs = OptimizeLBFGS(toy, parameters, loss_fn)
 
 for i in range(20):
-    OptimizeLBFGS(toy, loss_fn, PSF_0, parameters, [F, dx, dy, r0, n], 5)
-    OptimizeLBFGS(toy, loss_fn, PSF_0, parameters, [bg], 2)
-    OptimizeLBFGS(toy, loss_fn, PSF_0, parameters, [Jx, Jy, Jxy], 3)
-
-PSF_1 = toy.PSD2PSF(*parameters)
-SR = lambda PSF: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
-
-#%%
-optimizer_trf = OptimizeTRF(toy, parameters)
-optimizer_trf.Optimize(PSF_0)
+    optimizer_lbfgs.Optimize(PSF_0, [F, dx, dy, r0, n], 5)
+    optimizer_lbfgs.Optimize(PSF_0, [bg], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [Jx, Jy, Jxy], 3)
 
 PSF_1 = toy(*parameters)
+SR = lambda PSF: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
 
-#%%
+#%
+#optimizer_trf = OptimizeTRF(toy, parameters)
+#optimizer_trf.Optimize(PSF_0)
+#%
+
 n_result = (n + toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)) ).abs().data.item()
 n_init = toy.NoiseVariance(torch.tensor(r0_new(data_test['r0'], toy.GS_wvl, 0.5e-6), device=toy.device)).item()
 
@@ -539,12 +539,12 @@ print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
 print("Jx,Jy, Jxy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item(), Jxy.data.item()))
 print("n, n': ({:.2f},{:.2f})".format(n_init, n_result))
 
-plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
+plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 plt.show()
 
-
-
-
+plot_radial_profile(PSF_0, PSF_1, 'TipToy', title='IRDIS PSF')
+plt.show()
+#la chignon et tarte
 
 
 

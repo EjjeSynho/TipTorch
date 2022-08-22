@@ -18,7 +18,7 @@ from os import path
 
 from parameterParser import parameterParser
 from MUSE import MUSEcube
-from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
+from utils import plot_radial_profile, rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask
 from utils import register_hooks, iter_graph
 from utils import OptimizeTRF, OptimizeLBFGS
@@ -592,33 +592,7 @@ print("WFS noise: {:.2f}".format(n.data.item()))
 #%%
 PSF_1 = toy_MUSE(*parameters)
 
-id_max = np.unravel_index(PSF_0.argmax().cpu().numpy(), PSF_0.shape)
-PSF_1[id_max] = PSF_0.max() 
-
-profile_0 = radial_profile(PSF_0.detach().cpu().numpy())
-profile_1 = radial_profile(PSF_1.detach().cpu().numpy())
-
-profile_diff = np.abs(profile_1-profile_0) / PSF_0.max().cpu().numpy() * 100 #[%]
-
-fig = plt.figure(figsize=(6,4), dpi=300)
-ax = fig.add_subplot(111)
-ax.set_title('TipToy fitting')
-l2 = ax.plot(profile_0, label='Data')
-l1 = ax.plot(profile_1, label='TipToy')
-ax.set_xlabel('Pixels')
-ax.set_ylabel('Relative intensity')
-ax.set_yscale('log')
-ax.set_xlim([0, len(profile_1)])
-ax.grid()
-
-ax2 = ax.twinx()
-l3 = ax2.plot(profile_diff, label='Difference', color='green')
-ax2.set_ylim([0, profile_diff.max()*1.5])
-ax2.set_ylabel('Difference [%]')
-
-ls = l1+l2+l3
-labs = [l.get_label() for l in ls]
-ax2.legend(ls, labs, loc=0)
+plot_radial_profile(PSF_0, PSF_1, 'TipToy', title='MUSE NFM PSF')
 
 plt.show()
 
