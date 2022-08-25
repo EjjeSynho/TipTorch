@@ -23,35 +23,21 @@ from utils import Center, BackgroundEstimate, CircularMask
 from utils import register_hooks, iter_graph
 from utils import OptimizeTRF, OptimizeLBFGS
 from utils import radial_profile, plot_radial_profile
-from SPHERE_data import SPHERE_database
+from SPHERE_data import SPHERE_database, LoadSPHEREsampleByID
+# end of import list
 
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\210_SPHER.2017-09-19T00.38.31.896IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\13_SPHER.2016-09-28T06.29.29.592IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\190_SPHER.2017-03-07T06.09.15.212IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\26_SPHER.2017-09-01T07.45.22.723IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\422_SPHER.2017-05-20T10.28.56.559IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\102_SPHER.2017-06-17T00.24.09.582IRD_FLUX_CALIB_CORO_RAW_left.pickle'
+#210
+#13
+#190
+#26
+#422
+#102
 
-num = 450
-path_samples = 'C:/Users/akuznets/Data/SPHERE/test/'
-files = os.listdir(path_samples)
-sample_nums = []
-for file in files: sample_nums.append( int(re.findall(r'[0-9]+', file)[0]) )
+num = 260
 
+num_id, data_test = LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', num)
 
-def LoadSampleByNum(sample_num):
-    try: id = sample_nums.index(sample_num)
-    except ValueError:
-        print('No sample with such id')
-        return np.nan
-        
-    with open(path_samples+files[id], 'rb') as handle:
-        sample = pickle.load(handle)
-    return id,sample
-
-num_id, data_test = LoadSampleByNum(num)
 im = data_test['image']
-
 path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
 path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/irdis.ini'))
 
@@ -325,6 +311,7 @@ class PSFAO(torch.nn.Module):
             self.end = time.time()
             return (self.end-self.start)*1000.0 # in [ms]
 
+# end of class defenition
 
 #%%
 psfao = PSFAO(config_file, data_test, 'CUDA')
@@ -358,21 +345,76 @@ psfao.StartTimer()
 PSF_1 = psfao(*parameters)
 print(psfao.EndTimer())
 
-plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
- 
-#%%
+plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
+#%% ---------------------------------------------------------------------------
+'''
+N_src = torch.ones(5, device=psfao.device)
+r0 = torch.tensor(1.215965986251831, requires_grad=True, device=psfao.device) * N_src
+L0 = torch.tensor(25.0, requires_grad=True, device=psfao.device) * N_src
+F = torch.tensor(0.9732086658477783, requires_grad=True, device=psfao.device) * N_src
+bg = torch.tensor(1.4281032179042086e-07, requires_grad=True, device=psfao.device) * N_src
+b = torch.tensor(-0.0004935440374538302, requires_grad=True, device=psfao.device) * N_src
+amp = torch.tensor(2.995750665664673, requires_grad=True, device=psfao.device) * N_src
+dx = torch.tensor(0.4570627808570862, requires_grad=True, device=psfao.device) * N_src
+dy = torch.tensor(0.1504552960395813, requires_grad=True, device=psfao.device) * N_src
+alpha = torch.tensor(0.0031549211125820875, requires_grad=True, device=psfao.device) * N_src
+ratio = torch.tensor(0.9471700191497803, requires_grad=True, device=psfao.device) * N_src
+theta = torch.tensor(-0.7410240173339844, requires_grad=True, device=psfao.device) * N_src
+beta = torch.tensor(1.6140474081039429, requires_grad=True, device=psfao.device) * N_src
 
+
+ax = (alpha * ratio).unsqueeze(1).unsqueeze(2)
+ay = (alpha / ratio).unsqueeze(1).unsqueeze(2)
+
+uxx = psfao.kx2_AO.unsqueeze(0)
+uxy = psfao.kxy_AO.unsqueeze(0)
+uyy = psfao.ky2_AO.unsqueeze(0)
+
+#def reduced_center_coord(uxx, uxy, uyy, ax, ay, theta):
+c  = torch.cos(theta).unsqueeze(1).unsqueeze(2)
+s  = torch.sin(theta).unsqueeze(1).unsqueeze(2)
+s2 = torch.sin(2.0 * theta).unsqueeze(1).unsqueeze(2)
+
+rxx = (c/ax)**2 + (s/ay)**2
+rxy =  s2/ay**2 -  s2/ax**2
+ryy = (c/ay)**2 + (s/ax)**2
+
+uu = rxx*uxx + rxy*uxy + ryy*uyy
+#return uu
+'''
+#%%
+b = torch.ones([1,7,7])
+a = torch.tensor([1,2,3,4,5]).unsqueeze(1).unsqueeze(2)
+
+print(a*b)
+
+#%%
+uu = reduced_center_coord(psfao.kx2_AO, psfao.kxy_AO, psfao.ky2_AO, ax, ay, theta)
+V = (1.0+uu)**(-beta) # Moffat shape
+
+removeInside = 0.0
+E = (beta-1) / (np.pi*ax*ay)
+Fout = (1 +      (psfao.kc**2)/(ax*ay))**(1-beta)
+Fin  = (1 + (removeInside**2)/(ax*ay))**(1-beta)
+F = 1/(Fin-Fout)
+
+MoffatPSD = (amp * V*E*F + b) * psfao.mask_corrected_AO
+MoffatPSD[psfao.nOtf_AO//2, psfao.nOtf_AO//2] *= 0.0
+
+
+
+
+
+#%%
 loss_fn = nn.L1Loss(reduction='sum')
 optimizer_lbfgs = OptimizeLBFGS(psfao, parameters, loss_fn)
 
 for i in range(20):
-    optimizer_lbfgs.Optimize(PSF_0, [F, dx, dy], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [r0, F, dx, dy], 2)
     optimizer_lbfgs.Optimize(PSF_0, [bg], 2)
-    optimizer_lbfgs.Optimize(PSF_0, [b], 2)
-    optimizer_lbfgs.Optimize(PSF_0, [r0, amp, alpha, beta], 5)
+    optimizer_lbfgs.Optimize(PSF_0, [amp, alpha, beta], 5)
     optimizer_lbfgs.Optimize(PSF_0, [ratio, theta], 5)
-
-PSF_1 = psfao(*parameters)
+    optimizer_lbfgs.Optimize(PSF_0, [b], 2)
 
 '''
 optimizer_trf = OptimizeTRF(psfao, parameters)
@@ -381,23 +423,289 @@ PSF_1 = psfao(*parameters)
 r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta = parameters
 '''
 #%%
-#n_result = (n + toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)) ).abs().data.item()
-#n_init = toy.NoiseVariance(torch.tensor(r0_new(data_test['r0'], toy.GS_wvl, 0.5e-6), device=toy.device)).item()
-#
-#print("".join(['_']*52))
-#print('Loss:', loss_fn(PSF_1, PSF_0).item())
-#print("r0,r0': ({:.3f}, {:.2f})".format(data_test['r0'], r0_new(r0.data.item(), 0.5e-6, toy.wvl)))
-#print("I,bg:  ({:.3f}, {:.1E} )".format(F.data.item(), bg.data.item()))  v
-#print("dx,dy: ({:.2f}, {:.2f})".format(dx.data.item(), dy.data.item()))
-#print("Jx,Jy, Jxy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.data.item(), Jy.data.item(), Jxy.data.item()))
-#print("n, n': ({:.2f},{:.2f})".format(n_init, n_result))
 
+PSF_1 = psfao(*parameters)
 plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 plt.show()
 
+plot_radial_profile(PSF_0, PSF_1, 'PSF AO', title='IRDIS PSF')
+plt.show()
+
+#la chignon et tarte
+
+
+#%% =============================== MAKE DATASET ==========================================
+### =======================================================================================
+### =======================================================================================
+
+# Load the SPHERE PSF database
+path_fitted = 'C:/Users/akuznets/Data/SPHERE/fitted 4/'
+path_input  = 'C:/Users/akuznets/Data/SPHERE/test/'
+
+database = SPHERE_database(path_input, path_fitted)
+
+# Filter bad samples
+bad_samples = []
+for sample in database:
+    buf = np.array([sample['fitted']['r0'],
+                    sample['fitted']['F'],
+                    sample['fitted']['dx'],
+                    sample['fitted']['dy'],
+                    sample['fitted']['bg'],
+                    sample['fitted']['amp'],
+                    sample['fitted']['b'],
+                    sample['fitted']['alpha'],
+                    sample['fitted']['beta'],
+                    sample['fitted']['ratio'],
+                    sample['fitted']['theta']])
+
+    wvl = sample['input']['spectrum']['lambda']
+    r0_500 = r0_new(np.abs(sample['fitted']['r0']), 0.5e-6, wvl)
+    
+    if np.any(np.isnan(buf)) or np.isnan(sample['input']['WFS']['Nph vis']):
+       bad_samples.append(sample['file_id']) 
+
+for bad_sample in bad_samples:
+    database.remove(bad_sample)
+
+print(str(len(bad_samples))+' samples were filtered, '+str(len(database.data))+' samples remained')
+
+
+# %%
+
+def GetInputs(data_sample):
+    #wvl     = data_sample['input']['spectrum']['lambda']
+    r_0     = 3600*180/np.pi*0.976*0.5e-6 / data_sample['input']['seeing']['SPARTA'] # [m]
+    tau0    = data_sample['input']['tau0']['SPARTA']
+    wspeed  = data_sample['input']['Wind speed']['MASSDIMM']
+    wdir    = data_sample['input']['Wind direction']['MASSDIMM']
+    airmass = data_sample['input']['telescope']['airmass']
+    Nph = np.log10(
+        data_sample['input']['WFS']['Nph vis'] * data_sample['input']['WFS']['rate']*1240)
+    input = np.array([r_0, tau0, wspeed, wdir, airmass, Nph])
+    const = np.array([data_sample['fitted']['dx'],
+                      data_sample['fitted']['dy'],
+                      data_sample['fitted']['bg']])
+    return input, const
+
+
+def GetLabels(data_sample):
+    r0_500 = r0_new(np.abs(data_sample['fitted']['r0']), 0.5e-6, data_sample['input']['spectrum']['lambda'])
+    buf =  np.array([r0_500, 25.0,
+                     data_sample['fitted']['F'],
+                     data_sample['fitted']['amp'],
+                     data_sample['fitted']['b'],
+                     data_sample['fitted']['alpha'],
+                     data_sample['fitted']['beta'],
+                     data_sample['fitted']['ratio'],
+                     data_sample['fitted']['theta']])
+    return buf
+
+
+def GenerateDataset(dataset):
+    X = [] # inputs
+    C = [] # constant data
+    y = [] # labels
+
+    for sample in dataset:
+        input, const = GetInputs(sample)
+        label = GetLabels(sample)
+        X.append(torch.tensor(input, device=psfao.device).float())
+        C.append(torch.tensor(const, device=psfao.device).float())
+        y.append(torch.tensor(label, device=psfao.device).float())
+
+    return torch.vstack(X), torch.vstack(C), torch.vstack(y)
+
+validation_ids = np.unique(np.random.randint(0, high=len(database.data), size=50, dtype=int)).tolist()
+database_train, database_val = database.split(validation_ids)
+
+X_train, C_train, y_train = GenerateDataset(database_train)
+X_val, C_val, y_val = GenerateDataset(database_val)
+
+print(str(X_train.shape[0])+' samples in train dataset, '+str(X_val.shape[0])+' in validation')
+
+
+# %%
+class Gnosis(torch.nn.Module):
+        def __init__(self, input_size, hidden_size, device):
+            self.device = device
+            super(Gnosis, self).__init__()
+            self.input_size  = input_size
+            self.hidden_size = hidden_size
+
+            self.fc1  = torch.nn.Linear(self.input_size, self.hidden_size*2, device=self.device)
+            self.relu1 = torch.nn.SiLU()
+            self.fc2  = torch.nn.Linear(self.hidden_size*2, hidden_size, device=self.device)
+            self.relu2 = torch.nn.SiLU()
+            self.fc3  = torch.nn.Linear(self.hidden_size, 9, device=self.device)
+  
+            self.inp_normalizer = torch.ones(self.input_size, device=self.device)
+            self.out_normalizer = torch.ones(9, device=self.device)
+            self.inp_bias = torch.zeros(self.input_size, device=self.device)
+            self.out_bias = torch.zeros(9, device=self.device)
+
+        def forward(self, x):
+            hidden1   = self.fc1( (x+self.inp_bias) * self.inp_normalizer )
+            relu1     = self.relu1(hidden1)
+            hidden2   = self.fc2(relu1)
+            relu2     = self.relu2(hidden2)
+            model_inp = (self.fc3(relu2).abs() + self.out_bias) * self.out_normalizer
+
+            return model_inp
+
+
+gnosis = Gnosis(input_size=6, hidden_size=200, device=psfao.device)
+gnosis.inp_normalizer = torch.tensor([2., 10., 1./20., 1./360, 10., 1.], device=psfao.device)
+gnosis.inp_bias = torch.tensor([0.0, 0.0, 0.0, 0.0, -1.0, -6.0],   device=psfao.device)
+#loss_fn = nn.MSELoss() #reduction='sum')
+loss_fn = nn.L1Loss() #reduction='sum')
+
+print(gnosis)
+
+#%%
+optimizer = optim.SGD([{'params': gnosis.fc1.parameters()},
+                       {'params': gnosis.relu1.parameters()},
+                       {'params': gnosis.fc2.parameters()},
+                       {'params': gnosis.relu2.parameters()},
+                       {'params': gnosis.fc3.parameters()}], lr=1e-4, momentum=0.9)
+
+for i in range(40000):
+    optimizer.zero_grad()
+    #x,c = GetInputs(data, i)
+    loss = loss_fn(gnosis(X_train), y_train)
+    loss.backward()
+    if i % 1000: print(loss.item())
+    optimizer.step() # lambda: loss_fn(gnosis(X,C), y))
+
+print('Validation accuracy: '+str(loss_fn(gnosis(X_val), y_val).item()))
 #%%
 
-PSF_1 = psfao(*parameters)
-plot_radial_profile(PSF_0, PSF_1, 'PSF AO', title='IRDIS PSF')
- 
-#la chignon et tarte
+def PSFcomparator(data_sample):
+    psfao2 = PSFAO(config_file, data_sample['input'], 'CUDA')
+
+    x_test, c_test = GetInputs(data_sample)
+    x_test = torch.tensor(x_test, device=psfao2.device).float()
+    c_test = torch.tensor(c_test, device=psfao2.device).float()
+    y2 = gnosis(x_test)
+
+    def ReturnPSFfromPred(y,c):
+        r0_,L0_,F_,amp_,b_,alpha_,beta_,ratio_,theta_ = y.detach()
+        dx_, dy_, bg_ = c.detach()
+        r0_ = r0_new(r0_, psfao2.wvl, 0.5e-6)
+        return psfao2(r0_,L0_,F_,dx_,dy_,bg_,amp_,b_,alpha_,beta_,ratio_,theta_)
+
+    #PSF_1 = ReturnPSFfromPred(y1, c_test)
+    PSF_2 = ReturnPSFfromPred(y2, c_test)
+
+    A = torch.tensor(data_sample['input']['image'], device=psfao2.device)
+    C = torch.tensor(data_sample['fitted']['Img. fit'], device=psfao2.device)
+    PSF_0 = A/A.sum()
+    PSF_1 = C/C.sum()
+
+
+    return PSF_0, PSF_1, PSF_2
+
+#%%
+
+loss_fn = nn.L1Loss()
+
+fit_diff = []
+gnosis_diff = []
+
+PSF_0s = []
+PSF_1s = []
+PSF_2s = []
+
+profile_0s = []
+profile_1s = []
+profile_2s = []
+
+for i in range(len(database_val)):
+    data_sample = database_val[i]
+    PSF_0, PSF_1, PSF_2 = PSFcomparator(data_sample)
+    fit_diff.append(loss_fn(PSF_0, PSF_1).item())
+    gnosis_diff.append(loss_fn(PSF_0, PSF_2).item())
+
+    PSF_0s.append(PSF_0)
+    PSF_1s.append(PSF_1)
+    PSF_2s.append(PSF_2)
+
+    profile_0s.append( radial_profile(PSF_0.detach().cpu().numpy())[:32] )
+    profile_1s.append( radial_profile(PSF_1.detach().cpu().numpy())[:32] )
+    profile_2s.append( radial_profile(PSF_2.detach().cpu().numpy())[:32] )
+
+fit_diff = np.array(fit_diff)
+gnosis_diff = np.array(gnosis_diff)
+
+PSF_0s = torch.dstack(PSF_0s)
+PSF_1s = torch.dstack(PSF_1s)
+PSF_2s = torch.dstack(PSF_2s)
+
+profile_0s = np.vstack(profile_0s)
+profile_1s = np.vstack(profile_1s)
+profile_2s = np.vstack(profile_2s)
+
+c = profile_0s.mean(axis=0).max()
+
+profile_0s /= c*0.01
+profile_1s /= c*0.01
+profile_2s /= c*0.01
+
+# %%
+fig = plt.figure(figsize=(6,4), dpi=150)
+plt.grid()
+
+def plot_std(x,y, label, color, style):
+    y_m = y.mean(axis=0)
+    y_s = y.std(axis=0)
+    lower_bound = y_m-y_s
+    upper_bound = y_m+y_s
+
+    plt.fill_between(x, lower_bound, upper_bound, color=color, alpha=0.3)
+    plt.plot(x, y_m, label=label, color=color, linestyle=style)
+
+x = np.arange(32)
+plot_std(x, np.abs(profile_0s-profile_1s), '$\Delta$ Fit', 'royalblue', '--')
+plot_std(x, np.abs(profile_0s-profile_2s), '$\Delta$ Gnosis', 'darkgreen', ':')
+
+plt.title('Accuracy comparison (avg. for validation dataset)')
+plt.yscale('symlog')
+plt.xlim([x.min(), x.max()])
+plt.legend()
+plt.ylabel('Abs. relative diff., [%]')
+plt.xlabel('Pixels')
+
+#%%
+data_sample = database_val[i]
+PSF_0, PSF_1, PSF_2 = PSFcomparator(data_sample)
+
+profile_0 = radial_profile(PSF_0.detach().cpu().numpy())[:32]
+profile_1 = radial_profile(PSF_1.detach().cpu().numpy())[:32]
+profile_2 = radial_profile(PSF_2.detach().cpu().numpy())[:32]
+
+profile_diff1 = np.abs(profile_1-profile_0) / profile_0.max() * 100 #[%]
+profile_diff2 = np.abs(profile_2-profile_0) / profile_0.max() * 100 #[%]
+
+fig = plt.figure(figsize=(6,4), dpi=150)
+ax = fig.add_subplot(111)
+ax.set_title('Fitting vs. Gnosis vs. Direct pred.')
+l0 = ax.plot(profile_0, label='Data')
+l1 = ax.plot(profile_1, label='Fit')
+l2 = ax.plot(profile_2, label='Gnosis', color='g')
+ax.set_xlabel('Pixels')
+ax.set_ylabel('Relative intensity')
+ax.set_yscale('log')
+ax.set_xlim([0, len(profile_1)])
+ax.grid()
+
+ax2 = ax.twinx()
+l3 = ax2.plot(profile_diff1, label='$\Delta$ Fit', color='tab:orange', linestyle='dashdot')
+l4 = ax2.plot(profile_diff2, label='$\Delta$ Gnosis', color='g', linestyle=':')
+ax2.set_ylim([0, max([profile_diff1.max(), profile_diff2.max()])*1.25])
+ax2.set_ylabel('Difference [%]')
+
+ls = l0+l1+l2+l3+l4
+labels = [l.get_label() for l in ls]
+ax2.legend(ls, labels, loc=0)
+
+plt.show()

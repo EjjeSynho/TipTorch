@@ -24,7 +24,16 @@ import ipywidgets as widgets
 
 
 #%%
-path_fitted = 'C:\\Users\\akuznets\\Data\\SPHERE\\fitted 2\\'
+MODE = 'PSFAO'
+
+if MODE == 'TipToy new':
+    path_fitted = 'C:\\Users\\akuznets\\Data\\SPHERE\\fitted 3\\'
+elif MODE == 'TipToy old':
+    path_fitted = 'C:\\Users\\akuznets\\Data\\SPHERE\\fitted 2\\'
+elif MODE == 'PSFAO':
+    path_fitted = 'C:\\Users\\akuznets\\Data\\SPHERE\\fitted 4\\'
+
+
 path_input  = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\'
 
 files_input  = os.listdir(path_input)
@@ -59,10 +68,20 @@ for id in range(len(data)):
     dataframe_buf['SR fit']    = data[id][1]['SR fit']
     dataframe_buf['SR data']   = data[id][1]['SR data']
     dataframe_buf['SR SPARTA'] = data[id][0]['Strehl']
-    dataframe_buf['Jx']  = data[id][1]['Jx']
-    dataframe_buf['Jy']  = data[id][1]['Jy']
-    dataframe_buf['Jxy'] = data[id][1]['Jxy']
-    dataframe_buf['WFS noise'] = data[id][1]['n']
+
+    if MODE == 'TipToy new' or MODE == 'TipToy old':
+        dataframe_buf['Jx']  = data[id][1]['Jx']
+        dataframe_buf['Jy']  = data[id][1]['Jy']
+        dataframe_buf['Jxy'] = data[id][1]['Jxy']
+        dataframe_buf['WFS noise'] = np.abs(data[id][1]['n'] + data[id][1]['dn'])
+    elif MODE == 'PSFAO':
+        dataframe_buf['amp']   = data[id][1]['amp']
+        dataframe_buf['b']     = data[id][1]['b']
+        dataframe_buf['alpha'] = data[id][1]['alpha']
+        dataframe_buf['beta']  = data[id][1]['beta']
+        dataframe_buf['ratio'] = data[id][1]['ratio']
+        dataframe_buf['theta'] = data[id][1]['theta']
+
     dataframe_buf['$r_0$ SPARTA @ 500 [nm]'] = data[id][0]['r0']
     dataframe_buf['$r_0$ fitted @ 500 [nm]'] = r0_new(data[id][1]['r0'], 500e-9, wvl)
     dataframe_buf['$r_0$ MASSDIMM @ 500 [nm]'] = r0(data[id][0]['seeing']['MASSDIMM'], 500e-9, )
@@ -134,31 +153,6 @@ class Gauss2DFitter():
 
 fitter = Gauss2DFitter()
 
-'''
-X = dataframe['$r_0$ SPARTA @ 500 [nm]']
-Y = dataframe['$r_0$ MASSDIMM @ 500 [nm]']
-xy = CleanNans(X,Y)
-density = gaussian_kde(xy)(xy)
-data = np.vstack([density, xy[0,:], xy[1,:]])
-
-#moments = fitter.moments(data)
-params = fitter.fit(data)
-
-xlim = np.median(data[1,:])*2
-ylim = np.median(data[2,:])*2
-x = np.linspace(0., xlim, 50)
-y = np.linspace(0., ylim, 50)
-
-xx, yy = np.meshgrid(x, y)
-
-z = fitter.gaussian(*params)(xx,yy)
-plt.scatter(X, Y, s=5)
-plt.contour(xx, yy, z, levels=5, colors=['black'], linewidths=[0.5])
-plt.xlim([0,xlim])
-plt.ylim([0,ylim])
-'''
-
-
 %matplotlib qt
 #%matplotlib inline
 
@@ -227,7 +221,7 @@ class PlotScatter():
                 self.axx.contour(xx, yy, z, levels=5, colors=['black'], linewidths=[0.5])
 
             except np.linalg.LinAlgError:
-                print('It\'s the same parameter, come on')
+                print('It\'s the same parameter')
                 density = np.ones_like(xy[0,:])
             
             self.axx.scatter(x=xy[0,:], y=xy[1,:], c=density, picker=4)
@@ -348,19 +342,36 @@ def onpick(event):
         ax4.imshow(im_diff[crop], norm=norm)
 
         # Draw  parameters information window
-        Jx_tmp      = str( np.round(dataframe['Jx'][selected_id],1) )
-        Jy_tmp      = str( np.round(dataframe['Jy'][selected_id],1) )
-        Jxy_tmp     = str( np.round(dataframe['Jxy'][selected_id],1) )
-        noise_tmp   = str( np.round(np.abs(dataframe['WFS noise'][selected_id]),2) )
-        r0_buf_fit  = str( np.round(dataframe['$r_0$ fitted @ 500 [nm]'][selected_id],2) )
-        r0_buf_data = str( np.round(dataframe['$r_0$ SPARTA @ 500 [nm]'][selected_id],2) )
+        if MODE == 'TipToy new' or MODE == 'TipToy old':
+            Jx_tmp      = str( np.round(dataframe['Jx'][selected_id],1) )
+            Jy_tmp      = str( np.round(dataframe['Jy'][selected_id],1) )
+            Jxy_tmp     = str( np.round(dataframe['Jxy'][selected_id],1) )
+            noise_tmp   = str( np.round(np.abs(dataframe['WFS noise'][selected_id]),2) )
+            r0_buf_fit  = str( np.round(dataframe['$r_0$ fitted @ 500 [nm]'][selected_id],2) )
+            r0_buf_data = str( np.round(dataframe['$r_0$ SPARTA @ 500 [nm]'][selected_id],2) )
+
+            textstr = 'Jx, Jy, Jxy: '+Jx_tmp+', '+Jy_tmp+', '+Jxy_tmp+\
+                '\nWFS noise: '+noise_tmp+ \
+                '\nr$_{0 fit}$, r$_{0 data}$:'+r0_buf_fit+', '+r0_buf_data
+
+        elif MODE == 'PSFAO':
+            amp_tmp     = str( np.round(dataframe['amp'][selected_id],2) )
+            b_tmp       = str( np.round(dataframe['b'][selected_id],2) )
+            alph_tmp    = str( np.round(dataframe['alpha'][selected_id],2) )
+            beta_tmp    = str( np.round(dataframe['beta'][selected_id],2) )
+            ratio_tmp   = str( np.round(dataframe['ratio'][selected_id],2) )
+            theta_tmp   = str( np.round(dataframe['theta'][selected_id],2) )
+            r0_buf_fit  = str( np.round(dataframe['$r_0$ fitted @ 500 [nm]'][selected_id],2) )
+            r0_buf_data = str( np.round(dataframe['$r_0$ SPARTA @ 500 [nm]'][selected_id],2) )
+
+            textstr = 'r$_{0 fit}$, r$_{0 data}$:'+r0_buf_fit+', '+r0_buf_data+\
+                '\nA, b: ' + amp_tmp + ',' + b_tmp + '\n'\
+                r"$\alpha$, $\beta$, ratio, $\Theta$: " + \
+                alph_tmp+', '+beta_tmp+', '+ratio_tmp+', '+theta_tmp
 
         props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
-        textstr = 'Jx, Jy, Jxy: '+Jx_tmp+', '+Jy_tmp+', '+Jxy_tmp+'\nWFS noise: '+noise_tmp+ \
-            '\nr$_{0 fit}$, r$_{0 data}$:'+r0_buf_fit+', '+r0_buf_data
         ax7.text(0.0, 0.7, textstr, transform=ax7.transAxes, fontsize=14,
         verticalalignment='top', bbox=props)
-
         ax1.set_title(str(sample_id))
         #print("Picked: " + str(sample_id))
         

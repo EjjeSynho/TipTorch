@@ -482,3 +482,18 @@ def FilterSelectedDatasamples():
 #ProcessRawData()
 #SaveDatasetImages()
 #FilterSelectedDatasamples()
+
+#%%
+def LoadSPHEREsampleByID(path, sample_num): # searches for the sample with the specified ID in
+    files = os.listdir(path)
+    sample_nums = []
+    for file in files: sample_nums.append( int(re.findall(r'[0-9]+', file)[0]) )
+
+    try: id = sample_nums.index(sample_num)
+    except ValueError:
+        print('No sample with a such ID was found!')
+        return np.nan
+        
+    with open(path+files[id], 'rb') as handle:
+        sample = pickle.load(handle)
+    return id, sample

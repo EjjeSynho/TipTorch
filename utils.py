@@ -240,12 +240,13 @@ class OptimizeLBFGS:
 
     def Optimize(self, PSF_ref, to_optimize, steps):
         trigger_times = 0
-
         optimizer = optim.LBFGS(to_optimize, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
 
         for _ in range(steps):
             optimizer.zero_grad()
             loss = self.loss_fn( self.model(*self.parameters), PSF_ref )
+            if np.isnan(loss.item()):
+                return
             loss.backward()
 
             optimizer.step( lambda: self.loss_fn(self.model(*self.parameters), PSF_ref) )
@@ -296,34 +297,35 @@ class OptimizeTRF():
             self.parameters[free_param].requires_grad = True
 
 
-    def FitGauss2D(self, PSF):
-        nPix_crop = 16
-        crop = slice(PSF.shape[0]//2-PSF.shape[0]//2, PSF.shape[0]//2+nPix_crop//2)
-        PSF_cropped = torch.tensor(PSF[crop,crop], requires_grad=False, device=PSF.device)
-        PSF_cropped = PSF_cropped / PSF_cropped.max()
+def FitGauss2D(PSF):
+    nPix_crop = 16
+    crop = slice(PSF.shape[0]//2-nPix_crop//2, PSF.shape[0]//2+nPix_crop//2)
+    PSF_cropped = torch.tensor(PSF[crop,crop], requires_grad=False, device=PSF.device)
+    PSF_cropped = PSF_cropped / PSF_cropped.max()
 
-        px, py = torch.meshgrid(
-            torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=PSF.device),
-            torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=PSF.device),
-            indexing = 'ij')
+    px, py = torch.meshgrid(
+        torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=PSF.device),
+        torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=PSF.device),
+        indexing = 'ij')
 
-        def Gauss2D(X):
-            return X[0]*torch.exp( -((px-X[1])/(2*X[3]))**2 - ((py-X[2])/(2*X[4]))**2 )
+    def Gauss2D(X):
+        return X[0]*torch.exp( -((px-X[1])/(2*X[3]))**2 - ((py-X[2])/(2*X[4]))**2 )
 
-        X0 = torch.tensor([1.0, 0.0, 0.0, 1.1, 1.1], requires_grad=True, device=PSF.device)
+    X0 = torch.tensor([1.0, 0.0, 0.0, 1.1, 1.1], requires_grad=True, device=PSF.device)
 
-        loss_fn = nn.MSELoss()
-        optimizer = optim.LBFGS([X0], history_size=10, max_iter=4, line_search_fn="strong_wolfe")
+    loss_fn = nn.MSELoss()
+    optimizer = optim.LBFGS([X0], history_size=10, max_iter=4, line_search_fn="strong_wolfe")
 
-        for _ in range(20):
-            optimizer.zero_grad()
-            loss = loss_fn(Gauss2D(X0), PSF_cropped)
-            loss.backward()
-            optimizer.step(lambda: loss_fn(Gauss2D(X0), PSF_cropped))
+    for _ in range(20):
+        optimizer.zero_grad()
+        loss = loss_fn(Gauss2D(X0), PSF_cropped)
+        loss.backward()
+        optimizer.step(lambda: loss_fn(Gauss2D(X0), PSF_cropped))
 
-        FWHM = lambda x: 2*np.sqrt(2*np.log(2)) * np.abs(x)
+    FWHM = lambda x: 2*np.sqrt(2*np.log(2)) * np.abs(x)
 
-        return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
+    return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
+
 
 # Function to draw the radial profile of a PSF
 def radial_profile(data, center=None):
@@ -366,7 +368,6 @@ def plot_radial_profile(PSF_ref, PSF_estim, model_label, title=''):
     labs = [l.get_label() for l in ls]
     ax2.legend(ls, labs, loc=0)
     #la chignon et tarte
-
 
 
 def CircPupil(samples, D=8.0, centralObstruction=1.12):

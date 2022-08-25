@@ -17,40 +17,27 @@ from os import path
 import re
 
 from parameterParser import parameterParser
-from SPHERE_data import SPHERE_database
+from SPHERE_data import SPHERE_database,LoadSPHEREsampleByID
 from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask
 from utils import register_hooks, iter_graph
 from utils import OptimizeTRF, OptimizeLBFGS
 from utils import radial_profile, plot_radial_profile
-
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\210_SPHER.2017-09-19T00.38.31.896IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\13_SPHER.2016-09-28T06.29.29.592IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\190_SPHER.2017-03-07T06.09.15.212IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\26_SPHER.2017-09-01T07.45.22.723IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\422_SPHER.2017-05-20T10.28.56.559IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-#path_test = 'C:\\Users\\akuznets\\Data\\SPHERE\\test\\102_SPHER.2017-06-17T00.24.09.582IRD_FLUX_CALIB_CORO_RAW_left.pickle'
-
-num = 450
-path_samples = 'C:/Users/akuznets/Data/SPHERE/test/'
-files = os.listdir(path_samples)
-sample_nums = []
-for file in files: sample_nums.append( int(re.findall(r'[0-9]+', file)[0]) )
+# end of import list
 
 
-def LoadSampleByNum(sample_num):
-    try: id = sample_nums.index(sample_num)
-    except ValueError:
-        print('No sample with such id')
-        return np.nan
-        
-    with open(path_samples+files[id], 'rb') as handle:
-        sample = pickle.load(handle)
-    return id,sample
+#210
+#13
+#190
+#26
+#422
+#102
 
-num_id, data_test = LoadSampleByNum(num)
+num = 260 #450
+
+num_id, data_test = LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', num)
+
 im = data_test['image']
-
 path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
 path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/irdis.ini'))
 
@@ -450,6 +437,8 @@ class TipToy(torch.nn.Module):
             self.end = time.time()
             return (self.end-self.start)*1000.0 # in [ms]
 
+# end of class defenition
+
 #%% -------------------------------------------------------------
 toy = TipToy(config_file, data_test, 'CUDA')
 
@@ -479,7 +468,8 @@ toy.StartTimer()
 PSF_1 = toy(*parameters)
 print(toy.EndTimer())
 PSF_DL = toy.DLPSF()
-plt.imshow(torch.log( torch.hstack((PSF_0[el_croppo], PSF_1[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
+
+plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 
 ''' 
 mask = 1.0 - CircularMask(im, Center(PSF_0, centered=False), 20)
@@ -794,7 +784,7 @@ def PSFcomparator(data_sample):
     A = torch.tensor(data_sample['input']['image'], device=toy2.device)
     C = torch.tensor(data_sample['fitted']['Img. fit'], device=toy2.device)
     PSF_0 = A/A.sum()
-    PSF_1 = C/C.sum()
+    PSF_1 = C/C.sum() #TODO: mb PSF_0 sum?
 
     dx_0, dy_0 = Center(PSF_0)
     bg_0 = BackgroundEstimate(PSF_0, radius=90)
@@ -922,7 +912,7 @@ profile_diff3 = np.abs(profile_3-profile_0) / PSF_0.max().cpu().numpy() * 100 #[
 
 fig = plt.figure(figsize=(6,4), dpi=150)
 ax = fig.add_subplot(111)
-ax.set_title('Fitting vs. Gnosis vs. Direct pred.'  )
+ax.set_title('Fitting vs. Gnosis vs. Direct pred.')
 l0 = ax.plot(profile_0, label='Data')
 l1 = ax.plot(profile_1, label='Fit')
 l2 = ax.plot(profile_2, label='Gnosis', color='g')
@@ -945,7 +935,6 @@ labels = [l.get_label() for l in ls]
 ax2.legend(ls, labels, loc=0)
 
 plt.show()
-#Cut
 
 #la chignon et tarte
 
