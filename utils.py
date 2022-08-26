@@ -244,12 +244,12 @@ class OptimizeLBFGS:
 
         for _ in range(steps):
             optimizer.zero_grad()
-            loss = self.loss_fn( self.model(*self.parameters), PSF_ref )
+            loss = self.loss_fn( self.model.PSD2PSF(*self.parameters), PSF_ref )
             if np.isnan(loss.item()):
                 return
             loss.backward()
 
-            optimizer.step( lambda: self.loss_fn(self.model(*self.parameters), PSF_ref) )
+            optimizer.step( lambda: self.loss_fn(self.model.PSD2PSF(*self.parameters), PSF_ref) )
             if self.verbous:
                 print('Loss:', loss.item(), end="\r", flush=True)
 
@@ -263,38 +263,37 @@ class OptimizeLBFGS:
 class OptimizeTRF():
     def __init__(self, model, parameters) -> None:
         self.model = model
-        self.parameters = parameters
-        self.free_params = []
+        self.free_params = np.where(
+            np.array([param.requires_grad for param in parameters]))[0].tolist()
+        self.parameters = [p.clone().detach() for p in parameters]
 
     def __unpack_params(self, X):
-        to_optimize = torch.tensor(X, dtype=torch.float32, device=self.model.device)
-        for free_param, param in zip(self.free_params, to_optimize):
-            self.parameters[free_param] = param
+        to_optimize = torch.tensor(X.reshape(self.init_shape), dtype=torch.float32, device=self.model.device)
+        for i,free_param in enumerate(self.free_params):
+            self.parameters[free_param] = to_optimize[:,i]
 
     def __wrapper(self,X):
         self.__unpack_params(X)
-        return self.model(*self.parameters)
+        return self.model.PSD2PSF(*self.parameters)
 
     def Optimize(self, PSF_ref):
-        self.free_params = np.where(
-            np.array([param.requires_grad for param in self.parameters]))[0].tolist()
-
         X0 = torch.stack(
-            [param for param in self.parameters if param.requires_grad]).detach().cpu().numpy()
-            
+            [self.parameters[i] for i in self.free_params]).detach().cpu().numpy().T
+        self.init_shape = X0.shape
+        X0 = X0.flatten()
         func = lambda x: (PSF_ref-self.__wrapper(x)).detach().cpu().numpy().reshape(-1)
 
         iterations = 3
         for _ in range(iterations):
             result = least_squares(func, X0, method='trf',
-                                ftol=1e-9, xtol=1e-9, gtol=1e-9,
-                                max_nfev=1000, verbose=1, loss="linear")
+                                   ftol=1e-9, xtol=1e-9, gtol=1e-9,
+                                   max_nfev=1000, verbose=1, loss="linear")
             X0 = result.x
-        
         self.__unpack_params(X0)
 
         for free_param in self.free_params: # restore intial requires_grad from PyTorch
             self.parameters[free_param].requires_grad = True
+        return self.parameters
 
 
 def FitGauss2D(PSF):

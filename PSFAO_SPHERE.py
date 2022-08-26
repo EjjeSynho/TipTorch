@@ -218,6 +218,8 @@ class PSFAO(torch.nn.Module):
 
         super().__init__()
 
+        self.norm_regime = 'sum'
+
         # Read data and initialize AO system
         self.pixels_per_l_D = pixels_per_l_D
         self.AO_config = AO_config
@@ -226,7 +228,9 @@ class PSFAO(torch.nn.Module):
 
 
     def VonKarmanPSD(self, r0, L0):
-        return self.cte*r0**(-5/3)*(self.k2 + 1/L0**2)**(-11/6) * self.mask
+        #return self.cte*r0**(-5/3)*(self.k2 + 1/L0**2)**(-11/6) * self.mask
+        return self.cte*r0.unsqueeze(1).unsqueeze(2)**(-5/3)*(self.k2.unsqueeze(0) + \
+            1/L0.unsqueeze(1).unsqueeze(2)**2)**(-11/6) * self.mask.unsqueeze(0)
 
 
     def JitterCore(self, Jx, Jy, Jxy):
@@ -243,6 +247,39 @@ class PSFAO(torch.nn.Module):
 
 
     def MoffatPSD(self, amp, b, alpha, beta, ratio, theta):
+        ax = (alpha * ratio).unsqueeze(1).unsqueeze(2)
+        ay = (alpha / ratio).unsqueeze(1).unsqueeze(2)
+
+        uxx = self.kx2_AO.unsqueeze(0)
+        uxy = self.kxy_AO.unsqueeze(0)
+        uyy = self.ky2_AO.unsqueeze(0)
+
+        #def reduced_center_coord(uxx, uxy, uyy, ax, ay, theta):
+        c  = torch.cos(theta).unsqueeze(1).unsqueeze(2)
+        s  = torch.sin(theta).unsqueeze(1).unsqueeze(2)
+        s2 = torch.sin(2.0 * theta).unsqueeze(1).unsqueeze(2)
+
+        rxx = (c/ax)**2 + (s/ay)**2
+        rxy =  s2/ay**2 -  s2/ax**2
+        ryy = (c/ay)**2 + (s/ax)**2
+
+        uu = rxx*uxx + rxy*uxy + ryy*uyy
+
+        V = (1.0+uu)**(-beta.unsqueeze(1).unsqueeze(2)) # Moffat shape
+
+        removeInside = 0.0
+        E = (beta.unsqueeze(1).unsqueeze(2)-1) / (np.pi*ax*ay)
+        Fout = (1 +      (self.kc**2)/(ax*ay))**(1-beta.unsqueeze(1).unsqueeze(2))
+        Fin  = (1 + (removeInside**2)/(ax*ay))**(1-beta.unsqueeze(1).unsqueeze(2))
+        F = 1/(Fin-Fout)
+
+        MoffatPSD = (amp.unsqueeze(1).unsqueeze(2) * V*E*F + b.unsqueeze(1).unsqueeze(2)) * \
+            self.mask_corrected_AO.unsqueeze(0)
+        MoffatPSD[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
+
+        return MoffatPSD
+
+        '''        
         ax = alpha * ratio
         ay = alpha / ratio
 
@@ -270,9 +307,36 @@ class PSFAO(torch.nn.Module):
         MoffatPSD = (amp * V*E*F + b) * self.mask_corrected_AO
         MoffatPSD[self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
         return MoffatPSD
+        '''
 
 
     def PSD2PSF(self, r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta):
+    
+        PSD = self.VonKarmanPSD(r0.abs(), L0.abs()) + \
+            self.PSD_padder(self.MoffatPSD(amp, b.abs(), alpha, beta, ratio, theta))
+
+        dk = 2*self.kc/self.nOtf_AO
+        PSD *= (dk*self.wvl*1e9/2/np.pi)**2
+        cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD)))
+        SF  = torch.abs(cov).max()-cov
+        fftPhasor = torch.exp(-np.pi*1j*self.sampling_factor*(
+            self.U.unsqueeze(0)*dx.unsqueeze(1).unsqueeze(2) +
+            self.V.unsqueeze(0)*dy.unsqueeze(1).unsqueeze(2)))
+
+        OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/self.wvl)**2)
+
+        OTF = OTF_turb * self.OTF_static.unsqueeze(0) * fftPhasor
+        PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) ).unsqueeze(0)
+        PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='area').squeeze(0)
+
+        if self.norm_regime == 'max':
+            return PSF_out/torch.amax(PSF_out, dim=(1,2), keepdim=True) * F.unsqueeze(1).unsqueeze(2) + bg.unsqueeze(1).unsqueeze(2)
+        elif self.norm_regime == 'sum':
+            return PSF_out/PSF_out.sum(dim=(1,2), keepdim=True) * F.unsqueeze(1).unsqueeze(2) + bg.unsqueeze(1).unsqueeze(2)
+        else:
+            return PSF_out * F.unsqueeze(1).unsqueeze(2) + bg.unsqueeze(1).unsqueeze(2)
+
+        '''        
         PSD = self.VonKarmanPSD(r0.abs(), L0.abs()) + \
             self.PSD_padder(self.MoffatPSD(amp, b.abs(), alpha, beta, ratio, theta))
 
@@ -289,10 +353,13 @@ class PSFAO(torch.nn.Module):
         PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='area').squeeze(0).squeeze(0)
 
         return PSF_out/PSF_out.sum() * F + bg
+        '''
 
-
-    def forward(self, r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta):
-        return self.PSD2PSF(r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta)
+    def forward(self, x):
+        inp = [x[:,i] for i in range(x.shape[1])]
+        return self.PSD2PSF(*inp)
+    #def forward(self, r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta):
+        #return self.PSD2PSF(r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta)
 
 
     def StartTimer(self):
@@ -315,97 +382,59 @@ class PSFAO(torch.nn.Module):
 
 #%%
 psfao = PSFAO(config_file, data_test, 'CUDA')
+psfao.norm_regime = 'max'
+#psfao.norm_regime = 'sum'
 
-r0    = torch.tensor(r0_new(data_test['r0'], psfao.wvl, 0.5e-6), requires_grad=True, device=psfao.device)
-L0    = torch.tensor(25.0, requires_grad=False, device=psfao.device) # Outer scale [m]
-F     = torch.tensor(1.0,  requires_grad=True,  device=psfao.device)
-bg    = torch.tensor(0.0,  requires_grad=True,  device=psfao.device)
-b     = torch.tensor(1e-4, requires_grad=True,  device=psfao.device) # Phase PSD background [rad² m²]
-amp   = torch.tensor(3.0,  requires_grad=True,  device=psfao.device) # Phase PSD Moffat amplitude [rad²]
-dx    = torch.tensor(0.0,  requires_grad=True,  device=psfao.device)
-dy    = torch.tensor(0.0,  requires_grad=True,  device=psfao.device)
-alpha = torch.tensor(0.1,  requires_grad=True,  device=psfao.device) # Phase PSD Moffat alpha [1/m]
-ratio = torch.tensor(1.0,  requires_grad=True,  device=psfao.device) # Phase PSD Moffat ellipticity
-theta = torch.tensor(0.0,  requires_grad=True,  device=psfao.device) # Phase PSD Moffat angle
-beta  = torch.tensor(1.6,  requires_grad=True,  device=psfao.device) # Phase PSD Moffat beta power law
+r0    = torch.tensor([r0_new(data_test['r0'], psfao.wvl, 0.5e-6)], requires_grad=True, device=psfao.device)
+L0    = torch.tensor([25.0], requires_grad=False, device=psfao.device) # Outer scale [m]
+F     = torch.tensor([1.0],  requires_grad=True,  device=psfao.device)
+dx    = torch.tensor([0.0],  requires_grad=True,  device=psfao.device)
+dy    = torch.tensor([0.0],  requires_grad=True,  device=psfao.device)
+bg    = torch.tensor([0.0],  requires_grad=True,  device=psfao.device)
+amp   = torch.tensor([3.0],  requires_grad=True,  device=psfao.device) # Phase PSD Moffat amplitude [rad²]
+b     = torch.tensor([1e-4], requires_grad=True,  device=psfao.device) # Phase PSD background [rad² m²]
+alpha = torch.tensor([0.1],  requires_grad=True,  device=psfao.device) # Phase PSD Moffat alpha [1/m]
+beta  = torch.tensor([1.6],  requires_grad=True,  device=psfao.device) # Phase PSD Moffat beta power law
+ratio = torch.tensor([1.0],  requires_grad=True,  device=psfao.device) # Phase PSD Moffat ellipticity
+theta = torch.tensor([0.0],  requires_grad=True,  device=psfao.device) # Phase PSD Moffat angle
+
+
+rep = [2]
+r0    = r0.repeat(rep)
+L0    = L0.repeat(rep)
+F     = F.repeat(rep)
+dx    = dx.repeat(rep)
+dy    = dy.repeat(rep)
+bg    = bg.repeat(rep)
+amp   = amp.repeat(rep)
+b     = b.repeat(rep)
+alpha = alpha.repeat(rep)
+beta  = beta.repeat(rep)
+ratio = ratio.repeat(rep)
+theta = theta.repeat(rep)
 
 parameters = [r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta]
-
+x = torch.stack(parameters).T#.repeat([4,1])
 
 el_croppo = slice(256//2-32, 256//2+32)
-el_croppo = (el_croppo, el_croppo)
+el_croppo = (0, el_croppo, el_croppo)
 
-param = im.sum()
-PSF_0 = torch.tensor(im/param, device=psfao.device)
-
-dx_0, dy_0 = Center(PSF_0)
-bg_0 = BackgroundEstimate(PSF_0, radius=90)
+if    psfao.norm_regime == 'max': param = im.max()
+elif  psfao.norm_regime == 'sum': param = im.sum()
+else: param = 1.0
+PSF_0 = torch.tensor(im/param, device=psfao.device).unsqueeze(0)
 
 psfao.StartTimer()
-PSF_1 = psfao(*parameters)
+#PSF_1 = psfao(x)
+PSF_1 = psfao.PSD2PSF(*parameters)
 print(psfao.EndTimer())
 
 plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 #%% ---------------------------------------------------------------------------
-'''
-N_src = torch.ones(5, device=psfao.device)
-r0 = torch.tensor(1.215965986251831, requires_grad=True, device=psfao.device) * N_src
-L0 = torch.tensor(25.0, requires_grad=True, device=psfao.device) * N_src
-F = torch.tensor(0.9732086658477783, requires_grad=True, device=psfao.device) * N_src
-bg = torch.tensor(1.4281032179042086e-07, requires_grad=True, device=psfao.device) * N_src
-b = torch.tensor(-0.0004935440374538302, requires_grad=True, device=psfao.device) * N_src
-amp = torch.tensor(2.995750665664673, requires_grad=True, device=psfao.device) * N_src
-dx = torch.tensor(0.4570627808570862, requires_grad=True, device=psfao.device) * N_src
-dy = torch.tensor(0.1504552960395813, requires_grad=True, device=psfao.device) * N_src
-alpha = torch.tensor(0.0031549211125820875, requires_grad=True, device=psfao.device) * N_src
-ratio = torch.tensor(0.9471700191497803, requires_grad=True, device=psfao.device) * N_src
-theta = torch.tensor(-0.7410240173339844, requires_grad=True, device=psfao.device) * N_src
-beta = torch.tensor(1.6140474081039429, requires_grad=True, device=psfao.device) * N_src
+regime_opt = 'TRF'
+#regime_opt = 'LBFGS'
 
-
-ax = (alpha * ratio).unsqueeze(1).unsqueeze(2)
-ay = (alpha / ratio).unsqueeze(1).unsqueeze(2)
-
-uxx = psfao.kx2_AO.unsqueeze(0)
-uxy = psfao.kxy_AO.unsqueeze(0)
-uyy = psfao.ky2_AO.unsqueeze(0)
-
-#def reduced_center_coord(uxx, uxy, uyy, ax, ay, theta):
-c  = torch.cos(theta).unsqueeze(1).unsqueeze(2)
-s  = torch.sin(theta).unsqueeze(1).unsqueeze(2)
-s2 = torch.sin(2.0 * theta).unsqueeze(1).unsqueeze(2)
-
-rxx = (c/ax)**2 + (s/ay)**2
-rxy =  s2/ay**2 -  s2/ax**2
-ryy = (c/ay)**2 + (s/ax)**2
-
-uu = rxx*uxx + rxy*uxy + ryy*uyy
-#return uu
-'''
-#%%
-b = torch.ones([1,7,7])
-a = torch.tensor([1,2,3,4,5]).unsqueeze(1).unsqueeze(2)
-
-print(a*b)
-
-#%%
-uu = reduced_center_coord(psfao.kx2_AO, psfao.kxy_AO, psfao.ky2_AO, ax, ay, theta)
-V = (1.0+uu)**(-beta) # Moffat shape
-
-removeInside = 0.0
-E = (beta-1) / (np.pi*ax*ay)
-Fout = (1 +      (psfao.kc**2)/(ax*ay))**(1-beta)
-Fin  = (1 + (removeInside**2)/(ax*ay))**(1-beta)
-F = 1/(Fin-Fout)
-
-MoffatPSD = (amp * V*E*F + b) * psfao.mask_corrected_AO
-MoffatPSD[psfao.nOtf_AO//2, psfao.nOtf_AO//2] *= 0.0
-
-
-
-
-
-#%%
+#if regime_opt = 'LBFGS':
 loss_fn = nn.L1Loss(reduction='sum')
 optimizer_lbfgs = OptimizeLBFGS(psfao, parameters, loss_fn)
 
@@ -415,24 +444,22 @@ for i in range(20):
     optimizer_lbfgs.Optimize(PSF_0, [amp, alpha, beta], 5)
     optimizer_lbfgs.Optimize(PSF_0, [ratio, theta], 5)
     optimizer_lbfgs.Optimize(PSF_0, [b], 2)
+PSF_1 = psfao.PSD2PSF(*parameters)
 
-'''
+#%%
 optimizer_trf = OptimizeTRF(psfao, parameters)
-optimizer_trf.Optimize(PSF_0)
-PSF_1 = psfao(*parameters)
-r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta = parameters
-'''
+parameters = optimizer_trf.Optimize(PSF_0)
+PSF_1 = psfao.PSD2PSF(*parameters)
+
 #%%
 
-PSF_1 = psfao(*parameters)
 plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 plt.show()
 
-plot_radial_profile(PSF_0, PSF_1, 'PSF AO', title='IRDIS PSF')
+plot_radial_profile(PSF_0.squeeze(0), PSF_1.squeeze(0), 'PSF AO', title='IRDIS PSF')
 plt.show()
 
 #la chignon et tarte
-
 
 #%% =============================== MAKE DATASET ==========================================
 ### =======================================================================================
@@ -447,20 +474,12 @@ database = SPHERE_database(path_input, path_fitted)
 # Filter bad samples
 bad_samples = []
 for sample in database:
-    buf = np.array([sample['fitted']['r0'],
-                    sample['fitted']['F'],
-                    sample['fitted']['dx'],
-                    sample['fitted']['dy'],
+    buf = np.array([sample['fitted']['r0'], sample['fitted']['F'],
+                    sample['fitted']['dx'], sample['fitted']['dy'],
                     sample['fitted']['bg'],
-                    sample['fitted']['amp'],
-                    sample['fitted']['b'],
-                    sample['fitted']['alpha'],
-                    sample['fitted']['beta'],
-                    sample['fitted']['ratio'],
-                    sample['fitted']['theta']])
-
-    wvl = sample['input']['spectrum']['lambda']
-    r0_500 = r0_new(np.abs(sample['fitted']['r0']), 0.5e-6, wvl)
+                    sample['fitted']['amp'], sample['fitted']['b'],
+                    sample['fitted']['alpha'], sample['fitted']['beta'],
+                    sample['fitted']['ratio'], sample['fitted']['theta']])
     
     if np.any(np.isnan(buf)) or np.isnan(sample['input']['WFS']['Nph vis']):
        bad_samples.append(sample['file_id']) 
@@ -472,7 +491,6 @@ print(str(len(bad_samples))+' samples were filtered, '+str(len(database.data))+'
 
 
 # %%
-
 def GetInputs(data_sample):
     #wvl     = data_sample['input']['spectrum']['lambda']
     r_0     = 3600*180/np.pi*0.976*0.5e-6 / data_sample['input']['seeing']['SPARTA'] # [m]
@@ -482,91 +500,133 @@ def GetInputs(data_sample):
     airmass = data_sample['input']['telescope']['airmass']
     Nph = np.log10(
         data_sample['input']['WFS']['Nph vis'] * data_sample['input']['WFS']['rate']*1240)
-    input = np.array([r_0, tau0, wspeed, wdir, airmass, Nph])
-    const = np.array([data_sample['fitted']['dx'],
-                      data_sample['fitted']['dy'],
-                      data_sample['fitted']['bg']])
-    return input, const
+    input = np.array([
+        r_0, tau0, wspeed, wdir, airmass, Nph,
+        data_sample['fitted']['dx'],
+        data_sample['fitted']['dy'],
+        data_sample['fitted']['bg']])
+    return input
 
 
-def GetLabels(data_sample):
-    r0_500 = r0_new(np.abs(data_sample['fitted']['r0']), 0.5e-6, data_sample['input']['spectrum']['lambda'])
-    buf =  np.array([r0_500, 25.0,
-                     data_sample['fitted']['F'],
-                     data_sample['fitted']['amp'],
-                     data_sample['fitted']['b'],
-                     data_sample['fitted']['alpha'],
-                     data_sample['fitted']['beta'],
-                     data_sample['fitted']['ratio'],
-                     data_sample['fitted']['theta']])
+def GetLabels(sample):
+    #r0_500 = r0_new(np.abs(data_sample['fitted']['r0']), 0.5e-6, data_sample['input']['spectrum']['lambda'])
+    buf =  np.array([sample['fitted']['r0'],
+                     25.0,
+                     sample['fitted']['F'],
+                     sample['fitted']['dx'],
+                     sample['fitted']['dy'],
+                     sample['fitted']['bg'],
+                     sample['fitted']['amp'],
+                     sample['fitted']['b'],
+                     sample['fitted']['alpha'],
+                     sample['fitted']['beta'],
+                     sample['fitted']['ratio'],
+                     sample['fitted']['theta']])
     return buf
 
 
-def GenerateDataset(dataset):
-    X = [] # inputs
-    C = [] # constant data
+# Filter samples with the same (most presented) wavelength
+wvls = []
+for sample in database:
+    wvl = sample['input']['spectrum']['lambda']
+    wvls.append(wvl)
+wvls = np.array(wvls)
+
+sample_ids = np.arange(len(database))
+wvl_unique, _, unique_indices, counts = np.unique(wvls, return_index=True, return_inverse=True, return_counts=True)
+database_wvl = database.subset(sample_ids[unique_indices==np.argmax(counts)])
+
+
+def GenerateDataset(dataset, with_PSF=False):
+    x = [] # inputs
     y = [] # labels
 
     for sample in dataset:
-        input, const = GetInputs(sample)
-        label = GetLabels(sample)
-        X.append(torch.tensor(input, device=psfao.device).float())
-        C.append(torch.tensor(const, device=psfao.device).float())
-        y.append(torch.tensor(label, device=psfao.device).float())
+        input = GetInputs(sample)
+        if with_PSF:
+            pred = sample['input']['image']
+            pred = pred / pred.max()
+        else:
+            pred = GetLabels(sample)
+        x.append(torch.tensor(input, device=psfao.device).float())
+        y.append(torch.tensor(pred,  device=psfao.device).float())
+    
+    if with_PSF:
+        return torch.vstack(x), torch.dstack(y).permute([2,0,1])
+    else:
+        return torch.vstack(x), torch.vstack(y)
 
-    return torch.vstack(X), torch.vstack(C), torch.vstack(y)
+#%%
 
-validation_ids = np.unique(np.random.randint(0, high=len(database.data), size=50, dtype=int)).tolist()
+X,Y = GenerateDataset(database_wvl, with_PSF=True)
+
+for i in range(Y.shape[0]):
+    plt.plot(Y[i,128,:].detach().cpu())
+plt.show()
+
+
+#%%
+
+testo = Y.sum(dim=0, keepdim=True)
+plt.imshow(torch.log(testo).detach().cpu()[el_croppo])
+
+#%%
+
+validation_ids = np.unique(np.random.randint(0, high=len(database_wvl), size=30, dtype=int)).tolist()
 database_train, database_val = database.split(validation_ids)
 
-X_train, C_train, y_train = GenerateDataset(database_train)
-X_val, C_val, y_val = GenerateDataset(database_val)
+X_train, y_train = GenerateDataset(database_train, with_PSF=False)
+X_val, y_val = GenerateDataset(database_val, with_PSF=False)
 
 print(str(X_train.shape[0])+' samples in train dataset, '+str(X_val.shape[0])+' in validation')
 
-
 # %%
 class Gnosis(torch.nn.Module):
-        def __init__(self, input_size, hidden_size, device):
+        def __init__(self, input_size, hidden_size, psf_model=None, device='cpu'):
             self.device = device
             super(Gnosis, self).__init__()
             self.input_size  = input_size
             self.hidden_size = hidden_size
 
             self.fc1  = torch.nn.Linear(self.input_size, self.hidden_size*2, device=self.device)
-            self.relu1 = torch.nn.SiLU()
+            self.act1 = torch.nn.Tanh()
             self.fc2  = torch.nn.Linear(self.hidden_size*2, hidden_size, device=self.device)
-            self.relu2 = torch.nn.SiLU()
-            self.fc3  = torch.nn.Linear(self.hidden_size, 9, device=self.device)
+            self.act2 = torch.nn.Tanh()
+            self.fc3  = torch.nn.Linear(self.hidden_size, 12, device=self.device)
   
             self.inp_normalizer = torch.ones(self.input_size, device=self.device)
-            self.out_normalizer = torch.ones(9, device=self.device)
+            self.out_normalizer = torch.ones(12, device=self.device)
             self.inp_bias = torch.zeros(self.input_size, device=self.device)
-            self.out_bias = torch.zeros(9, device=self.device)
+            self.out_bias = torch.zeros(12, device=self.device)
+
+            self.psf_model = psf_model
+
 
         def forward(self, x):
-            hidden1   = self.fc1( (x+self.inp_bias) * self.inp_normalizer )
-            relu1     = self.relu1(hidden1)
-            hidden2   = self.fc2(relu1)
-            relu2     = self.relu2(hidden2)
-            model_inp = (self.fc3(relu2).abs() + self.out_bias) * self.out_normalizer
+            hidden1 = self.fc1(x * self.inp_normalizer + self.inp_bias)
+            act1 = self.act1(hidden1)
+            hidden2 = self.fc2(act1)
+            act2 = self.act2(hidden2)
+            model_inp = self.fc3(act2) * self.out_normalizer + self.out_bias
+            #model_inp = (self.fc3(act2)*0.0+1.0) * self.out_normalizer + self.out_bias
+            if self.psf_model is None:
+                return model_inp
+            else:
+                return self.psf_model(model_inp)
 
-            return model_inp
 
+gnosis = Gnosis(input_size=9, hidden_size=200, device=psfao.device)
+gnosis.inp_normalizer = torch.tensor([5, 50, 1/50, 1/360, 1, 0.5, 2, 2, 1e6], device=psfao.device).unsqueeze(0)
+gnosis.inp_bias = torch.tensor([0, 0, 0, 0, -1, -3, 0, 0, 0],   device=psfao.device).unsqueeze(0)
+gnosis.out_normalizer = 0.25/torch.tensor([0.5, 0.01, 0.25, 1, 1, 2e6, 0.125, 1e3, 1e2, 0.2, 0.5, 0.5], device=psfao.device).unsqueeze(0)
 
-gnosis = Gnosis(input_size=6, hidden_size=200, device=psfao.device)
-gnosis.inp_normalizer = torch.tensor([2., 10., 1./20., 1./360, 10., 1.], device=psfao.device)
-gnosis.inp_bias = torch.tensor([0.0, 0.0, 0.0, 0.0, -1.0, -6.0],   device=psfao.device)
-#loss_fn = nn.MSELoss() #reduction='sum')
-loss_fn = nn.L1Loss() #reduction='sum')
-
-print(gnosis)
 
 #%%
+loss_fn = nn.L1Loss() #reduction='sum')
 optimizer = optim.SGD([{'params': gnosis.fc1.parameters()},
-                       {'params': gnosis.relu1.parameters()},
+                       {'params': gnosis.act1.parameters()},
                        {'params': gnosis.fc2.parameters()},
-                       {'params': gnosis.relu2.parameters()},
+                       {'params': gnosis.act2.parameters()},
                        {'params': gnosis.fc3.parameters()}], lr=1e-4, momentum=0.9)
 
 for i in range(40000):
@@ -578,6 +638,7 @@ for i in range(40000):
     optimizer.step() # lambda: loss_fn(gnosis(X,C), y))
 
 print('Validation accuracy: '+str(loss_fn(gnosis(X_val), y_val).item()))
+
 #%%
 
 def PSFcomparator(data_sample):
