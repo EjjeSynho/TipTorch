@@ -356,7 +356,7 @@ class SPHERE_database:
         try: #file_id is the identifier of a sample in the database, id is just an index in array
             id = self.file_ids.index(sample_id)
         except ValueError:
-            print('Cannot find sample with such index!')
+            print('Cannot find sample with index', sample_id)
             return None
         return {'input': self.data[id][0], 'fitted': self.data[id][1], 'index': id}
 

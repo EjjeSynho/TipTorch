@@ -35,23 +35,26 @@ exec(code)
 #num = 450
 #num_id, data_sample = LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', num)
 
-path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
+path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP_old/P3')
 path_ini  = path.join(path_root, path.normpath('aoSystem/parFiles/irdis.ini'))
 config_file = parameterParser(path_root, path_ini).params
 
 def FitDataSample(data_test, save_fitted_path=None):
     toy = TipToy(config_file, data_test, 'CUDA')
-    #toy.Update(data_test, reinit_grids=True)
-    im = data_test['image']
-    norma = im.sum()
-    PSF_0 = torch.tensor(im/norma, device=toy.device)
-    dx_0, dy_0 = Center(PSF_0)
+    toy.norm_regime = 'max'
 
+    im = data_test['image']
+    if    toy.norm_regime == 'max': norma = im.max()
+    elif  toy.norm_regime == 'sum': norma = im.sum()
+    else: norma = 1.0
+    PSF_0 = torch.tensor(im/norma, device=toy.device)
+
+    dx_0, dy_0 = Center(PSF_0)
     bg_0 = BackgroundEstimate(PSF_0, radius=90)
     WFS_n = toy.NoiseVariance(r0_new(data_test['r0'], toy.GS_wvl, 0.5e-6))
 
     r0  = torch.tensor(r0_new(data_test['r0'], toy.wvl, 0.5e-6), requires_grad=True, device=toy.device)
-    L0  = torch.tensor(25.0,  requires_grad=True, device=toy.device)
+    L0  = torch.tensor(25.0,  requires_grad=True,  device=toy.device)
     F   = torch.tensor(1.0,   requires_grad=True,  device=toy.device)
     dx  = torch.tensor(dx_0,  requires_grad=True,  device=toy.device)
     dy  = torch.tensor(dy_0,  requires_grad=True,  device=toy.device)

@@ -19,15 +19,6 @@ r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
 
-def VLTpupilArea(instrument='SPHERE'): # [m2]
-    if instrument == 'SPHERE':
-        pupil = fits.getdata('C:/Users/akuznets/Projects/TIPTOP/P3/aoSystem/data/VLT_CALIBRATION\VLT_PUPIL/ALC2LyotStop_measured.fits').astype('float')
-    else:
-        raise NotImplementedError
-    relative_area = pupil.sum() / (np.pi*(pupil.shape[0]//2-6.5)**2)
-    true_area = np.pi * 8**2 * relative_area
-    return true_area
-
 class Photometry:
     def __init__(self):
         
@@ -340,14 +331,14 @@ def radial_profile(data, center=None):
     return radialprofile[0:data.shape[0]//2]
 
 
-def plot_radial_profile(PSF_ref, PSF_estim, model_label, title=''):
+def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300):
     center = Center(PSF_ref, centered=False)
     profile_0 = radial_profile(PSF_ref.detach().cpu().numpy(), center)[:32+1]
     profile_1 = radial_profile(PSF_estim.detach().cpu().numpy(), center)[:32+1]
 
     profile_diff = np.abs(profile_1-profile_0) / profile_0.max() * 100 #[%]
 
-    fig = plt.figure(figsize=(6,4), dpi=300)
+    fig = plt.figure(figsize=(6,4), dpi=dpi)
     ax = fig.add_subplot(111)
     ax.set_title(title)
     ax.set_xlabel('Pixels')
@@ -367,6 +358,90 @@ def plot_radial_profile(PSF_ref, PSF_estim, model_label, title=''):
     labs = [l.get_label() for l in ls]
     ax2.legend(ls, labs, loc=0)
     #la chignon et tarte
+
+
+def DisplayDataset(samples_list, tiles_in_row, show_labels=True, dpi=300):
+    from PIL import Image, ImageDraw
+    from matplotlib import cm
+
+    def prepare_single_img(sample, crop_region=32):
+        buf_data = sample['input']['image']
+        label_buf = sample['file_id']
+
+        crop_region = 32
+        ROI_x = slice(buf_data.shape[0]//2-crop_region, buf_data.shape[0]//2+crop_region)
+        ROI_y = slice(buf_data.shape[1]//2-crop_region, buf_data.shape[1]//2+crop_region)
+        buf_data = np.log(buf_data/buf_data.max())[(ROI_x, ROI_y)]
+        buf_data -= buf_data[np.where(np.isfinite(buf_data))].min()
+        buf_data[np.where(np.isnan(buf_data))] = 0.0
+
+        im_buf = Image.fromarray( np.uint8(cm.viridis(buf_data/buf_data.max())*255) )
+        if show_labels:
+            I1 = ImageDraw.Draw(im_buf)
+            I1.text((0,0), str(label_buf), fill=(255,255,255))
+        return np.asarray(im_buf)
+
+    def prepare_row(row_list):
+        row_processed = [prepare_single_img(buf) for buf in row_list]
+        hspace = 3
+        hgap = np.ones([row_processed[0].shape[0], hspace, 4], dtype=row_processed[0].dtype)
+
+        row = []
+        for i in range(len(row_processed)-1):
+            row.append(row_processed[i])
+            row.append(hgap)
+        row.append(row_processed[-1])
+        return np.hstack(row)
+
+    def prepare_ids(num_in_row, samples_num):
+        A = []
+        ids = np.arange(samples_num).tolist()
+        c = 0
+        if num_in_row > samples_num: num_in_row = samples_num
+        for i in range(samples_num//num_in_row+1):
+            a = []
+            for j in range(num_in_row):
+                if c >= samples_num: break
+                a.append(ids[c])
+                c = c+1
+            if len(a) > 0: A.append(a)
+        return A
+
+    def match_dimensions(col_list):
+        delta_width = col_list[-2].shape[1] - col_list[-1].shape[1]
+
+        if delta_width > 0:
+            filler = np.ones([col_list[-2].shape[0], delta_width, 4], dtype=np.uint8)*255
+            col_list[-1] = np.hstack([col_list[-1], filler])
+        return col_list
+
+    def prepare_cols(samples_list, ids_list):
+        col_list = []
+        for a in ids_list:
+            buf_samples = [samples_list[i] for i in a]
+            col_list.append(prepare_row(buf_samples))
+
+        col_list = match_dimensions(col_list)
+
+        col_processed = [col for col in col_list]
+        vspace = 3
+        vgap = np.ones([vspace, col_processed[0].shape[1], 4], dtype=col_processed[0].dtype)*255
+
+        cols = []
+        for i in range(len(col_processed)-1):
+            cols.append(col_processed[i])
+            cols.append(vgap)
+        cols.append(col_processed[-1])
+        return np.vstack(cols)
+
+    samples_num = len(samples_list)
+
+    ids  = prepare_ids(tiles_in_row, samples_num)
+    tile = prepare_cols(samples_list, ids)
+
+    plt.figure(dpi=dpi)
+    plt.axis('off')
+    plt.imshow(tile)
 
 
 def CircPupil(samples, D=8.0, centralObstruction=1.12):
@@ -477,3 +552,13 @@ def PupilVLT(samples, vangle=[0,0], petal_modes=False):
 
     else:
         return petal_1 + petal_2 + petal_3 + petal_4
+
+
+def VLTpupilArea(instrument='SPHERE'): # [m2]
+    if instrument == 'SPHERE':
+        pupil = fits.getdata('C:/Users/akuznets/Projects/TIPTOP/P3/aoSystem/data/VLT_CALIBRATION\VLT_PUPIL/ALC2LyotStop_measured.fits').astype('float')
+    else:
+        raise NotImplementedError
+    relative_area = pupil.sum() / (np.pi*(pupil.shape[0]//2-6.5)**2)
+    true_area = np.pi * 8**2 * relative_area
+    return true_area

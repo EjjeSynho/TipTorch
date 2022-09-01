@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from parameterParser import parameterParser
 from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
-from utils import Center, BackgroundEstimate, CircularMask
+from utils import Center, BackgroundEstimate, CircularMask, DisplayDataset
 from utils import register_hooks, iter_graph
 from utils import OptimizeTRF, OptimizeLBFGS
 from utils import radial_profile, plot_radial_profile
@@ -38,7 +38,7 @@ num = 260
 num_id, data_test = LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', num)
 
 im = data_test['image']
-path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
+path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP_old/P3')
 path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/irdis.ini'))
 
 config_file = parameterParser(path_root, path_ini).params
@@ -358,8 +358,6 @@ class PSFAO(torch.nn.Module):
     def forward(self, x):
         inp = [x[:,i] for i in range(x.shape[1])]
         return self.PSD2PSF(*inp)
-    #def forward(self, r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta):
-        #return self.PSD2PSF(r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta)
 
 
     def StartTimer(self):
@@ -398,21 +396,6 @@ beta  = torch.tensor([1.6],  requires_grad=True,  device=psfao.device) # Phase P
 ratio = torch.tensor([1.0],  requires_grad=True,  device=psfao.device) # Phase PSD Moffat ellipticity
 theta = torch.tensor([0.0],  requires_grad=True,  device=psfao.device) # Phase PSD Moffat angle
 
-
-rep = [2]
-r0    = r0.repeat(rep)
-L0    = L0.repeat(rep)
-F     = F.repeat(rep)
-dx    = dx.repeat(rep)
-dy    = dy.repeat(rep)
-bg    = bg.repeat(rep)
-amp   = amp.repeat(rep)
-b     = b.repeat(rep)
-alpha = alpha.repeat(rep)
-beta  = beta.repeat(rep)
-ratio = ratio.repeat(rep)
-theta = theta.repeat(rep)
-
 parameters = [r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta]
 x = torch.stack(parameters).T#.repeat([4,1])
 
@@ -425,48 +408,46 @@ else: param = 1.0
 PSF_0 = torch.tensor(im/param, device=psfao.device).unsqueeze(0)
 
 psfao.StartTimer()
-#PSF_1 = psfao(x)
-PSF_1 = psfao.PSD2PSF(*parameters)
+PSF_1 = psfao(x)
+#PSF_1 = psfao.PSD2PSF(*parameters)
 print(psfao.EndTimer())
 
 plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
+
 #%% ---------------------------------------------------------------------------
-regime_opt = 'TRF'
-#regime_opt = 'LBFGS'
+#regime_opt = 'TRF'
+regime_opt = 'LBFGS'
 
-#if regime_opt = 'LBFGS':
-loss_fn = nn.L1Loss(reduction='sum')
-optimizer_lbfgs = OptimizeLBFGS(psfao, parameters, loss_fn)
+if regime_opt == 'LBFGS':
+    loss_fn = nn.L1Loss(reduction='sum')
+    optimizer_lbfgs = OptimizeLBFGS(psfao, parameters, loss_fn)
 
-for i in range(20):
-    optimizer_lbfgs.Optimize(PSF_0, [r0, F, dx, dy], 2)
-    optimizer_lbfgs.Optimize(PSF_0, [bg], 2)
-    optimizer_lbfgs.Optimize(PSF_0, [amp, alpha, beta], 5)
-    optimizer_lbfgs.Optimize(PSF_0, [ratio, theta], 5)
-    optimizer_lbfgs.Optimize(PSF_0, [b], 2)
+    for i in range(20):
+        optimizer_lbfgs.Optimize(PSF_0, [r0, F, dx, dy], 2)
+        optimizer_lbfgs.Optimize(PSF_0, [bg], 2)
+        optimizer_lbfgs.Optimize(PSF_0, [amp, alpha, beta], 5)
+        optimizer_lbfgs.Optimize(PSF_0, [ratio, theta], 5)
+        optimizer_lbfgs.Optimize(PSF_0, [b], 2)
+        
+elif regime_opt == 'TRF' :
+    optimizer_trf = OptimizeTRF(psfao, parameters)
+    parameters = optimizer_trf.Optimize(PSF_0)
+
 PSF_1 = psfao.PSD2PSF(*parameters)
 
 #%%
-optimizer_trf = OptimizeTRF(psfao, parameters)
-parameters = optimizer_trf.Optimize(PSF_0)
-PSF_1 = psfao.PSD2PSF(*parameters)
-
-#%%
-
 plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 plt.show()
 
 plot_radial_profile(PSF_0.squeeze(0), PSF_1.squeeze(0), 'PSF AO', title='IRDIS PSF')
 plt.show()
 
-#la chignon et tarte
-
 #%% =============================== MAKE DATASET ==========================================
 ### =======================================================================================
 ### =======================================================================================
 
 # Load the SPHERE PSF database
-path_fitted = 'C:/Users/akuznets/Data/SPHERE/fitted 4/'
+path_fitted = 'C:/Users/akuznets/Data/SPHERE/fitted_PSFAO_maxnorm/'
 path_input  = 'C:/Users/akuznets/Data/SPHERE/test/'
 
 database = SPHERE_database(path_input, path_fitted)
@@ -490,7 +471,6 @@ for bad_sample in bad_samples:
 print(str(len(bad_samples))+' samples were filtered, '+str(len(database.data))+' samples remained')
 
 
-# %%
 def GetInputs(data_sample):
     #wvl     = data_sample['input']['spectrum']['lambda']
     r_0     = 3600*180/np.pi*0.976*0.5e-6 / data_sample['input']['seeing']['SPARTA'] # [m]
@@ -509,8 +489,8 @@ def GetInputs(data_sample):
 
 
 def GetLabels(sample):
-    #r0_500 = r0_new(np.abs(data_sample['fitted']['r0']), 0.5e-6, data_sample['input']['spectrum']['lambda'])
-    buf =  np.array([sample['fitted']['r0'],
+    r0_500 = r0_new(np.abs(sample['fitted']['r0']), 0.5e-6, sample['input']['spectrum']['lambda'])
+    buf =  np.array([r0_500, #sample['fitted']['r0'],
                      25.0,
                      sample['fitted']['F'],
                      sample['fitted']['dx'],
@@ -536,6 +516,22 @@ sample_ids = np.arange(len(database))
 wvl_unique, _, unique_indices, counts = np.unique(wvls, return_index=True, return_inverse=True, return_counts=True)
 database_wvl = database.subset(sample_ids[unique_indices==np.argmax(counts)])
 
+# Filter bad samples manually by their file ids
+bad_file_ids = [
+    90,  860, 840, 839, 832, 860, 846, 844, 836, 79,  78,  77,  76,  769,
+    757, 754, 752, 738, 723, 696, 681, 676, 653, 642, 63,  636, 62,  620, 
+    623, 616, 615, 599, 594, 58,  57,  584, 52,  54,  521, 51,  495, 494, 468, 
+    456, 433, 415, 414, 373, 368, 364, 352, 342, 338, 336, 315, 296, 297, 
+    298, 291, 290, 289, 276, 264, 253, 252, 236, 234, 233, 227, 221, 220, 
+    215, 214, 213, 212, 211, 209, 208, 207, 206, 204, 203, 202, 201, 200, 786,
+    193, 192, 191, 190, 189, 188, 174, 172, 171, 170, 169, 166, 165, 159, 
+    158, 156, 155, 143, 139, 135, 132, 130, 128, 126, 96,  92,  787, 750,
+    53,  513, 490, 369, 299, 270, 263, 255, 98,  88,  87,  86,  862, 796, 781]
+
+bad_ids = [database_wvl.find(file_id)['index'] for file_id in bad_file_ids]
+good_ids = list(set(np.arange(len(database_wvl))) - set(bad_ids))
+database_wvl_good = database_wvl.subset(good_ids)
+
 
 def GenerateDataset(dataset, with_PSF=False):
     x = [] # inputs
@@ -556,70 +552,70 @@ def GenerateDataset(dataset, with_PSF=False):
     else:
         return torch.vstack(x), torch.vstack(y)
 
-#%%
-
-X,Y = GenerateDataset(database_wvl, with_PSF=True)
-
-for i in range(Y.shape[0]):
-    plt.plot(Y[i,128,:].detach().cpu())
-plt.show()
-
-
-#%%
-
-testo = Y.sum(dim=0, keepdim=True)
-plt.imshow(torch.log(testo).detach().cpu()[el_croppo])
+#X,Y = GenerateDataset(database_wvl_good, with_PSF=True)
+#for i in range(Y.shape[0]):
+#    plt.plot(Y[i,128,:].detach().cpu())
+#plt.show()
+#testo = Y.sum(dim=0, keepdim=True)
+#plt.imshow(torch.log(testo).detach().cpu()[el_croppo])
+#plt.show()
 
 #%%
-
-validation_ids = np.unique(np.random.randint(0, high=len(database_wvl), size=30, dtype=int)).tolist()
-database_train, database_val = database.split(validation_ids)
+validation_ids = np.unique(np.random.randint(0, high=len(database_wvl_good), size=30, dtype=int)).tolist()
+database_train, database_val = database_wvl_good.split(validation_ids)
 
 X_train, y_train = GenerateDataset(database_train, with_PSF=False)
 X_val, y_val = GenerateDataset(database_val, with_PSF=False)
 
 print(str(X_train.shape[0])+' samples in train dataset, '+str(X_val.shape[0])+' in validation')
 
+#DisplayDataset(database_val, 5, dpi=300)
+#plt.show()
+#DisplayDataset(database_train, 10, dpi=600)
+#plt.show()
+
 # %%
 class Gnosis(torch.nn.Module):
-        def __init__(self, input_size, hidden_size, psf_model=None, device='cpu'):
-            self.device = device
-            super(Gnosis, self).__init__()
-            self.input_size  = input_size
-            self.hidden_size = hidden_size
+    def __init__(self, input_size, hidden_size, psf_model=None, tranform_fun=lambda x:x, device='cpu'):
+        self.device = device
+        super(Gnosis, self).__init__()
+        self.input_size  = input_size
+        self.hidden_size = hidden_size
 
-            self.fc1  = torch.nn.Linear(self.input_size, self.hidden_size*2, device=self.device)
-            self.act1 = torch.nn.Tanh()
-            self.fc2  = torch.nn.Linear(self.hidden_size*2, hidden_size, device=self.device)
-            self.act2 = torch.nn.Tanh()
-            self.fc3  = torch.nn.Linear(self.hidden_size, 12, device=self.device)
-  
-            self.inp_normalizer = torch.ones(self.input_size, device=self.device)
-            self.out_normalizer = torch.ones(12, device=self.device)
-            self.inp_bias = torch.zeros(self.input_size, device=self.device)
-            self.out_bias = torch.zeros(12, device=self.device)
+        self.fc1  = torch.nn.Linear(self.input_size, self.hidden_size*2, device=self.device)
+        self.act1 = torch.nn.Tanh()
+        self.fc2  = torch.nn.Linear(self.hidden_size*2, hidden_size, device=self.device)
+        self.act2 = torch.nn.Tanh()
+        self.fc3  = torch.nn.Linear(self.hidden_size, 12, device=self.device)
 
-            self.psf_model = psf_model
+        self.inp_normalizer = torch.ones(self.input_size, device=self.device)
+        self.out_normalizer = torch.ones(12, device=self.device)
+        self.inp_bias = torch.zeros(self.input_size, device=self.device)
+        self.out_bias = torch.zeros(12, device=self.device)
+
+        self.psf_model = psf_model
+        self.tranform_fun = tranform_fun
 
 
-        def forward(self, x):
-            hidden1 = self.fc1(x * self.inp_normalizer + self.inp_bias)
-            act1 = self.act1(hidden1)
-            hidden2 = self.fc2(act1)
-            act2 = self.act2(hidden2)
-            model_inp = self.fc3(act2) * self.out_normalizer + self.out_bias
-            #model_inp = (self.fc3(act2)*0.0+1.0) * self.out_normalizer + self.out_bias
-            if self.psf_model is None:
-                return model_inp
-            else:
-                return self.psf_model(model_inp)
+    def forward(self, x):
+        hidden1 = self.fc1(x * self.inp_normalizer + self.inp_bias)
+        act1 = self.act1(hidden1)
+        hidden2 = self.fc2(act1)
+        act2 = self.act2(hidden2)
+        model_inp = self.fc3(act2) * self.out_normalizer + self.out_bias
+        if self.psf_model is None:
+            return model_inp
+        else:
+            return self.psf_model(self.tranform_fun(model_inp)) # to rescale r0 mostly
 
 
 gnosis = Gnosis(input_size=9, hidden_size=200, device=psfao.device)
 gnosis.inp_normalizer = torch.tensor([5, 50, 1/50, 1/360, 1, 0.5, 2, 2, 1e6], device=psfao.device).unsqueeze(0)
 gnosis.inp_bias = torch.tensor([0, 0, 0, 0, -1, -3, 0, 0, 0],   device=psfao.device).unsqueeze(0)
-gnosis.out_normalizer = 0.25/torch.tensor([0.5, 0.01, 0.25, 1, 1, 2e6, 0.125, 1e3, 1e2, 0.2, 0.5, 0.5], device=psfao.device).unsqueeze(0)
 
+#r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta
+#gnosis.out_normalizer = 0.25/torch.tensor([0.5, 0.01, 0.25, 1, 1, 2e6, 0.125, 1e3, 1e2, 0.2, 0.5, 0.5], device=psfao.device).unsqueeze(0)
+gnosis.out_normalizer = 1.0/torch.tensor([1, 1, 1, 1, 1, 2e6, 1, 1e3, 1, 1, 1, 1], device=psfao.device).unsqueeze(0)
 
 #%%
 loss_fn = nn.L1Loss() #reduction='sum')
@@ -627,47 +623,58 @@ optimizer = optim.SGD([{'params': gnosis.fc1.parameters()},
                        {'params': gnosis.act1.parameters()},
                        {'params': gnosis.fc2.parameters()},
                        {'params': gnosis.act2.parameters()},
-                       {'params': gnosis.fc3.parameters()}], lr=1e-4, momentum=0.9)
+                       {'params': gnosis.fc3.parameters()}], lr=1e-3, momentum=0.9)
 
-for i in range(40000):
+for i in range(6000):
     optimizer.zero_grad()
-    #x,c = GetInputs(data, i)
     loss = loss_fn(gnosis(X_train), y_train)
     loss.backward()
-    if i % 1000: print(loss.item())
-    optimizer.step() # lambda: loss_fn(gnosis(X,C), y))
+    if not i % 1000: print(loss.item())
+    optimizer.step()
 
 print('Validation accuracy: '+str(loss_fn(gnosis(X_val), y_val).item()))
 
+#torch.save(gnosis.state_dict(), 'gnosis_weights_psfao.dict')
+#gnosis.load_state_dict(torch.load('gnosis_weights_psfao.dict'))
+#gnosis.eval()
+
 #%%
+def r0_transform(pred):
+    pred[0][0] = r0_new(pred[0][0], wvl_unique[np.argmax(counts)], 0.5e-6)
+    return pred
 
 def PSFcomparator(data_sample):
     psfao2 = PSFAO(config_file, data_sample['input'], 'CUDA')
+    psfao2.norm_regime = 'max'
+    gnosis.psf_model = psfao2
+    gnosis.tranform_fun = r0_transform
 
-    x_test, c_test = GetInputs(data_sample)
-    x_test = torch.tensor(x_test, device=psfao2.device).float()
-    c_test = torch.tensor(c_test, device=psfao2.device).float()
-    y2 = gnosis(x_test)
-
-    def ReturnPSFfromPred(y,c):
-        r0_,L0_,F_,amp_,b_,alpha_,beta_,ratio_,theta_ = y.detach()
-        dx_, dy_, bg_ = c.detach()
-        r0_ = r0_new(r0_, psfao2.wvl, 0.5e-6)
-        return psfao2(r0_,L0_,F_,dx_,dy_,bg_,amp_,b_,alpha_,beta_,ratio_,theta_)
-
-    #PSF_1 = ReturnPSFfromPred(y1, c_test)
-    PSF_2 = ReturnPSFfromPred(y2, c_test)
-
+    x_test = torch.tensor(GetInputs(data_sample), device=psfao2.device).float()
+    PSF_2 = gnosis(x_test)
     A = torch.tensor(data_sample['input']['image'], device=psfao2.device)
     C = torch.tensor(data_sample['fitted']['Img. fit'], device=psfao2.device)
-    PSF_0 = A/A.sum()
-    PSF_1 = C/C.sum()
+    norm = A.max()
+    PSF_0 = A / norm
+    PSF_1 = C / norm
 
+    return PSF_0.squeeze(0), PSF_1.squeeze(0), PSF_2.squeeze(0)
 
-    return PSF_0, PSF_1, PSF_2
+i = 5
+PSF_0, PSF_1, PSF_2 = PSFcomparator(database_val[i])
+
+el_crop = (el_croppo[1], el_croppo[2])
+plt.imshow(torch.log(
+    torch.hstack((PSF_0.abs()[el_crop], PSF_2.abs()[el_crop],
+    ((PSF_2-PSF_0).abs()[el_crop])) )).detach().cpu())
+plt.show()
+
+#plot_radial_profile(PSF_0, PSF_1, 'PSF AO', title='IRDIS PSF')
+#plt.show()
+plot_radial_profile(PSF_0, PSF_2, 'Gnosis', title='IRDIS PSF', dpi=100)
+plt.show()
+
 
 #%%
-
 loss_fn = nn.L1Loss()
 
 fit_diff = []
@@ -681,12 +688,11 @@ profile_0s = []
 profile_1s = []
 profile_2s = []
 
-for i in range(len(database_val)):
-    data_sample = database_val[i]
+#for data_sample in database_val:
+for data_sample in database_val:
     PSF_0, PSF_1, PSF_2 = PSFcomparator(data_sample)
     fit_diff.append(loss_fn(PSF_0, PSF_1).item())
     gnosis_diff.append(loss_fn(PSF_0, PSF_2).item())
-
     PSF_0s.append(PSF_0)
     PSF_1s.append(PSF_1)
     PSF_2s.append(PSF_2)
@@ -712,6 +718,7 @@ profile_0s /= c*0.01
 profile_1s /= c*0.01
 profile_2s /= c*0.01
 
+
 # %%
 fig = plt.figure(figsize=(6,4), dpi=150)
 plt.grid()
@@ -722,51 +729,42 @@ def plot_std(x,y, label, color, style):
     lower_bound = y_m-y_s
     upper_bound = y_m+y_s
 
+    print(label, 'mean:', y_m.max())
+
     plt.fill_between(x, lower_bound, upper_bound, color=color, alpha=0.3)
     plt.plot(x, y_m, label=label, color=color, linestyle=style)
 
-x = np.arange(32)
-plot_std(x, np.abs(profile_0s-profile_1s), '$\Delta$ Fit', 'royalblue', '--')
-plot_std(x, np.abs(profile_0s-profile_2s), '$\Delta$ Gnosis', 'darkgreen', ':')
+x = np.arange(profile_1s[0].shape[0])
+plot_std(x,profile_0s-profile_1s, '$\Delta$ Fit', 'royalblue', '--')
+plot_std(x,profile_0s-profile_2s, '$\Delta$ Gnosis', 'darkgreen', ':')
+plot_std(x,profile_0s, 'Input PSF', 'darkslategray', '-')
 
 plt.title('Accuracy comparison (avg. for validation dataset)')
 plt.yscale('symlog')
 plt.xlim([x.min(), x.max()])
 plt.legend()
-plt.ylabel('Abs. relative diff., [%]')
+plt.ylabel('Relative intensity and diff., [%]')
 plt.xlabel('Pixels')
 
+
 #%%
-data_sample = database_val[i]
-PSF_0, PSF_1, PSF_2 = PSFcomparator(data_sample)
+X_train, y_train = GenerateDataset(database_train, with_PSF=True)
+X_val, y_val = GenerateDataset(database_val, with_PSF=True)
 
-profile_0 = radial_profile(PSF_0.detach().cpu().numpy())[:32]
-profile_1 = radial_profile(PSF_1.detach().cpu().numpy())[:32]
-profile_2 = radial_profile(PSF_2.detach().cpu().numpy())[:32]
+loss_fn = nn.L1Loss() #reduction='sum')
+optimizer = optim.SGD([{'params': gnosis.fc1.parameters()},
+                       {'params': gnosis.act1.parameters()},
+                       {'params': gnosis.fc2.parameters()},
+                       {'params': gnosis.act2.parameters()},
+                       {'params': gnosis.fc3.parameters()}], lr=1e-2, momentum=0.9)
 
-profile_diff1 = np.abs(profile_1-profile_0) / profile_0.max() * 100 #[%]
-profile_diff2 = np.abs(profile_2-profile_0) / profile_0.max() * 100 #[%]
+for i in range(6000):
+    optimizer.zero_grad()
+    loss = loss_fn(gnosis(X_val), y_val)
+    loss.backward()
+    #if not i % 1000:
+    print(loss.item())
+    optimizer.step()
 
-fig = plt.figure(figsize=(6,4), dpi=150)
-ax = fig.add_subplot(111)
-ax.set_title('Fitting vs. Gnosis vs. Direct pred.')
-l0 = ax.plot(profile_0, label='Data')
-l1 = ax.plot(profile_1, label='Fit')
-l2 = ax.plot(profile_2, label='Gnosis', color='g')
-ax.set_xlabel('Pixels')
-ax.set_ylabel('Relative intensity')
-ax.set_yscale('log')
-ax.set_xlim([0, len(profile_1)])
-ax.grid()
-
-ax2 = ax.twinx()
-l3 = ax2.plot(profile_diff1, label='$\Delta$ Fit', color='tab:orange', linestyle='dashdot')
-l4 = ax2.plot(profile_diff2, label='$\Delta$ Gnosis', color='g', linestyle=':')
-ax2.set_ylim([0, max([profile_diff1.max(), profile_diff2.max()])*1.25])
-ax2.set_ylabel('Difference [%]')
-
-ls = l0+l1+l2+l3+l4
-labels = [l.get_label() for l in ls]
-ax2.legend(ls, labels, loc=0)
-
-plt.show()
+#la chignon et tarte
+# %%
