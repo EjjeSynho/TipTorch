@@ -12,9 +12,10 @@ from scipy import signal
 from astropy.io import fits
 import pickle
 import time
+import re
 import os
 from os import path
-import re
+from copy import deepcopy
 
 from parameterParser import parameterParser
 from SPHERE_data import SPHERE_database,LoadSPHEREsampleByID
@@ -25,6 +26,7 @@ from utils import OptimizeTRF, OptimizeLBFGS
 from utils import radial_profile, plot_radial_profile
 # end of import list
 
+#%%
 
 #210
 #13
@@ -33,11 +35,13 @@ from utils import radial_profile, plot_radial_profile
 #422
 #102
 
-num = 260 #450
 
-num_id, data_test = LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', num)
+data_samples = []
+data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 260)[1] )
+data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 450)[1] )
+data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 26 )[1] )
 
-im = data_test['image']
+
 path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP_old/P3')
 path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/irdis.ini'))
 
@@ -47,61 +51,69 @@ config_file = parameterParser(path_root, path_ini).params
 #%% ------------------------ Managing paths ------------------------
 class TipToy(torch.nn.Module):
 
-    def SetDataSample(self, data_sample):
+    def SetDataSample(self, data_samples):
         # Reading parameters from the file
-        self.wvl = data_sample['spectrum']['lambda']
+        num_src = len(data_samples)
 
-        self.AO_config['atmosphere']['Seeing']          = data_sample['seeing']
-        self.AO_config['atmosphere']['WindSpeed']       = [data_sample['Wind speed']['header']]
-        self.AO_config['atmosphere']['WindDirection']   = [data_sample['Wind direction']['header']]
-        self.AO_config['sources_science']['Wavelength'] = [self.wvl]
-        self.AO_config['sensor_science']['FieldOfView'] = data_sample['image'].shape[0]
-        self.AO_config['sensor_science']['Zenith']      = [90.0-data_sample['telescope']['altitude']]
-        self.AO_config['sensor_science']['Azimuth']     = [data_sample['telescope']['azimuth']]
-        self.AO_config['sensor_science']['SigmaRON']    = data_sample['Detector']['ron']
-        self.AO_config['sensor_science']['Gain']        = data_sample['Detector']['gain']
+        self.wvl = torch.tensor([data_sample['spectrum']['lambda'] for data_sample in data_samples], device=self.device)
+        self.configs = deepcopy(self.AO_config)
+        self.configs['sources_science']['Wavelength'] = self.wvl
+        self.configs['sensor_science']['FieldOfView'] = data_samples[0]['image'].shape[0] #TODO: image size check
 
-        self.AO_config['RTC']['SensorFrameRate_HO']  = data_sample['WFS']['rate']
-        self.AO_config['sensor_HO']['NumberPhotons'] = data_sample['WFS']['Nph vis']
+        self.configs['atmosphere']['Seeing']        = torch.tensor([data_sample['seeing']['SPARTA'] for data_sample in data_samples], device=self.device)
+        self.configs['atmosphere']['WindSpeed']     = torch.tensor([data_sample['Wind speed']['header'] for data_sample in data_samples], device=self.device)
+        self.configs['atmosphere']['WindDirection'] = torch.tensor([data_sample['Wind direction']['header'] for data_sample in data_samples], device=self.device)
+        self.configs['sensor_science']['Zenith']    = torch.tensor([90.0-data_sample['telescope']['altitude'] for data_sample in data_samples], device=self.device)
+        self.configs['telescope']['ZenithAngle']    = torch.tensor([90.0-data_sample['telescope']['altitude'] for data_sample in data_samples], device=self.device)
+        self.configs['sensor_science']['Azimuth']   = torch.tensor([data_sample['telescope']['azimuth'] for data_sample in data_samples], device=self.device)
+        self.configs['sensor_science']['SigmaRON']  = torch.tensor([data_sample['Detector']['ron']  for data_sample in data_samples], device=self.device)
+        self.configs['sensor_science']['Gain']      = torch.tensor([data_sample['Detector']['gain'] for data_sample in data_samples], device=self.device)
+        self.configs['sensor_HO']['NumberPhotons']  = torch.tensor([data_sample['WFS']['Nph vis'] for data_sample in data_samples], device=self.device)
+        self.configs['sources_HO']['Wavelength']    = torch.tensor([self.AO_config['sources_HO']['Wavelength'][0] for _ in range(num_src)], device=self.device)
+        self.configs['sources_HO']['Height']        = torch.tensor([self.AO_config['sources_HO']['Height']  for _ in range(num_src)], device=self.device)
+        self.configs['sources_HO']['Zenith']        = torch.tensor([self.AO_config['sources_HO']['Zenith']  for _ in range(num_src)], device=self.device)
+        self.configs['sources_HO']['Azimuth']       = torch.tensor([self.AO_config['sources_HO']['Azimuth'] for _ in range(num_src)], device=self.device)
+        self.configs['atmosphere']['Cn2Weights']    = torch.tensor([self.AO_config['atmosphere']['Cn2Weights'] for _ in range(num_src)], device=self.device)
+        self.configs['atmosphere']['Cn2Heights']    = torch.tensor([self.AO_config['atmosphere']['Cn2Heights'] for _ in range(num_src)], device=self.device)
+        self.configs['RTC']['LoopDelaySteps_HO']    = torch.tensor([self.AO_config['RTC']['LoopDelaySteps_HO'] for _ in range(num_src)], device=self.device)
+        self.configs['RTC']['LoopGain_HO']          = torch.tensor([self.AO_config['RTC']['LoopGain_HO']   for _ in range(num_src)], device=self.device)
+        self.configs['RTC']['SensorFrameRate_HO']   = torch.tensor([data_sample['WFS']['rate'] for data_sample in data_samples], device=self.device)
 
         # Setting internal parameters
         self.D       = self.AO_config['telescope']['TelescopeDiameter']
         self.psInMas = self.AO_config['sensor_science']['PixelScale'] #[mas]
         self.nPix    = self.AO_config['sensor_science']['FieldOfView']
         self.pitch   = self.AO_config['DM']['DmPitchs'][0] #[m]
-        self.h_DM    = self.AO_config['DM']['DmHeights'][0] # ????? what is h_DM?
-        self.nDM     = 1
+        #self.h_DM    = self.AO_config['DM']['DmHeights'][0] # ????? what is h_DM?
+        #self.nDM     = 1
         self.kc      = 1/(2*self.pitch) #TODO: kc is not consistent with vanilla TIPTOP
 
-        self.zenith_angle  = torch.tensor(self.AO_config['telescope']['ZenithAngle'], device=self.device) # [deg]
+        #self.zenith_angle  = torch.tensor(self.AO_config['telescope']['ZenithAngle'], device=self.device) # [deg] #TODO: telescope zenith != sample zenith?
+        self.zenith_angle  = self.configs['telescope']['ZenithAngle']
         self.airmass       = 1.0 / torch.cos(self.zenith_angle * deg2rad)
 
         self.GS_wvl     = self.AO_config['sources_HO']['Wavelength'][0] #[m]
-        self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
-        self.GS_angle   = torch.tensor(self.AO_config['sources_HO']['Zenith'],  device=self.device) / rad2arc
-        self.GS_azimuth = torch.tensor(self.AO_config['sources_HO']['Azimuth'], device=self.device) * deg2rad
-        self.GS_dirs_x  = torch.tan(self.GS_angle) * torch.cos(self.GS_azimuth)
-        self.GS_dirs_y  = torch.tan(self.GS_angle) * torch.sin(self.GS_azimuth)
-        self.nGS = self.GS_dirs_y.size(0)
+        #self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
 
-        self.wind_speed  = torch.tensor(self.AO_config['atmosphere']['WindSpeed'], device=self.device)
-        self.wind_dir    = torch.tensor(self.AO_config['atmosphere']['WindDirection'], device=self.device)
-        self.Cn2_weights = torch.tensor(self.AO_config['atmosphere']['Cn2Weights'], device=self.device)
-        self.Cn2_heights = torch.tensor(self.AO_config['atmosphere']['Cn2Heights'], device=self.device) * self.airmass #[m]
+        self.wind_speed  = self.configs['atmosphere']['WindSpeed']
+        self.wind_dir    = self.configs['atmosphere']['WindDirection']
+        self.Cn2_weights = self.configs['atmosphere']['Cn2Weights']
+        self.Cn2_heights = self.configs['atmosphere']['Cn2Heights'] * self.airmass #[m]
         #self.stretch     = 1.0 / (1.0-self.Cn2_heights/self.GS_height)
         self.h           = self.Cn2_heights #* self.stretch
         self.nL          = self.Cn2_heights.size(0)
 
         self.WFS_d_sub = np.mean(self.AO_config['sensor_HO']['SizeLenslets'])
         self.WFS_n_sub = np.mean(self.AO_config['sensor_HO']['NumberLenslets'])
+
         self.WFS_det_clock_rate = np.mean(self.AO_config['sensor_HO']['ClockRate']) # [(?)]
         self.WFS_FOV = self.AO_config['sensor_HO']['FieldOfView']
         self.WFS_RON = self.AO_config['sensor_HO']['SigmaRON']
         self.WFS_psInMas = self.AO_config['sensor_HO']['PixelScale']
         self.WFS_wvl = torch.tensor(self.GS_wvl, device=self.device) #TODO: clarify this
-        self.WFS_spot_FWHM = torch.tensor(self.AO_config['sensor_HO']['SpotFWHM'][0], device=self.device)
-        self.WFS_excessive_factor = self.AO_config['sensor_HO']['ExcessNoiseFactor']
-        self.WFS_Nph = torch.tensor(self.AO_config['sensor_HO']['NumberPhotons'], device=self.device)
+        self.WFS_spot_FWHM = self.configs['sensor_HO']['SpotFWHM'][0]
+        self.WFS_excessive_factor = self.configs['sensor_HO']['ExcessNoiseFactor']
+        self.WFS_Nph = self.configs['sensor_HO']['NumberPhotons']
 
         self.HOloop_rate  = np.mean(self.AO_config['RTC']['SensorFrameRate_HO']) # [Hz] (?)
         self.HOloop_delay = self.AO_config['RTC']['LoopDelaySteps_HO'] # [ms] (?)
@@ -112,14 +124,13 @@ class TipToy(torch.nn.Module):
         if self.pixels_per_l_D is None:
             self.pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
 
-        self.sampling_factor = int(np.ceil(2.0/self.pixels_per_l_D)) # check how much it is less than Nyquist
+        self.sampling_factor = (torch.ceil(2.0/self.pixels_per_l_D)).int() # check how much it is less than Nyquist
         self.sampling = self.sampling_factor * self.pixels_per_l_D
-        self.nOtf = self.nPix * self.sampling_factor
+        self.nOtf = self.nPix * self.sampling_factor.max().item()
 
-        self.dk = 1/self.D/self.sampling # PSD spatial frequency step
+        self.dk = 1/self.D/self.sampling.min() # PSD spatial frequency step
         self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 
-        #with torch.no_grad():
         # Initialize spatial frequencies
         self.kx, self.ky = torch.meshgrid(
             torch.linspace(-self.nOtf/2, self.nOtf/2-1, self.nOtf, device=self.device)*self.dk + 1e-10,
@@ -137,7 +148,7 @@ class TipToy(torch.nn.Module):
         self.nOtf_AO += self.nOtf_AO % 2
 
         # Comb samples involved in antialising
-        n_times = min(4,max(2,int(np.ceil(self.nOtf/self.nOtf_AO/2))))
+        n_times = min(4, max(2, int(np.ceil(self.nOtf/self.nOtf_AO/2))) )
         ids = []
         for mi in range(-n_times,n_times):
             for ni in range(-n_times,n_times):
@@ -161,30 +172,14 @@ class TipToy(torch.nn.Module):
         self.k_AO  = self.k [corrected_ROI]
         self.k2_AO = self.k2[corrected_ROI]
 
-        #M_mask = torch.zeros([self.nOtf_AO,self.nOtf_AO,self.nGS,self.nGS], device=self.device)
-        #for j in range(self.nGS):
-        #    M_mask[:,:,j,j] += 1.0
-
         # Matrix repetitions and dimensions expansion to avoid in runtime
         self.kx_1_1 = torch.unsqueeze(torch.unsqueeze(self.kx_AO,2),3)
         self.ky_1_1 = torch.unsqueeze(torch.unsqueeze(self.ky_AO,2),3)
         self.k_1_1  = torch.unsqueeze(torch.unsqueeze(self.k_AO, 2),3)
 
-        #self.kx_nGs_nGs = self.kx_1_1.repeat([1,1,self.nGS,self.nGS]) * M_mask
-        #self.ky_nGs_nGs = self.ky_1_1.repeat([1,1,self.nGS,self.nGS]) * M_mask
-        #self.k_nGs_nGs  = self.k_1_1.repeat([1,1,self.nGS,self.nGS])  * M_mask
-        #self.kx_nGs_nL  = self.kx_1_1.repeat([1,1,self.nGS,self.nL])
-        #self.ky_nGs_nL  = self.ky_1_1.repeat([1,1,self.nGS,self.nL])
-        #self.k_nGs_nL   = self.k_1_1.repeat([1,1,self.nGS,self.nL])
-        #self.kx_1_nL    = self.kx_1_1.repeat([1,1,1,self.nL])
-        #self.ky_1_nL    = self.ky_1_1.repeat([1,1,1,self.nL])
-
         # For NGS-like alising 2nd dimension is used to store combs information
         self.km = self.kx_1_1.repeat([1,1,self.N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(m/self.WFS_d_sub,0),0),3)
         self.kn = self.ky_1_1.repeat([1,1,self.N_combs,1]) - torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(n/self.WFS_d_sub,0),0),3)
-
-        #self.GS_dirs_x_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.GS_dirs_x,0),0),3).repeat([self.nOtf_AO,self.nOtf_AO,1,self.nL])# * dim_N_N_nGS_nL
-        #self.GS_dirs_y_nGs_nL = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.GS_dirs_y,0),0),3).repeat([self.nOtf_AO,self.nOtf_AO,1,self.nL])# * dim_N_N_nGS_nL
 
         # Initialize OTF frequencines
         self.U,self.V = torch.meshgrid(
@@ -200,6 +195,7 @@ class TipToy(torch.nn.Module):
         self.UV  = self.U*self.V
         self.UV2 = self.U**2 + self.V**2
 
+        #TODO: pathcheck
         pupil_path = self.AO_config['telescope']['PathPupil']
         pupil_apodizer = self.AO_config['telescope']['PathApodizer']
 
@@ -208,21 +204,26 @@ class TipToy(torch.nn.Module):
 
         pupil_pix  = pupil.shape[0]
         #padded_pix = nOtf
-        padded_pix = int(pupil_pix*self.sampling)
+        #padded_pix = int(pupil_pix*self.sampling)
 
-        pupil_padded = torch.zeros([padded_pix, padded_pix], device=self.device)
-        pupil_padded[
-            padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2,
-            padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2
-        ] = pupil*apodizer
+        self.OTFs_static = torch.zeros([len(self.wvl), self.nOtf, self.nOtf], device=self.device)
 
         def fftAutoCorr(x):
             x_fft = fft.fft2(x)
             return fft.fftshift( fft.ifft2(x_fft*torch.conj(x_fft))/x.size(0)*x.size(1) )
 
-        self.OTF_static = torch.real( fftAutoCorr(pupil_padded) ).unsqueeze(0).unsqueeze(0)
-        self.OTF_static = interpolate(self.OTF_static, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
-        self.OTF_static = self.OTF_static / self.OTF_static.max()
+        for i,samp in enumerate(self.sampling):
+            padded_pix = int(pupil_pix*self.sampling[i])
+
+            pupil_padded = torch.zeros([padded_pix, padded_pix], device=self.device)
+            pupil_padded[
+                padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2,
+                padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2
+            ] = pupil*apodizer
+
+            OTF_static = torch.real( fftAutoCorr(pupil_padded) ).unsqueeze(0).unsqueeze(0)
+            OTF_static = interpolate(OTF_static, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
+            self.OTFs_static[i,:,:] = OTF_static / OTF_static.max()
 
         self.PSD_padder = torch.nn.ZeroPad2d((self.nOtf-self.nOtf_AO)//2)
 
@@ -243,15 +244,15 @@ class TipToy(torch.nn.Module):
         if reinit_grids: self.InitGrids()
 
 
-    def __init__(self, AO_config, data_sample, device=None, pixels_per_l_D=None):
+    def __init__(self, AO_config, data_samples, device=None, pixels_per_l_D=None):
         if device is None or device == 'cpu' or device == 'CPU':
             self.device = torch.device('cpu')
             self.is_gpu = False
 
         elif device == 'cuda' or device == 'CUDA':
-            self.device  = torch.device('cuda') # Will use the default CUDA device
-            self.start = torch.cuda.Event(enable_timing=True)
-            self.end   = torch.cuda.Event(enable_timing=True)
+            self.device = torch.device('cuda') # Will use the default CUDA device
+            self.start  = torch.cuda.Event(enable_timing=True)
+            self.end    = torch.cuda.Event(enable_timing=True)
             self.is_gpu = True
 
         super().__init__()
@@ -261,7 +262,7 @@ class TipToy(torch.nn.Module):
         # Read data and initialize AO system
         self.pixels_per_l_D = pixels_per_l_D
         self.AO_config = AO_config
-        self.SetDataSample(data_sample)
+        self.SetDataSample(data_samples)
         self.InitGrids()
 
 
@@ -349,7 +350,7 @@ class TipToy(torch.nn.Module):
 
 
     def VonKarmanPSD(self, r0, L0):
-        return self.cte*r0**(-5/3)*(self.k2 + 1/L0**2)**(-11/6) * self.mask
+        return self.cte*r0**(-5/3)*(self.k2.unsqueeze(0) + 1/L0**2)**(-11/6) * self.mask.unsqueeze(0)
 
 
     def ChromatismPSD(self, r0, L0):
@@ -364,8 +365,8 @@ class TipToy(torch.nn.Module):
 
     def JitterCore(self, Jx, Jy, Jxy):
         u_max = self.sampling*self.D/self.wvl/(3600*180*1e3/np.pi)
-        norm_fact = u_max**2 * (2*np.sqrt(2*np.log(2)))**2
-        Djitter = norm_fact * (Jx**2 * self.U2 + Jy**2 * self.V2 + 2*Jxy*self.UV)
+        norm_fact = u_max.unsqueeze(1).unsqueeze(2)**2 * (2*np.sqrt(2*np.log(2)))**2
+        Djitter = norm_fact * (Jx**2 * self.U2.unsqueeze(0) + Jy**2 * self.V2.unsqueeze(0) + 2*Jxy*self.UV.unsqueeze(0))
         return torch.exp(-0.5*Djitter) #TODO: cover Nyquist sampled case
 
 
@@ -389,38 +390,38 @@ class TipToy(torch.nn.Module):
         return (PSF_out/PSF_out.sum())
 
 
-    def PSD2PSF(self, r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy):
-        WFS_noise_var2 = torch.abs(n + self.NoiseVariance(r0_new(r0.abs(), self.GS_wvl, self.wvl)))
-        self.vx = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.wind_speed*torch.cos(self.wind_dir*np.pi/180.),0),0),0)
-        self.vy = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.wind_speed*torch.sin(self.wind_dir*np.pi/180.),0),0),0)
+    def PSD2PSF(self, r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy):
+        #WFS_noise_var2 = torch.abs(dn + self.NoiseVariance(r0_new(r0.abs(), self.GS_wvl, self.wvl)))
+        #self.vx = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.wind_speed*torch.cos(self.wind_dir*np.pi/180.),0),0),0)
+        #self.vy = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.wind_speed*torch.sin(self.wind_dir*np.pi/180.),0),0),0)
 
-        self.Controller()
-        self.ReconstructionFilter(r0.abs(), L0.abs(), WFS_noise_var2)
+        #self.Controller()
+        #self.ReconstructionFilter(r0.abs(), L0.abs(), WFS_noise_var2)
 
         # Put all contributiors together and sum up the resulting PSD
-        PSD = self.VonKarmanPSD(r0.abs(),L0.abs()) + \
-        self.PSD_padder(
-            self.NoisePSD(WFS_noise_var2) + \
-            self.SpatioTemporalPSD() + \
-            self.AliasingPSD(r0.abs(), L0) + \
-            self.ChromatismPSD(r0.abs(), L0.abs())
-        )
+        PSD = self.VonKarmanPSD(r0.abs(),L0.abs()) #+ \
+        #self.PSD_padder(
+        #    self.NoisePSD(WFS_noise_var2) + \
+        #    self.SpatioTemporalPSD() + \
+        #    self.AliasingPSD(r0.abs(), L0) + \
+        #    self.ChromatismPSD(r0.abs(), L0.abs())
+        #)
         # Computing OTF from PSD
         dk = 2*self.kc/self.nOtf_AO
-        PSD *= (dk*self.wvl*1e9/2/np.pi)**2
-        cov  = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD)))
-        SF   = torch.abs(cov).max()-cov
-        fftPhasor = torch.exp(-np.pi*1j*self.sampling_factor*(self.U*dx+self.V*dy))
-        OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/self.wvl)**2)
+        #PSD *= (dk*self.wvl*1e9/2/np.pi)**2
+        cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD))) # FFT axes are set to 1,2 by PyTorch by default
+        SF = (torch.abs(cov).amax(dim=(1,2)).unsqueeze(1).unsqueeze(2)-cov) * (dk*500/2/np.pi)**2
+        fftPhasor = torch.exp(-np.pi*1j*self.sampling_factor.unsqueeze(1).unsqueeze(2)*(self.U*dx+self.V*dy))
+        OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/self.wvl.unsqueeze(1).unsqueeze(2))**2)
+        OTF = OTF_turb * self.OTFs_static * fftPhasor * self.JitterCore(Jx.abs(),Jy.abs(),Jxy.abs())
 
-        OTF = OTF_turb * self.OTF_static * fftPhasor * self.JitterCore(Jx.abs(),Jy.abs(),Jxy.abs())
-        PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) ).unsqueeze(0).unsqueeze(0)
-        PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='area').squeeze(0).squeeze(0) #TODO: proper flux scaling
-        
+        PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) ).unsqueeze(0)
+        PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='area').squeeze(0)
+
         if self.norm_regime == 'max':
-            return PSF_out/PSF_out.max() * F + bg
+            return PSF_out/torch.amax(PSF_out, dim=(1,2), keepdim=True) * F + bg
         elif self.norm_regime == 'sum':
-            return PSF_out/PSF_out.sum() * F + bg
+            return PSF_out/PSF_out.sum(dim=(1,2), keepdim=True) * F + bg
         else:
             return PSF_out * F + bg
 
@@ -449,42 +450,66 @@ class TipToy(torch.nn.Module):
 # end of class defenition
 
 #%% -------------------------------------------------------------
-toy = TipToy(config_file, data_test, 'CUDA')
+toy = TipToy(config_file, data_samples, 'CUDA')
 toy.norm_regime = 'max'
 
+Nsrc = len(data_samples)
+
+im = np.dstack([data_sample['image'] for data_sample in data_samples])
+
 el_croppo = slice(im.shape[0]//2-32, im.shape[1]//2+32)
-el_croppo = (el_croppo, el_croppo)
 
-if    toy.norm_regime == 'max': param = im.max()
-elif  toy.norm_regime == 'sum': param = im.sum()
-else: param = 1.0
-PSF_0 = torch.tensor(im/param, device=toy.device)
+for i in range(im.shape[2]):
+    if    toy.norm_regime == 'max': param = im[:,:,i].max()
+    elif  toy.norm_regime == 'sum': param = im[:,:,i].sum()
+    else: param = 1.0
+    im[:,:,i] /= param
 
-dx_0, dy_0 = Center(PSF_0)
+PSF_0 = torch.tensor(im, device=toy.device).permute([2,0,1])
 
-bg_0 = BackgroundEstimate(PSF_0, radius=90)
+#dx_0, dy_0 = Center(PSF_0)
+#bg_0 = BackgroundEstimate(PSF_0, radius=90)
 
-r0  = torch.tensor(r0_new(data_test['r0'], toy.wvl, 0.5e-6), requires_grad=True, device=toy.device)
-#r0  = torch.tensor(data_test['r0'], requires_grad=True, device=toy.device)
-L0  = torch.tensor(25.0, requires_grad=False, device=toy.device)
-F   = torch.tensor(1.0,  requires_grad=True,  device=toy.device)
-dx  = torch.tensor(dx_0, requires_grad=True,  device=toy.device)
-dy  = torch.tensor(dy_0, requires_grad=True,  device=toy.device)
-bg  = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
-n   = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
-Jx  = torch.tensor(10.0, requires_grad=True,  device=toy.device)
-Jy  = torch.tensor(10.0, requires_grad=True,  device=toy.device)
-Jxy = torch.tensor(2.0,  requires_grad=True,  device=toy.device)
+#r0  = torch.tensor(
+#    [r0_new(data_sample['r0'], toy.wvl[i], 0.5e-6) for i,data_sample in enumerate(data_samples)],
+#    requires_grad=True, device=toy.device).unsqueeze(1).unsqueeze(2)
+
+r0  = torch.tensor(
+    [data_sample['r0'] for data_sample in data_samples],
+    requires_grad=True, device=toy.device).unsqueeze(1).unsqueeze(2)
+    
+L0  = torch.tensor([25.0]*3, requires_grad=False, device=toy.device).unsqueeze(1).unsqueeze(2)
+F   = torch.tensor([1.0]*3,  requires_grad=True,  device=toy.device).unsqueeze(1).unsqueeze(2)
+dx  = torch.tensor([0.0]*3,  requires_grad=True,  device=toy.device).unsqueeze(1).unsqueeze(2)
+dy  = torch.tensor([0.0]*3,  requires_grad=True,  device=toy.device).unsqueeze(1).unsqueeze(2)
+bg  = torch.tensor([0.0]*3,  requires_grad=True,  device=toy.device).unsqueeze(1).unsqueeze(2)
+n   = torch.tensor([0.0]*3,  requires_grad=True,  device=toy.device).unsqueeze(1).unsqueeze(2)
+Jx  = torch.tensor([10.0]*3, requires_grad=True,  device=toy.device).unsqueeze(1).unsqueeze(2)
+Jy  = torch.tensor([10.0]*3, requires_grad=True,  device=toy.device).unsqueeze(1).unsqueeze(2)
+Jxy = torch.tensor([2.0]*3,  requires_grad=True,  device=toy.device).unsqueeze(1).unsqueeze(2)
 
 parameters = [r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy]
-x = torch.stack(parameters).T.unsqueeze(0)
+#x = torch.stack(parameters).T.unsqueeze(0)
 
 toy.StartTimer()
-PSF_1 = toy(x)
-print(toy.EndTimer())
-PSF_DL = toy.DLPSF()
+#PSF_1 = toy(x)
+PSF_1 = toy.PSD2PSF(*parameters)
 
-plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
+#print(toy.EndTimer())
+#PSF_DL = toy.DLPSF()
+
+for i in range(im.shape[2]):
+    plt.imshow(torch.log(
+        torch.hstack(
+            (
+                PSF_0.abs()[i, el_croppo, el_croppo],
+                PSF_1.abs()[i, el_croppo, el_croppo],
+                (PSF_1-PSF_0).abs()[i, el_croppo, el_croppo]
+            )
+        )
+    ).detach().cpu())
+    plt.show()
+#%%
 
 ''' 
 mask = 1.0 - CircularMask(im, Center(PSF_0, centered=False), 20)

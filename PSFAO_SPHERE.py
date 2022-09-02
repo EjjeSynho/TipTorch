@@ -51,16 +51,8 @@ class PSFAO(torch.nn.Module):
         # Reading parameters from the file
         self.wvl = data_sample['spectrum']['lambda']
 
-        self.AO_config['atmosphere']['Seeing']          = data_sample['seeing']
-        self.AO_config['atmosphere']['WindSpeed']       = [data_sample['Wind speed']['header']]
-        self.AO_config['atmosphere']['WindDirection']   = [data_sample['Wind direction']['header']]
         self.AO_config['sources_science']['Wavelength'] = [self.wvl]
         self.AO_config['sensor_science']['FieldOfView'] = data_sample['image'].shape[0]
-        self.AO_config['sensor_science']['Zenith']      = [90.0-data_sample['telescope']['altitude']]
-        self.AO_config['sensor_science']['Azimuth']     = [data_sample['telescope']['azimuth']]
-        self.AO_config['sensor_science']['SigmaRON']    = data_sample['Detector']['ron']
-        self.AO_config['sensor_science']['Gain']        = data_sample['Detector']['gain']
-
         self.AO_config['RTC']['SensorFrameRate_HO']  = data_sample['WFS']['rate']
         self.AO_config['sensor_HO']['NumberPhotons'] = data_sample['WFS']['Nph vis']
 
@@ -69,43 +61,8 @@ class PSFAO(torch.nn.Module):
         self.psInMas = self.AO_config['sensor_science']['PixelScale'] #[mas]
         self.nPix    = self.AO_config['sensor_science']['FieldOfView']
         self.pitch   = self.AO_config['DM']['DmPitchs'][0] #[m]
-        self.h_DM    = self.AO_config['DM']['DmHeights'][0] # ????? what is h_DM?
         self.nDM     = 1
         self.kc      = 1/(2*self.pitch) #TODO: kc is not consistent with vanilla TIPTOP
-
-        self.zenith_angle  = torch.tensor(self.AO_config['telescope']['ZenithAngle'], device=self.device) # [deg]
-        self.airmass       = 1.0 / torch.cos(self.zenith_angle * deg2rad)
-
-        self.GS_wvl     = self.AO_config['sources_HO']['Wavelength'][0] #[m]
-        self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
-        self.GS_angle   = torch.tensor(self.AO_config['sources_HO']['Zenith'],  device=self.device) / rad2arc
-        self.GS_azimuth = torch.tensor(self.AO_config['sources_HO']['Azimuth'], device=self.device) * deg2rad
-        self.GS_dirs_x  = torch.tan(self.GS_angle) * torch.cos(self.GS_azimuth)
-        self.GS_dirs_y  = torch.tan(self.GS_angle) * torch.sin(self.GS_azimuth)
-        self.nGS = self.GS_dirs_y.size(0)
-
-        self.wind_speed  = torch.tensor(self.AO_config['atmosphere']['WindSpeed'], device=self.device)
-        self.wind_dir    = torch.tensor(self.AO_config['atmosphere']['WindDirection'], device=self.device)
-        self.Cn2_weights = torch.tensor(self.AO_config['atmosphere']['Cn2Weights'], device=self.device)
-        self.Cn2_heights = torch.tensor(self.AO_config['atmosphere']['Cn2Heights'], device=self.device) * self.airmass #[m]
-        self.stretch     = 1.0 / (1.0-self.Cn2_heights/self.GS_height)
-        self.h           = self.Cn2_heights * self.stretch
-        self.nL          = self.Cn2_heights.size(0)
-
-        self.WFS_d_sub = np.mean(self.AO_config['sensor_HO']['SizeLenslets'])
-        self.WFS_n_sub = np.mean(self.AO_config['sensor_HO']['NumberLenslets'])
-        self.WFS_det_clock_rate = np.mean(self.AO_config['sensor_HO']['ClockRate']) # [(?)]
-        self.WFS_FOV = self.AO_config['sensor_HO']['FieldOfView']
-        self.WFS_RON = self.AO_config['sensor_HO']['SigmaRON']
-        self.WFS_psInMas = self.AO_config['sensor_HO']['PixelScale']
-        self.WFS_wvl = torch.tensor(self.GS_wvl, device=self.device) #TODO: clarify this
-        self.WFS_spot_FWHM = torch.tensor(self.AO_config['sensor_HO']['SpotFWHM'][0], device=self.device)
-        self.WFS_excessive_factor = self.AO_config['sensor_HO']['ExcessNoiseFactor']
-        self.WFS_Nph = torch.tensor(self.AO_config['sensor_HO']['NumberPhotons'], device=self.device)
-
-        self.HOloop_rate  = np.mean(self.AO_config['RTC']['SensorFrameRate_HO']) # [Hz] (?)
-        self.HOloop_delay = self.AO_config['RTC']['LoopDelaySteps_HO'] # [ms] (?)
-        self.HOloop_gain  = self.AO_config['RTC']['LoopGain_HO']
 
 
     def InitGrids(self):
