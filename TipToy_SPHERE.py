@@ -465,18 +465,17 @@ dx_0, dy_0 = Center(PSF_0)
 bg_0 = BackgroundEstimate(PSF_0, radius=90)
 
 r0  = torch.tensor(r0_new(data_test['r0'], toy.wvl, 0.5e-6), requires_grad=True, device=toy.device)
-#r0  = torch.tensor(data_test['r0'], requires_grad=True, device=toy.device)
 L0  = torch.tensor(25.0, requires_grad=False, device=toy.device)
 F   = torch.tensor(1.0,  requires_grad=True,  device=toy.device)
 dx  = torch.tensor(dx_0, requires_grad=True,  device=toy.device)
 dy  = torch.tensor(dy_0, requires_grad=True,  device=toy.device)
 bg  = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
-n   = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
+dn   = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
 Jx  = torch.tensor(10.0, requires_grad=True,  device=toy.device)
 Jy  = torch.tensor(10.0, requires_grad=True,  device=toy.device)
 Jxy = torch.tensor(2.0,  requires_grad=True,  device=toy.device)
 
-parameters = [r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy]
+parameters = [r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy]
 x = torch.stack(parameters).T.unsqueeze(0)
 
 toy.StartTimer()
@@ -509,14 +508,14 @@ def loss_fn(a,b):
         window_loss(Jx, 50) + \
         window_loss(Jy, 50) + \
         window_loss(Jxy, 400) + \
-        window_loss(n+toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)), 1.5)
+        window_loss(dn+toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)), 1.5)
     return z
 
 #%
 optimizer_lbfgs = OptimizeLBFGS(toy, parameters, loss_fn)
 
 for i in range(20):
-    optimizer_lbfgs.Optimize(PSF_0, [F, dx, dy, r0, n], 5)
+    optimizer_lbfgs.Optimize(PSF_0, [F, dx, dy, r0, dn], 5)
     optimizer_lbfgs.Optimize(PSF_0, [bg], 2)
     optimizer_lbfgs.Optimize(PSF_0, [Jx, Jy, Jxy], 3)
 
@@ -528,7 +527,7 @@ SR = lambda PSF: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
 #optimizer_trf.Optimize(PSF_0)
 #%
 
-n_result = (n + toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)) ).abs().data.item()
+n_result = (dn + toy.NoiseVariance(r0_new(r0, toy.GS_wvl, toy.wvl)) ).abs().data.item()
 n_init = toy.NoiseVariance(torch.tensor(r0_new(data_test['r0'], toy.GS_wvl, 0.5e-6), device=toy.device)).item()
 
 print("".join(['_']*52))
