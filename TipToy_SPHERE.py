@@ -264,6 +264,14 @@ class TipToy(torch.nn.Module):
         self.SetDataSample(data_sample)
         self.InitGrids()
 
+        self.PSDs = {}
+        self.include_PSD = {}
+        self.include_PSD['vK'] = True
+        self.include_PSD['noise'] = True
+        self.include_PSD['ST'] = True
+        self.include_PSD['aliasing'] = True
+        self.include_PSD['chromatism'] = True
+
 
     def Controller(self, nF=1000):
         #nTh = 1
@@ -324,9 +332,10 @@ class TipToy(torch.nn.Module):
 
     def NoisePSD(self, WFS_noise_var):
         noisePSD = abs(self.Rx**2 + self.Ry**2) / (2*self.kc)**2
+        #print(noisePSD.sum().item())
         noisePSD = noisePSD * self.piston_filter * self.noise_gain * WFS_noise_var * self.mask_corrected_AO
+        #print(noisePSD.sum().item())
         return noisePSD
-
 
     def AliasingPSD(self, r0, L0):
         T = self.WFS_det_clock_rate / self.HOloop_rate
@@ -389,27 +398,30 @@ class TipToy(torch.nn.Module):
         return (PSF_out/PSF_out.sum())
 
 
-    def PSD2PSF(self, r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy):
-        WFS_noise_var2 = torch.abs(n + self.NoiseVariance(r0_new(r0.abs(), self.GS_wvl, self.wvl)))
+    def PSD2PSF(self, r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy):
+        WFS_noise_var2 = torch.abs(dn + self.NoiseVariance(r0_new(r0.abs(), self.GS_wvl, 0.5e-6)))
         self.vx = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.wind_speed*torch.cos(self.wind_dir*np.pi/180.),0),0),0)
         self.vy = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(self.wind_speed*torch.sin(self.wind_dir*np.pi/180.),0),0),0)
 
         self.Controller()
         self.ReconstructionFilter(r0.abs(), L0.abs(), WFS_noise_var2)
 
-        # Put all contributiors together and sum up the resulting PSD
-        PSD = self.VonKarmanPSD(r0.abs(),L0.abs()) + \
-        self.PSD_padder(
-            self.NoisePSD(WFS_noise_var2) + \
-            self.SpatioTemporalPSD() + \
-            self.AliasingPSD(r0.abs(), L0) + \
-            self.ChromatismPSD(r0.abs(), L0.abs())
-        )
-        # Computing OTF from PSD
         dk = 2*self.kc/self.nOtf_AO
-        PSD *= (dk*self.wvl*1e9/2/np.pi)**2
-        cov  = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD)))
-        SF   = torch.abs(cov).max()-cov
+        PSD_norm = (dk*500/2/np.pi)**2
+        noise_PSD_norm = (dk*self.GS_wvl*1e9/2/np.pi)**2
+
+        # Put all contributiors together and sum up the resulting PSD
+        PSD = self.VonKarmanPSD(r0.abs(),L0.abs()) * PSD_norm + \
+        self.PSD_padder(
+            self.NoisePSD(WFS_noise_var2) * noise_PSD_norm + \
+            self.SpatioTemporalPSD() * PSD_norm + \
+            self.AliasingPSD(r0.abs(), L0) * PSD_norm + \
+            self.ChromatismPSD(r0.abs(), L0.abs()) * PSD_norm
+        )
+
+        # Computing OTF from PSD
+        cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD))) # FFT axes are set to 1,2 by PyTorch by default
+        SF = torch.abs(cov).max()-cov
         fftPhasor = torch.exp(-np.pi*1j*self.sampling_factor*(self.U*dx+self.V*dy))
         OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/self.wvl)**2)
 
@@ -448,7 +460,15 @@ class TipToy(torch.nn.Module):
 
 # end of class defenition
 
-#%% -------------------------------------------------------------
+'''
+r0_0 = 0.25 # @500nm
+r0_1 = r0_new(0.25, toy.wvl, 0.5e-6)
+
+print( toy.NoiseVariance(r0_new(r0_1, toy.GS_wvl, toy.wvl) ) )
+print( toy.NoiseVariance(r0_new(r0_0, toy.GS_wvl, 0.5e-6) ) )
+'''
+
+#% -------------------------------------------------------------
 toy = TipToy(config_file, data_test, 'CUDA')
 toy.norm_regime = 'max'
 
@@ -464,40 +484,38 @@ dx_0, dy_0 = Center(PSF_0)
 
 bg_0 = BackgroundEstimate(PSF_0, radius=90)
 
-r0  = torch.tensor(r0_new(data_test['r0'], toy.wvl, 0.5e-6), requires_grad=True, device=toy.device)
+#r0  = torch.tensor(r0_new(data_test['r0'], toy.wvl, 0.5e-6), requires_grad=True, device=toy.device)
+r0  = torch.tensor(r0_new(0.25, toy.wvl, 0.5e-6), requires_grad=True, device=toy.device)
 L0  = torch.tensor(25.0, requires_grad=False, device=toy.device)
 F   = torch.tensor(1.0,  requires_grad=True,  device=toy.device)
-dx  = torch.tensor(dx_0, requires_grad=True,  device=toy.device)
-dy  = torch.tensor(dy_0, requires_grad=True,  device=toy.device)
+dx  = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
+dy  = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
 bg  = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
-dn   = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
-Jx  = torch.tensor(10.0, requires_grad=True,  device=toy.device)
-Jy  = torch.tensor(10.0, requires_grad=True,  device=toy.device)
-Jxy = torch.tensor(2.0,  requires_grad=True,  device=toy.device)
+dn  = torch.tensor(5.5,  requires_grad=True,  device=toy.device)
+Jx  = torch.tensor(0.0, requires_grad=True,  device=toy.device)
+Jy  = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
+Jxy = torch.tensor(0.0,  requires_grad=True,  device=toy.device)
 
 parameters = [r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy]
 x = torch.stack(parameters).T.unsqueeze(0)
 
-toy.StartTimer()
+#toy.StartTimer()
 PSF_1 = toy(x)
-print(toy.EndTimer())
+#print(toy.EndTimer())
 PSF_DL = toy.DLPSF()
 
+
+profile_0 = np.log(radial_profile(PSF_1.detach().cpu().numpy()))
+
+plt.plot(profile_0)
+plt.title('Init')
+plt.grid()
+
+
+#%%
 plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_croppo], ((PSF_1-PSF_0).abs()[el_croppo])) )).detach().cpu())
 
-''' 
-mask = 1.0 - CircularMask(im, Center(PSF_0, centered=False), 20)
-t = np.linspace(-10, 10, 30)
-bump = np.exp(-0.5*t**2)
-bump /= np.trapz(bump) # normalize the integral to 1
-kernel = bump[:, np.newaxis] * bump[np.newaxis, :]
-mask = signal.fftconvolve(mask, kernel, mode='same')
-mask /= mask.max()
-img3 = 1.0 - torch.tensor( mask, device=toy.device )
-plt.imshow(torch.log(PSF_0.abs()*img3).cpu())
-'''
 #%%
-  
 loss = nn.L1Loss(reduction='sum')
 
 window_loss = lambda x, x_max: (x>0).float()*(0.01/x)**2 + (x<0).float()*100 + 100*(x>x_max).float()*(x-x_max)**2

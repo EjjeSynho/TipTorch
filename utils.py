@@ -213,6 +213,19 @@ def Center(im, centered=True):
     return WoG - np.array(im.shape)//2 * int(centered)
 
 
+''' 
+mask = 1.0 - CircularMask(im, Center(PSF_0, centered=False), 20)
+t = np.linspace(-10, 10, 30)
+bump = np.exp(-0.5*t**2)
+bump /= np.trapz(bump) # normalize the integral to 1
+kernel = bump[:, np.newaxis] * bump[np.newaxis, :]
+mask = signal.fftconvolve(mask, kernel, mode='same')
+mask /= mask.max()
+img3 = 1.0 - torch.tensor( mask, device=toy.device )
+plt.imshow(torch.log(PSF_0.abs()*img3).cpu())
+'''
+
+
 def CircularMask(img, center, radius):
     xx,yy = np.meshgrid( np.arange(0,img.shape[1]), np.arange(0,img.shape[0]) )
     mask_PSF = np.ones(img.shape[0:2])
