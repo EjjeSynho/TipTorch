@@ -99,9 +99,7 @@ class PSFAO(torch.nn.Module):
         corrected_ROI = slice(self.nOtf//2-self.nOtf_AO//2, self.nOtf//2+self.nOtf_AO//2)
         corrected_ROI = (corrected_ROI,corrected_ROI)
 
-        self.mask_AO = self.mask[corrected_ROI]
         self.mask_corrected_AO = self.mask_corrected[corrected_ROI]
-        self.mask_corrected_AO_1_1  = torch.unsqueeze(torch.unsqueeze(self.mask_corrected_AO,2),3)
 
         self.kx_AO  = self.kx  [corrected_ROI]
         self.ky_AO  = self.ky  [corrected_ROI]
@@ -110,11 +108,6 @@ class PSFAO(torch.nn.Module):
         self.kxy_AO = self.kxy [corrected_ROI]
         self.k_AO   = self.k   [corrected_ROI]
         self.k2_AO  = self.k2  [corrected_ROI]
-
-        # Matrix repetitions and dimensions expansion to avoid in runtime
-        self.kx_1_1 = torch.unsqueeze(torch.unsqueeze(self.kx_AO,2),3)
-        self.ky_1_1 = torch.unsqueeze(torch.unsqueeze(self.ky_AO,2),3)
-        self.k_1_1  = torch.unsqueeze(torch.unsqueeze(self.k_AO, 2),3)
 
         # Initialize OTF frequencines
         self.U,self.V = torch.meshgrid(
@@ -185,16 +178,15 @@ class PSFAO(torch.nn.Module):
 
 
     def VonKarmanPSD(self, r0, L0):
-        #return self.cte*r0**(-5/3)*(self.k2 + 1/L0**2)**(-11/6) * self.mask
         return self.cte*r0.unsqueeze(1).unsqueeze(2)**(-5/3)*(self.k2.unsqueeze(0) + \
             1/L0.unsqueeze(1).unsqueeze(2)**2)**(-11/6) * self.mask.unsqueeze(0)
 
 
-    def JitterCore(self, Jx, Jy, Jxy):
-        u_max = self.sampling*self.D/self.wvl/(3600*180*1e3/np.pi)
-        norm_fact = u_max**2 * (2*np.sqrt(2*np.log(2)))**2
-        Djitter = norm_fact * (Jx**2 * self.U2 + Jy**2 * self.V2 + 2*Jxy*self.UV)
-        return torch.exp(-0.5*Djitter) #TODO: cover Nyquist sampled case
+    #def JitterCore(self, Jx, Jy, Jxy):
+    #    u_max = self.sampling*self.D/self.wvl/(3600*180*1e3/np.pi)
+    #    norm_fact = u_max**2 * (2*np.sqrt(2*np.log(2)))**2
+    #    Djitter = norm_fact * (Jx**2 * self.U2 + Jy**2 * self.V2 + 2*Jxy*self.UV)
+    #    return torch.exp(-0.5*Djitter) #TODO: cover Nyquist sampled case
 
 
     def DLPSF(self):
@@ -235,36 +227,6 @@ class PSFAO(torch.nn.Module):
         MoffatPSD[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
 
         return MoffatPSD
-
-        '''        
-        ax = alpha * ratio
-        ay = alpha / ratio
-
-        def reduced_center_coord(uxx, uxy, uyy, ax, ay, theta):
-            c  = torch.cos(theta)
-            s  = torch.sin(theta)
-            s2 = torch.sin(2.0 * theta)
-
-            rxx = (c/ax)**2 + (s/ay)**2
-            rxy =  s2/ay**2 -  s2/ax**2
-            ryy = (c/ay)**2 + (s/ax)**2
-            
-            uu = rxx*uxx + rxy*uxy + ryy*uyy
-            return uu
-
-        uu = reduced_center_coord(self.kx2_AO, self.kxy_AO, self.ky2_AO, ax, ay, theta)
-        V = (1.0+uu)**(-beta) # Moffat shape
-
-        removeInside = 0.0
-        E = (beta-1) / (np.pi*ax*ay)
-        Fout = (1 +      (self.kc**2)/(ax*ay))**(1-beta)
-        Fin  = (1 + (removeInside**2)/(ax*ay))**(1-beta)
-        F = 1/(Fin-Fout)
-
-        MoffatPSD = (amp * V*E*F + b) * self.mask_corrected_AO
-        MoffatPSD[self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
-        return MoffatPSD
-        '''
 
 
     def PSD2PSF(self, r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta):
@@ -398,6 +360,41 @@ plt.show()
 
 plot_radial_profile(PSF_0.squeeze(0), PSF_1.squeeze(0), 'PSF AO', title='IRDIS PSF')
 plt.show()
+
+#%%
+params = [p.clone().detach() for p in parameters]
+PSF_ref = psfao.PSD2PSF(*params)
+
+dp = torch.tensor(1e-2, device=psfao.device)
+
+PSF_diff = []
+for i in range(len(params)):
+    params[i] += dp
+    PSF_mod = psfao.PSD2PSF(*params)
+    PSF_diff.append( (PSF_mod-PSF_ref)/dp )
+    params[i] -= dp
+
+loss_fn = nn.L1Loss(reduction='sum')
+def f(*params):
+    return loss_fn(psfao.PSD2PSF(*params), psfao.PSD2PSF(*[p+dp for p in params]))
+
+sensetivity = torch.autograd.functional.jacobian(f, tuple(params))
+
+#%%
+from matplotlib.colors import SymLogNorm
+
+names = [r'r$_0$', r'L$_0$', 'F', 'dx', 'dy', 'bg', 'amp', 'b', r'$\alpha$', r'$\beta$', r'$\ratio$', r'$\theta$']
+scales = []
+
+for name, diff_map in zip(names, PSF_diff):
+    scales.append(diff_map.abs().sum())
+    z_lims = max([diff_map.min().abs().item(), diff_map.max().abs().item()])
+    plt.imshow( (diff_map).cpu(), cmap=plt.get_cmap('Spectral'), norm=SymLogNorm(z_lims*1e-3, vmin=-z_lims, vmax=z_lims) )
+    plt.title(name)
+    plt.colorbar()
+    plt.show()
+
+
 
 #%% =============================== MAKE DATASET ==========================================
 ### =======================================================================================
@@ -616,6 +613,7 @@ def PSFcomparator(data_sample):
 
     return PSF_0.squeeze(0), PSF_1.squeeze(0), PSF_2.squeeze(0)
 
+'''
 i = 5
 PSF_0, PSF_1, PSF_2 = PSFcomparator(database_val[i])
 
@@ -630,7 +628,7 @@ plt.show()
 plot_radial_profile(PSF_0, PSF_2, 'Gnosis', title='IRDIS PSF', dpi=100)
 plt.show()
 
-
+'''
 #%%
 loss_fn = nn.L1Loss()
 
@@ -645,8 +643,8 @@ profile_0s = []
 profile_1s = []
 profile_2s = []
 
+for data_sample in database_train:
 #for data_sample in database_val:
-for data_sample in database_val:
     PSF_0, PSF_1, PSF_2 = PSFcomparator(data_sample)
     fit_diff.append(loss_fn(PSF_0, PSF_1).item())
     gnosis_diff.append(loss_fn(PSF_0, PSF_2).item())
