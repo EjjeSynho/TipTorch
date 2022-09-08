@@ -44,8 +44,8 @@ path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP_old/P3')
 path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/irdis.ini'))
 
 config_file = parameterParser(path_root, path_ini).params
-config_file['atmosphere']['Cn2Weights'] = [0.95, 0.05]
-config_file['atmosphere']['Cn2Heights'] = [0, 10000]
+#config_file['atmosphere']['Cn2Weights'] = [0.95, 0.05]
+#config_file['atmosphere']['Cn2Heights'] = [0, 10000]
 
 #%% ------------------------ Managing paths ------------------------
 class TipToy(torch.nn.Module):
@@ -530,23 +530,23 @@ plt.imshow(torch.log( torch.hstack((PSF_0.abs()[el_croppo], PSF_1.abs()[el_cropp
 plot_radial_profile(PSF_0, PSF_1, 'TipToy', title='IRDIS PSF', dpi=100)
 
 #%%
-loss_fn = nn.L1Loss(reduction='sum')
+loss = nn.L1Loss(reduction='sum')
 
 # Confines a value between 0 and the specified value
-#window_loss = lambda x, x_max: \
-#    (x>0).float()*(0.01/x)**2 + \
-#    (x<0).float()*100 + \
-#    100*(x>x_max).float()*(x-x_max)**2
-#
-## TODO: specify loss weights
-#def loss_fn(a,b):
-#    z = loss(a,b) + \
-#        window_loss(r0, 0.5) * 5.0 + \
-#        window_loss(Jx, 50) + \
-#        window_loss(Jy, 50) + \
-#        window_loss(Jxy, 400) + \
-#        window_loss(dn+toy.NoiseVariance(r0), 1.0)
-#    return z
+window_loss = lambda x, x_max: \
+    (x>0).float()*(0.01/x)**2 + \
+    (x<0).float()*100 + \
+    100*(x>x_max).float()*(x-x_max)**2
+
+# TODO: specify loss weights
+def loss_fn(a,b):
+    z = loss(a,b) + \
+        window_loss(r0, 0.5) * 5.0 + \
+        window_loss(Jx, 50) + \
+        window_loss(Jy, 50) + \
+        window_loss(Jxy, 400) + \
+        window_loss(dn+toy.NoiseVariance(r0), 1.0)
+    return z
 
 #%
 optimizer_lbfgs = OptimizeLBFGS(toy, parameters, loss_fn)
@@ -885,8 +885,8 @@ profile_1s = []
 profile_2s = []
 profile_3s = []
 
-for data_sample in database_train:   #TODO: fix memory issue
-#for data_sample in database_val:
+#for data_sample in database_train:   #TODO: fix memory issue
+for data_sample in database_val:
 
     PSF_0, PSF_1, PSF_2, PSF_3 = PSFcomparator(data_sample)
     fit_diff.append(loss_fn(PSF_0, PSF_1).item())
@@ -925,7 +925,6 @@ profile_2s /= c * 0.01
 profile_3s /= c * 0.01
 
 #%%
-
 fig = plt.figure(figsize=(6,4), dpi=150)
 plt.grid()
 
@@ -952,12 +951,35 @@ plt.ylabel('Abs. relative diff., [%]')
 plt.xlabel('Pixels')
 
 #%%
-fd = fit_diff.mean()
-gd = gnosis_diff.mean()
-dd = direct_diff.mean()
+fd = np.nanmean(fit_diff)
+gd = np.nanmean(gnosis_diff)
+dd = np.nanmean(direct_diff)
 
 print('Fitting: '+str(np.round(dd/fd*100-100).astype('int'))+'% improvement compared to direct prediction')
 print('Gnosis: ' +str(np.round(dd/gd*100-100).astype('int'))+'% improvement compared to direct prediction')
 
 #%% ==========================================================================================
+loss_fn = nn.L1Loss() #reduction='sum')
+optimizer = optim.SGD([{'params': gnosis.fc1.parameters()},
+                       {'params': gnosis.act1.parameters()},
+                       {'params': gnosis.fc2.parameters()},
+                       {'params': gnosis.act2.parameters()},
+                       {'params': gnosis.fc3.parameters()}], lr=1e-9, momentum=0.9)
 
+sample = database_train[0]
+toy = TipToy(config_file, sample['input'], 'CUDA')
+toy.norm_regime = 'max'
+gnosis.psf_model = toy
+
+for i in range(20):
+    for sample in database_train:
+        toy.Update(data_sample['input'], reinit_grids=False)
+        input = torch.tensor(GetInputs(sample), device=toy.device).unsqueeze(0).float()
+        label = torch.tensor(sample['input']['image'] / sample['input']['image'].max(), device=toy.device).float()
+        optimizer.zero_grad()
+        pred = gnosis(input)
+        loss = loss_fn(pred, label)
+        loss.backward()
+        print(loss.item())
+        optimizer.step()
+# %%
