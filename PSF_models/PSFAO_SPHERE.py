@@ -17,14 +17,15 @@ from os import path
 import re
 from tqdm import tqdm
 
-from parameterParser import parameterParser
+from tools.parameterParser import parameterParser
 from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask, DisplayDataset
 from utils import register_hooks, iter_graph
 from utils import OptimizeTRF, OptimizeLBFGS
 from utils import radial_profile, plot_radial_profile
 from SPHERE_data import SPHERE_database, LoadSPHEREsampleByID
-# end of import list
+
+device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
 
 #210
 #13
@@ -155,16 +156,12 @@ class PSFAO(torch.nn.Module):
         if reinit_grids: self.InitGrids()
 
 
-    def __init__(self, AO_config, data_sample, device=None, pixels_per_l_D=None):
-        if device is None or device == 'cpu' or device == 'CPU':
-            self.device = torch.device('cpu')
-            self.is_gpu = False
+    def __init__(self, AO_config, data_sample, device, pixels_per_l_D=None):
+        self.device = device
 
-        elif device == 'cuda' or device == 'CUDA':
-            self.device  = torch.device('cuda') # Will use the default CUDA device
+        if self.device.type is not 'cpu':
             self.start = torch.cuda.Event(enable_timing=True)
             self.end   = torch.cuda.Event(enable_timing=True)
-            self.is_gpu = True
 
         super().__init__()
 
@@ -180,13 +177,6 @@ class PSFAO(torch.nn.Module):
     def VonKarmanPSD(self, r0, L0):
         return self.cte*r0.unsqueeze(1).unsqueeze(2)**(-5/3)*(self.k2.unsqueeze(0) + \
             1/L0.unsqueeze(1).unsqueeze(2)**2)**(-11/6) * self.mask.unsqueeze(0)
-
-
-    #def JitterCore(self, Jx, Jy, Jxy):
-    #    u_max = self.sampling*self.D/self.wvl/(3600*180*1e3/np.pi)
-    #    norm_fact = u_max**2 * (2*np.sqrt(2*np.log(2)))**2
-    #    Djitter = norm_fact * (Jx**2 * self.U2 + Jy**2 * self.V2 + 2*Jxy*self.UV)
-    #    return torch.exp(-0.5*Djitter) #TODO: cover Nyquist sampled case
 
 
     def DLPSF(self):
@@ -230,7 +220,6 @@ class PSFAO(torch.nn.Module):
 
 
     def PSD2PSF(self, r0, L0, F, dx, dy, bg, amp, b, alpha, beta, ratio, theta):
-    
         PSD = self.VonKarmanPSD(r0.abs(), L0.abs()) + \
             self.PSD_padder(self.MoffatPSD(amp, b.abs(), alpha, beta, ratio, theta))
 
@@ -280,14 +269,14 @@ class PSFAO(torch.nn.Module):
 
 
     def StartTimer(self):
-        if self.is_gpu:
+        if self.device.type is not 'cpu':
             self.start.record()
         else:
             self.start = time.time()
 
 
     def EndTimer(self):
-        if self.is_gpu:
+        if self.device.type is not 'cpu':
             self.end.record()
             torch.cuda.synchronize()
             return self.start.elapsed_time(self.end)
@@ -298,7 +287,7 @@ class PSFAO(torch.nn.Module):
 # end of class defenition
 
 #%%
-psfao = PSFAO(config_file, data_test, 'CUDA')
+psfao = PSFAO(config_file, data_test, device)
 psfao.norm_regime = 'max'
 #psfao.norm_regime = 'sum'
 

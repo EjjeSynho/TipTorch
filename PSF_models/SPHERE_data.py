@@ -10,7 +10,7 @@ from astropy.coordinates import SkyCoord
 from astropy import units as u
 from tqdm import tqdm
 from query_eso_archive import query_simbad
-import pickle
+import pickle5 as pickle
 import re
 from copy import deepcopy, copy
 
@@ -389,6 +389,14 @@ class SPHERE_database:
     def __iter__(self):
         for sample in self.data:
             yield {'input': sample[0], 'fitted': sample[1], 'file_id': sample[2]}
+
+    def __add__(self, o):
+        for sample, file_id in zip(o.data, o.file_ids):
+            self.data.append(sample)
+            self.file_ids.append(file_id)
+
+    def __sub__(self, o):
+        self.remove(o.file_ids)
 
     def subset(self, ids):
         buf = copy(self)

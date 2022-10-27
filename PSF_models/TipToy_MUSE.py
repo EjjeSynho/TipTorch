@@ -16,7 +16,7 @@ import pickle
 import os
 from os import path
 
-from parameterParser import parameterParser
+from tools.parameterParser import parameterParser
 from MUSE import MUSEcube
 from utils import plot_radial_profile, rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask

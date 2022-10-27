@@ -1,4 +1,7 @@
 #%%
+%reload_ext autoreload
+%autoreload 2
+
 import torch
 from torch import nn, optim, fft
 from torch.nn import ParameterDict, ParameterList, Parameter
@@ -9,26 +12,27 @@ import numpy as np
 import matplotlib.pyplot as plt
 import scipy.special as spc
 from astropy.io import fits
-import pickle
+import pickle5 as pickle
 import time
 import re
 import os
 from os import path
 from copy import deepcopy
 
-from parameterParser import parameterParser
+from tools.parameterParser import parameterParser
 from SPHERE_data import SPHERE_database,LoadSPHEREsampleByID
 from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask
 from utils import register_hooks, iter_graph
 from utils import OptimizeTRF, OptimizeLBFGS
 from utils import radial_profile, plot_radial_profile
-# end of import list
+
+device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
 
 #%%
 data_samples = []
 data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 347)[1] )
-data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 351)[1] )
+#data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 351)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 342)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 349)[1] )
@@ -122,14 +126,10 @@ class TipToy(torch.nn.Module):
 
 
     def InitGrids(self):
-        self.add12d = lambda x: x.unsqueeze(1).unsqueeze(2)
-        self.add0d  = lambda x: x.unsqueeze(0)
+        pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
 
-        if self.pixels_per_l_D is None:
-            self.pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
-
-        self.sampling_factor = int(np.ceil(2.0/self.pixels_per_l_D)) # check how much it is less than Nyquist
-        self.sampling = self.sampling_factor * self.pixels_per_l_D
+        self.sampling_factor = int(np.ceil(2.0/pixels_per_l_D)) # check how much it is less than Nyquist
+        self.sampling = self.sampling_factor * pixels_per_l_D
         self.nOtf = self.nPix * self.sampling_factor
 
         self.dk = 1/self.D/self.sampling # PSD spatial frequency step
@@ -237,28 +237,25 @@ class TipToy(torch.nn.Module):
         self.PR = PistonFilter(torch.hypot(self.km,self.kn))
 
 
-    def Update(self, data_sample, reinit_grids=True):
-        self.SetDataSample(data_sample)
+    def Update(self, data_samples, reinit_grids=True):
+        self.SetDataSample(data_samples)
         if reinit_grids: self.InitGrids()
 
 
-    def __init__(self, AO_config, data_sample, device=None, pixels_per_l_D=None):
-        if device is None or device == 'cpu' or device == 'CPU':
-            self.device = torch.device('cpu')
-            self.is_gpu = False
+    def __init__(self, AO_config, data_sample, device):
+        self.device = device
 
-        elif device == 'cuda' or device == 'CUDA':
-            self.device  = torch.device('cuda') # Will use the default CUDA device
-            self.start = torch.cuda.Event(enable_timing=True)
-            self.end   = torch.cuda.Event(enable_timing=True)
-            self.is_gpu = True
+        if self.device.type is not 'cpu':
+            self.start  = torch.cuda.Event(enable_timing=True)
+            self.end    = torch.cuda.Event(enable_timing=True)
 
         super().__init__()
 
+        self.add12d = lambda x: x.unsqueeze(1).unsqueeze(2)
+        self.add0d  = lambda x: x.unsqueeze(0)
         self.norm_regime = 'sum'
 
         # Read data and initialize AO system
-        self.pixels_per_l_D = pixels_per_l_D
         self.AO_config = AO_config
         self.SetDataSample(data_sample)
         self.InitGrids()
@@ -332,6 +329,7 @@ class TipToy(torch.nn.Module):
         psd_ST = (1+abs(Ff)**2 * self.h2 - 2*torch.real(Ff*self.h1*A)) * self.W_atm * self.mask_corrected_AO
         return psd_ST
 
+
     def NoisePSD(self, WFS_noise_var):
         noisePSD = abs(self.Rx**2 + self.Ry**2) / (2*self.kc)**2
         noisePSD = noisePSD * self.piston_filter * self.noise_gain * WFS_noise_var * self.mask_corrected_AO
@@ -362,6 +360,7 @@ class TipToy(torch.nn.Module):
     def VonKarmanSpectrum(self, r0, L0, freq2):
         return self.cte*r0**(-5/3) * (freq2 + 1/L0**2)**(-11/6)
 
+
     def VonKarmanPSD(self, r0, L0):
         return self.VonKarmanSpectrum(r0, L0, self.k2) * self.mask
 
@@ -383,7 +382,7 @@ class TipToy(torch.nn.Module):
 
 
     def NoiseVariance(self, r0):
-        r0_WFS = r0_new(r0.abs(), self.GS_wvl, 0.5e-6).unsqueeze(1).unsqueeze(2) #from (Nsrc x 1 x 1) to (Nsrc)
+        r0_WFS = r0_new(r0.abs(), self.GS_wvl, 0.5e-6).flatten() #from (Nsrc x 1 x 1) to (Nsrc)
         WFS_nPix = self.WFS_FOV / self.WFS_n_sub
         WFS_pixelScale = self.WFS_psInMas / 1e3 # [arcsec]
         # Read-out noise calculation
@@ -399,13 +398,12 @@ class TipToy(torch.nn.Module):
         varNoise = self.WFS_excessive_factor * (varRON+varShot)
         return self.add12d( varNoise )
 
+    
     '''
     def DLPSF(self):
         PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(self.OTF_static))) ).unsqueeze(0).unsqueeze(0)
-        PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='area').squeeze(0).squeeze(0)
-        return (PSF_out/PSF_out.sum())
+        self.PSF_DL = interpolate(PSF, size=(self.nPix,self.nPix), mode='area').squeeze(0).squeeze(0)
     '''
-
 
     def PSD2PSF(self, r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy):
         r0  = self.add12d(r0)
@@ -428,8 +426,8 @@ class TipToy(torch.nn.Module):
 
         dk = 2*self.kc/self.nOtf_AO
 
-        # All PSD components are normalized to [nm] assuming that all cpntributors
-        # are computed for 500 [nm]
+        # All PSD components are normalized to [nm] assuming that all contributors
+        # are computed for 500 [nm] as well as all chromatic inputs
         PSD_norm = (dk*500/2/np.pi)**2
 
         # WFS operates on another wavelength -> this PSD components is normalized for WFSing wvl 
@@ -478,25 +476,24 @@ class TipToy(torch.nn.Module):
 
 
     def StartTimer(self):
-        if self.is_gpu:
-            self.start.record()
-        else:
+        if toy.device.type == 'cpu':
             self.start = time.time()
+        else:
+            self.start.record()
 
 
     def EndTimer(self):
-        if self.is_gpu:
+        if toy.device.type == 'cpu':
+            self.end = time.time()
+            return (self.end-self.start)*1000.0 # in [ms]
+        else:
             self.end.record()
             torch.cuda.synchronize()
             return self.start.elapsed_time(self.end)
-        else:
-            self.end = time.time()
-            return (self.end-self.start)*1000.0 # in [ms]
 
-# end of class defenition
 
 #%% -------------------------------------------------------------
-toy = TipToy(config_file, data_samples, 'CUDA')
+toy = TipToy(config_file, data_samples, device)
 toy.norm_regime = 'sum'
 
 ims = []
@@ -721,20 +718,25 @@ def GenerateDataset(dataset, with_PSF=False):
         input = GetInputs(sample)
         if with_PSF:
             pred = sample['input']['image']
-            pred = pred / pred.max()
+            pred = pred / pred.max() #TODO: proper normalization!!!!!
         else:
             pred = GetLabels(sample)
-        x.append(torch.tensor(input, device=toy.device).float())
-        y.append(torch.tensor(pred,  device=toy.device).float())
+        x.append(input)
+        y.append(pred)
     
     if with_PSF:
-        return torch.vstack(x), torch.dstack(y).permute([2,0,1])
+        return torch.Tensor(np.vstack(x)).float().to(toy.device), \
+               torch.Tensor(np.dstack(y)).permute([2,0,1]).float().to(toy.device)
     else:
-        return torch.vstack(x), torch.vstack(y)
+        return torch.Tensor(np.vstack(x)).float().to(toy.device), \
+               torch.Tensor(np.vstack(y)).float().to(toy.device)
 
 
 #%%
-validation_ids = np.unique(np.random.randint(0, high=len(database_wvl_good), size=30, dtype=int)).tolist()
+#validation_ids = np.unique(np.random.randint(0, high=len(database_wvl_good), size=30, dtype=int)).tolist()
+validation_ids = np.arange(len(database_wvl_good))
+np.random.shuffle(validation_ids)
+validation_ids = validation_ids[:30]
 database_train, database_val = database_wvl_good.split(validation_ids)
 
 X_train, y_train = GenerateDataset(database_train, with_PSF=False)
@@ -763,7 +765,7 @@ class Gnosis(torch.nn.Module):
 
         self.psf_model = psf_model
         self.tranform_fun = tranform_fun
-
+        self.buf_outin = 0.0
 
     def forward(self, x):
         hidden1 = self.fc1(x * self.inp_normalizer + self.inp_bias)
@@ -774,6 +776,7 @@ class Gnosis(torch.nn.Module):
         if self.psf_model is None:
             return model_inp
         else:
+            self.buf_outin = model_inp
             return self.psf_model(self.tranform_fun(model_inp)) # to rescale r0 mostly
 
 
@@ -797,7 +800,7 @@ for i in range(6000):
     if not i % 1000: print(loss.item())
     optimizer.step()
 
-print('Validation accuracy: '+str(loss_fn(gnosis(X_val), y_val).item()))
+print('Validation loss: '+str(loss_fn(gnosis(X_val), y_val).item()))
 
 #torch.save(gnosis.state_dict(), 'gnosis_weights_psfao.dict')
 #gnosis.load_state_dict(torch.load('gnosis_weights_psfao.dict'))
@@ -805,100 +808,67 @@ print('Validation accuracy: '+str(loss_fn(gnosis(X_val), y_val).item()))
 
 
 #%%
-def r0_transform(pred):
-    pred[0][0] = r0_new(pred[0][0], wvl_unique[np.argmax(counts)], 0.5e-6)
-    return pred
+def PSFcomparator(dataset):
+    # Predicted PSFs
+    test_batch = [sample['input'] for sample in dataset]
+    toy.Update(test_batch)
+    toy.norm_regime = 'max' #TODO: proper normalization regime choice
+    gnosis.psf_model = toy
 
-def PSFcomparator(data_sample):
-    toy2 = TipToy(config_file, [data_sample['input']], 'CUDA')
-    toy2.norm_regime = 'max'
-    gnosis.psf_model = toy2
-    #gnosis.tranform_fun = r0_transform
+    X_val, _ = GenerateDataset(dataset, with_PSF=False)
+    PSFs_2 = gnosis(X_val)
 
-    x_test = torch.tensor(GetInputs(data_sample), device=toy2.device).float()
-    PSF_2 = gnosis(x_test)
-    A = torch.tensor(data_sample['input']['image'], device=toy2.device)
-    C = torch.tensor(data_sample['fitted']['Img. fit'], device=toy2.device)
-    norm = A.max()
-    PSF_0 = A / norm
-    PSF_1 = C / norm
+    # Input PSFs
+    PSFs_0 = torch.tensor([sample['input']['image'] for sample in dataset], device=toy.device)
+    norma  = PSFs_0.amax(dim=(1,2)).unsqueeze(1).unsqueeze(2) #TODO: proper normalization!
+    PSFs_0 = PSFs_0 / norma
 
-    r0  = torch.tensor([data_sample['input']['r0']], device=toy2.device)
-    L0  = torch.tensor([25.], device=toy2.device)
-    F   = torch.tensor([1.0],  device=toy2.device)
-    dx  = torch.tensor([0.0],  device=toy2.device)
-    dy  = torch.tensor([0.0],  device=toy2.device)
-    bg  = torch.tensor([0.0],  device=toy2.device)
-    dn  = torch.tensor([0.0],  device=toy2.device)
-    Jx  = torch.tensor([10.0], device=toy2.device)
-    Jy  = torch.tensor([10.0], device=toy2.device)
-    Jxy = torch.tensor([2.0],  device=toy2.device)
+    # Direct prediction from the telemetry
+    N_src = len(test_batch)
+    r0  = torch.tensor([sample['input']['r0'] for sample in dataset], device=toy.device)
+    L0  = torch.tensor([25.]*N_src,  device=toy.device)
+    F   = torch.tensor([1.0]*N_src,  device=toy.device)
+    dx  = torch.tensor([0.0]*N_src,  device=toy.device)
+    dy  = torch.tensor([0.0]*N_src,  device=toy.device)
+    bg  = torch.tensor([0.0]*N_src,  device=toy.device)
+    dn  = torch.tensor([0.0]*N_src,  device=toy.device)
+    Jx  = torch.tensor([10.0]*N_src, device=toy.device)
+    Jy  = torch.tensor([10.0]*N_src, device=toy.device)
+    Jxy = torch.tensor([2.0]*N_src,  device=toy.device)
 
-    PSF_3 = toy2.PSD2PSF(r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy)
-    return PSF_0, PSF_1, PSF_2, PSF_3
+    parameters = [r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy]
+    PSFs_3 = toy.PSD2PSF(*parameters)
 
+    # Cross-check inputs from the fitted dataset
+    PSFs_1 = torch.tensor([sample['fitted']['Img. fit'] for sample in dataset],  device=toy.device)
+    PSFs_1 = PSFs_1 / norma
+    return PSFs_0.detach().cpu().numpy(), \
+           PSFs_1.detach().cpu().numpy(), \
+           PSFs_2.detach().cpu().numpy(), \
+           PSFs_3.detach().cpu().numpy()
 
-loss_fn = nn.L1Loss()
+# Input data
+# fitted PSFs
+# NN-predicted PSFs
+# telemetry-predicted PSFs
 
-fit_diff = []
-gnosis_diff = []
-direct_diff = []
+PSF_0s, PSF_1s, PSF_2s, PSF_3s = PSFcomparator(database_val)
 
-PSF_0s = []
-PSF_1s = []
-PSF_2s = []
-PSF_3s = []
+fit_diff    = np.abs(PSF_0s-PSF_1s).max(axis=(1,2))
+gnosis_diff = np.abs(PSF_0s-PSF_2s).max(axis=(1,2))
+direct_diff = np.abs(PSF_0s-PSF_3s).max(axis=(1,2))
 
-profile_0s = []
-profile_1s = []
-profile_2s = []
-profile_3s = []
-
-#for data_sample in database_train:   #TODO: fix memory issue
-for data_sample in database_val:
-
-    PSF_0, PSF_1, PSF_2, PSF_3 = PSFcomparator(data_sample)
-    fit_diff.append(loss_fn(PSF_0, PSF_1).item())
-    gnosis_diff.append(loss_fn(PSF_0, PSF_2).item())
-    direct_diff.append(loss_fn(PSF_0, PSF_3).item())
-
-    PSF_0s.append(PSF_0.squeeze(0).detach().cpu().numpy())
-    PSF_1s.append(PSF_1.squeeze(0).detach().cpu().numpy())
-    PSF_2s.append(PSF_2.squeeze(0).detach().cpu().numpy())
-    PSF_3s.append(PSF_3.squeeze(0).detach().cpu().numpy())
-
-    profile_0s.append( radial_profile(PSF_0.squeeze(0).detach().cpu().numpy())[:32] )
-    profile_1s.append( radial_profile(PSF_1.squeeze(0).detach().cpu().numpy())[:32] )
-    profile_2s.append( radial_profile(PSF_2.squeeze(0).detach().cpu().numpy())[:32] )
-    profile_3s.append( radial_profile(PSF_3.squeeze(0).detach().cpu().numpy())[:32] )
-
-fit_diff = np.array(fit_diff)
-gnosis_diff = np.array(gnosis_diff)
-direct_diff = np.array(direct_diff)
-
-PSF_0s = np.dstack(PSF_0s)
-PSF_1s = np.dstack(PSF_1s)
-PSF_2s = np.dstack(PSF_2s)
-PSF_3s = np.dstack(PSF_3s)
-
-profile_0s = np.vstack(profile_0s)
-profile_1s = np.vstack(profile_1s)
-profile_2s = np.vstack(profile_2s)
-profile_3s = np.vstack(profile_3s)
-
-c = profile_0s.mean(axis=0).max()
-
-profile_0s /= c * 0.01
-profile_1s /= c * 0.01
-profile_2s /= c * 0.01
-profile_3s /= c * 0.01
+profile_0s = radial_profile(PSF_0s)[:,:32] * 100
+profile_1s = radial_profile(PSF_1s)[:,:32] * 100
+profile_2s = radial_profile(PSF_2s)[:,:32] * 100
+profile_3s = radial_profile(PSF_3s)[:,:32] * 100
 
 #%%
 fig = plt.figure(figsize=(6,4), dpi=150)
 plt.grid()
 
 def plot_std(x,y, label, color, style):
-    y_m = np.nanmean(y, axis=0)
+    y_m = np.nanmedian(y, axis=0)
     y_s = np.nanstd(y, axis=0)
     lower_bound = y_m-y_s
     upper_bound = y_m+y_s
@@ -906,11 +876,11 @@ def plot_std(x,y, label, color, style):
     plt.fill_between(x, lower_bound, upper_bound, color=color, alpha=0.3)
     plt.plot(x, y_m, label=label, color=color, linestyle=style)
 
-x = np.arange(32)
-plot_std(x, profile_0s, 'Input PSF', 'darkslategray', '-')
-plot_std(x, profile_0s-profile_1s, '$\Delta$ Fit', 'royalblue', '--')
-plot_std(x, profile_0s-profile_2s, '$\Delta$ Gnosis', 'darkgreen', ':')
-plot_std(x, profile_0s-profile_3s, '$\Delta$ Direct', 'orchid', 'dashdot')
+x = np.arange(profile_0s.shape[1])
+plot_std(x, np.abs(profile_0s), 'Input PSF', 'darkslategray', '-')
+plot_std(x, np.abs(profile_0s-profile_1s), '$\Delta$ Fit', 'royalblue', '--')
+plot_std(x, np.abs(profile_0s-profile_2s), '$\Delta$ Gnosis', 'darkgreen', ':')
+plot_std(x, np.abs(profile_0s-profile_3s), '$\Delta$ Direct', 'orchid', 'dashdot')
 
 plt.title('Accuracy comparison (avg. for validation dataset)')
 plt.yscale('symlog')
@@ -920,26 +890,50 @@ plt.ylabel('Abs. relative diff., [%]')
 plt.xlabel('Pixels')
 
 #%%
-fd = np.nanmean(fit_diff)
-gd = np.nanmean(gnosis_diff)
-dd = np.nanmean(direct_diff)
+fd = np.nanmedian(fit_diff)
+gd = np.nanmedian(gnosis_diff)
+dd = np.nanmedian(direct_diff)
 
-print('Fitting: '+str(np.round(dd/fd*100-100).astype('int'))+'% improvement compared to direct prediction')
-print('Gnosis: ' +str(np.round(dd/gd*100-100).astype('int'))+'% improvement compared to direct prediction')
+print('Fitting: '+str(np.round((1.-fd)*100).astype('int'))+'% median accuracy')
+print('Gnosis:  '+str(np.round((1.-gd)*100).astype('int'))+'% median accuracy')
+print('Direct:  '+str(np.round((1.-dd)*100).astype('int'))+'% median accuracy')
 
 #%% ==========================================================================================
+gnosis.psf_model.Update([sample['input'] for sample in database_train])
 
-test_batch = [sample['input'] for sample in database_val]
+X_train, y_train = GenerateDataset(database_train, with_PSF=False)
+_, pred_train = GenerateDataset(database_train, with_PSF=True)
 
-toy2 = TipToy(config_file, test_batch, 'CUDA')
-toy2.norm_regime = 'max'
+test = gnosis(X_train)
 
-X_val, y_val = GenerateDataset(database_val, with_PSF=False)
-_, z_val = GenerateDataset(database_val, with_PSF=True)
+#%%
 
-preds = toy2(y_val)
+optimizer.zero_grad()
+loss = loss_fn(gnosis(X_train), pred_train)
+loss.backward()
 
-loss_fn = nn.L1Loss()
-print(loss_fn(preds, z_val).item())
+print(loss.item())
 
+#%%
+testo = test.detach().cpu().numpy()
+for i in range(test.shape[0]):
+    el_croppo = slice(test.shape[1]//2-32, test.shape[2]//2+32)
+    el_croppo = (0, el_croppo, el_croppo)
+    plt.imshow(torch.log(test[el_croppo]).detach().cpu())
+    plt.show()
+
+#%%
+loss_fn = nn.L1Loss() #reduction='sum')
+optimizer = optim.SGD([{'params': gnosis.fc1.parameters()},
+                       {'params': gnosis.act1.parameters()},
+                       {'params': gnosis.fc2.parameters()},
+                       {'params': gnosis.act2.parameters()},
+                       {'params': gnosis.fc3.parameters()}], lr=1e-3, momentum=0.9)
+
+for i in range(6000):
+    optimizer.zero_grad()
+    loss = loss_fn(gnosis(X_train), y_train)
+    loss.backward()
+    if not i % 1000: print(loss.item())
+    optimizer.step()
 # %%

@@ -330,18 +330,50 @@ def FitGauss2D(PSF):
     return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
 
 
-# Function to draw the radial profile of a PSF
+# Function to draw the radial profile of a PSF or of a PSF stack
 def radial_profile(data, center=None):
-    if center is None:
-        center = (data.shape[0]//2, data.shape[1]//2)
-    y, x = np.indices((data.shape))
-    r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
-    r = r.astype('int')
+    # Enable work with PyTorch tensors as well
+    if type(data) is torch.Tensor:
+        PSF_data = data.detach().cpu().numpy()
+    else:
+        PSF_data = data
 
-    tbin = np.bincount(r.ravel(), data.ravel())
-    nr = np.bincount(r.ravel())
-    radialprofile = tbin / nr
-    return radialprofile[0:data.shape[0]//2]
+    PSF_center = center
+    if center is not None:
+        if type(center) is torch.Tensor: PSF_center = center.detach().cpu().numpy()
+
+    def radial_profile_individual(data, center=None):
+        if center is None:
+            center = (data.shape[0]//2, data.shape[1]//2)
+        y, x = np.indices((data.shape))
+        r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
+        r = r.astype('int')
+
+        tbin = np.bincount(r.ravel(), data.ravel())
+        nr = np.bincount(r.ravel())
+        radialprofile = tbin / nr
+        return radialprofile[0:data.shape[0]//2]
+
+    if len(PSF_data.shape) == 2:
+        if type(data) is torch.Tensor:
+            return torch.Tensor(radial_profile_individual(PSF_data, PSF_center)).to(data.device)
+        else:
+            return radial_profile_individual(PSF_data, PSF_center)
+
+    elif len(PSF_data.shape) == 3:
+        profiles = []
+        for i in range(PSF_data.shape[0]):
+            if PSF_center is None:
+                profiles.append( radial_profile_individual(PSF_data[i,:,:]) )
+            else:
+                profiles.append( radial_profile_individual(PSF_data[i,:,:], PSF_center) )
+    
+        if type(data) is torch.Tensor:
+            return torch.Tensor(np.array(profiles)).to(data.device)
+        else:
+            return np.array(profiles)
+    else:
+        raise ValueError('PSF stack of wrong dimensionality is passed!')
 
 
 def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300):
