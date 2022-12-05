@@ -9,7 +9,7 @@ from astropy.io import fits
 import pickle
 import os
 from os import path
-from tools.parameterParser import parameterParser
+from tools.parameter_parser import parameterParser
 from MUSE import MUSEcube
 from utils import radial_profile
 

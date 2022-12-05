@@ -16,7 +16,7 @@ import os
 from os import path
 import re
 
-from tools.parameterParser import parameterParser
+from tools.parameter_parser import parameterParser
 from SPHERE_data import SPHERE_database,LoadSPHEREsampleByID
 from utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from utils import Center, BackgroundEstimate, CircularMask

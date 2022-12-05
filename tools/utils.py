@@ -18,10 +18,11 @@ seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
+SR = lambda PSF, PSF_DL: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
+
 
 class Photometry:
     def __init__(self):
-        
         self.__InitPhotometry()
     
     def FluxFromMag(self, mag, band):
@@ -213,19 +214,6 @@ def Center(im, centered=True):
     return WoG - np.array(im.shape)//2 * int(centered)
 
 
-''' 
-mask = 1.0 - CircularMask(im, Center(PSF_0, centered=False), 20)
-t = np.linspace(-10, 10, 30)
-bump = np.exp(-0.5*t**2)
-bump /= np.trapz(bump) # normalize the integral to 1
-kernel = bump[:, np.newaxis] * bump[np.newaxis, :]
-mask = signal.fftconvolve(mask, kernel, mode='same')
-mask /= mask.max()
-img3 = 1.0 - torch.tensor( mask, device=toy.device )
-plt.imshow(torch.log(PSF_0.abs()*img3).cpu())
-'''
-
-
 def CircularMask(img, center, radius):
     xx,yy = np.meshgrid( np.arange(0,img.shape[1]), np.arange(0,img.shape[0]) )
     mask_PSF = np.ones(img.shape[0:2])
@@ -249,8 +237,7 @@ class OptimizeLBFGS:
         for _ in range(steps):
             optimizer.zero_grad()
             loss = self.loss_fn( self.model.PSD2PSF(*self.parameters), PSF_ref )
-            if np.isnan(loss.item()):
-                return
+            if np.isnan(loss.item()): return
             loss.backward()
 
             optimizer.step( lambda: self.loss_fn(self.model.PSD2PSF(*self.parameters), PSF_ref) )
@@ -258,7 +245,7 @@ class OptimizeLBFGS:
                 print('Loss:', loss.item(), end="\r", flush=True)
 
             # Early stop check
-            if np.round(loss.item(),4) >= np.round(self.last_loss,4):
+            if np.round(loss.item(),3) >= np.round(self.last_loss,3):
                 trigger_times += 1
                 if trigger_times > 1: return
             self.last_loss = loss.item()
@@ -376,7 +363,7 @@ def radial_profile(data, center=None):
         raise ValueError('PSF stack of wrong dimensionality is passed!')
 
 
-def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300):
+def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300, scale='log'):
     center = Center(PSF_ref, centered=False)
     profile_0 = radial_profile(PSF_ref.detach().cpu().numpy(), center)[:32+1]
     profile_1 = radial_profile(PSF_estim.detach().cpu().numpy(), center)[:32+1]
@@ -388,7 +375,7 @@ def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300):
     ax.set_title(title)
     ax.set_xlabel('Pixels')
     ax.set_ylabel('Relative intensity')
-    ax.set_yscale('log')
+    if scale == 'log': ax.set_yscale('log')
     ax.set_xlim([0, len(profile_1)-1])
     ax.grid()
     ax2 = ax.twinx()

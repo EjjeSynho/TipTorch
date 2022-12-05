@@ -7,7 +7,7 @@ from torch import nn
 import re
 import os
 from SPHERE_data import LoadSPHEREsampleByID
-from tools.parameterParser import parameterParser
+from tools.parameter_parser import parameterParser
 from utils import r0_new, Center, BackgroundEstimate
 from utils import OptimizeLBFGS, FitGauss2D
 

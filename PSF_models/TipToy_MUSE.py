@@ -1,4 +1,12 @@
 #%%
+import sys
+sys.path.insert(0, '..')
+
+#TC10%: seeing better than 0.6 and tau0 larger than 5.2 ms
+#TC20%: seeing < 0.70” and tau0 > 4.4 ms
+#TC30%: seeing < 0.80” and tau0 > 4.1 ms
+#TC50%: seeing < 1.00“ and tau0 > 3.2ms
+
 import torch
 import numpy as np
 from torch import nn, optim, fft
@@ -11,21 +19,19 @@ from torch.nn.functional import interpolate
 from astropy.io import fits
 from skimage.transform import resize
 from graphviz import Digraph
-from VLT_pupil import PupilVLT, CircPupil
 import pickle
 import os
 from os import path
 
-from tools.parameterParser import parameterParser
-from MUSE import MUSEcube
-from utils import plot_radial_profile, rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
-from utils import Center, BackgroundEstimate, CircularMask
-from utils import register_hooks, iter_graph
-from utils import OptimizeTRF, OptimizeLBFGS
-from utils import radial_profile
+from tools.parameter_parser import ParameterParser
+from data_processing.MUSE_read_preproc import MUSEcube
+from tools.utils import plot_radial_profile, rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
+from tools.utils import Center, BackgroundEstimate, CircularMask
+from tools.utils import register_hooks, iter_graph
+from tools.utils import OptimizeTRF, OptimizeLBFGS
+from tools.utils import radial_profile
 
-path_root = path.normpath('C:/Users/akuznets/Projects/TIPTOP/P3')
-path_ini = path.join(path_root, path.normpath('aoSystem/parFiles/muse_ltao.ini'))
+path_ini = '../data/parameter_files/muse_ltao.ini'
 
 # Load image
 data_dir = path.normpath('C:/Users/akuznets/Data/MUSE/DATA/')
@@ -43,7 +49,7 @@ im, _, wvl = data_cube.Layer(5)
 obs_info = dict( data_cube.obs_info )
 
 # Load and correct AO system parameters
-config_file = parameterParser(path_root, path_ini).params
+config_file = ParameterParser(path_ini).params
 config_file['sources_science']['Wavelength'] = wvl
 config_file['sensor_science']['FieldOfView'] = im.shape[0]
 
@@ -574,11 +580,14 @@ loss_fn1 = nn.L1Loss(reduction='sum')
 def loss_fn(A,B):
     return loss_fn1(A,B) + torch.max(torch.abs(A-B)) + torch.abs(torch.max(A)-torch.max(B))
 
+
+optimizer_lbfgs = OptimizeLBFGS(toy_MUSE, parameters, loss_fn)
+
 for i in range(10):
-    OptimizeLBFGS(toy_MUSE, loss_fn, PSF_0, parameters, [r0, F, dx, dy], 5)
-    OptimizeLBFGS(toy_MUSE, loss_fn, PSF_0, parameters, [bg], 3)
-    OptimizeLBFGS(toy_MUSE, loss_fn, PSF_0, parameters, [n], 5)
-    OptimizeLBFGS(toy_MUSE, loss_fn, PSF_0, parameters, [Jx, Jy, Jxy], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [r0, F, dx, dy], 5)
+    optimizer_lbfgs.Optimize(PSF_0, [bg], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [n], 5)
+    optimizer_lbfgs.Optimize(PSF_0, [Jx, Jy, Jxy], 3)
 
 PSF_1 = toy_MUSE(*parameters)
 
