@@ -95,6 +95,7 @@ class SPHERE_loader():
     def read_DTTS_data(self):
         
         date_obs = self.hdr[0].header['DATE-OBS']
+        # in the end of the header I need to find keyword OBS_STA OBS_END
         n_subap = 1240
 
         # grab the number of photons
@@ -701,7 +702,7 @@ def FilterSelectedDatasamples():
 
 #%%
 
-#ProcessRawData(save=False)
+ProcessRawData(save=False)
 
 #%%  Let it run!
 #ProcessRawData()

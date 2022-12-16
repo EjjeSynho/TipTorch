@@ -425,10 +425,10 @@ class TipToy(torch.nn.Module):
 
         PSD = self.PSDs['fitting'] + \
                 self.PSD_padder(
-                self.PSDs['WFS noise'] + \
-                self.PSDs['spatio-temporal'] + \
-                self.PSDs['aliasing'] + \
-                self.PSDs['chromatism'] )
+                    self.PSDs['WFS noise'] + \
+                    self.PSDs['spatio-temporal'] + \
+                    self.PSDs['aliasing'] + \
+                    self.PSDs['chromatism'] )
 
         # Computing OTF from PSD
         cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD))) # FFT axes are set to 1,2 by PyTorch by default
@@ -444,9 +444,9 @@ class TipToy(torch.nn.Module):
         PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='area').squeeze(0)
 
         if self.norm_regime == 'max':
-            self.norm_scale = torch.amax(PSF_out, dim=(1,2), keepdim=True) * F + bg
+            self.norm_scale = torch.amax(PSF_out, dim=(1,2), keepdim=True)
         elif self.norm_regime == 'sum':
-            self.norm_scale = PSF_out.sum(dim=(1,2), keepdim=True) * F + bg
+            self.norm_scale = PSF_out.sum(dim=(1,2), keepdim=True)
 
         return PSF_out/self.norm_scale * F + bg
 

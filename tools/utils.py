@@ -392,6 +392,19 @@ def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300, scal
     #la chignon et tarte
 
 
+def plot_std(x,y, label, color, style):
+    y_m = y.mean(axis=0)
+    y_s = y.std(axis=0)
+    lower_bound = y_m-y_s
+    upper_bound = y_m+y_s
+
+    print(label, 'mean:', y_m.max())
+
+    plt.fill_between(x, lower_bound, upper_bound, color=color, alpha=0.3)
+    plt.plot(x, y_m, label=label, color=color, linestyle=style)
+    plt.show()
+
+
 def DisplayDataset(samples_list, tiles_in_row, show_labels=True, dpi=300):
     from PIL import Image, ImageDraw
     from matplotlib import cm
