@@ -6,29 +6,25 @@ import sys
 sys.path.insert(0, '..')
 
 import torch
-from torch import nn, optim
-from tqdm import tqdm
-import numpy as np
+from torch import nn
 import matplotlib.pyplot as plt
-import time
 
 from data_processing.SPHERE_data import SPHERE_database, SPHERE_dataset, LoadSPHEREsampleByID
 from tools.parameter_parser import ParameterParser
-from tools.utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from tools.utils import register_hooks, iter_graph
 from tools.utils import OptimizeTRF, OptimizeLBFGS
 from tools.utils import radial_profile, plot_radial_profile, SR
-from tools.utils import Center, BackgroundEstimate
+from tools.utils import BackgroundEstimate
 
 device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
 
-#%%
+#%% Initialize data sample
 data_samples = []
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 0)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 100)[1] )
-#data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 347)[1] )
+data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 347)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 351)[1] )
-data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
+#data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 342)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 349)[1] )
 
@@ -44,19 +40,9 @@ def show_row(row, log=True):
     plt.imshow(buf.abs().detach().cpu())
     plt.show()
 
-'''
-nphs = []
-photons = []
-for sample in data_samples:
-    nphs.append(sample['WFS']['Nph vis'])
-    im = sample['image']
-    photons.append(sample['image'].sum())
-nphs = np.array(nphs)
-photons = np.array(photons)
-plt.scatter(nphs,photons/1e6)
-'''
-#%% -------------------------------------------------------------
+#%% Initialize model
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
+
 #norm_regime = None 
 norm_regime = 'sum'
 toy = TipToy(config_file, data_samples, norm_regime, device)
@@ -102,17 +88,6 @@ PSF_1 = toy.PSD2PSF(*parameters)
 #print(toy.EndTimer())
 PSF_DL = toy.DLPSF()
 
-'''
-el_croppo = slice(PSF_1.shape[1]//2-32, PSF_1.shape[2]//2+32)
-el_croppo = (el_croppo, el_croppo)
-plt.imshow(PSF_DL[0,:,:][el_croppo].detach().cpu().numpy())
-plt.show()
-plt.imshow(PSF_1[0,:,:][el_croppo].detach().cpu().numpy())
-plt.show()
-plot_radial_profile(PSF_DL[0,:,:], PSF_1[0,:,:], 'TipToy', title='IRDIS PSF', dpi=100, scale='log')
-print(SR(PSF_1, PSF_DL))
-'''
-
 def draw_result(PSF_in, PSF_out):
     for i in range(PSF_out.shape[0]):
         el_croppo = slice(PSF_in.shape[1]//2-32, PSF_in.shape[2]//2+32)
@@ -124,11 +99,8 @@ def draw_result(PSF_in, PSF_out):
         ) )).detach().cpu())
         plt.show()
 
-#draw_result(PSF_0, PSF_1)
-#for i in range(PSF_0.shape[0]):
-#    plot_radial_profile(PSF_0[i,:,:], PSF_1[i,:,:], 'TipToy', title='IRDIS PSF', dpi=100)
 
-#%%
+#%% PSF fitting (no early-stopping)
 loss = nn.L1Loss(reduction='sum')
 
 # Confines a value between 0 and the specified value
@@ -154,7 +126,7 @@ for i in range(20):
     optimizer_lbfgs.Optimize(PSF_0, [Jx, Jy, Jxy], 3)
 
 PSF_1 = toy.PSD2PSF(*parameters)
-print('Strehl ratio: ', SR(PSF_1, PSF_DL))
+print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 
 
 draw_result(PSF_0, PSF_1)
@@ -163,6 +135,7 @@ for i in range(PSF_0.shape[0]):
 
 
 #%%
+'''
 from data_processing.SPHERE_data import SPHERE_database, SPHERE_dataset, LoadSPHEREsampleByID
 
 #la chignon et tarte
@@ -171,6 +144,7 @@ database_wvl = dataset.FilterWavelength()
 x, y, i0, i1 = dataset.GenerateDataset(database_wvl)
 
 #%% =============================== MAKE DATASET ==========================================
+
 ### =======================================================================================
 ### =======================================================================================
 
@@ -210,43 +184,43 @@ for bad_sample in bad_samples:
 print(str(len(bad_samples))+' samples were filtered, '+str(len(database.data))+' samples remained')
 
 #%%
-'''
-r0_fit  = []
-r0_data = []
-N_ph    = []
-tau_0   = []
-air     = []
-wspd    = []
-wdir    = []
-seeing  = []
 
-for sample in database:
-    wvl = sample['input']['spectrum']['lambda']
-    r0_fit.append( np.abs(sample['fitted']['r0']) )
-    r0_data.append( np.abs(sample['input']['r0']) )
-    seeing.append( sample['input']['seeing']['SPARTA'] )
-    N_ph.append( np.log10(sample['input']['WFS']['Nph vis'] * sample['input']['WFS']['rate']*1240) )
-    tau_0 .append( sample['input']['tau0']['SPARTA'] )
-    air.append( sample['input']['telescope']['airmass'] )
-    wspd.append( sample['input']['Wind speed']['MASSDIMM'] )
-    wdir.append( sample['input']['Wind direction']['MASSDIMM'] )
+# r0_fit  = []
+# r0_data = []
+# N_ph    = []
+# tau_0   = []
+# air     = []
+# wspd    = []
+# wdir    = []
+# seeing  = []
 
-r0_data = np.array(r0_data)
-r0_fit = np.array(r0_fit)
-N_ph = np.array(N_ph)
-tau_0 = np.array(tau_0)
-air = np.array(air)
-wspd = np.array(wspd)
-wdir = np.array(wdir)
-seeing = np.array(seeing)
+# for sample in database:
+#     wvl = sample['input']['spectrum']['lambda']
+#     r0_fit.append( np.abs(sample['fitted']['r0']) )
+#     r0_data.append( np.abs(sample['input']['r0']) )
+#     seeing.append( sample['input']['seeing']['SPARTA'] )
+#     N_ph.append( np.log10(sample['input']['WFS']['Nph vis'] * sample['input']['WFS']['rate']*1240) )
+#     tau_0 .append( sample['input']['tau0']['SPARTA'] )
+#     air.append( sample['input']['telescope']['airmass'] )
+#     wspd.append( sample['input']['Wind speed']['MASSDIMM'] )
+#     wdir.append( sample['input']['Wind direction']['MASSDIMM'] )
 
-counts = plt.hist(N_ph, bins=20)
-plt.show()
-counts = plt.hist(r0_fit, bins=20)
-plt.show()
-counts = plt.hist(seeing, bins=20)
-plt.show()
-'''
+# r0_data = np.array(r0_data)
+# r0_fit = np.array(r0_fit)
+# N_ph = np.array(N_ph)
+# tau_0 = np.array(tau_0)
+# air = np.array(air)
+# wspd = np.array(wspd)
+# wdir = np.array(wdir)
+# seeing = np.array(seeing)
+
+# counts = plt.hist(N_ph, bins=20)
+# plt.show()
+# counts = plt.hist(r0_fit, bins=20)
+# plt.show()
+# counts = plt.hist(seeing, bins=20)
+# plt.show()
+
 
 #%%
 def GetInputs(data_sample):
@@ -537,4 +511,6 @@ for i in range(6000):
     loss.backward()
     if not i % 1000: print(loss.item())
     optimizer.step()
+
+'''
 # %%
