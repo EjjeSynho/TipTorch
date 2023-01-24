@@ -18,7 +18,12 @@ seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
-SR = lambda PSF, PSF_DL: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
+def SR(PSF, PSF_DL):
+    ratio = torch.amax(PSF, dim=(-2,-1)) / torch.amax(PSF_DL, dim=(-2,-1)) * PSF_DL.sum(dim=(-2,-1)) / PSF.sum(dim=(-2,-1)) 
+    if ratio.squeeze().dim() == 0:
+        return ratio.item()
+    else:
+        return ratio.squeeze()
 
 
 class Photometry:
@@ -221,34 +226,55 @@ def CircularMask(img, center, radius):
     return mask_PSF
 
 
+class EarlyStopping:
+    def __init__(self, patience=2, tolerance=1e-1, relative=False):
+        self.__patience  = patience
+        self.__tolerance = tolerance
+        self.__previous_loss = 1e16
+        self.__counter = 0
+        self.__relative = relative
+        self.stop = False
+
+    def __compare(self, a, b):
+        return abs(a/b-1) < self.__tolerance if self.__relative else abs(a-b) < self.__tolerance
+
+    def __call__(self, current_loss):
+        if self.__compare(self.__previous_loss, current_loss.item()):
+            self.__counter += 1 
+            self.stop = True if self.__counter >= self.__patience else False
+        else: self.__counter = 0
+        self.__previous_loss = current_loss.item()
+
+
 class OptimizeLBFGS:
     def __init__(self, model, parameters, loss_fn, verbous=True):
         self.model = model
         self.loss_fn = loss_fn
         self.parameters = parameters
-        self.last_loss = 1e16
         self.verbous = verbous
 
 
     def Optimize(self, PSF_ref, to_optimize, steps):
-        trigger_times = 0
         optimizer = optim.LBFGS(to_optimize, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
 
-        for _ in range(steps):
+        early_stopping = EarlyStopping(patience=2, tolerance=0.01, relative=False)
+
+        for i in range(steps):
             optimizer.zero_grad()
             loss = self.loss_fn( self.model.PSD2PSF(*self.parameters), PSF_ref )
-            if np.isnan(loss.item()): return
-            loss.backward()
 
+            if np.isnan(loss.item()): return
+            early_stopping(loss)
+
+            loss.backward()
             optimizer.step( lambda: self.loss_fn(self.model.PSD2PSF(*self.parameters), PSF_ref) )
+
             if self.verbous:
                 print('Loss:', loss.item(), end="\r", flush=True)
 
-            # Early stop check
-            if np.round(loss.item(),3) >= np.round(self.last_loss,3):
-                trigger_times += 1
-                if trigger_times > 1: return
-            self.last_loss = loss.item()
+            if early_stopping.stop:
+                # if self.verbous: print('Stopped at it.', i, 'with loss:', loss.item())
+                break
 
 
 class OptimizeTRF():

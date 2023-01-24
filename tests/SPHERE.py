@@ -11,7 +11,6 @@ import matplotlib.pyplot as plt
 
 from data_processing.SPHERE_data import SPHERE_database, SPHERE_dataset, LoadSPHEREsampleByID
 from tools.parameter_parser import ParameterParser
-from tools.utils import register_hooks, iter_graph
 from tools.utils import OptimizeTRF, OptimizeLBFGS
 from tools.utils import radial_profile, plot_radial_profile, SR
 from tools.utils import BackgroundEstimate
@@ -24,8 +23,8 @@ data_samples = []
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 100)[1] )
 data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 347)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 351)[1] )
-#data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
-#data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 342)[1] )
+data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
+data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 342)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 349)[1] )
 
 path_ini = '../data/parameter_files/irdis.ini'
@@ -56,7 +55,7 @@ for sample in data_samples:
     ims.append(torch.tensor(im/norma, device=toy.device))
 
 PSF_0 = torch.tensor(torch.dstack(ims)).permute([2,0,1])
-bg_0 = torch.tensor([BackgroundEstimate(PSF_, radius=90).item() for PSF_ in ims]).to(toy.device)
+bg_0 = toy.make_tensor([BackgroundEstimate(PSF_, radius=90).item() for PSF_ in ims])
 
 N_src = len(data_samples)
 
@@ -70,11 +69,11 @@ L0  = init_torch_param(25.0, N_src)
 F   = init_torch_param(1.0,  N_src)
 dx  = init_torch_param(0.0,  N_src)
 dy  = init_torch_param(0.0,  N_src)
-bg  = init_torch_param(bg_0, N_src)
 dn  = init_torch_param(0.05, N_src)
 Jx  = init_torch_param(5.0,  N_src)
 Jy  = init_torch_param(5.0,  N_src)
 Jxy = init_torch_param(2.0,  N_src)
+bg  = bg_0
 
 toy.WFS_Nph.requires_grad = True
 
@@ -119,7 +118,7 @@ def loss_fn(a,b):
 
 optimizer_lbfgs = OptimizeLBFGS(toy, parameters, loss_fn)
 
-for i in range(20):
+for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [F, dx, dy], 3)
     optimizer_lbfgs.Optimize(PSF_0, [r0, dn, toy.WFS_Nph], 5)
     optimizer_lbfgs.Optimize(PSF_0, [bg], 2)

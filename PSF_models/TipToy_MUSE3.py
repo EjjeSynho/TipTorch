@@ -1,4 +1,6 @@
 #%%
+%matplotlib qt
+
 import sys
 sys.path.insert(0, '..')
 
@@ -111,20 +113,26 @@ class TipToyMUSE(torch.nn.Module):
 
 
     def InitGrids(self):
+        iseven = lambda x: 1-x%2
+        get_grid_samples = lambda N: 2*((torch.linspace(-N//2+1, N//2, N).to(self.device)-0.5*iseven(N)) / (N-N%2))
+        
         self.pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
 
         self.sampling_factor = int(np.ceil(2.0/self.pixels_per_l_D)) # check how much it is less than Nyquist
         self.sampling = self.sampling_factor * self.pixels_per_l_D
         self.nOtf = self.nPix * self.sampling_factor
+        self.nOtf += iseven(self.nOtf) #Force nOtf to be odd to have a central pixel
 
         self.dk = 1/self.D/self.sampling # PSD spatial frequency step
         self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 
+
         #with torch.no_grad():
+
         # Initialize spatial frequencies
         self.kx, self.ky = torch.meshgrid(
-            torch.linspace(-self.nOtf/2, self.nOtf/2-1, self.nOtf, device=self.device)*self.dk + 1e-10,
-            torch.linspace(-self.nOtf/2, self.nOtf/2-1, self.nOtf, device=self.device)*self.dk + 1e-10,
+            get_grid_samples(self.nOtf) * self.nOtf/2 * self.dk + 1e-10,
+            get_grid_samples(self.nOtf) * self.nOtf/2 * self.dk + 1e-10,
             indexing = 'ij')
 
         self.k2 = self.kx**2 + self.ky**2
@@ -135,9 +143,9 @@ class TipToyMUSE(torch.nn.Module):
         self.mask_corrected = 1.0-self.mask
 
         self.nOtf_AO = int(2*self.kc/self.dk)
-        self.nOtf_AO += self.nOtf_AO % 2
+        self.nOtf_AO += iseven(self.nOtf_AO) #Force nOtf to be odd as well
 
-        # Comb samples involved in antialising
+        # Comb samples involved in alising PSD
         n_times = min(4,max(2,int(np.ceil(self.nOtf/self.nOtf_AO/2))))
         ids = []
         for mi in range(-n_times,n_times):
@@ -150,12 +158,12 @@ class TipToyMUSE(torch.nn.Module):
         n = torch.tensor(ids[:,1], device=self.device)
         self.N_combs = m.shape[0]
 
-        corrected_ROI = slice(self.nOtf//2-self.nOtf_AO//2, self.nOtf//2+self.nOtf_AO//2)
+        corrected_ROI = slice(self.nOtf//2-self.nOtf_AO//2, self.nOtf//2+self.nOtf_AO//2+self.nOtf_AO%2)
         corrected_ROI = (corrected_ROI,corrected_ROI)
 
         self.mask_AO = self.mask[corrected_ROI]
         self.mask_corrected_AO = self.mask_corrected[corrected_ROI]
-        self.mask_corrected_AO_1_1  = self.pdims(self.mask_corrected_AO, 2)
+        self.mask_corrected_AO_1_1 = self.pdims(self.mask_corrected_AO, 2)
 
         self.kx_AO = self.kx[corrected_ROI]
         self.ky_AO = self.ky[corrected_ROI]
@@ -187,14 +195,7 @@ class TipToyMUSE(torch.nn.Module):
         self.GS_dirs_y_nGs_nL = self.pdims(self.GS_dirs_y,[-2,1]).repeat([self.nOtf_AO,self.nOtf_AO,1,self.nL])
 
         # Initialize OTF frequencines
-        self.U,self.V = torch.meshgrid(
-            torch.linspace(0, self.nOtf-1, self.nOtf, device=self.device),
-            torch.linspace(0, self.nOtf-1, self.nOtf, device=self.device),
-            indexing = 'ij')
-
-        self.U = (self.U-self.nOtf/2) * 2/self.nOtf
-        self.V = (self.V-self.nOtf/2) * 2/self.nOtf
-
+        self.U, self.V = torch.meshgrid(get_grid_samples(self.nOtf), get_grid_samples(self.nOtf), indexing='ij')
         self.U2  = self.U**2
         self.V2  = self.V**2
         self.UV  = self.U*self.V
@@ -240,13 +241,14 @@ class TipToyMUSE(torch.nn.Module):
         self.PR = PistonFilter(torch.hypot(self.km,self.kn))
 
         # Diffraction-limited PSF
-        self.PSF_DL = interpolate( \
-            torch.abs(fft.fftshift(fft.ifft2(fft.fftshift(self.OTF_static)))).unsqueeze(0).unsqueeze(0), \
-            size=(self.nPix,self.nPix), mode='area' ).squeeze(0).squeeze(0)
+        self.PSF_DL = interpolate(
+            torch.abs(fft.fftshift(fft.ifft2(fft.fftshift(self.OTF_static)))).unsqueeze(0).unsqueeze(0),
+            size = (self.nPix,self.nPix), mode='area'
+        ).squeeze(0).squeeze(0)
 
 
     def pdims(self, x, ns):
-        # if negative, dimensions are added in the beginning, else in the end
+        # Expands dimesnsions. If negative, dimensions are added in the beginning, else in the end
         expdims = lambda x, n: x.view(*x.shape, *[1 for _ in range(n)]) if n>0 else x.view(*[1 for _ in range(abs(n))], *x.shape)
 
         if hasattr(ns, "__len__"):
@@ -315,7 +317,7 @@ class TipToyMUSE(torch.nn.Module):
         self.SyAv = 2j*np.pi*self.ky_AO*self.WFS_d_sub*Av
 
         MV = 0
-        Wn = WFS_noise_var/(2*self.kc)**2
+        Wn = WFS_noise_var / (2*self.kc)**2
 
         self.W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * (self.wvl/self.GS_wvl)**2
         
@@ -532,11 +534,12 @@ class TipToyMUSE(torch.nn.Module):
         cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD)))
         SF  = torch.abs(cov).max()-cov
 
-        fftPhasor = torch.exp(-np.pi*1j*self.sampling_factor*(self.U*dx+self.V*dy))
+        center_aligned = torch.exp(-np.pi*1j*(self.nOtf%2)*(self.U+self.V))
+        fftPhasor = torch.exp(-np.pi*1j*self.sampling_factor*(self.U*dx+self.V*dy)) * center_aligned
+
         OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/self.wvl)**2)
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
-        OTF = OTF_turb * self.OTF_static * fftPhasor * OTF_jitter
-        OTF = OTF[1:,1:]
+        OTF = OTF_turb * self.OTF_static * OTF_jitter * fftPhasor
 
         PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF))) ).unsqueeze(0).unsqueeze(0)
         PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='bilinear').squeeze(0).squeeze(0)
@@ -574,12 +577,13 @@ class TipToyMUSE(torch.nn.Module):
 
 
 #%%
-#TODO: crashes at windir=45!!!
-
+# config_file['sensor_science']['FieldOfView'] = 201
 toy = TipToyMUSE(config_file, obs_info, device=device)
 
 r0  = torch.tensor(obs_info['SPTR0'], requires_grad=True,  device=toy.device)
 L0  = torch.tensor(obs_info['SPTL0'], requires_grad=False, device=toy.device)
+#r0  = torch.tensor(0.1,   requires_grad=True,  device=toy_MUSE.device)
+#L0  = torch.tensor(47.93, requires_grad=False, device=toy_MUSE.device)
 F   = torch.tensor(1.0,   requires_grad=True,  device=toy.device)
 dx  = torch.tensor(0.0,   requires_grad=True,  device=toy.device)
 dy  = torch.tensor(0.0,   requires_grad=True,  device=toy.device)
@@ -592,8 +596,14 @@ Jxy = torch.tensor(2.0,   requires_grad=True,  device=toy.device)
 parameters = [r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy]
 
 PSF_1 = toy.PSD2PSF(*parameters)
-PSF_0 = torch.tensor(im/im.sum(), device=toy.device) #* 1e2
-plt.imshow(torch.log(PSF_0).detach().cpu())
+# PSF_0 = torch.tensor(im/im.sum(), device=toy.device) #* 1e2
+# plt.imshow(torch.log(PSF_0).detach().cpu())
+
+# el_croppo = slice(PSF_1.shape[0]//2-32, PSF_1.shape[1]//2+32)
+# el_croppo = (el_croppo, el_croppo)
+
+# plt.imshow(torch.log(PSF_1[el_croppo]).detach().cpu())
+plt.imshow(torch.log(PSF_1).detach().cpu())
 
 #%%
 loss_fn1 = nn.L1Loss(reduction='sum')
@@ -627,7 +637,7 @@ tau0 = torch.tensor([7.e-3, 5.2e-3, 4.4e-3, 4.1e-3, 3.2e-3]).to(device)
 seeings = torch.tensor([0.5, 0.6, 0.7, 0.8, 1.0]).to(device)
 r0s = r0(seeings, 500e-9)
 V = 0.314*r0s / tau0
-#%%
+
 profiles = []
 PSFs = []
 DLs  = []
@@ -638,9 +648,12 @@ from copy import deepcopy
 obs_info_1 = deepcopy(obs_info)
 config_file_1 = deepcopy(config_file)
 
+#obs_info_1['WINDSP'] = [0.0] * len(['Cn2Heights'])
+#obs_info_1['WINDIR'] = [0.0] * len(['Cn2Heights'])
 obs_info_1['TELALT']  = 0.0
 obs_info_1['TELAZ']   = 0.0
 obs_info_1['AIRMASS'] = 1.0
+
 
 for rid in range(4):
     PSFs_group = []
@@ -653,12 +666,6 @@ for rid in range(4):
         profiles_chromatic = []
 
         for wvl in data_cube.wavelengths:
-            windspeed_rand = np.random.uniform(low=V[rid].item(), high=V[rid+1].item())
-            winddir_rand = np.random.uniform(-180, 180)
-            
-            obs_info_1['WINDSP'] = windspeed_rand
-            obs_info_1['WINDIR'] = winddir_rand
-
             config_file_1['sources_science']['Wavelength'] = wvl
             toy = TipToyMUSE(config_file_1, obs_info_1, norm_regime=None, device=device)
 
@@ -668,11 +675,12 @@ for rid in range(4):
             dx  = torch.tensor(0.0).to(device)
             dy  = torch.tensor(0.0).to(device)
             bg  = torch.tensor(0.0).to(device)
-            n   = torch.tensor(np.random.uniform(low=4/2, high=7/2)).to(device)
-            Jx  = torch.tensor(np.random.uniform(low=10/3, high=20/3)).to(device)
-            Jy  = torch.tensor(np.random.uniform(low=10/3, high=20/3)).to(device)
+            n   = torch.tensor(np.random.uniform(low=4, high=7)).to(device)
+            Jx  = torch.tensor(np.random.uniform(low=10, high=20)).to(device)
+            Jy  = torch.tensor(np.random.uniform(low=10, high=20)).to(device)
             Jxy = torch.tensor(0.0).to(device)
-            #toy.wind_speed = torch.tensor([V_rand, V_rand]).to(device)
+            V_rand = np.random.uniform(low=V[rid].item(), high=V[rid+1].item())
+            toy.wind_speed = torch.tensor([V_rand, V_rand]).to(device)
 
             PSF_1 = toy.PSD2PSF(*[r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy])
             PSF_DL = toy.DLPSF()
@@ -692,6 +700,14 @@ for rid in range(4):
 PSFs     = np.stack(PSFs)
 DLs      = np.stack(DLs)
 profiles = np.stack(profiles)
+
+#%%
+
+PSF_in = PSFs[0,0,9,:,:]
+el_croppo = slice(PSF_in.shape[0]//2-32, PSF_in.shape[1]//2+32)
+
+plt.imshow(PSF_in[(el_croppo,el_croppo)])
+
 
 #%%
 SR = lambda PSF, PSF_DL: (PSF.max()/PSF_DL.max() * PSF_DL.sum()/PSF.sum()).item()
@@ -724,31 +740,19 @@ def plot_std(x,y, label, color, style):
 
 SR_str = lambda p,m,s: 'TC'+str(p)+r'%, SR: ($\mu$=' + str(np.round(m,2)) + r', $\sigma$=' + str(np.round(s+1e-4,2)) + ')'
 
-los_labelos = [
-    r'TC10%: seeing < 0.6”, $\tau_0$ > 5.2 ms',
-    r'TC20%: seeing < 0.7”, $\tau_0$ > 4.4 ms',
-    r'TC30%: seeing < 0.8”, $\tau_0$ > 4.1 ms',
-    r'TC50%: seeing < 1.0“, $\tau_0$ > 3.2 ms'
-]
-
-x = np.arange(profiles1.shape[2]) *toy.psInMas
-# plot_std(x,  profiles1[0,:,:], SR_str(10,SRs1[0].mean(), SRs1[0].std()), 'blue',  '-')
-# plot_std(x,  profiles1[1,:,:], SR_str(20,SRs1[1].mean(), SRs1[1].std()), 'green', '-')
-# plot_std(x,  profiles1[2,:,:], SR_str(30,SRs1[2].mean(), SRs1[2].std()), 'black', '-')
-# plot_std(x,  profiles1[3,:,:], SR_str(50,SRs1[3].mean(), SRs1[3].std()), 'red',   '-')
-
-plot_std(x,  profiles1[0,:,:], los_labelos[0], 'blue',  '-')
-plot_std(x,  profiles1[1,:,:], los_labelos[1], 'green', '-')
-plot_std(x,  profiles1[2,:,:], los_labelos[2], 'black', '-')
-plot_std(x,  profiles1[3,:,:], los_labelos[3], 'red',   '-')
+x = np.arange(profiles1.shape[2])
+plot_std(x,  profiles1[0,:,:], SR_str(10,SRs1[0].mean(), SRs1[0].std()), 'blue',  '-')
+plot_std(x,  profiles1[1,:,:], SR_str(20,SRs1[1].mean(), SRs1[1].std()), 'green', '-')
+plot_std(x,  profiles1[2,:,:], SR_str(30,SRs1[2].mean(), SRs1[2].std()), 'black', '-')
+plot_std(x,  profiles1[3,:,:], SR_str(50,SRs1[3].mean(), SRs1[3].std()), 'red',   '-')
 
 plt.grid()
-plt.title('Average predicted NFM PSF profiles (polychromatic)')
-plt.xlim([0, 5*toy.psInMas])
-plt.ylim([0, profiles1[0].mean(axis=0).max()*1.1])
+plt.title('Average synthetic MUSE NFM polychromatic PSFs')
+plt.xlim([0, 10])
+plt.ylim([0, profiles1[0].mean(axis=0).max()*1.5])
 plt.legend()
 plt.ylabel('SR')
-plt.xlabel('Distance from on-axis [mas]')
+plt.xlabel('Pixels from on-axis')
 #plt.show()
 plt.savefig('avgPSFs.pdf')
 
@@ -758,36 +762,6 @@ PSF_1 = toy.PSD2PSF(*parameters)
 plot_radial_profile(PSF_0, PSF_1, 'TipToy', title='MUSE NFM PSF')
 
 plt.show()
-
-#%%
-
-def save_GIF(array, duration=1e3, scale=1, path='test.gif'):
-    from PIL import Image
-    from PIL.Image import Resampling
-    from matplotlib import cm
-    from skimage.transform import rescale
-    
-    gif_anim = []
-    for layer in np.rollaxis(array, 2):
-        #buf = layer - layer.min()
-        #buf = buf/buf.max()
-        if scale != 1.0: buf = rescale(layer, scale, order=0)
-        gif_anim.append(Image.fromarray(np.uint8(cm.viridis(buf)*255)))
-    gif_anim[0].save(path, save_all=True, append_images=gif_anim[1:], optimize=False, duration=duration, loop=0)
-
-el_croppo = slice(PSF_0.shape[0]//2-32, PSF_0.shape[1]//2+32)
-PSFs_anim = PSFs1[:,:,el_croppo,el_croppo].transpose([0,2,3,1])
-
-from matplotlib.colors import LogNorm
-
-norm=LogNorm(PSFs_anim.min(), vmax=PSFs_anim.max())
-
-path = 'C:\\Users\\akuznets\\Projects\\TipToy\\data\\temp\\'
-
-for group in range(4):
-    for i in range(20):
-        plt.imshow(PSFs_anim[group,:,:,i], norm=norm)
-        plt.savefig(path+str(group)+'_'+str(i)+'.png')
 
 #%%
 optimizer_trf = OptimizeTRF(toy, parameters)
