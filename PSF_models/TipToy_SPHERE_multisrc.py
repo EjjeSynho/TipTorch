@@ -17,50 +17,52 @@ class TipToy(torch.nn.Module):
     def InitValues(self):
         # Reading parameters from the file
         num_src = self.config['NumberSources']
-        self.Nsrc = num_src
+        self.Nsrc = num_src.int().item()
         self.wvl = self.config['sources_science']['Wavelength']
         if not torch.all(self.wvl  == self.wvl[0]).item():
             raise ValueError('All wavelength must be the same for all samples')
-        self.wvl = self.wvl[0]
+        self.wvl = self.wvl[0].item()
         
         # Setting internal parameters
         self.D       = self.config['telescope']['TelescopeDiameter']
         self.psInMas = self.config['sensor_science']['PixelScale'] #[mas]
-        self.nPix    = self.config['sensor_science']['FieldOfView']
-        self.pitch   = self.config['DM']['DmPitchs'][0] #[m]
-        #self.h_DM    = self.AO_config['DM']['DmHeights'][0] # ????? what is h_DM?
+        self.nPix    = self.config['sensor_science']['FieldOfView'].int().item()
+        self.pitch   = self.config['DM']['DmPitchs'] #[m]
+        #self.h_DM    = self.AO_config['DM']['DmHeights'] # ????? what is h_DM?
         #self.nDM     = 1
         self.kc      = 1/(2*self.pitch)
 
         #self.zenith_angle  = torch.tensor(self.AO_config['telescope']['ZenithAngle'], device=self.device) # [deg] #TODO: telescope zenith != sample zenith?
-        self.zenith_angle  = self.configs['telescope']['ZenithAngle']
+        self.zenith_angle  = self.config['telescope']['ZenithAngle']
         self.airmass       = 1.0 / torch.cos(self.zenith_angle * deg2rad)
 
         self.GS_wvl     = self.config['sources_HO']['Wavelength'][0] #[m]
         #self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
-        self.wind_speed  = self.configs['atmosphere']['WindSpeed']
-        self.wind_dir    = self.configs['atmosphere']['WindDirection']
-        self.Cn2_weights = self.configs['atmosphere']['Cn2Weights']
-        self.Cn2_heights = self.configs['atmosphere']['Cn2Heights'] * self.airmass.unsqueeze(1) #[m]
+        min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
+        self.wind_speed  = self.config['atmosphere']['WindSpeed']
+        self.wind_dir    = self.config['atmosphere']['WindDirection']
+        self.Cn2_weights = min_2d(self.config['atmosphere']['Cn2Weights'])
+        self.Cn2_heights = min_2d(self.config['atmosphere']['Cn2Heights']) * self.airmass.unsqueeze(1) # [m]
         #self.stretch     = 1.0 / (1.0-self.Cn2_heights/self.GS_height)
         self.h           = self.Cn2_heights #* self.stretch
         self.nL          = self.Cn2_heights.size(0)
 
-        self.WFS_d_sub = np.mean(self.config['sensor_HO']['SizeLenslets']) #TODO: seems like it's absent
-        self.WFS_n_sub = np.mean(self.config['sensor_HO']['NumberLenslets'])
 
-        self.WFS_det_clock_rate = self.configs['sensor_HO']['ClockRate'].flatten() # [(?)]
-        self.WFS_FOV = self.configs['sensor_HO']['FieldOfView']
-        self.WFS_RON = self.configs['sensor_HO']['SigmaRON']
-        self.WFS_psInMas = self.configs['sensor_HO']['PixelScale']
+        self.WFS_d_sub = self.config['sensor_HO']['SizeLenslets'] #TODO: seems like it's absent
+        self.WFS_n_sub = self.config['sensor_HO']['NumberLenslets']
+
+        self.WFS_det_clock_rate = self.config['sensor_HO']['ClockRate'].flatten() # [(?)]
+        self.WFS_FOV = self.config['sensor_HO']['FieldOfView']
+        self.WFS_RON = self.config['sensor_HO']['SigmaRON']
+        self.WFS_psInMas = self.config['sensor_HO']['PixelScale']
         self.WFS_wvl = self.make_tensor(self.GS_wvl) #TODO: clarify this
-        self.WFS_spot_FWHM = self.make_tensor(self.configs['sensor_HO']['SpotFWHM'][0])
-        self.WFS_excessive_factor = self.configs['sensor_HO']['ExcessNoiseFactor']
-        self.WFS_Nph = self.configs['sensor_HO']['NumberPhotons']
+        self.WFS_spot_FWHM = self.make_tensor(self.config['sensor_HO']['SpotFWHM'][0])
+        self.WFS_excessive_factor = self.config['sensor_HO']['ExcessNoiseFactor']
+        self.WFS_Nph = self.config['sensor_HO']['NumberPhotons']
 
-        self.HOloop_rate  = self.configs['RTC']['SensorFrameRate_HO'] # [Hz] (?)
-        self.HOloop_delay = self.configs['RTC']['LoopDelaySteps_HO'] # [ms] (?)
-        self.HOloop_gain  = self.configs['RTC']['LoopGain_HO']
+        self.HOloop_rate  = self.config['RTC']['SensorFrameRate_HO'] # [Hz] (?)
+        self.HOloop_delay = self.config['RTC']['LoopDelaySteps_HO'] # [ms] (?)
+        self.HOloop_gain  = self.config['RTC']['LoopGain_HO']
 
 
     def InitGrids(self):
@@ -156,7 +158,7 @@ class TipToy(torch.nn.Module):
             x_fft = fft.fft2(x)
             return fft.fftshift( fft.ifft2(x_fft*torch.conj(x_fft))/x.size(0)*x.size(1) )
 
-        self.OTF_static = pdims(torch.real(fftAutoCorr(pupil_padded)), 2)
+        self.OTF_static = pdims(torch.real(fftAutoCorr(pupil_padded)), -2)
         self.OTF_static = interpolate(self.OTF_static, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
         self.OTF_static = pdims( self.OTF_static / self.OTF_static.max(), -1 )
 
@@ -194,8 +196,6 @@ class TipToy(torch.nn.Module):
 
         super().__init__()
 
-        # self.add12d = lambda x: x.unsqueeze(1).unsqueeze(2)
-        # self.add0d  = lambda x: x.unsqueeze(0)
         self.norm_regime = norm_regime
         self.norm_scale  = self.make_tensor(1.0)
 

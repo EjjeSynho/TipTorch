@@ -230,7 +230,7 @@ class TipToy(torch.nn.Module):
 
     def __init__(self, AO_config, data_sample, norm_regime='sum', device=torch.device('cpu')):
         self.device = device
-        self.make_tensor = lambda x: torch.tensor(x, device=self.device)
+        self.make_tensor = lambda x: torch.tensor(x, device=self.device) if type(x) is not torch.Tensor else x
 
         if self.device.type is not 'cpu':
             self.start = torch.cuda.Event(enable_timing=True)
@@ -376,9 +376,9 @@ class TipToy(torch.nn.Module):
         WFS_pixelScale = self.WFS_psInMas / 1e3 # [arcsec]
        
         # Read-out noise calculation
-        nD = torch.maximum( rad2arc*self.wvl/self.WFS_d_sub/WFS_pixelScale, self.make_tensor(1.0) ) #spot FWHM in pixels and without turbulence
+        nD = torch.maximum( self.make_tensor(rad2arc*self.wvl/self.WFS_d_sub/WFS_pixelScale), self.make_tensor(1.0) ) #spot FWHM in pixels and without turbulence
         # Photon-noise calculation
-        nT = torch.maximum( torch.hypot(self.WFS_spot_FWHM.max()/1e3, rad2arc*self.WFS_wvl/r0_WFS) / WFS_pixelScale, self.make_tensor(1.0) )
+        nT = torch.maximum( self.make_tensor(torch.hypot(self.WFS_spot_FWHM.max()/1e3, rad2arc*self.WFS_wvl/r0_WFS) / WFS_pixelScale), self.make_tensor(1.0) )
 
         varRON  = np.pi**2/3 * (self.WFS_RON**2/self.WFS_Nph**2) * (WFS_nPix**2/nD)**2
         varShot = np.pi**2/(2*self.WFS_Nph) * (nT/nD)**2

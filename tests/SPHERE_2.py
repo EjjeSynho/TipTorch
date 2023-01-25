@@ -35,16 +35,12 @@ config_file = ParameterParser(path_ini).params
 # config_file['atmosphere']['Cn2Weights'] = [0.95, 0.05]
 # config_file['atmosphere']['Cn2Heights'] = [0, 10000]
 
-config_manager = ConfigManager(GetSPHEREonsky())
-merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
-config_manager.Convert(merged_config, framework='pytorch', device=device)
-
 #%% Initialize model
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
+from PSF_models.TipToy_SPHERE_multisrc_2 import TipToy
 
 #norm_regime = None 
 norm_regime = 'sum'
-toy = TipToy(merged_config, norm_regime, device)
+toy = TipToy(config_file, data_samples, norm_regime, device)
 
 #%%
 ims = []
@@ -79,7 +75,7 @@ bg  = bg_0
 toy.WFS_Nph.requires_grad = True
 
 #L0.requires_grad = False
-
+#%%
 parameters = [r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy]
 x = torch.stack(parameters).T.unsqueeze(0)
 

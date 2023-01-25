@@ -1,6 +1,7 @@
 import sys
 sys.path.insert(0, '..')
 
+import torch
 import numpy as np
 import cupy as cp
 from copy import deepcopy
@@ -12,7 +13,7 @@ from pprint import pprint
 class ConfigManager():
     def __init__(self, match_table=[], uniqualized=[]):
         self.match_table = match_table
-        
+
         if len(uniqualized) == 0:
             self.uniqualized = [
                 ['atmosphere', 'Wavelength'],
@@ -134,8 +135,9 @@ class ConfigManager():
         return new_config
 
 
-    def Convert(self, config, framework='pytorch'):
+    def Convert(self, config, framework='pytorch', device=None):
         if framework == 'pytorch':
+            if device is None: device = torch.device('cpu')
             convert_value = lambda x: torch.tensor(x, device=device).float()
         elif framework == 'numpy':
             convert_value = lambda x: np.array(x).astype(np.float32)
@@ -147,9 +149,12 @@ class ConfigManager():
         zero_d = lambda x: x if type(x) == float else convert_value(x)
         for entry in config:
             value = config[entry]
-            if isinstance(value, dict): self.Convert(value, framework)
-            elif isinstance(value, str) or not self.is_valid(value): pass
-            else: value = zero_d(value)
+            if isinstance(value, dict):
+                self.Convert(value, framework, device)
+            elif isinstance(value, str) or not self.is_valid(value):
+                pass
+            else:
+                value = zero_d(value)
             config[entry] = value
 
 
