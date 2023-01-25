@@ -12,6 +12,8 @@ import time
 
 from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, pdims
 
+#### THIS IS THE LATEST VERSION!!!! ######
+
 
 class TipToy(torch.nn.Module):
     def InitValues(self):
@@ -39,14 +41,14 @@ class TipToy(torch.nn.Module):
         self.GS_wvl     = self.config['sources_HO']['Wavelength'][0] #[m]
         #self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
         min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
-        self.wind_speed  = self.config['atmosphere']['WindSpeed']
-        self.wind_dir    = self.config['atmosphere']['WindDirection']
+        self.wind_speed  = min_2d(self.config['atmosphere']['WindSpeed'])
+        self.wind_dir    = min_2d(self.config['atmosphere']['WindDirection'])
         self.Cn2_weights = min_2d(self.config['atmosphere']['Cn2Weights'])
         self.Cn2_heights = min_2d(self.config['atmosphere']['Cn2Heights']) * self.airmass.unsqueeze(1) # [m]
+        
         #self.stretch     = 1.0 / (1.0-self.Cn2_heights/self.GS_height)
         self.h           = self.Cn2_heights #* self.stretch
         self.nL          = self.Cn2_heights.size(0)
-
 
         self.WFS_d_sub = self.config['sensor_HO']['SizeLenslets'] #TODO: seems like it's absent
         self.WFS_n_sub = self.config['sensor_HO']['NumberLenslets']
@@ -122,9 +124,13 @@ class TipToy(torch.nn.Module):
         self.k2 = pdims( self.k2, -1 )
 
         # For NGS-like alising 0th dimension is used to store shifted spatial frequency
-        self.km = self.kx_AO.repeat([self.N_combs,1,1,1]) - pdims(m/self.WFS_d_sub,2).unsqueeze(3)
-        self.kn = self.ky_AO.repeat([self.N_combs,1,1,1]) - pdims(n/self.WFS_d_sub,2).unsqueeze(3)
+        # This is thing is 5D: (aliased samples) x (N src) x (Atmospheric layers) x (kx) x (ky)
+        self.km = self.kx_AO.repeat([self.N_combs,1,1,1]) - pdims(m/self.WFS_d_sub, 3)
+        self.kn = self.ky_AO.repeat([self.N_combs,1,1,1]) - pdims(n/self.WFS_d_sub, 3)
         
+        # self.km = self.km.unsqueeze(2)
+        # self.kn = self.kn.unsqueeze(2)
+
         # Initialize OTF frequencines
         self.U, self.V = torch.meshgrid(
             torch.linspace(0, self.nOtf-1, self.nOtf, device=self.device),
@@ -188,7 +194,7 @@ class TipToy(torch.nn.Module):
 
     def __init__(self, AO_config, norm_regime='sum', device=torch.device('cpu')):
         self.device = device
-        self.make_tensor = lambda x: torch.tensor(x, device=self.device)
+        self.make_tensor = lambda x: torch.tensor(x, device=self.device) if type(x) is not torch.Tensor else x
 
         if self.device.type is not 'cpu':
             self.start = torch.cuda.Event(enable_timing=True)
@@ -222,7 +228,7 @@ class TipToy(torch.nn.Module):
             return hInt, rtfInt, atfInt, ntfInt
 
         #f = torch.logspace(-3, torch.log10(torch.tensor([0.5/Ts])).item(), nF)
-        f = torch.zeros([self.Nsrc,nF], device=self.device)
+        f = torch.zeros([self.Nsrc, nF], device=self.device)
         for i in range(self.Nsrc): 
             f[i,:] = torch.logspace(-3, torch.log10(0.5/Ts[i]), nF)
 
@@ -231,20 +237,21 @@ class TipToy(torch.nn.Module):
 
         thetaWind = self.make_tensor(0.0) #torch.linspace(0, 2*np.pi-2*np.pi/nTh, nTh)
         costh = torch.cos(thetaWind) #TODO: what is thetaWind?
-        
+
         fi = -self.vx*self.kx_AO*costh - self.vy*self.ky_AO*costh
-        _, _, atfInt, ntfInt = TransferFunctions(fi, pdims(Ts,2),
-                                                     pdims(delay,2),
-                                                     pdims(loopGain,2))
+
+        _, _, atfInt, ntfInt = TransferFunctions(fi, pdims(Ts,3),
+                                                    pdims(delay,3),
+                                                    pdims(loopGain,3))
 
         # AO transfer function
-        self.h1 = pdims(self.Cn2_weights.T,2) * atfInt.unsqueeze(0) #/nTh
-        self.h2 = pdims(self.Cn2_weights.T,2) * abs(atfInt.unsqueeze(0))**2 #/nTh
-        self.hn = pdims(self.Cn2_weights.T,2) * abs(ntfInt.unsqueeze(0))**2 #/nTh
+        self.h1 = pdims(self.Cn2_weights,2) * atfInt #/nTh
+        self.h2 = pdims(self.Cn2_weights,2) * abs(atfInt)**2 #/nTh
+        self.hn = pdims(self.Cn2_weights,2) * abs(ntfInt)**2 #/nTh
 
-        self.h1 = torch.sum(self.h1, axis=0) #summing along the weights dimension (4D->3D)
-        self.h2 = torch.sum(self.h2, axis=0) 
-        self.hn = torch.sum(self.hn, axis=0) 
+        self.h1 = torch.sum(self.h1, axis=1) #sum over the atmospheric layers
+        self.h2 = torch.sum(self.h2, axis=1) 
+        self.hn = torch.sum(self.hn, axis=1) 
 
 
     def ReconstructionFilter(self, r0, L0, WFS_noise_var):
@@ -255,8 +262,6 @@ class TipToy(torch.nn.Module):
         MV = 0
         Wn = WFS_noise_var / (2*self.kc)**2
         # TODO: isn't this one computed for the WFSing wvl?
-        #self.W_atm = self.cte*r0.**(-5/3) * (self.k2_AO + 1/L0**2)**(-11/6) * \
-        #    (self.wvl/self.GS_wvl)**2 #TODO: check for SPHERE
 
         self.W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * (self.wvl/self.GS_wvl)**2
         
@@ -281,22 +286,28 @@ class TipToy(torch.nn.Module):
 
 
     def AliasingPSD(self, r0, L0):
-        T = pdims(self.WFS_det_clock_rate / self.HOloop_rate, 2)
-        td = T * pdims(self.HOloop_delay, 2)
+        T = pdims(self.WFS_det_clock_rate / self.HOloop_rate, [-1,3])
+        td = T * pdims(self.HOloop_delay, [-1,3])
 
         Rx1 = pdims(2j*np.pi*self.WFS_d_sub * self.Rx, -1)
         Ry1 = pdims(2j*np.pi*self.WFS_d_sub * self.Ry, -1)
 
-        W_mn = (self.km**2 + self.kn**2 + 1/pdims(L0,-1)**2)**(-11/6)
+        W_mn = (self.km**2 + self.kn**2 + 1/L0.unsqueeze(0)**2)**(-11/6)
+
         Q = (Rx1*self.km + Ry1*self.kn) * torch.sinc(self.WFS_d_sub*self.km) * torch.sinc(self.WFS_d_sub*self.kn)
-        tf = pdims(self.h1,-1)
+        tf = pdims(self.h1,-1).unsqueeze(2)
 
-        avr = ( (self.Cn2_weights.T).unsqueeze(1).unsqueeze(3).unsqueeze(4) * \
-            pdims( torch.sinc(self.km*self.vx*T) * torch.sinc(self.kn*self.vy*T) * \
-            torch.exp(2j*np.pi*self.km*self.vx*td) * \
-            torch.exp(2j*np.pi*self.kn*self.vy*td) * tf,-1) ).sum(axis=0)
+        # Reference tto the variables but with diamensions expansion
+        vx = pdims(self.vx,-1)
+        vy = pdims(self.vy,-1)
+        km = self.km.unsqueeze(2)
+        kn = self.kn.unsqueeze(2)
 
-        aliasing_PSD = torch.sum(self.PR*W_mn*abs(Q*avr)**2, axis=0) * self.cte*r0**(-5/3) * self.mask_corrected_AO
+        avr = (pdims(self.Cn2_weights, [-1,2]) * tf * 
+               torch.sinc(km*vx*T) * torch.sinc(kn*self.vy*T) * \
+               torch.exp(2j*np.pi*km*vx*td) * torch.exp(2j*np.pi*kn*vy*td)).sum(dim=2) # sum along layers axis as well as along aliasing samples axis      
+
+        aliasing_PSD = torch.sum(self.PR*W_mn*abs(Q*avr)**2, dim=0) * self.cte * r0**(-5/3) * self.mask_corrected_AO    
         return aliasing_PSD
 
 

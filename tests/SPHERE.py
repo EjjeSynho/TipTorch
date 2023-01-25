@@ -25,24 +25,26 @@ data_samples = []
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 100)[1] )
 data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 347)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 351)[1] )
-# data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
-# data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 342)[1] )
+data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
+data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 342)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 349)[1] )
 
 path_ini = '../data/parameter_files/irdis.ini'
 
 config_file = ParameterParser(path_ini).params
-# config_file['atmosphere']['Cn2Weights'] = [0.95, 0.05]
-# config_file['atmosphere']['Cn2Heights'] = [0, 10000]
+config_file['atmosphere']['Cn2Weights'] = [0.95, 0.05]
+config_file['atmosphere']['Cn2Heights'] = [0, 10000]
 
 config_manager = ConfigManager(GetSPHEREonsky())
 merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
 config_manager.Convert(merged_config, framework='pytorch', device=device)
 
+# merged_config['atmosphere']['WindSpeed'] = torch.tensor([[20, 10], [25, 15], [30, 20]]).to(device)
+# merged_config['atmosphere']['WindDirection'] = torch.tensor([[200, 100], [250, 150], [300, 200]]).to(device)
+
 #%% Initialize model
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
 
-#norm_regime = None 
 norm_regime = 'sum'
 toy = TipToy(merged_config, norm_regime, device)
 
@@ -82,8 +84,8 @@ toy.WFS_Nph.requires_grad = True
 
 parameters = [r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy]
 x = torch.stack(parameters).T.unsqueeze(0)
-
 #toy.StartTimer()
+#%%
 PSF_1 = toy.PSD2PSF(*parameters)
 #print(toy.EndTimer())
 PSF_DL = toy.DLPSF()

@@ -52,11 +52,7 @@ def print_dict(d, indent=0):
         print('  ' + str(value))
 
 
-def show_row(row, log=True):
-    if log: buf = torch.log( torch.hstack(row) )
-    else: buf = torch.hstack(row)
-    plt.imshow(buf.abs().detach().cpu())
-    plt.show()
+
 
 
 class Photometry:
