@@ -18,12 +18,45 @@ seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
+
+# Adds singleton dimensions to the tensor. If negative, dimensions are added in the beginning, else in the end
+def pdims(x, ns):
+    expdims = lambda x, n: x.view(*x.shape, *[1 for _ in range(n)]) if n>0 else x.view(*[1 for _ in range(abs(n))], *x.shape)
+
+    if hasattr(ns, "__len__"):
+        for n in ns:
+            x = expdims(x, n)
+        return x
+    else:
+        return expdims(x, ns)
+
+
+# Computes Strehl ratio
 def SR(PSF, PSF_DL):
     ratio = torch.amax(PSF, dim=(-2,-1)) / torch.amax(PSF_DL, dim=(-2,-1)) * PSF_DL.sum(dim=(-2,-1)) / PSF.sum(dim=(-2,-1)) 
     if ratio.squeeze().dim() == 0:
         return ratio.item()
     else:
         return ratio.squeeze()
+
+
+# Outputs dictionary, even with subdictionaries
+def print_dict(d, indent=0):
+   for key, value in d.items():
+      print('\t' * indent + str(key) + ':', end='')
+      if isinstance(value, dict):
+        print()
+        print_dict(value, indent+1)
+      else:
+        # print('\t'*(indent+1) + str(value))
+        print('  ' + str(value))
+
+
+def show_row(row, log=True):
+    if log: buf = torch.log( torch.hstack(row) )
+    else: buf = torch.hstack(row)
+    plt.imshow(buf.abs().detach().cpu())
+    plt.show()
 
 
 class Photometry:

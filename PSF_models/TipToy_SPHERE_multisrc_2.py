@@ -2,32 +2,66 @@
 import sys
 sys.path.insert(0, '..')
 
-import numpy as np
 import torch
+import scipy.special as spc
 from torch import fft
 from torch.nn.functional import interpolate
-import scipy.special as spc
 from astropy.io import fits
+import numpy as np
 import time
+from os import path
+from copy import deepcopy
 
 from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, pdims
 
 
 class TipToy(torch.nn.Module):
-    def InitValues(self):
+    def SetDataSample(self, data_samples):
         # Reading parameters from the file
-        num_src = self.config['NumberSources']
+        num_src = len(data_samples)
         self.Nsrc = num_src
-        self.wvl = self.config['sources_science']['Wavelength']
-        if not torch.all(self.wvl  == self.wvl[0]).item():
+        self.wvl = np.array([data_sample['spectrum']['lambda'] for data_sample in data_samples])
+        if not np.all(self.wvl  == self.wvl[0]):
             raise ValueError('All wavelength must be the same for all samples')
         self.wvl = self.wvl[0]
         
+        #  This function maskes sure that the dimensionality of input data correponds to the numberr of input targets
+        def initialize_param(dictionary, entries):
+            if type(dictionary) == list:
+                return self.make_tensor([record[entries[0]][entries[1]] for record in dictionary]).float()
+            else:
+                return self.make_tensor([dictionary[entries[0]][entries[1]]]*num_src).float()
+
+        self.configs = deepcopy(self.AO_config)
+        self.configs['sources_science']['Wavelength'] = self.wvl
+        self.configs['sensor_science']['FieldOfView'] = data_samples[0]['image'].shape[0] #TODO: image size check
+
+        self.configs['atmosphere']['Seeing']        = initialize_param(data_samples,   ['seeing','SPARTA'])
+        self.configs['atmosphere']['WindSpeed']     = initialize_param(data_samples,   ['Wind speed','header'])
+        self.configs['atmosphere']['WindDirection'] = initialize_param(data_samples,   ['Wind direction','header'])
+        self.configs['sensor_science']['Zenith']    = initialize_param(data_samples,   ['telescope','altitude'])*-1 + 90. # TODO: aren't they the same?
+        self.configs['telescope']['ZenithAngle']    = initialize_param(data_samples,   ['telescope','altitude'])*-1 + 90. # TODO: aren't they the same?
+        self.configs['sensor_science']['Azimuth']   = initialize_param(data_samples,   ['telescope','azimuth'])
+        self.configs['sensor_science']['SigmaRON']  = initialize_param(data_samples,   ['Detector','ron'])
+        self.configs['sensor_science']['Gain']      = initialize_param(data_samples,   ['Detector','gain'])
+        self.configs['sensor_HO']['NumberPhotons']  = initialize_param(data_samples,   ['WFS','Nph vis'])
+        self.configs['RTC']['SensorFrameRate_HO']   = initialize_param(data_samples,   ['WFS','rate'])
+        
+        self.configs['sensor_HO']['ClockRate']      = initialize_param(self.AO_config, ['sensor_HO','ClockRate'])
+        self.configs['sources_HO']['Wavelength']    = initialize_param(self.AO_config, ['sources_HO','Wavelength']).squeeze()
+        self.configs['sources_HO']['Height']        = initialize_param(self.AO_config, ['sources_HO','Height'])
+        self.configs['sources_HO']['Zenith']        = initialize_param(self.AO_config, ['sources_HO','Zenith'])
+        self.configs['sources_HO']['Azimuth']       = initialize_param(self.AO_config, ['sources_HO','Azimuth'])
+        self.configs['atmosphere']['Cn2Weights']    = initialize_param(self.AO_config, ['atmosphere','Cn2Weights'])
+        self.configs['atmosphere']['Cn2Heights']    = initialize_param(self.AO_config, ['atmosphere','Cn2Heights'])
+        self.configs['RTC']['LoopDelaySteps_HO']    = initialize_param(self.AO_config, ['RTC','LoopDelaySteps_HO'])
+        self.configs['RTC']['LoopGain_HO']          = initialize_param(self.AO_config, ['RTC','LoopGain_HO'])
+
         # Setting internal parameters
-        self.D       = self.config['telescope']['TelescopeDiameter']
-        self.psInMas = self.config['sensor_science']['PixelScale'] #[mas]
-        self.nPix    = self.config['sensor_science']['FieldOfView']
-        self.pitch   = self.config['DM']['DmPitchs'][0] #[m]
+        self.D       = self.AO_config['telescope']['TelescopeDiameter']
+        self.psInMas = self.AO_config['sensor_science']['PixelScale'] #[mas]
+        self.nPix    = self.AO_config['sensor_science']['FieldOfView']
+        self.pitch   = self.AO_config['DM']['DmPitchs'][0] #[m]
         #self.h_DM    = self.AO_config['DM']['DmHeights'][0] # ????? what is h_DM?
         #self.nDM     = 1
         self.kc      = 1/(2*self.pitch)
@@ -36,8 +70,9 @@ class TipToy(torch.nn.Module):
         self.zenith_angle  = self.configs['telescope']['ZenithAngle']
         self.airmass       = 1.0 / torch.cos(self.zenith_angle * deg2rad)
 
-        self.GS_wvl     = self.config['sources_HO']['Wavelength'][0] #[m]
+        self.GS_wvl     = self.AO_config['sources_HO']['Wavelength'][0] #[m]
         #self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
+
         self.wind_speed  = self.configs['atmosphere']['WindSpeed']
         self.wind_dir    = self.configs['atmosphere']['WindDirection']
         self.Cn2_weights = self.configs['atmosphere']['Cn2Weights']
@@ -46,8 +81,8 @@ class TipToy(torch.nn.Module):
         self.h           = self.Cn2_heights #* self.stretch
         self.nL          = self.Cn2_heights.size(0)
 
-        self.WFS_d_sub = np.mean(self.config['sensor_HO']['SizeLenslets']) #TODO: seems like it's absent
-        self.WFS_n_sub = np.mean(self.config['sensor_HO']['NumberLenslets'])
+        self.WFS_d_sub = np.mean(self.AO_config['sensor_HO']['SizeLenslets']) #TODO: seems like it's absent
+        self.WFS_n_sub = np.mean(self.AO_config['sensor_HO']['NumberLenslets'])
 
         self.WFS_det_clock_rate = self.configs['sensor_HO']['ClockRate'].flatten() # [(?)]
         self.WFS_FOV = self.configs['sensor_HO']['FieldOfView']
@@ -137,13 +172,22 @@ class TipToy(torch.nn.Module):
         self.UV  = self.U*self.V
         self.UV2 = self.U**2 + self.V**2
 
-        pupil_path = self.config['telescope']['PathPupil']
-        pupil_apodizer = self.config['telescope']['PathApodizer']
+        pupil_path = self.AO_config['telescope']['PathPupil']
+        pupil_apodizer = self.AO_config['telescope']['PathApodizer']
 
         pupil    = self.make_tensor(fits.getdata(pupil_path).astype('float'))
         apodizer = self.make_tensor(fits.getdata(pupil_apodizer).astype('float'))
 
+        #abit_padded = torch.nn.ZeroPad2d(8)
+        #pupil = abit_padded(pupil)
+        #apodizer = abit_padded(apodizer)
+
+        #ROI = ( slice(7, pupil.shape[0]-7), slice(7, pupil.shape[1]-7) )
+        #pupil = pupil[ROI]
+        #apodizer = apodizer[ROI]
+
         pupil_pix  = pupil.shape[0]
+        #padded_pix = nOtf
         padded_pix = int(pupil_pix*self.sampling)
 
         pupil_padded = torch.zeros([padded_pix, padded_pix], device=self.device)
@@ -156,7 +200,7 @@ class TipToy(torch.nn.Module):
             x_fft = fft.fft2(x)
             return fft.fftshift( fft.ifft2(x_fft*torch.conj(x_fft))/x.size(0)*x.size(1) )
 
-        self.OTF_static = pdims(torch.real(fftAutoCorr(pupil_padded)), 2)
+        self.OTF_static = torch.real( fftAutoCorr(pupil_padded) ).unsqueeze(0).unsqueeze(0)
         self.OTF_static = interpolate(self.OTF_static, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
         self.OTF_static = pdims( self.OTF_static / self.OTF_static.max(), -1 )
 
@@ -179,12 +223,12 @@ class TipToy(torch.nn.Module):
             size=(self.nPix,self.nPix), mode='area' ).squeeze(0).squeeze(0)
         
 
-    def Update(self, reinit_grids=True):
-        self.InitValues()
+    def Update(self, data_samples, reinit_grids=True):
+        self.SetDataSample(data_samples)
         if reinit_grids: self.InitGrids()
 
 
-    def __init__(self, AO_config, norm_regime='sum', device=torch.device('cpu')):
+    def __init__(self, AO_config, data_sample, norm_regime='sum', device=torch.device('cpu')):
         self.device = device
         self.make_tensor = lambda x: torch.tensor(x, device=self.device)
 
@@ -200,8 +244,8 @@ class TipToy(torch.nn.Module):
         self.norm_scale  = self.make_tensor(1.0)
 
         # Read data and initialize AO system
-        self.config = AO_config
-        self.InitValues()
+        self.AO_config = AO_config
+        self.SetDataSample(data_sample)
         self.InitGrids()
 
         self.PSDs = {}

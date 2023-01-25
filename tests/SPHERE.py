@@ -6,11 +6,13 @@ import sys
 sys.path.insert(0, '..')
 
 import torch
+import numpy as np
 from torch import nn
 import matplotlib.pyplot as plt
 
 from data_processing.SPHERE_data import SPHERE_database, SPHERE_dataset, LoadSPHEREsampleByID
 from tools.parameter_parser import ParameterParser
+from tools.config_manager import ConfigManager, GetSPHEREonsky
 from tools.utils import OptimizeTRF, OptimizeLBFGS
 from tools.utils import radial_profile, plot_radial_profile, SR
 from tools.utils import BackgroundEstimate
@@ -33,11 +35,10 @@ config_file = ParameterParser(path_ini).params
 #config_file['atmosphere']['Cn2Weights'] = [0.95, 0.05]
 #config_file['atmosphere']['Cn2Heights'] = [0, 10000]
 
-def show_row(row, log=True):
-    if log: buf = torch.log( torch.hstack(row) )
-    else: buf = torch.hstack(row)
-    plt.imshow(buf.abs().detach().cpu())
-    plt.show()
+config_manager = ConfigManager(GetSPHEREonsky())
+merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
+config_manager.Convert(merged_config, framework='pytorch')
+
 
 #%% Initialize model
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
