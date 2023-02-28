@@ -9,6 +9,7 @@ from graphviz import Digraph
 from skimage.transform import resize
 import matplotlib.pyplot as plt
 
+
 rad2mas  = 3600 * 180 * 1000 / np.pi
 rad2arc  = rad2mas / 1000
 deg2rad  = np.pi / 180
@@ -17,6 +18,35 @@ asec2rad = np.pi / 180 / 3600
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
+
+
+def mask_circle(N, r, center=(0,0), centered=True):
+    factor = 0.5 * (1-N%2)
+    if centered:
+        coord_range = np.linspace(-N//2+N%2+factor, N//2-factor, N)
+    else:
+        coord_range = np.linspace(0, N-1, N)
+    xx, yy = np.meshgrid(coord_range-center[1], coord_range-center[0])
+    pupil_round = np.zeros([N, N], dtype=np.int32)
+    pupil_round[np.sqrt(yy**2+xx**2) < r] = 1
+    return pupil_round
+
+
+def CroppedROI(im, point, win):
+    return ( slice(max(point[0]-win//2, 0), min(point[0]+win//2+win%2, im.shape[0])),
+             slice(max(point[1]-win//2, 0), min(point[1]+win//2+win%2, im.shape[1])) )
+
+
+def GetROIaroundMax(im, win=100):
+    im[np.isinf(im)] = np.nan
+    # determine the position of maximum intensity, so the image is centered around the brightest star
+    max_id = np.unravel_index(np.nanargmax(im), im.shape)
+    # make it more correct with the center of mass
+    max_crop = CroppedROI(im, max_id, 20)
+    CoG_id = np.array(center_of_mass(np.nan_to_num(im[max_crop]))).round().astype(np.int32)
+    max_id = (max_crop[0].start + CoG_id[0], max_crop[1].start + CoG_id[1])
+    ids = CroppedROI(im, max_id, win)
+    return im[ids], ids, max_id
 
 
 # Adds singleton dimensions to the tensor. If negative, dimensions are added in the beginning, else in the end
@@ -52,7 +82,44 @@ def print_dict(d, indent=0):
         print('  ' + str(value))
 
 
-
+def wavelength_to_rgb(wavelength, gamma=0.8, show_invisible=False):
+    wavelength = float(wavelength)
+    if wavelength >= 380 and wavelength <= 440:
+        attenuation = 0.3 + 0.7 * (wavelength - 380) / (440 - 380)
+        R = ((-(wavelength - 440) / (440 - 380)) * attenuation) ** gamma
+        G = 0.0
+        B = (1.0 * attenuation) ** gamma
+    elif wavelength >= 440 and wavelength <= 490:
+        R = 0.0
+        G = ((wavelength - 440) / (490 - 440)) ** gamma
+        B = 1.0
+    elif wavelength >= 490 and wavelength <= 510:
+        R = 0.0
+        G = 1.0
+        B = (-(wavelength - 510) / (510 - 490)) ** gamma
+    elif wavelength >= 510 and wavelength <= 580:
+        R = ((wavelength - 510) / (580 - 510)) ** gamma
+        G = 1.0
+        B = 0.0
+    elif wavelength >= 580 and wavelength <= 645:
+        R = 1.0
+        G = (-(wavelength - 645) / (645 - 580)) ** gamma
+        B = 0.0
+    elif wavelength >= 645 and wavelength <= 750:
+        attenuation = 0.3 + 0.7 * (750 - wavelength) / (750 - 645)
+        R = (1.0 * attenuation) ** gamma
+        G = 0.0
+        B = 0.0
+    else:
+        a = 0.4
+        R = a
+        G = a
+        B = a
+        if not show_invisible:
+            R = 0.0
+            G = 0.0
+            B = 0.0
+    return (R,G,B)
 
 
 class Photometry:
@@ -420,8 +487,14 @@ def radial_profile(data, center=None):
 
 def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300, scale='log'):
     center = Center(PSF_ref, centered=False)
-    profile_0 = radial_profile(PSF_ref.detach().cpu().numpy(), center)[:32+1]
-    profile_1 = radial_profile(PSF_estim.detach().cpu().numpy(), center)[:32+1]
+
+    if type(PSF_ref) is torch.Tensor:
+        PSF_ref = PSF_ref.detach().cpu().numpy()
+    if type(PSF_estim) is torch.Tensor:
+        PSF_estim = PSF_estim.detach().cpu().numpy()
+
+    profile_0 = radial_profile(PSF_ref,   center)[:32+1]
+    profile_1 = radial_profile(PSF_estim, center)[:32+1]
 
     profile_diff = np.abs(profile_1-profile_0) / profile_0.max() * 100 #[%]
 

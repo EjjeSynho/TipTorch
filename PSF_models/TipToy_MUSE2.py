@@ -804,3 +804,19 @@ print("Jx,Jy: ({:.1f}, {:.1f}, {:.1f})".format(Jx.abs().item(), Jy.abs().item(),
 print("WFS noise: {:.2f}".format(n.data.item()))
 
 #la chignon et tarte
+
+#%%
+h = torch.stack([torch.eye(3)*5, torch.eye(3)*4]).float()
+f = torch.linalg.pinv(h)
+print(f)
+
+hh = torch.tensor([
+    [5,0,0,0,0,0],
+    [0,5,0,0,0,0],
+    [0,0,5,0,0,0],
+    [0,0,0,4,0,0],
+    [0,0,0,0,4,0],
+    [0,0,0,0,0,4]
+]).float()
+ff = torch.linalg.inv(hh)
+print(ff)

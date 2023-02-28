@@ -8,14 +8,13 @@ sys.path.insert(0, '..')
 import torch
 import numpy as np
 from torch import nn
-import matplotlib.pyplot as plt
-
 from data_processing.SPHERE_data import SPHERE_database, SPHERE_dataset, LoadSPHEREsampleByID
 from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager, GetSPHEREonsky
 from tools.utils import OptimizeTRF, OptimizeLBFGS
 from tools.utils import radial_profile, plot_radial_profile, SR
 from tools.utils import BackgroundEstimate
+import matplotlib.pyplot as plt
 
 device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
 
@@ -25,8 +24,8 @@ data_samples = []
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 100)[1] )
 data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 347)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 351)[1] )
-data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
-data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 342)[1] )
+# data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
+# data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 342)[1] )
 #data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 349)[1] )
 
 path_ini = '../data/parameter_files/irdis.ini'
@@ -64,7 +63,7 @@ N_src = len(data_samples)
 
 init_torch_param = lambda x, N=None: \
     torch.tensor([x]*N, requires_grad=True, device=device).flatten() \
-    if N is not None and N != 0 \
+    if N != None and N != 0 \
     else torch.tensor(x, device=device, requires_grad=True).flatten()
 
 r0  = init_torch_param([sample['r0'] for sample in data_samples])
@@ -135,6 +134,11 @@ print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 draw_result(PSF_0, PSF_1)
 for i in range(PSF_0.shape[0]):
     plot_radial_profile(PSF_0[i,:,:], PSF_1[i,:,:], 'TipToy', title='IRDIS PSF', dpi=100)
+
+#%%
+
+reconstruction_result = np.save('C:/Users/akuznets/Data/SPHERE/PSF_TipToy.npy', PSF_1.detach().cpu().numpy())
+initial_PSF = np.save('C:/Users/akuznets/Data/SPHERE/PSF_init.npy', PSF_0.detach().cpu().numpy())
 
 
 #%%
@@ -283,7 +287,7 @@ bad_file_ids = [
     158, 156, 155, 143, 139, 135, 132, 130, 128, 126, 96,  92,  787, 750,
     53,  513, 490, 369, 299, 270, 263, 255, 98,  88,  87,  86,  862, 796, 781]
 
-bad_ids = [database_wvl.find(file_id)['index'] for file_id in bad_file_ids if database_wvl.find(file_id) is not None]
+bad_ids = [database_wvl.find(file_id)['index'] for file_id in bad_file_ids if database_wvl.find(file_id) != None]
 good_ids = list(set(np.arange(len(database_wvl))) - set(bad_ids))
 database_wvl_good = database_wvl.subset(good_ids)
 
