@@ -100,7 +100,8 @@ class ConfigManager():
         self.squeeze_values(buf_modifier)
 
         for config_entry, modifier_entry, modifier_func in self.match_table:
-            if modifier_func is None: modifier_func = lambda x: x
+            if modifier_func is None:
+                modifier_func = lambda x: x
             self.set_value(buf_config, config_entry, modifier_func(self.get_value(buf_modifier, modifier_entry)))
         return buf_config
 
@@ -174,6 +175,6 @@ def GetSPHEREonsky():
         (['sensor_science','Gain'],        ['Detector', 'gain'],        None),
         (['sensor_science','PixelScale'],  ['Detector', 'psInMas'],     None),
         (['sensor_science','SigmaRON'],    ['Detector', 'ron'],         None),
-        (['sources_science','Wavelength'], ['spectrum','lambda'],       None)
+        (['sources_science','Wavelength'], ['spectra'],                 None)
     ]
     return match_table

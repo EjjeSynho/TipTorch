@@ -1,7 +1,4 @@
 #%%
-%reload_ext autoreload
-%autoreload 2
-
 import sys
 sys.path.insert(0, '..')
 
@@ -805,7 +802,6 @@ def CreateSPHEREdataframe(save_df_dir=None):
 # df = CreateSPHEREdataframe(save_df_dir='E:/ESO/Data/SPHERE/sphere_df.pickle')
 #%%
 def LoadSPHEREsampleByID(id): # searches for the sample with the specified ID in
-
     with open('E:/ESO/Data/SPHERE/sphere_df.pickle', 'rb') as handle:
         request_df = pickle.load(handle)
 

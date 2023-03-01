@@ -5,6 +5,7 @@
 import sys
 sys.path.insert(0, '..')
 
+import pickle
 import torch
 import numpy as np
 from torch import nn
@@ -20,13 +21,26 @@ device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu'
 
 #%% Initialize data sample
 data_samples = []
-#data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 0)[1] )
-#data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 100)[1] )
-data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 347)[1] )
-#data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 351)[1] )
-# data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 340)[1] )
-# data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 342)[1] )
-#data_samples.append( LoadSPHEREsampleByID('C:/Users/akuznets/Data/SPHERE/test/', 349)[1] )
+
+with open('E:/ESO/Data/SPHERE/sphere_df.pickle', 'rb') as handle:
+    psf_df = pickle.load(handle)
+psf_df = psf_df[psf_df['Class A'] == True]
+psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
+psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
+
+good_ids = psf_df.index.values.tolist()
+#%%
+# 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
+
+data_samples.append( LoadSPHEREsampleByID(465) )
+data_samples.append( LoadSPHEREsampleByID(89) )
+
+# Preprocess input data so TipToy can understand it
+for i in range(len(data_samples)):
+    buf = data_samples[i]['spectra'].copy()
+    buf = [buf['central L']*1e-9, buf['central R']*1e-9]
+    data_samples[i]['spectra'] = buf[0]  #TODO fix this later
+
 
 path_ini = '../data/parameter_files/irdis.ini'
 
@@ -38,8 +52,11 @@ config_manager = ConfigManager(GetSPHEREonsky())
 merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
 config_manager.Convert(merged_config, framework='pytorch', device=device)
 
-# merged_config['atmosphere']['WindSpeed'] = torch.tensor([[20, 10], [25, 15], [30, 20]]).to(device)
+# spectra = merged_config['sources_science']['Wavelength']['central L']
+# merged_config['sources_science']['Wavelength'] = [spectra, spectra['central R']]
+
 # merged_config['atmosphere']['WindDirection'] = torch.tensor([[200, 100], [250, 150], [300, 200]]).to(device)
+# merged_config['atmosphere']['WindSpeed'] = torch.tensor([[20, 10], [25, 15], [30, 20]]).to(device)
 
 #%% Initialize model
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
@@ -50,7 +67,8 @@ toy = TipToy(merged_config, norm_regime, device)
 #%%
 ims = []
 for sample in data_samples:
-    im = sample['image']
+    im = sample['PSF L'].sum(axis=0) #TODO fix this later
+
     if    toy.norm_regime == 'max': norma = im.max()
     elif  toy.norm_regime == 'sum': norma = im.sum()
     else: norma = 1.0

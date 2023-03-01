@@ -93,7 +93,7 @@ class TipToy(torch.nn.Module):
         self.nOtf_AO = int(2*self.kc/self.dk)
         self.nOtf_AO += self.nOtf_AO % 2
 
-        # Comb samples involved in antialising
+        # Comb samples involved in alising PSD calculation
         n_times = min(4,max(2,int(np.ceil(self.nOtf/self.nOtf_AO/2))))
         ids = []
         for mi in range(-n_times,n_times):
@@ -196,7 +196,7 @@ class TipToy(torch.nn.Module):
         self.device = device
         self.make_tensor = lambda x: torch.tensor(x, device=self.device) if type(x) is not torch.Tensor else x
 
-        if self.device.type is not 'cpu':
+        if self.device.type != 'cpu':
             self.start = torch.cuda.Event(enable_timing=True)
             self.end   = torch.cuda.Event(enable_timing=True)
 
