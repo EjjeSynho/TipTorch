@@ -8,6 +8,7 @@ sys.path.insert(0, '..')
 import os
 from os import path
 import torch
+import json
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -223,8 +224,6 @@ class SPHERE_loader():
         entries_spart_vis = [
             ('n_ph', 'flux_VisLoop[#photons/subaperture/frame]'),
             ('rate', 'WFS frequency')]
-
-
 
         # sparta_atmospheric_params
         entries_spart_atm = [
@@ -595,6 +594,259 @@ def SaveReducedAsImages():
 
 
 #%%
+
+def CreateSPHEREdataframe(save_df_dir=None):
+
+    reduced_files = os.listdir(path_output)
+
+    columns_main = [
+        'ID',
+        'Filename',
+        'Date',
+        'Observation',
+        'Airmass',
+        'r0 (SPARTA)',
+        'Seeing (SPARTA)',
+        'Seeing (MASSDIMM)',
+        'Seeing (DIMM)',
+        'FWHM',
+        'Strehl',
+        'Turb. speed',
+        'Wind direction (header)',
+        'Wind direction (MASSDIMM)',
+        'Wind speed (header)',
+        'Wind speed (SPARTA)',
+        'Wind speed (MASSDIMM)',
+        'Tau0 (header)',
+        'Tau0 (SPARTA)',
+        'Tau0 (MASSDIMM)',
+        'Tau0 (MASS)',
+        'Pressure',
+        'Humidity',
+        'Temperature',
+        'Nph WFS',
+        'Rate']
+
+    main_df = {}
+    for col in columns_main:
+        main_df[col] = []
+
+    for file in tqdm(reduced_files):
+        with open(os.path.join(path_output, file), 'rb') as handle:
+            data = pickle.load(handle)
+
+        id = int(file.split('_')[0])
+        pure_filename = file.replace('.pickle','').replace(str(id)+'_','')
+
+        main_df['ID'].append(id)
+        main_df['Filename'].append(pure_filename)
+        main_df['Date'].append(data['observation']['date'])
+        main_df['Observation'].append(data['observation']['name'])
+        main_df['Airmass'].append(data['telescope']['airmass'])
+        main_df['r0 (SPARTA)'].append(data['r0'])
+        main_df['Seeing (SPARTA)'].append(data['seeing']['SPARTA'])
+        main_df['Seeing (MASSDIMM)'].append(data['seeing']['MASSDIMM'])
+        main_df['Seeing (DIMM)'].append(data['seeing']['DIMM'])
+        main_df['FWHM'].append(data['FWHM'])
+        main_df['Strehl'].append(data['Strehl'])
+        main_df['Turb. speed'].append(data['turb speed'])
+        main_df['Wind direction (header)'].append(data['Wind direction']['header'])
+        main_df['Wind direction (MASSDIMM)'].append(data['Wind direction']['MASSDIMM'])
+        main_df['Wind speed (header)'].append(data['Wind speed']['header'])
+        main_df['Wind speed (SPARTA)'].append(data['Wind speed']['SPARTA'])
+        main_df['Wind speed (MASSDIMM)'].append(data['Wind speed']['MASSDIMM'])
+        main_df['Tau0 (header)'].append(data['tau0']['header'])
+        main_df['Tau0 (SPARTA)'].append(data['tau0']['SPARTA'])
+        main_df['Tau0 (MASSDIMM)'].append(data['tau0']['MASSDIMM'])
+        main_df['Tau0 (MASS)'].append(data['tau0']['MASS'])
+        main_df['Pressure'].append(data['Environment']['pressure'])
+        main_df['Humidity'].append(data['Environment']['humidity'])
+        main_df['Temperature'].append(data['Environment']['temperature'])
+        main_df['Nph WFS'].append(data['WFS']['Nph vis'])
+        main_df['Rate'].append(data['WFS']['rate'])
+
+    main_df = pd.DataFrame(main_df)
+
+    # Get spectrum information
+    mag_list = []
+    files = []
+    spectra = []
+
+    for file in tqdm(reduced_files):
+        with open(os.path.join(path_output, file), 'rb') as handle:
+            data = pickle.load(handle)
+        files.append(file)
+        mag_list.append(data['observation']['magnitudes'])
+        spectra.append(data['spectra'])
+
+
+    # To find the closest filter to the wavelength of the observation
+    wvl = np.array([1043, 1245, 1625, 2182, 1085, 1213, 1283, 1573, 1642, 2091, 2124, 2170, 2266,
+                    2290, 1022, 1190, 1593, 1593, 1667, 2110, 1076, 1273, 1667, 1667, 1733, 2251])
+
+    bw =  np.array([140, 240, 290, 300, 14, 17, 18,  23, 24, 34, 31, 31, 32,
+                    33,  49,  42,  52,  52, 54, 102, 50, 46, 54, 54, 57, 109])
+
+    # Get all possible magnitudes
+    mags = []
+    for mag_ in mag_list: mags += [mag for mag in mag_ if mag not in mags]
+    mag_cols_names = ['mag '+mag for mag in mags]
+
+    spectrum_df = {
+        'ID': [],
+        'Filename': [],
+        'λ left (nm)': [],
+        'λ right (nm)': [],
+        'Δλ left (nm)': [],
+        'Δλ right (nm)': []
+    }
+    for col in mag_cols_names: spectrum_df[col] = []
+
+
+    for record in tqdm(files):
+        id = int(record.split('_')[0])
+        pure_filename = record.replace('.pickle','').replace(str(id)+'_','')
+            
+        spectrum_df['ID'].append(id)
+        spectrum_df['Filename'].append(pure_filename)
+
+        # Get source magnitude information
+        for mag in mags:
+            if mag in mag_list[files.index(record)]:
+                x = mag_list[files.index(record)][mag]
+                if isinstance(x, list) or isinstance(x, tuple):
+                    x = x[0]
+                spectrum_df['mag '+mag].append(x)
+            else:
+                spectrum_df['mag '+mag].append(np.nan)
+
+        # Get spectrum information
+        sp = deepcopy(spectra[files.index(record)])
+        spectrum_df['λ left (nm)'  ].append(sp['central R'])
+        spectrum_df['λ right (nm)' ].append(sp['central L'])
+        spectrum_df['Δλ left (nm)' ].append(np.round(sp['range L'][-1] - sp['range L'][0]).astype(np.int_).item())
+        spectrum_df['Δλ right (nm)'].append(np.round(sp['range R'][-1] - sp['range R'][0]).astype(np.int_).item())
+
+    spectrum_df = pd.DataFrame(spectrum_df)
+
+
+    # import seaborn as sns
+
+    # sns.set_theme()  # <-- This actually changes the look of plots.
+    # plt.hist([df['λ left (nm)'], df['λ right (nm)']], bins=30, color=['r','b'], alpha=0.5)
+    # plt.xlabel('λ [nm]')
+    # plt.ylabel('Count')
+    # plt.legend(['λ left', 'λ right'])
+
+
+    # sns.set_theme()  # <-- This actually changes the look of plots.
+    # plt.hist([df['Δλ left (nm)'], df['Δλ right (nm)']], bins=30, color=['r','b'], alpha=0.5)
+    # plt.legend(['Δλ left', 'Δλ right'])
+    # plt.xlabel('λ [nm]')
+    # plt.ylabel('Count')
+
+
+    # Load labels information
+    with open('E:/ESO/Data/SPHERE/labels.json', 'r') as f:
+        labels = json.load(f)
+
+    for key in ['Blurry', 'Noisy', 'Clipped', 'Crossed', 'Streched', 'Wingsgone']:
+        labels.pop(key)
+
+    labels_df = {
+        'ID': [],
+        'Filename': []
+    }
+    for key in [i for i in labels.keys()]: labels_df[key] = []
+
+    def search_keys_by_filename(filename):
+        labels_return = {}
+        for key in labels.keys():
+            labels_return[key] = False
+            for file_from_dict in labels[key]:
+                id = int(file_from_dict.split('_')[0])
+                pure_filename = file_from_dict.replace(str(id)+'_','')
+                if pure_filename == filename:
+                    labels_return[key] = True
+                    break
+        return labels_return
+
+    for record in tqdm(files):
+        id = int(record.split('_')[0])
+        pure_filename = record.replace('.pickle','').replace(str(id)+'_','')
+        
+        labels_df['ID'].append(id)
+        labels_df['Filename'].append(pure_filename)
+
+        labels_current = search_keys_by_filename(pure_filename)
+
+        for key in labels.keys():
+            labels_df[key].append(labels_current[key])
+
+    labels_df = pd.DataFrame(labels_df)
+    labels_df.rename(columns={"doubles": "Doubles", "invalid": "Invalid"})
+
+    reindexed = ['ID', 'Filename', 'Class A', 'Class B', 'Class C', 'LWE', 'doubles', 'No coronograph', 'invalid']
+    labels_df = labels_df.reindex(columns=reindexed)
+
+    # Merge all dataframes
+    df = pd.merge(main_df, spectrum_df, on=['ID','Filename'])
+    df = pd.merge(df, labels_df, on=['ID','Filename'])
+    df.sort_values('ID', inplace=True)
+    df.set_index('ID', inplace=True)
+
+    if save_df_dir is not None:
+        print('Saving dataframe to:', save_df_dir)
+        with open(save_df_dir, 'wb') as handle:
+            pickle.dump(df, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    return df
+
+# df = CreateSPHEREdataframe(save_df_dir='E:/ESO/Data/SPHERE/sphere_df.pickle')
+#%%
+def LoadSPHEREsampleByID(id): # searches for the sample with the specified ID in
+
+    with open('E:/ESO/Data/SPHERE/sphere_df.pickle', 'rb') as handle:
+        request_df = pickle.load(handle)
+
+    file = request_df.loc[request_df.index == id]['Filename'].values[0]
+    full_filename = 'E:/ESO/Data/SPHERE/IRDIS_reduced/'+str(id)+'_'+file+'.pickle'
+
+    with open(full_filename, 'rb') as handle:
+        data_sample = pickle.load(handle)
+    return data_sample
+
+
+#'Filename', 'Date', 'Observation', 'Airmass', 'r0 (SPARTA)',
+#'Seeing (SPARTA)', 'Seeing (MASSDIMM)', 'Seeing (DIMM)', 'FWHM',
+#'Strehl', 'Turb. speed', 'Wind direction (header)',
+#'Wind direction (MASSDIMM)', 'Wind speed (header)',
+#'Wind speed (SPARTA)', 'Wind speed (MASSDIMM)', 'Tau0 (header)',
+#'Tau0 (SPARTA)', 'Tau0 (MASSDIMM)', 'Tau0 (MASS)', 'Pressure',
+#'Humidity', 'Temperature', 'Nph WFS', 'Rate', 'λ left (nm)',
+#'λ right (nm)', 'Δλ left (nm)', 'Δλ right (nm)', 'mag V', 'mag R',
+#'mag G', 'mag J', 'mag H', 'mag K', 'Class A', 'Class B', 'Class C',
+#'LWE', 'doubles', 'No coronograph', 'invalid'
+#
+#df2 = df.copy()
+## df2 = df2[df2['Invalid'] == True]
+#
+#import seaborn as sns
+#
+#xx = 'Nph WFS'
+#yy = 'FWHM'
+#hh = 'λ left (nm)'
+#
+#val_max = max([df2[xx].max(), df2[yy].max()])
+#
+#sns.set_theme()  # <-- This actually changes the look of plots.
+#sns.scatterplot(data=df2, x=xx, y=yy, hue=hh, alpha=0.5)
+#plt.xlabel(xx)
+#plt.ylabel(yy)
+#plt.xscale('log')
+
+
+#%%
 class SPHERE_database:
     def __init__(self, path_input, path_fitted):
         files_input  = os.listdir(path_input)
@@ -883,22 +1135,3 @@ class SPHERE_dataset:
         return torch.vstack(x), torch.vstack(y), torch.dstack(i0).permute([2,0,1]), torch.dstack(i1).permute([2,0,1])
 
 
-#%%  Let it run!
-#ProcessRawData()
-#SaveDatasetImages()
-#FilterSelectedDatasamples()
-
-#%%
-def LoadSPHEREsampleByID(path, sample_num): # searches for the sample with the specified ID in
-    files = os.listdir(path)
-    sample_nums = []
-    for file in files: sample_nums.append( int(re.findall(r'[0-9]+', file)[0]) )
-
-    try: id = sample_nums.index(sample_num)
-    except ValueError:
-        print('No sample with a such ID was found!')
-        return np.nan
-        
-    with open(path+files[id], 'rb') as handle:
-        sample = pickle.load(handle)
-    return id, sample
