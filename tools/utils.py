@@ -5,9 +5,11 @@ from torch import optim, nn
 from astropy.io import fits
 from scipy.ndimage import center_of_mass
 from scipy.optimize import least_squares
+from math import prod
 from graphviz import Digraph
 from skimage.transform import resize
 import matplotlib.pyplot as plt
+from matplotlib import cm
 
 
 rad2mas  = 3600 * 180 * 1000 / np.pi
@@ -18,6 +20,71 @@ asec2rad = np.pi / 180 / 3600
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
+
+
+def save_GIF(array, duration=1e3, scale=1, path='test.gif', colormap=cm.viridis):
+    from PIL import Image
+    from skimage.transform import rescale
+    
+    gif_anim = []
+    for layer in np.rollaxis(array, 2):
+        buf = layer/layer.max()
+        if scale != 1.0:
+            buf = rescale(buf, scale, order=0)
+        gif_anim.append( Image.fromarray(np.uint8(colormap(buf)*255)) )
+    gif_anim[0].save(path, save_all=True, append_images=gif_anim[1:], optimize=True, duration=duration, loop=0)
+
+
+def save_GIF_RGB(images_stack, duration=1e3, downscale=4, path='test.gif'):
+    from PIL import Image
+    gif_anim = []
+    
+    def remove_transparency(img, bg_colour=(255, 255, 255)):
+        alpha = im.convert('RGBA').split()[-1]
+        bg = Image.new("RGBA", im.size, bg_colour + (255,))
+        bg.paste(im, mask=alpha)
+        return bg
+    
+    for layer in images_stack:
+        im = Image.fromarray(np.uint8(layer*255))
+        im.thumbnail((im.size[0]//downscale, im.size[1]//downscale), Image.ANTIALIAS)
+        gif_anim.append( remove_transparency(im) )
+        gif_anim[0].save(path, save_all=True, append_images=gif_anim[1:], optimize=True, duration=duration, loop=0)
+
+
+
+class ParameterReshaper():
+    def __init__(self):
+        super().__init__()
+        self.parameters_list = []
+        self.p_shapes = []
+        self.fixed_ids = []
+        self.device = torch.device('cpu')
+
+    def flatten(self, parameters_list):
+        p_list = []
+        self.fixed_ids = []
+        self.parameters_list = parameters_list
+        self.device = self.parameters_list[0].device
+        for i,p in enumerate(self.parameters_list):
+            if p.requires_grad:
+                p_list.append(p.clone().detach().cpu())
+            else:
+                self.fixed_ids.append(i)
+        self.p_shapes = [p.shape for p in p_list]
+        return torch.hstack([p.view(-1) for p in p_list])
+
+    def unflatten(self, p):
+        N_p = len(self.p_shapes)
+        p_shapes_flat = [prod(shp) for shp in self.p_shapes]
+        ids = [slice(sum(p_shapes_flat[:i]), sum(p_shapes_flat[:i+1])) for i in range(N_p)]
+        p_list = [p[ids[i]].reshape(self.p_shapes[i]) for i in range(N_p)]
+        for i in self.fixed_ids:
+            p_list.insert(i, self.parameters_list[i])
+        for i in range(len(p_list)):
+            if type(p_list) != torch.tensor:
+                p_list[i] = torch.tensor(p_list[i], device=self.device)
+        return p_list
 
 
 def mask_circle(N, r, center=(0,0), centered=True):
@@ -288,16 +355,44 @@ def register_hooks(var):
 
 
 def BackgroundEstimate(im, radius=90):
-    nPix = im.shape[0]
-    buf_x, buf_y = torch.meshgrid(
-        torch.linspace(-nPix//2, nPix//2, nPix, device=im.device),
-        torch.linspace(-nPix//2, nPix//2, nPix, device=im.device),
+    nPix = im.shape[-1]
+    buf_x, buf_y = np.meshgrid(
+        np.linspace(-nPix//2, nPix//2, nPix),
+        np.linspace(-nPix//2, nPix//2, nPix),
         indexing = 'ij'
     )
     mask_noise = buf_x**2 + buf_y**2
-    mask_noise[mask_noise < radius**2] = 0.0
-    mask_noise[mask_noise > 0.0] = 1.0
-    return torch.median(im[mask_noise>0.]).data
+    mask_noise[mask_noise < radius**2] = 0
+    mask_noise[mask_noise > 0.0] = 1
+    if type(im) == torch.Tensor:
+        return torch.median(torch.tensor(im[mask_noise>0.])).item()
+    else:
+        return np.median(im[mask_noise>0.])
+
+
+def BackgroundEstimate2(im, radius=90):
+    nPix = im.shape[-1]
+    buf_x, buf_y = np.meshgrid(
+        np.linspace(-nPix//2, nPix//2, nPix),
+        np.linspace(-nPix//2, nPix//2, nPix),
+        indexing = 'ij'
+    )
+    mask_noise = buf_x**2 + buf_y**2
+    mask_noise[mask_noise < radius**2] = 0
+    mask_noise[mask_noise > 0.0] = 1
+    mask_pos = np.copy(mask_noise)
+    mask_pos[im*mask_noise < 0.0] = 0
+    mask_neg = np.copy(mask_noise)
+    mask_neg[im*mask_noise > 0.0] = 0
+    if type(im) == torch.Tensor:
+        median_pos = torch.median(torch.tensor(im[mask_pos>0.])).item()
+        median_neg = torch.median(torch.tensor(im[mask_neg>0.])).item()
+        median_noise = 0.5*(median_pos+median_neg)
+    else:
+        median_pos = np.median(im[mask_pos>0.])
+        median_neg = np.median(im[mask_neg>0.])
+        median_noise = 0.5*(median_pos+median_neg)
+    return median_noise
 
 
 def Center(im, centered=True):

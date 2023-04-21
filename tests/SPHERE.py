@@ -8,45 +8,155 @@ sys.path.insert(0, '..')
 import pickle
 import torch
 import numpy as np
+import matplotlib.pyplot as plt
 from torch import nn
-from data_processing.SPHERE_data import SPHERE_database, SPHERE_dataset, LoadSPHEREsampleByID
+from data_processing.SPHERE_data import SPHERE_database, SPHERE_dataset, LoadSPHEREsampleByID, plot_sample
 from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager, GetSPHEREonsky
 from tools.utils import OptimizeTRF, OptimizeLBFGS
 from tools.utils import radial_profile, plot_radial_profile, SR
-from tools.utils import BackgroundEstimate
-import matplotlib.pyplot as plt
+from tools.utils import BackgroundEstimate2,BackgroundEstimate, ParameterReshaper
+from pathlib import Path
+from tqdm import tqdm
+from PSF_models.TipToy_SPHERE_multisrc import TipToy
+from copy import deepcopy
+from tools.utils import save_GIF
+from matplotlib import cm
+
 
 device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
+# device = torch.device('cpu')
+
+make_tensor = lambda x: torch.tensor(x, device=device) if type(x) is not torch.Tensor else x
+
+def init_torch_param(x, N=None):
+    if N != None and N != 0:
+        return torch.tensor([x]*N, requires_grad=True, device=device).flatten()
+    else:
+        return torch.tensor(x, device=device, requires_grad=True).flatten()
+
+norm_regime = 'sum'
+only_left = False
 
 #%% Initialize data sample
-data_samples = []
 
 with open('E:/ESO/Data/SPHERE/sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
-psf_df = psf_df[psf_df['Class A'] == True]
-psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
-psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
+
+psf_df = psf_df[psf_df['invalid'] == False]
+# psf_df = psf_df[psf_df['Class A'] == True]
+# psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
+# psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
 
 good_ids = psf_df.index.values.tolist()
+
 #%%
+
+def SamplesByIds(ids):
+    data_samples = []
+    for id in ids:
+        data_samples.append( LoadSPHEREsampleByID(id) )
+    return data_samples
+
+
+def SamplesFromDITs(id):
+    init_sample = LoadSPHEREsampleByID(id)
+    data_samples1 = []
+
+    N_DITs = init_sample['PSF L'].shape[0]
+    if N_DITs > 20: 
+        print('***** WARNING! '+str(N_DITs)+' DITs might be too many to fit into VRAM! *****')
+    else:
+        print('Split into '+str(N_DITs)+' samples')
+
+    for i in range(init_sample['PSF L'].shape[0]):
+        data_samples1.append( deepcopy(init_sample) )
+
+    for i, sample in enumerate(data_samples1):
+        sample['PSF L'] = init_sample['PSF L'][i,...][None,...]
+        sample['PSF R'] = init_sample['PSF R'][i,...][None,...]
+
+    return data_samples1
+
+
+def OnlyCentralWvl(samples):
+    for i in range(len(samples)):
+        buf = samples[i]['spectra'].copy()
+        samples[i]['spectra'] = [buf['central L']*1e-9, buf['central R']*1e-9]
+
+
+def GenerateImages(samples):
+    ims = []
+    bgs = []
+
+    # Preprocess input data so TipToy can understand it
+    for i in range(len(samples)):
+        bg_est = lambda x: BackgroundEstimate(x, radius=80).item()
+
+        check_center = lambda x: x[x.shape[0]//2, x.shape[1]//2] > 0
+
+        def process_PSF(x): # this function copllapses DITs and normalizes the image
+            x = x.sum(axis=0)
+            if   norm_regime == 'sum': x /= x.sum()
+            elif norm_regime == 'max': x /= x.max()
+            return x
+
+        buf_im = []
+        buf_bg = []
+
+        if 'PSF L' in samples[i].keys():
+            buf_im.append( process_PSF(samples[i]['PSF L']) )
+            if not check_center(buf_im[-1]): buf_im[-1] *= -1
+            buf_bg.append( bg_est(buf_im[-1]) )
+            # buf_im[-1] -= bg_est(buf_im[-1])
+            # buf_im[-1] -= np.median(buf_im[-1])
+        if 'PSF R' in samples[i].keys():
+            buf_im.append( process_PSF(samples[i]['PSF R']) )
+            if not check_center(buf_im[-1]): buf_im[-1] *= -1
+            buf_bg.append( bg_est(buf_im[-1]) )
+            # buf_im[-1] -= bg_est(buf_im[-1])
+            # buf_im[-1] -= np.median(buf_im[-1])
+
+        ims.append(np.stack(buf_im))
+        bgs.append(buf_bg)
+
+    # outputs torch parameters
+    return make_tensor(np.stack(ims)), make_tensor(np.stack(bgs))
+
+
+# data_samples = [data_samples[6]]
+
+# A = np.log(np.abs(init_sample['PSF L'].transpose(1,2,0)))[64:192,64:192,:]
+
+# dir_save_gif = 'C:/Users/akuznets/Projects/TipToy/data/temp/' + str(id) + '.gif'
+# save_GIF(A, duration=1e2, scale=4, path=dir_save_gif, colormap=cm.hot)
+
+
+# for i in range(len(data_samples1)):
+#     plt.imshow(np.log(np.abs(data_samples1[i]['PSF L'])[64:192,64:192]))
+#     plt.show()
+
+sample_ids = [578]
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
+# data_samples = SamplesByIds([11, 578])
+# data_samples = SamplesFromDITs(578)
 
-data_samples.append( LoadSPHEREsampleByID(465) )
-data_samples.append( LoadSPHEREsampleByID(89) )
+regime = '1P21I' #'1P2NI' 'NP2NI'
 
-# Preprocess input data so TipToy can understand it
-for i in range(len(data_samples)):
-    buf = data_samples[i]['spectra'].copy()
-    buf = [buf['central L']*1e-9, buf['central R']*1e-9]
-    data_samples[i]['spectra'] = buf[0]  #TODO fix this later
+if regime == '1P21I':
+    data_samples = SamplesByIds(sample_ids)
 
+elif regime == 'NP2NI' or regime == '1P2NI':
+    data_samples = SamplesByIds(sample_ids[0])
 
+OnlyCentralWvl(data_samples)
+
+# Manage config files
 path_ini = '../data/parameter_files/irdis.ini'
 
 config_file = ParameterParser(path_ini).params
-config_file['atmosphere']['Cn2Weights'] = [0.95, 0.05]
-config_file['atmosphere']['Cn2Heights'] = [0, 10000]
+# config_file['atmosphere']['Cn2Weights'] = [0.95, 0.05]
+# config_file['atmosphere']['Cn2Heights'] = [0, 10000]
 
 config_manager = ConfigManager(GetSPHEREonsky())
 merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
@@ -59,63 +169,93 @@ config_manager.Convert(merged_config, framework='pytorch', device=device)
 # merged_config['atmosphere']['WindSpeed'] = torch.tensor([[20, 10], [25, 15], [30, 20]]).to(device)
 
 #%% Initialize model
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
+PSF_0, bg = GenerateImages(data_samples)
+if regime == '1P2NI':
+    data_samples = data_samples[0]
 
-norm_regime = 'sum'
-toy = TipToy(merged_config, norm_regime, device)
+# N_src = len(data_samples)
+N_src = 1
 
-#%%
-ims = []
-for sample in data_samples:
-    im = sample['PSF L'].sum(axis=0) #TODO fix this later
-
-    if    toy.norm_regime == 'max': norma = im.max()
-    elif  toy.norm_regime == 'sum': norma = im.sum()
-    else: norma = 1.0
-    ims.append(torch.tensor(im/norma, device=toy.device))
-
-PSF_0 = torch.tensor(torch.dstack(ims)).permute([2,0,1])
-bg_0 = toy.make_tensor([BackgroundEstimate(PSF_, radius=90).item() for PSF_ in ims])
-
-N_src = len(data_samples)
-
-init_torch_param = lambda x, N=None: \
-    torch.tensor([x]*N, requires_grad=True, device=device).flatten() \
-    if N != None and N != 0 \
-    else torch.tensor(x, device=device, requires_grad=True).flatten()
-
+# Monochromatic multi-object parameters
 r0  = init_torch_param([sample['r0'] for sample in data_samples])
 L0  = init_torch_param(25.0, N_src)
-F   = init_torch_param(1.0,  N_src)
 dx  = init_torch_param(0.0,  N_src)
 dy  = init_torch_param(0.0,  N_src)
-dn  = init_torch_param(0.05, N_src)
+dn  = init_torch_param(0.0,  N_src)
 Jx  = init_torch_param(5.0,  N_src)
 Jy  = init_torch_param(5.0,  N_src)
 Jxy = init_torch_param(2.0,  N_src)
-bg  = bg_0
-
-toy.WFS_Nph.requires_grad = True
-
-#L0.requires_grad = False
+dn.requires_grad = True
+# Polychromatic parameters
+bg.requires_grad = True
+F  = torch.ones_like(bg).to(device).requires_grad_(True)
 
 parameters = [r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy]
-x = torch.stack(parameters).T.unsqueeze(0)
+
+L0.requires_grad = False
+
+#%% Initialize model
+from PSF_models.TipToy_SPHERE_multisrc import TipToy
+toy = TipToy(merged_config, norm_regime, device)
+# toy.WFS_Nph.requires_grad = True
 #toy.StartTimer()
+
+aaa = list(toy.parameters())
+
+for a in aaa:
+    print(a)
+
+#%%
+
+
+class CustomModule(nn.Module):
+    def __init__(self):
+        super(CustomModule, self).__init__()
+        
+        self.layer1 = nn.Linear(10, 20)
+        self.layer2 = nn.Linear(20, 1)
+
+        # Add custom parameters
+        self.custom_param1 = nn.Parameter(torch.randn(5, 5))
+        self.custom_param2 = nn.Parameter(torch.randn(3, 3))
+        
+    def forward(self, input):
+        x = self.layer1(input)
+        x = self.layer2(x)
+        return x
+
+# Create an instance of the custom module
+my_module = CustomModule()
+
+# Get the list of optimizable parameters
+optimizable_parameters = list(my_module.parameters())
+
+# Print the parameters and their shapes
+print("Optimizable parameters in the custom module:")
+for param in optimizable_parameters:
+    print(param.shape)
+
+
 #%%
 PSF_1 = toy.PSD2PSF(*parameters)
 #print(toy.EndTimer())
+
 PSF_DL = toy.DLPSF()
 
 def draw_result(PSF_in, PSF_out):
-    for i in range(PSF_out.shape[0]):
-        el_croppo = slice(PSF_in.shape[1]//2-32, PSF_in.shape[2]//2+32)
-        el_croppo = (el_croppo, el_croppo)
+    ROI_size = 128
+    ROI = slice(PSF_in.shape[-2]//2-ROI_size//2, PSF_in.shape[-1]//2+ROI_size//2)
+    dPSF = (PSF_out - PSF_in).abs()
 
-        plt.imshow(torch.log(torch.hstack((
-            PSF_in[i,:,:].abs()[el_croppo], PSF_out[i,:,:].abs()[el_croppo], \
-            ((PSF_out[i,:,:]-PSF_in[i,:,:]).abs()[el_croppo])
-        ) )).detach().cpu())
+    cut = lambda x: np.log(x.abs().detach().cpu().numpy()[..., ROI, ROI])
+    # cut = lambda x: np.log(x.detach().cpu().numpy()[..., ROI, ROI])
+
+    for src in range(N_src):
+        row = []
+        for wvl in range(PSF_in.shape[1]):
+            row.append( np.hstack([cut(PSF_in[src, wvl,...]), cut(PSF_out[src, wvl,...]), cut(dPSF[src, wvl,...])]) )
+        plt.imshow(np.vstack(row))
+        plt.title('Source %d'%src)
         plt.show()
 
 draw_result(PSF_0, PSF_1)
@@ -131,32 +271,116 @@ window_loss = lambda x, x_max: \
 def loss_fn(a,b):
     z = loss(a,b) + \
         window_loss(r0, 0.5).sum() * 5.0 + \
-        window_loss(Jx, 50).sum()*0.5 + \
-        window_loss(Jy, 50).sum()*0.5 + \
-        window_loss(Jxy, 400).sum()*0.5 + \
+        window_loss(Jx, 50).sum() * 0.5 + \
+        window_loss(Jy, 50).sum() * 0.5 + \
+        window_loss(Jxy, 400).sum() * 0.5 + \
         window_loss(dn + toy.NoiseVariance(r0), 1.5).sum()
     return z
 
 optimizer_lbfgs = OptimizeLBFGS(toy, parameters, loss_fn)
 
 for i in range(10):
-    optimizer_lbfgs.Optimize(PSF_0, [F, dx, dy], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [r0, dn, toy.WFS_Nph], 5)
+    optimizer_lbfgs.Optimize(PSF_0, [F], 3)
     optimizer_lbfgs.Optimize(PSF_0, [bg], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [dx, dy], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [r0, dn], 5)
     optimizer_lbfgs.Optimize(PSF_0, [Jx, Jy, Jxy], 3)
 
 PSF_1 = toy.PSD2PSF(*parameters)
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 
-
 draw_result(PSF_0, PSF_1)
-for i in range(PSF_0.shape[0]):
-    plot_radial_profile(PSF_0[i,:,:], PSF_1[i,:,:], 'TipToy', title='IRDIS PSF', dpi=100)
 
 #%%
 
-reconstruction_result = np.save('C:/Users/akuznets/Data/SPHERE/PSF_TipToy.npy', PSF_1.detach().cpu().numpy())
-initial_PSF = np.save('C:/Users/akuznets/Data/SPHERE/PSF_init.npy', PSF_0.detach().cpu().numpy())
+# _ = plt.hist(F.detach().cpu().numpy().flatten(), bins=10)
+# _ = plt.hist(r0.detach().cpu().numpy().flatten(), bins=10)
+# _ = plt.hist(dn.detach().cpu().numpy().flatten(), bins=10)
+# _ = plt.hist(bg.detach().cpu().numpy().flatten(), bins=100)
+
+
+#%%
+for i in range(PSF_0.shape[0]):
+    plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=100)
+
+#%%
+
+# reconstruction_result = np.save('C:/Users/akuznets/Data/SPHERE/PSF_TipToy.npy', PSF_1.detach().cpu().numpy())
+# initial_PSF = np.save('C:/Users/akuznets/Data/SPHERE/PSF_init.npy', PSF_0.detach().cpu().numpy())
+
+
+#%%
+import torch
+from torchmin import minimize
+from scipy.optimize import least_squares
+from tools.utils import ParameterReshaper
+
+reshaper = ParameterReshaper()
+
+x0 = reshaper.flatten(parameters).numpy()#.to(device)
+# x0.requires_grad = True
+x1 = reshaper.unflatten(x0)
+
+
+#%%
+def run(x):
+    p = reshaper.unflatten(x)
+    PSF_1 = toy.PSD2PSF(*p)
+    # return loss_fn(PSF_1, PSF_0)
+    return (PSF_1-PSF_0).detach().cpu().numpy().reshape(-1)
+
+# run(x0)
+
+result = least_squares(run, x0, method='trf', ftol=1e-9, xtol=1e-9, gtol=1e-9, max_nfev=1000, verbose=2, loss="linear")
+
+#%%
+x1 = reshaper.unflatten(result.x)
+
+PSF_1 = toy.PSD2PSF(*x1)
+print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
+
+draw_result(PSF_0, PSF_1)
+
+#%%
+# def rosen(x):
+#     return torch.sum(100*(x[..., 1:] - x[..., :-1]**2)**2 + (1 - x[..., :-1])**2)
+
+# initial point
+# x0 = torch.tensor([1., 8.])
+
+# Select from the following methods:
+#  ['bfgs', 'l-bfgs', 'cg', 'newton-cg', 'newton-exact', 
+#   'trust-ncg', 'trust-krylov', 'trust-exact', 'dogleg']
+
+# BFGS
+result = minimize(run, x0, method='dogleg')
+x1 = result.x
+
+print(x1-x0)
+
+# Newton Conjugate Gradient
+# result = minimize(rosen, x0, method='newton-cg')
+
+# Newton Exact
+# result = minimize(rosen, x0, method='newton-exact')
+
+#%%
+
+params_copy = [p.clone().detach() for p in parameters]
+
+F, dx, dy, r0, dn, toy.WFS_Nph, bg, Jx, Jy, Jxy = params_copy
+
+ps = [[F, dx, dy],
+      [r0, dn, toy.WFS_Nph],
+      [bg],
+      [Jx, Jy, Jxy]]
+
+for p in ps[0]:
+    if p in params_copy:
+        print(p)
+
+# x0 = reshaper.flatten(ps[i]).to(device)
+# result = minimize(run, x0, method='dogleg')
 
 
 #%%

@@ -33,12 +33,18 @@ path_output = 'E:/ESO/Data/SPHERE/IRDIS_reduced/'
 
 h = 'HIERARCH ESO '
 
-files_L = []
-files_R = []
 
 #%%
 def GetFilesList():
-    global files_L, files_R
+    files_L = []
+    files_R = []
+
+    if os.path.isdir(folder_L) == False:
+        print('Folder does not exist: ', folder_L)
+        # return None, None
+    if os.path.isdir(folder_R) == False:
+        print('Folder does not exist: ', folder_R)
+        # return None, None
 
     def list_files(path):
         file_list = []
@@ -48,33 +54,23 @@ def GetFilesList():
         return file_list
 
     files_L = list_files(folder_L)
-    files_R = list_files(folder_R)
-
+    files_L_only = []
+    files_R = []
 
     # Scanning for matchjng files
     pure_filename = lambda x: re.search(r'([^\\\/]*)(_left|_right)?\.fits$', str(x)).group(1).replace('_left','').replace('_right','')
 
-    pure_filenames_L = [pure_filename(file) for file in files_L]
-    pure_filenames_R = [pure_filename(file) for file in files_R]
+    for i,file_L in enumerate(files_L):
+        file_R = file_L.replace('_left', '_right').replace('_LEFT', '_RIGHT')
+        if os.path.isfile(file_R) == False:
+            print('File not found: ', file_R)
+            files_L_only.append(files_L.pop(i))
+        else:
+            files_R.append(file_R)
 
-    # Find files that are not in both folders
-    files_L_only = [file for file in files_L if pure_filename(file) not in pure_filenames_R]
-    files_R_only = [file for file in files_R if pure_filename(file) not in pure_filenames_L]
+    return files_L, files_R
 
-    # Find files that are in both folders
-    files_L_in_R = [file for file in files_L if pure_filename(file) in pure_filenames_R]
-    files_R_in_L = [file for file in files_R if pure_filename(file) in pure_filenames_L]
-
-    if len(files_L_only) == 0 and len(files_R_only) == 0:
-        print('All files are in both folders')
-    else:
-        print('Files only in left folder:')
-        for file in files_L_only:
-            print(file)
-        print('Files only in right folder:')
-        for file in files_R_only:
-            print(file)
-
+files_L, files_R = GetFilesList()
 
 #%%
 class SPHERE_loader():
@@ -312,17 +308,11 @@ class SPHERE_loader():
                                 DTTS_PSFs.append(layer.squeeze(0).tolist())
                                 
             tables.rename(columns = {tables.columns[0]: "id"}, inplace=True)
-            tables.sort_values(by='date', inplace=True)
             tables['PSF'] = DTTS_PSFs
+            tables.sort_values(by='date', inplace=True)
             tables.drop_duplicates(subset=['date'], inplace=True)
-
-            id_min, id_max = find_closest(tables, timestamp, T_exp)
-
-            cube_array = []
-            cube = tables.iloc[id_min:id_max+1]['PSF']
-            for i in range(len(cube)):
-                cube_array.append(np.array(cube[i]))
-            cube_array = np.array(cube_array)
+            # tables.reset_index(inplace=True, drop=True)
+            cube_array = np.array( [np.array(tables.iloc[i]['PSF']) for i in range(*find_closest(tables, timestamp, T_exp))] )
         except:
             cube_array = np.nan
         
@@ -530,9 +520,12 @@ class SPHERE_loader():
         if os.path.exists(path):
             file = os.path.basename(self.filename_L).replace('.fits','').replace('_left','')
             path_new = os.path.join(path, prefix+file+'.pickle')
-            print('Saving to: ', path_new)
-            with open(path_new, 'wb') as handle:
-              pickle.dump(self.data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            if not os.path.exists(path_new):
+                print('Saving to: ', path_new)
+                with open(path_new, 'wb') as handle:
+                    pickle.dump(self.data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            else:
+                print('File already exists: ', path_new)
         else:
             raise ValueError('Wrong path is specified!')
         
@@ -540,6 +533,33 @@ class SPHERE_loader():
     def __init__(self, path_dtts) -> None:
         self.data = {}
         self.path_dtts = path_dtts
+
+#%%
+
+# Load the data
+loader = SPHERE_loader(path_dtts)
+
+def plot_sample(id):
+    samp = loader.load(files_L[id], files_R[id])
+
+    buf = samp['spectra'].copy()
+    buf = [buf['central L']*1e-9, buf['central R']*1e-9]
+    samp['spectra'] = buf
+
+    PSF_L_0 = samp['PSF L'].sum(axis=0)
+    PSF_R_0 = samp['PSF R'].sum(axis=0)
+
+    ROI = (slice(128-32, 128+32), slice(128-32, 128+32))
+
+    fig, axs = plt.subplots(1, 2, figsize=(6, 3))
+    axs[0].imshow(np.log(np.abs(PSF_L_0[ROI])), origin='lower')
+    axs[1].imshow(np.log(np.abs(PSF_R_0[ROI])), origin='lower')
+    axs[0].set_title(str(np.round(samp['spectra'][0]*1e9).astype('uint'))+' [nm]')
+    axs[1].set_title(str(np.round(samp['spectra'][1]*1e9).astype('uint'))+' [nm]')
+    for ax in axs: ax.axis('off')
+    fig.suptitle(id)
+    fig.tight_layout()
+    plt.show()
 
 
 #%%
@@ -562,6 +582,7 @@ def ReduceIRDISData():
     print('===================== Completed! =====================')
     return good_files, bad_files
 
+# good_files, bad_files = ReduceIRDISData()
 
 #%%
 def SaveReducedAsImages():
@@ -589,9 +610,7 @@ def SaveReducedAsImages():
             # plt.show()
             plt.savefig(dir_save_imgs + file.replace('.pickle','.png'), bbox_inches='tight', pad_inches=0)
 
-
 #%%
-
 def CreateSPHEREdataframe(save_df_dir=None):
 
     reduced_files = os.listdir(path_output)
@@ -800,6 +819,7 @@ def CreateSPHEREdataframe(save_df_dir=None):
     return df
 
 # df = CreateSPHEREdataframe(save_df_dir='E:/ESO/Data/SPHERE/sphere_df.pickle')
+
 #%%
 def LoadSPHEREsampleByID(id): # searches for the sample with the specified ID in
     with open('E:/ESO/Data/SPHERE/sphere_df.pickle', 'rb') as handle:
@@ -812,34 +832,59 @@ def LoadSPHEREsampleByID(id): # searches for the sample with the specified ID in
         data_sample = pickle.load(handle)
     return data_sample
 
+'''
+'Filename', 'Date', 'Observation', 'Airmass', 'r0 (SPARTA)',
+'Seeing (SPARTA)', 'Seeing (MASSDIMM)', 'Seeing (DIMM)', 'FWHM',
+'Strehl', 'Turb. speed', 'Wind direction (header)',
+'Wind direction (MASSDIMM)', 'Wind speed (header)',
+'Wind speed (SPARTA)', 'Wind speed (MASSDIMM)', 'Tau0 (header)',
+'Tau0 (SPARTA)', 'Tau0 (MASSDIMM)', 'Tau0 (MASS)', 'Pressure',
+'Humidity', 'Temperature', 'Nph WFS', 'Rate', 'λ left (nm)',
+'λ right (nm)', 'Δλ left (nm)', 'Δλ right (nm)', 'mag V', 'mag R',
+'mag G', 'mag J', 'mag H', 'mag K', 'Class A', 'Class B', 'Class C',
+'LWE', 'doubles', 'No coronograph', 'invalid'
 
-#'Filename', 'Date', 'Observation', 'Airmass', 'r0 (SPARTA)',
-#'Seeing (SPARTA)', 'Seeing (MASSDIMM)', 'Seeing (DIMM)', 'FWHM',
-#'Strehl', 'Turb. speed', 'Wind direction (header)',
-#'Wind direction (MASSDIMM)', 'Wind speed (header)',
-#'Wind speed (SPARTA)', 'Wind speed (MASSDIMM)', 'Tau0 (header)',
-#'Tau0 (SPARTA)', 'Tau0 (MASSDIMM)', 'Tau0 (MASS)', 'Pressure',
-#'Humidity', 'Temperature', 'Nph WFS', 'Rate', 'λ left (nm)',
-#'λ right (nm)', 'Δλ left (nm)', 'Δλ right (nm)', 'mag V', 'mag R',
-#'mag G', 'mag J', 'mag H', 'mag K', 'Class A', 'Class B', 'Class C',
-#'LWE', 'doubles', 'No coronograph', 'invalid'
-#
-#df2 = df.copy()
-## df2 = df2[df2['Invalid'] == True]
-#
-#import seaborn as sns
-#
-#xx = 'Nph WFS'
-#yy = 'FWHM'
-#hh = 'λ left (nm)'
-#
-#val_max = max([df2[xx].max(), df2[yy].max()])
-#
-#sns.set_theme()  # <-- This actually changes the look of plots.
-#sns.scatterplot(data=df2, x=xx, y=yy, hue=hh, alpha=0.5)
-#plt.xlabel(xx)
-#plt.ylabel(yy)
-#plt.xscale('log')
+df2 = df.copy()
+# df2 = df2[df2['Invalid'] == True]
+
+import seaborn as sns
+
+xx = 'Nph WFS'
+yy = 'FWHM'
+hh = 'λ left (nm)'
+
+val_max = max([df2[xx].max(), df2[yy].max()])
+
+sns.set_theme()  # <-- This actually changes the look of plots.
+sns.scatterplot(data=df2, x=xx, y=yy, hue=hh, alpha=0.5)
+plt.xlabel(xx)
+plt.ylabel(yy)
+plt.xscale('log')
+'''
+
+def plot_sample(id):
+    samp = LoadSPHEREsampleByID(id)
+
+    buf = samp['spectra'].copy()
+    buf = [buf['central L']*1e-9, buf['central R']*1e-9]
+    samp['spectra'] = buf
+
+    PSF_L_0 = samp['PSF L'].sum(axis=0)
+    PSF_R_0 = samp['PSF R'].sum(axis=0)
+
+    ROI = slice(PSF_L_0.shape[0]-32, PSF_L_0.shape[0]+32)
+    ROI = (ROI, ROI)
+
+    fig, axs = plt.subplots(1, 2, figsize=(6, 3))
+    axs[0].imshow(np.log(np.abs(PSF_L_0[ROI])), origin='lower')
+    axs[1].imshow(np.log(np.abs(PSF_R_0[ROI])), origin='lower')
+    axs[0].set_title(str(np.round(samp['spectra'][0]*1e9).astype('uint'))+' [nm]')
+    axs[1].set_title(str(np.round(samp['spectra'][1]*1e9).astype('uint'))+' [nm]')
+    for ax in axs: ax.axis('off')
+    fig.suptitle(id)
+    fig.tight_layout()
+    plt.show()
+    # plt.savefig(save_folder / f'{id}.png', dpi=300)
 
 
 #%%
