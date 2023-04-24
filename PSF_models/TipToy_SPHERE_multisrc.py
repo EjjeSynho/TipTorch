@@ -10,7 +10,7 @@ import scipy.special as spc
 from astropy.io import fits
 import time
 
-from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, pdims
+from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, pdims, min_2d
 
 #### THIS IS THE LATEST VERSION!!!! ######
 
@@ -18,11 +18,13 @@ from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, pdims
 class TipToy(torch.nn.Module):
     def InitValues(self):
         # Reading parameters from the file
-
         num_src = self.config['NumberSources']
         self.N_src = num_src.int().item()
+        
         self.wvl = self.config['sources_science']['Wavelength']
-        self.wvl = self.wvl if self.wvl.ndim == 2 else self.wvl.unsqueeze(0).T
+        # self.wvl = self.wvl if self.wvl.ndim == 2 else self.wvl.unsqueeze(0).T
+        self.wvl = min_2d(self.wvl)
+        self.N_wvl = self.wvl.shape[-1]
 
         # Setting internal parameters
         self.psInMas = self.config['sensor_science']['PixelScale'] #[mas]
@@ -31,12 +33,12 @@ class TipToy(torch.nn.Module):
                 if not torch.all(self.psInMas == self.psInMas[0]).item(): raise ValueError('All pixel scales must be the same for all samples')
                 self.psInMas = self.psInMas[0]
 
-        self.D       = self.config['telescope']['TelescopeDiameter']
-        self.nPix    = self.config['sensor_science']['FieldOfView'].int().item()
-        self.pitch   = self.config['DM']['DmPitchs'] #[m]
-        #self.h_DM    = self.AO_config['DM']['DmHeights'] # ????? what is h_DM?
-        #self.nDM     = 1
-        self.kc      = 1/(2*self.pitch)
+        self.D     = self.config['telescope']['TelescopeDiameter']
+        self.nPix  = self.config['sensor_science']['FieldOfView'].int().item()
+        self.pitch = self.config['DM']['DmPitchs'] #[m]
+        #self.h_DM  = self.AO_config['DM']['DmHeights'] # ????? what is h_DM?
+        #self.nDM   = 1
+        self.kc    = 1/(2*self.pitch)
 
         #self.zenith_angle  = torch.tensor(self.AO_config['telescope']['ZenithAngle'], device=self.device) # [deg] #TODO: telescope zenith != sample zenith?
         self.zenith_angle  = self.config['telescope']['ZenithAngle']
@@ -44,9 +46,9 @@ class TipToy(torch.nn.Module):
 
         self.GS_wvl     = self.config['sources_HO']['Wavelength'][0] #[m]
         #self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
-        min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
-        self.wind_speed  = min_2d(self.config['atmosphere']['WindSpeed'])
-        self.wind_dir    = min_2d(self.config['atmosphere']['WindDirection'])
+        # min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
+        self.wind_speed  = self.config['atmosphere']['WindSpeed']
+        self.wind_dir    = self.config['atmosphere']['WindDirection']
         self.Cn2_weights = min_2d(self.config['atmosphere']['Cn2Weights'])
         self.Cn2_heights = min_2d(self.config['atmosphere']['Cn2Heights']) * self.airmass.unsqueeze(1) # [m]
         
@@ -70,6 +72,44 @@ class TipToy(torch.nn.Module):
         self.HOloop_delay = self.config['RTC']['LoopDelaySteps_HO'] # [ms] (?)
         self.HOloop_gain  = self.config['RTC']['LoopGain_HO']
 
+        self.r0  = rad2arc*0.976*self.config['atmosphere']['Wavelength'] / self.config['atmosphere']['Seeing']
+        self.L0  = self.config['atmosphere']['L0'] # [m]
+        self.F   = torch.ones (self.N_src, self.N_wvl, device=self.device)
+        self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
+        self.dx  = torch.zeros(self.N_src, device=self.device)
+        self.dy  = torch.zeros(self.N_src, device=self.device)
+        self.dn  = torch.zeros(self.N_src, device=self.device)
+        self.Jx  = torch.ones(self.N_src, device=self.device)
+        self.Jy  = torch.ones(self.N_src, device=self.device)
+        self.Jxy = torch.ones(self.N_src, device=self.device)
+
+        self._optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']
+
+        for name in self._optimizables:
+            setattr(self, name, nn.Parameter(getattr(self, name)))
+
+
+    @property
+    def optimizables(self):
+        return self._optimizables
+    
+
+    @optimizables.setter
+    def optimizables(self, new_optimizables):
+        self._make_optimizable(new_optimizables)
+        self._optimizables = new_optimizables
+    
+
+    def _make_optimizable(self, args):
+        for name in args:
+            if name not in self._optimizables and not isinstance(getattr(self, name), nn.Parameter):
+                setattr(self, name, nn.Parameter(getattr(self, name)))
+        for name in self.optimizables:
+            if name not in args and isinstance(getattr(self, name), nn.Parameter):
+                buffer = getattr(self, name).detach().clone()
+                delattr(self, name)
+                setattr(self, name, buffer)
+
 
     def InitGrids(self):
         # Initialize grids
@@ -80,7 +120,7 @@ class TipToy(torch.nn.Module):
         self.sampling = self.sampling_factor * pixels_per_l_D
         self.nOtf = (self.nPix * self.sampling_factor.max()).item()
 
-        self.dk = 1/self.D/self.sampling.min() # PSD spatial frequency step
+        self.dk = 1/self.D/self.sampling.min() # PSD spatial frequency step  TODO: or .max()?
         self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 
         # Initialize spatial frequencies
@@ -225,11 +265,7 @@ class TipToy(torch.nn.Module):
 
 
     def __init__(self, AO_config, norm_regime='sum', device=torch.device('cpu')):
-
         super().__init__()
-
-        # self.custom_param1 = nn.Parameter(torch.randn(5, 5))
-        # self.custom_param2 = nn.Parameter(torch.randn(3, 3))
         
         self.device = device
         self.make_tensor = lambda x: torch.tensor(x, device=self.device) if type(x) is not torch.Tensor else x
@@ -238,7 +274,6 @@ class TipToy(torch.nn.Module):
             self.start = torch.cuda.Event(enable_timing=True)
             self.end   = torch.cuda.Event(enable_timing=True)
 
-
         self.norm_regime = norm_regime
         self.norm_scale  = self.make_tensor(1.0) # TODO: num obj x num wvl
 
@@ -246,7 +281,6 @@ class TipToy(torch.nn.Module):
         self.config = AO_config
         self.InitValues()
         self.InitGrids()
-
         self.PSDs = {}
 
 
@@ -259,7 +293,7 @@ class TipToy(torch.nn.Module):
         def TransferFunctions(freq, Ts, delay, loopGain):
             z = torch.exp(-2j*np.pi*freq*Ts)
             hInt = loopGain/(1.0 - z**(-1.0))
-            rtfInt = 1.0/(1 + hInt*z**(-delay))
+            rtfInt = 1.0 / (1+hInt*z**(-delay))
             atfInt = hInt * z**(-delay)*rtfInt
             ntfInt = atfInt / z
             return hInt, rtfInt, atfInt, ntfInt
@@ -278,9 +312,8 @@ class TipToy(torch.nn.Module):
         fi = -self.vx*self.kx_AO*costh - self.vy*self.ky_AO*costh
 
         _, _, atfInt, ntfInt = TransferFunctions(fi, pdims(Ts,3),
-                                                    pdims(delay,3),
-                                                    pdims(loopGain,3))
-
+                                                     pdims(delay,3),
+                                                     pdims(loopGain,3))
         # AO transfer function
         self.h1 = pdims(self.Cn2_weights,2) * atfInt #/nTh
         self.h2 = pdims(self.Cn2_weights,2) * abs(atfInt)**2 #/nTh
@@ -297,7 +330,7 @@ class TipToy(torch.nn.Module):
         self.SyAv = ( 2j*np.pi*self.ky_AO*self.WFS_d_sub*Av ).repeat([self.N_src,1,1])
 
         MV = 0
-        Wn = WFS_noise_var / (2*self.kc)**2
+        Wn = WFS_noise_var / (2*self.kc)**2 #TODO: should it be kc for 500 nm?
         # TODO: isn't this one computed for the WFSing wvl?
 
         self.W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * (500e-9/self.GS_wvl)**2 #TODO: clarify this
@@ -398,21 +431,21 @@ class TipToy(torch.nn.Module):
         return self.PSF_DL / self.norm_scale
 
 
-    def PSD2PSF(self, r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy):
-        r0  = pdims(r0,  2)
-        L0  = pdims(L0,  2)
-        F   = pdims(F,   2)
-        dx  = pdims(dx,  2)
-        dy  = pdims(dy,  2)
-        bg  = pdims(bg,  2)
-        dn  = pdims(dn,  2)
-        Jx  = pdims(Jx,  2)
-        Jy  = pdims(Jy,  2)
-        Jxy = pdims(Jxy, 2)
+    def PSD2PSF(self):
+        r0  = pdims(self.r0,  2)
+        L0  = pdims(self.L0,  2)
+        F   = pdims(self.F,   2)
+        dx  = pdims(self.dx,  2)
+        dy  = pdims(self.dy,  2)
+        bg  = pdims(self.bg,  2)
+        dn  = pdims(self.dn,  2)
+        Jx  = pdims(self.Jx,  2)
+        Jy  = pdims(self.Jy,  2)
+        Jxy = pdims(self.Jxy, 2)
 
-        WFS_noise_var = torch.abs( dn + pdims( self.NoiseVariance(r0.abs()), 2) )
-        self.vx = pdims( self.wind_speed*torch.cos(self.wind_dir*np.pi/180.0), 2 )
-        self.vy = pdims( self.wind_speed*torch.sin(self.wind_dir*np.pi/180.0), 2 )
+        WFS_noise_var = torch.abs( dn + pdims(self.NoiseVariance(r0.abs()), 2) )
+        self.vx = pdims( min_2d(self.wind_speed) * torch.cos(min_2d(self.wind_dir) * np.pi/180.0), 2 )
+        self.vy = pdims( min_2d(self.wind_speed) * torch.sin(min_2d(self.wind_dir) * np.pi/180.0), 2 )
 
         self.Controller()
         self.ReconstructionFilter(r0.abs(), L0.abs(), WFS_noise_var)
@@ -456,15 +489,57 @@ class TipToy(torch.nn.Module):
 
         if self.norm_regime == 'max':
             self.norm_scale = torch.amax(PSF_out, dim=(-2,-1), keepdim=True)
+        
         elif self.norm_regime == 'sum':
             self.norm_scale = PSF_out.sum(dim=(-2,-1), keepdim=True)
 
         # return PSF_out/self.norm_scale * F + bg #TODO: to put norm inside or not?
-        return (PSF_out*F + bg)/self.norm_scale #TODO: to put norm inside or not?
+        return (PSF_out*F + bg) / self.norm_scale #TODO: to put norm inside or not?
 
 
-    def forward(self, x):
-        return self.PSD2PSF(*[x[:,i] for i in range(x.shape[1])])
+    def _to_device_recursive(self, obj, device):
+        if isinstance(obj, torch.Tensor):
+            if obj.device != device:
+                if isinstance(obj, nn.Parameter):
+                    obj.data = obj.data.to(device)
+                    if obj.grad is not None:
+                        obj.grad = obj.grad.to(device)
+                else:
+                    obj = obj.to(device)
+        elif isinstance(obj, nn.Module):
+            obj.to(device)
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                self._to_device_recursive(item, device)
+        elif isinstance(obj, dict):
+            for item in obj.values():
+                self._to_device_recursive(item, device)
+        return obj
+
+
+    def to(self, device):
+        if isinstance(device, str):
+            device = torch.device(device)
+        if self.device == device:
+            return self
+        self.device = device
+        
+        for name, attr in self.__dict__.items():
+            new_attr = self._to_device_recursive(attr, device)
+            if new_attr is not attr:
+                # print(f"Transferring '{name}' to device '{device}'")
+                setattr(self, name, new_attr)
+        return self
+
+
+    def forward(self, x=None):
+        if x is not None:
+            for name, value in x.items():
+                if isinstance(getattr(self, name), nn.Parameter):
+                    setattr(self, name, nn.Parameter(value))
+                else:
+                    setattr(self, name, value)
+        return self.PSD2PSF()
 
 
     def StartTimer(self):

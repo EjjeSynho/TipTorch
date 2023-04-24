@@ -7,9 +7,9 @@ sys.path.insert(0, '..')
 
 import pickle
 import torch
+from torch import nn
 import numpy as np
 import matplotlib.pyplot as plt
-from torch import nn
 from data_processing.SPHERE_data import SPHERE_database, SPHERE_dataset, LoadSPHEREsampleByID, plot_sample
 from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager, GetSPHEREonsky
@@ -39,7 +39,6 @@ norm_regime = 'sum'
 only_left = False
 
 #%% Initialize data sample
-
 with open('E:/ESO/Data/SPHERE/sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
@@ -51,7 +50,6 @@ psf_df = psf_df[psf_df['invalid'] == False]
 good_ids = psf_df.index.values.tolist()
 
 #%%
-
 def SamplesByIds(ids):
     data_samples = []
     for id in ids:
@@ -75,7 +73,6 @@ def SamplesFromDITs(id):
     for i, sample in enumerate(data_samples1):
         sample['PSF L'] = init_sample['PSF L'][i,...][None,...]
         sample['PSF R'] = init_sample['PSF R'][i,...][None,...]
-
     return data_samples1
 
 
@@ -92,7 +89,6 @@ def GenerateImages(samples):
     # Preprocess input data so TipToy can understand it
     for i in range(len(samples)):
         bg_est = lambda x: BackgroundEstimate(x, radius=80).item()
-
         check_center = lambda x: x[x.shape[0]//2, x.shape[1]//2] > 0
 
         def process_PSF(x): # this function copllapses DITs and normalizes the image
@@ -124,32 +120,31 @@ def GenerateImages(samples):
     return make_tensor(np.stack(ims)), make_tensor(np.stack(bgs))
 
 
-# data_samples = [data_samples[6]]
-
-# A = np.log(np.abs(init_sample['PSF L'].transpose(1,2,0)))[64:192,64:192,:]
-
 # dir_save_gif = 'C:/Users/akuznets/Projects/TipToy/data/temp/' + str(id) + '.gif'
 # save_GIF(A, duration=1e2, scale=4, path=dir_save_gif, colormap=cm.hot)
 
 
-# for i in range(len(data_samples1)):
-#     plt.imshow(np.log(np.abs(data_samples1[i]['PSF L'])[64:192,64:192]))
-#     plt.show()
-
-sample_ids = [578]
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
-# data_samples = SamplesByIds([11, 578])
-# data_samples = SamplesFromDITs(578)
+sample_ids = [578]
 
-regime = '1P21I' #'1P2NI' 'NP2NI'
+regime = '1P21I'
+# regime = '1P2NI'
+# regime = 'NP2NI'
 
 if regime == '1P21I':
     data_samples = SamplesByIds(sample_ids)
 
 elif regime == 'NP2NI' or regime == '1P2NI':
-    data_samples = SamplesByIds(sample_ids[0])
+    if len(sample_ids) > 1:
+        print('****** Warning: Only one sample ID can be used in this regime! ******')
+    data_samples = SamplesFromDITs(sample_ids[0])
 
 OnlyCentralWvl(data_samples)
+PSF_0, bg = GenerateImages(data_samples)
+
+if regime == '1P2NI':
+    data_samples = [data_samples[0]]
+    bg = bg.mean(dim=0)
 
 # Manage config files
 path_ini = '../data/parameter_files/irdis.ini'
@@ -162,82 +157,21 @@ config_manager = ConfigManager(GetSPHEREonsky())
 merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
 config_manager.Convert(merged_config, framework='pytorch', device=device)
 
-# spectra = merged_config['sources_science']['Wavelength']['central L']
-# merged_config['sources_science']['Wavelength'] = [spectra, spectra['central R']]
-
-# merged_config['atmosphere']['WindDirection'] = torch.tensor([[200, 100], [250, 150], [300, 200]]).to(device)
-# merged_config['atmosphere']['WindSpeed'] = torch.tensor([[20, 10], [25, 15], [30, 20]]).to(device)
 
 #%% Initialize model
-PSF_0, bg = GenerateImages(data_samples)
-if regime == '1P2NI':
-    data_samples = data_samples[0]
-
-# N_src = len(data_samples)
-N_src = 1
-
-# Monochromatic multi-object parameters
-r0  = init_torch_param([sample['r0'] for sample in data_samples])
-L0  = init_torch_param(25.0, N_src)
-dx  = init_torch_param(0.0,  N_src)
-dy  = init_torch_param(0.0,  N_src)
-dn  = init_torch_param(0.0,  N_src)
-Jx  = init_torch_param(5.0,  N_src)
-Jy  = init_torch_param(5.0,  N_src)
-Jxy = init_torch_param(2.0,  N_src)
-dn.requires_grad = True
-# Polychromatic parameters
-bg.requires_grad = True
-F  = torch.ones_like(bg).to(device).requires_grad_(True)
-
-parameters = [r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy]
-
-L0.requires_grad = False
-
-#%% Initialize model
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
 toy = TipToy(merged_config, norm_regime, device)
-# toy.WFS_Nph.requires_grad = True
-#toy.StartTimer()
 
-aaa = list(toy.parameters())
-
-for a in aaa:
-    print(a)
-
-#%%
-
-
-class CustomModule(nn.Module):
-    def __init__(self):
-        super(CustomModule, self).__init__()
-        
-        self.layer1 = nn.Linear(10, 20)
-        self.layer2 = nn.Linear(20, 1)
-
-        # Add custom parameters
-        self.custom_param1 = nn.Parameter(torch.randn(5, 5))
-        self.custom_param2 = nn.Parameter(torch.randn(3, 3))
-        
-    def forward(self, input):
-        x = self.layer1(input)
-        x = self.layer2(x)
-        return x
-
-# Create an instance of the custom module
-my_module = CustomModule()
-
-# Get the list of optimizable parameters
-optimizable_parameters = list(my_module.parameters())
-
-# Print the parameters and their shapes
-print("Optimizable parameters in the custom module:")
-for param in optimizable_parameters:
-    print(param.shape)
+toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
+_ = toy({
+    'Jxy': torch.tensor([5.0]*toy.N_src, device=toy.device).flatten(),
+    'Jx':  torch.tensor([2.0]*toy.N_src, device=toy.device).flatten(),
+    'Jy':  torch.tensor([2.0]*toy.N_src, device=toy.device).flatten(),
+    'bg':  bg.to(device)
+})
 
 
 #%%
-PSF_1 = toy.PSD2PSF(*parameters)
+PSF_1 = toy.PSD2PSF()
 #print(toy.EndTimer())
 
 PSF_DL = toy.DLPSF()
@@ -248,17 +182,29 @@ def draw_result(PSF_in, PSF_out):
     dPSF = (PSF_out - PSF_in).abs()
 
     cut = lambda x: np.log(x.abs().detach().cpu().numpy()[..., ROI, ROI])
-    # cut = lambda x: np.log(x.detach().cpu().numpy()[..., ROI, ROI])
 
-    for src in range(N_src):
+    if regime == '1P2NI':
         row = []
         for wvl in range(PSF_in.shape[1]):
-            row.append( np.hstack([cut(PSF_in[src, wvl,...]), cut(PSF_out[src, wvl,...]), cut(dPSF[src, wvl,...])]) )
+            row.append(
+                np.hstack([cut(PSF_in[:, wvl,...].mean(dim=0)),
+                           cut(PSF_out[:, wvl,...].mean(dim=0)),
+                           cut(dPSF[:, wvl,...].mean(dim=0))]) )
         plt.imshow(np.vstack(row))
-        plt.title('Source %d'%src)
+        plt.title('Sources average')
         plt.show()
 
+    else:
+        for src in range(toy.N_src):
+            row = []
+            for wvl in range(PSF_in.shape[1]):
+                row.append( np.hstack([cut(PSF_in[src, wvl,...]), cut(PSF_out[src, wvl,...]), cut(dPSF[src, wvl,...])]) )
+            plt.imshow(np.vstack(row))
+            plt.title('Source %d' % src)
+            plt.show()
+
 draw_result(PSF_0, PSF_1)
+
 
 #%% PSF fitting (no early-stopping)
 loss = nn.L1Loss(reduction='sum')
@@ -270,34 +216,27 @@ window_loss = lambda x, x_max: \
 # TODO: specify loss weights
 def loss_fn(a,b):
     z = loss(a,b) + \
-        window_loss(r0, 0.5).sum() * 5.0 + \
-        window_loss(Jx, 50).sum() * 0.5 + \
-        window_loss(Jy, 50).sum() * 0.5 + \
-        window_loss(Jxy, 400).sum() * 0.5 + \
-        window_loss(dn + toy.NoiseVariance(r0), 1.5).sum()
+        window_loss(toy.r0, 0.5).sum() * 5.0 + \
+        window_loss(toy.Jx, 50).sum() * 0.5 + \
+        window_loss(toy.Jy, 50).sum() * 0.5 + \
+        window_loss(toy.Jxy, 400).sum() * 0.5 + \
+        window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum()
     return z
 
-optimizer_lbfgs = OptimizeLBFGS(toy, parameters, loss_fn)
+optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
 
-for i in range(10):
-    optimizer_lbfgs.Optimize(PSF_0, [F], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [bg], 2)
-    optimizer_lbfgs.Optimize(PSF_0, [dx, dy], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [r0, dn], 5)
-    optimizer_lbfgs.Optimize(PSF_0, [Jx, Jy, Jxy], 3)
+for i in range(20):
+    optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 5)
+    # optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
-PSF_1 = toy.PSD2PSF(*parameters)
+PSF_1 = toy.PSD2PSF()
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 
 draw_result(PSF_0, PSF_1)
-
-#%%
-
-# _ = plt.hist(F.detach().cpu().numpy().flatten(), bins=10)
-# _ = plt.hist(r0.detach().cpu().numpy().flatten(), bins=10)
-# _ = plt.hist(dn.detach().cpu().numpy().flatten(), bins=10)
-# _ = plt.hist(bg.detach().cpu().numpy().flatten(), bins=100)
-
 
 #%%
 for i in range(PSF_0.shape[0]):

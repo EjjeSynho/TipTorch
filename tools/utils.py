@@ -127,10 +127,11 @@ def pdims(x, ns):
     else:
         return expdims(x, ns)
 
+min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
 
 # Computes Strehl ratio
 def SR(PSF, PSF_DL):
-    ratio = torch.amax(PSF, dim=(-2,-1)) / torch.amax(PSF_DL, dim=(-2,-1)) * PSF_DL.sum(dim=(-2,-1)) / PSF.sum(dim=(-2,-1)) 
+    ratio = torch.amax(PSF.abs(), dim=(-2,-1)) / torch.amax(PSF_DL, dim=(-2,-1)) * PSF_DL.sum(dim=(-2,-1)) / PSF.abs().sum(dim=(-2,-1)) 
     if ratio.squeeze().dim() == 0:
         return ratio.item()
     else:
@@ -438,10 +439,9 @@ class EarlyStopping:
 
 
 class OptimizeLBFGS:
-    def __init__(self, model, parameters, loss_fn, verbous=True):
+    def __init__(self, model, loss_fn, verbous=True):
         self.model = model
         self.loss_fn = loss_fn
-        self.parameters = parameters
         self.verbous = verbous
 
 
@@ -452,13 +452,13 @@ class OptimizeLBFGS:
 
         for i in range(steps):
             optimizer.zero_grad()
-            loss = self.loss_fn( self.model.PSD2PSF(*self.parameters), PSF_ref )
+            loss = self.loss_fn( self.model(), PSF_ref )
 
             if np.isnan(loss.item()): return
             early_stopping(loss)
 
             loss.backward()
-            optimizer.step( lambda: self.loss_fn(self.model.PSD2PSF(*self.parameters), PSF_ref) )
+            optimizer.step( lambda: self.loss_fn(self.model(), PSF_ref) )
 
             if self.verbous:
                 print('Loss:', loss.item(), end="\r", flush=True)
