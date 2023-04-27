@@ -166,15 +166,34 @@ def GetSPHEREonsky():
         (['atmosphere','WindSpeed'],       ['Wind speed','header'],     None),
         (['atmosphere','WindDirection'],   ['Wind direction','header'], None),
         (['sensor_science','Zenith'],      ['telescope','altitude'],    func),
-        (['telescope','ZenithAngle'],      ['telescope','altitude'],    func),
+        (['telescope','ZenithAngle'],      ['telescope','altitude'],    func), #TODO: difference between zenith and zenithAngle?
         (['sensor_science','Azimuth'],     ['telescope','azimuth'],     None),
         (['sensor_science','SigmaRON'],    ['Detector','ron'],          None),
         (['sensor_science','Gain'],        ['Detector','gain'],         None),
         (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis'],           None),
         (['RTC','SensorFrameRate_HO'],     ['WFS','rate'],              None),
-        (['sensor_science','Gain'],        ['Detector', 'gain'],        None),
         (['sensor_science','PixelScale'],  ['Detector', 'psInMas'],     None),
         (['sensor_science','SigmaRON'],    ['Detector', 'ron'],         None),
         (['sources_science','Wavelength'], ['spectra'],                 None)
+    ]
+    return match_table
+
+
+def GetSPHEREsynth():
+    match_table = [
+        (['atmosphere','Cn2Weights'],      ['Cn2','profile'],       None),
+        (['atmosphere','Cn2Heights'],      ['Cn2','heights'],       None),
+        (['atmosphere','Seeing'],          ['seeing'],              None),
+        (['atmosphere','WindSpeed'],       ['Wind speed'],          None),
+        (['atmosphere','WindDirection'],   ['Wind direction'],      None),
+        (['telescope','Zenith'],           ['telescope','zenith'],  None),
+        (['telescope','ZenithAngle'],      ['telescope','zenith'],  None),
+        (['sensor_science','SigmaRON'],    ['Detector','ron'],      None),
+        (['sensor_science','Gain'],        ['Detector','gain'],     None),
+        (['sensor_HO','NumberPhotons'],    ['WFS', 'Nph vis'],      None),
+        (['RTC','SensorFrameRate_HO'],     ['WFS', 'rate'],         None),
+        (['sensor_science','PixelScale'],  ['Detector', 'psInMas'], None),
+        (['sensor_science','SigmaRON'],    ['Detector','ron'],      None),
+        (['sources_science','Wavelength'], ['spectra'],             None),
     ]
     return match_table

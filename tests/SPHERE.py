@@ -10,18 +10,14 @@ import torch
 from torch import nn
 import numpy as np
 import matplotlib.pyplot as plt
-from data_processing.SPHERE_data import SPHERE_database, SPHERE_dataset, LoadSPHEREsampleByID, plot_sample
+from data_processing.SPHERE_data import LoadSPHEREsampleByID
 from tools.parameter_parser import ParameterParser
-from tools.config_manager import ConfigManager, GetSPHEREonsky
-from tools.utils import OptimizeTRF, OptimizeLBFGS
-from tools.utils import radial_profile, plot_radial_profile, SR
-from tools.utils import BackgroundEstimate2,BackgroundEstimate, ParameterReshaper
-from pathlib import Path
-from tqdm import tqdm
+from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
+from tools.utils import OptimizeLBFGS
+from tools.utils import plot_radial_profile, plot_radial_profiles, SR
+from tools.utils import BackgroundEstimate, ParameterReshaper
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
 from copy import deepcopy
-from tools.utils import save_GIF
-from matplotlib import cm
 
 
 device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
@@ -89,7 +85,7 @@ def GenerateImages(samples):
     # Preprocess input data so TipToy can understand it
     for i in range(len(samples)):
         bg_est = lambda x: BackgroundEstimate(x, radius=80).item()
-        check_center = lambda x: x[x.shape[0]//2, x.shape[1]//2] > 0
+        check_center = lambda x: x[x.shape[0]//2, x.shape[1]//2] > 0 # for some reason, ssome images apperead flipped in sign
 
         def process_PSF(x): # this function copllapses DITs and normalizes the image
             x = x.sum(axis=0)
@@ -104,14 +100,11 @@ def GenerateImages(samples):
             buf_im.append( process_PSF(samples[i]['PSF L']) )
             if not check_center(buf_im[-1]): buf_im[-1] *= -1
             buf_bg.append( bg_est(buf_im[-1]) )
-            # buf_im[-1] -= bg_est(buf_im[-1])
-            # buf_im[-1] -= np.median(buf_im[-1])
+
         if 'PSF R' in samples[i].keys():
             buf_im.append( process_PSF(samples[i]['PSF R']) )
             if not check_center(buf_im[-1]): buf_im[-1] *= -1
             buf_bg.append( bg_est(buf_im[-1]) )
-            # buf_im[-1] -= bg_est(buf_im[-1])
-            # buf_im[-1] -= np.median(buf_im[-1])
 
         ims.append(np.stack(buf_im))
         bgs.append(buf_bg)
@@ -125,7 +118,10 @@ def GenerateImages(samples):
 
 
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
-sample_ids = [578]
+# sample_ids = [578]
+sample_ids = [576]
+# sample_ids = [456]
+# sample_ids = [465]
 
 regime = '1P21I'
 # regime = '1P2NI'
@@ -133,7 +129,6 @@ regime = '1P21I'
 
 if regime == '1P21I':
     data_samples = SamplesByIds(sample_ids)
-
 elif regime == 'NP2NI' or regime == '1P2NI':
     if len(sample_ids) > 1:
         print('****** Warning: Only one sample ID can be used in this regime! ******')
@@ -150,9 +145,6 @@ if regime == '1P2NI':
 path_ini = '../data/parameter_files/irdis.ini'
 
 config_file = ParameterParser(path_ini).params
-# config_file['atmosphere']['Cn2Weights'] = [0.95, 0.05]
-# config_file['atmosphere']['Cn2Heights'] = [0, 10000]
-
 config_manager = ConfigManager(GetSPHEREonsky())
 merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
 config_manager.Convert(merged_config, framework='pytorch', device=device)
@@ -230,7 +222,7 @@ for i in range(20):
     optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
     optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 5)
-    # optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
 PSF_1 = toy.PSD2PSF()
@@ -239,14 +231,180 @@ print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 draw_result(PSF_0, PSF_1)
 
 #%%
-for i in range(PSF_0.shape[0]):
-    plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=100)
+PSF_refs   = [ x for x in torch.split(PSF_0[:,0,...].squeeze().cpu(), 1, dim=0) ]
+PSF_estims = [ x for x in torch.split(PSF_1[:,0,...].squeeze().cpu(), 1, dim=0) ]
+
+# plot_radial_profiles(PSF_refs, PSF_estims, 'TipToy', title='IRDIS PSF', dpi=200)
+for i in range(PSF_0.shape[0]): plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=200)
+
+#%% ================================= Read OOPAO sample =================================
+
+def SynthsByIds(target_id):
+    import os
+    import re
+
+    directory = 'E:/ESO/Data/SPHERE/IRDIS_synthetic/'
+    target_id = str(target_id)
+
+    for filename in os.listdir(directory):
+        match = re.match(r'(\d+)_synth.pickle', filename)
+        if match and match.group(1) == target_id:
+            # Load pickle file
+            with open(directory + filename, 'rb') as f:
+                data = pickle.load(f)
+                return data
+    return None
+
+
+def SynthsFromDITs(id):
+    init_sample = SynthsByIds(id)
+    data_samples1 = []
+
+    N_DITs = init_sample['PSF L'].shape[0]
+    if N_DITs > 20: 
+        print('***** WARNING! '+str(N_DITs)+' DITs might be too many to fit into VRAM! *****')
+    else:
+        print('Split into '+str(N_DITs)+' samples')
+
+    for i in range(init_sample['PSF L'].shape[0]):
+        data_samples1.append( deepcopy(init_sample) )
+
+    for i, sample in enumerate(data_samples1):
+        sample['PSF L'] = init_sample['PSF L'][i,...][None,...]
+        sample['PSF R'] = init_sample['PSF R'][i,...][None,...]
+    return data_samples1
+
+
+# data_synth = [SynthsByIds(sample_ids[0])]
+data_synth = SynthsFromDITs(sample_ids[0])
+
+PSF_2, bg = GenerateImages(data_synth)
+bg *= 0
+
+# Manage config files
+path_ini = '../data/parameter_files/irdis.ini'
+
+config_file = ParameterParser(path_ini).params
+
+config_manager = ConfigManager(GetSPHEREsynth())
+synth_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_synth])
+config_manager.Convert(synth_config, framework='pytorch', device=device)
+
+buf = synth_config['sources_science']['Wavelength']
+buf = torch.vstack([buf['central L'] * 1e-9, buf['central R'] * 1e-9]).T
+synth_config['sources_science']['Wavelength'] = buf
+
+
+#%% Initialize model
+toy = TipToy(synth_config, norm_regime, device)
+
+toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
+_ = toy({
+    'Jxy': torch.tensor([5.0]*toy.N_src, device=toy.device).flatten(),
+    'Jx':  torch.tensor([2.0]*toy.N_src, device=toy.device).flatten(),
+    'Jy':  torch.tensor([2.0]*toy.N_src, device=toy.device).flatten(),
+    'bg':  bg.to(device)
+})
+
 
 #%%
+PSF_3 = toy.PSD2PSF()
+PSF_DL = toy.DLPSF()
 
+
+# def plt2PIL(fig=None):
+#     from PIL import Image
+#     # Render the figure on a canvas
+#     if fig is None:
+#         # fig = plt.gcf()
+#         canvas = plt.get_current_fig_manager().canvas
+#     else:
+#         canvas = fig.canvas
+
+#     canvas.draw()
+#     rgba = canvas.buffer_rgba()
+
+#     # Create a numpy array from the bytes
+#     buffer = np.array(rgba).tobytes()
+#     # Create a PIL image from the bytes
+#     pil_image = Image.frombuffer('RGBA', (canvas.get_width_height()), buffer, 'raw', 'RGBA', 0, 1)
+
+#     return pil_image
+
+
+def draw_result_PIL(PSF_in, PSF_out):
+    ROI_size = 128
+    ROI = slice(PSF_in.shape[-2]//2-ROI_size//2, PSF_in.shape[-1]//2+ROI_size//2)
+    dPSF = (PSF_out - PSF_in).abs()
+
+    cut = lambda x: np.log(x.abs().detach().cpu().numpy()[..., ROI, ROI])
+
+    if regime == '1P2NI':
+        row = []
+        for wvl in range(PSF_in.shape[1]):
+            row.append(
+                np.hstack([cut(PSF_in[:, wvl,...].mean(dim=0)),
+                           cut(PSF_out[:, wvl,...].mean(dim=0)),
+                           cut(dPSF[:, wvl,...].mean(dim=0))]) )
+        plt.imshow(np.vstack(row))
+        plt.title('Sources average')
+        plt.show()
+
+    else:
+        for src in range(toy.N_src):
+            row = []
+            for wvl in range(PSF_in.shape[1]):
+                row.append( np.hstack([cut(PSF_in[src, wvl,...]), cut(PSF_out[src, wvl,...]), cut(dPSF[src, wvl,...])]) )
+            plt.imshow(np.vstack(row))
+            plt.title('Source %d' % src)
+            plt.show()
+
+
+draw_result_PIL(PSF_2, PSF_3)
+#%%
+loss = nn.L1Loss(reduction='sum')
+
+# Confines a value between 0 and the specified value
+window_loss = lambda x, x_max: \
+    torch.gt(x,0)*(0.01/x)**2 + torch.lt(x,0)*100 + 100*torch.gt(x,x_max)*(x-x_max)**2
+
+# TODO: specify loss weights
+def loss_fn(a,b):
+    z = loss(a,b) + \
+        window_loss(toy.r0, 0.5).sum() * 5.0 + \
+        window_loss(toy.Jx, 50).sum() * 0.5 + \
+        window_loss(toy.Jy, 50).sum() * 0.5 + \
+        window_loss(toy.Jxy, 400).sum() * 0.5 + \
+        window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum()
+    return z
+
+optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
+
+for i in range(20):
+    optimizer_lbfgs.Optimize(PSF_2, [toy.F], 3)
+    optimizer_lbfgs.Optimize(PSF_2, [toy.bg], 2)
+    optimizer_lbfgs.Optimize(PSF_2, [toy.dx, toy.dy], 3)
+    optimizer_lbfgs.Optimize(PSF_2, [toy.r0, toy.dn], 5)
+    optimizer_lbfgs.Optimize(PSF_2, [toy.wind_dir, toy.wind_speed], 3)
+    optimizer_lbfgs.Optimize(PSF_2, [toy.Jx, toy.Jy, toy.Jxy], 3)
+
+PSF_3 = toy.PSD2PSF()
+print('\nStrehl ratio: ', SR(PSF_3, PSF_DL))
+
+draw_result(PSF_2, PSF_3)
+#%%
+
+PSF_refs   = [ x for x in torch.split(PSF_2[:,0,...].squeeze().cpu(), 1, dim=0) ]
+PSF_estims = [ x for x in torch.split(PSF_3[:,0,...].squeeze().cpu(), 1, dim=0) ]
+
+plot_radial_profiles(PSF_refs, PSF_estims, 'TipToy', title='IRDIS PSF', dpi=200)
+
+# for i in range(PSF_0.shape[0]): plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=200)
+
+
+#%%
 # reconstruction_result = np.save('C:/Users/akuznets/Data/SPHERE/PSF_TipToy.npy', PSF_1.detach().cpu().numpy())
 # initial_PSF = np.save('C:/Users/akuznets/Data/SPHERE/PSF_init.npy', PSF_0.detach().cpu().numpy())
-
 
 #%%
 import torch

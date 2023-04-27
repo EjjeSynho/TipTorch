@@ -22,6 +22,43 @@ r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
 
+def separate_islands(binary_image):
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.csgraph import connected_components
+
+    def find_islands(binary_image):
+        height, width = binary_image.shape
+        # Create a graph representation of the binary image
+        adjacency_matrix = np.zeros((height * width, height * width), dtype=np.uint8)
+        for i in range(height):
+            for j in range(width):
+                if binary_image[i, j] == 1:
+                    node_index = i * width + j
+                    for x, y in ((i-1, j), (i+1, j), (i, j-1), (i, j+1)):
+                        if 0 <= x < height and 0 <= y < width and binary_image[x, y] == 1:
+                            neighbor_index = x * width + y
+                            adjacency_matrix[node_index, neighbor_index] = 1
+
+        sparse_matrix = csr_matrix(adjacency_matrix)
+        n_components, labels = connected_components(csgraph=sparse_matrix, directed=False)
+        return n_components, labels
+
+    n_components, labels = find_islands(binary_image)
+    height, width = binary_image.shape
+    separated_images = []
+
+    for i in range(n_components):
+        island_image = np.zeros((height, width), dtype=np.uint8)
+        for label_idx, label in enumerate(labels):
+            if label == i:
+                x, y = divmod(label_idx, width)
+                island_image[x, y] = 1
+        if island_image.sum() > 1:
+            separated_images.append(island_image)
+
+    return separated_images
+
+
 def save_GIF(array, duration=1e3, scale=1, path='test.gif', colormap=cm.viridis):
     from PIL import Image
     from skimage.transform import rescale
@@ -402,6 +439,7 @@ def Center(im, centered=True):
             im = im.detach().numpy()
         else:
             im = im.detach().cpu().numpy()
+    im = im.squeeze()
     WoG_ROI = 16
     center = np.array(np.unravel_index(np.argmax(im), im.shape))
     crop = slice(center[0]-WoG_ROI//2, center[1]+WoG_ROI//2)
@@ -583,14 +621,11 @@ def radial_profile(data, center=None):
 def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300, scale='log'):
     center = Center(PSF_ref, centered=False)
 
-    if type(PSF_ref) is torch.Tensor:
-        PSF_ref = PSF_ref.detach().cpu().numpy()
-    if type(PSF_estim) is torch.Tensor:
-        PSF_estim = PSF_estim.detach().cpu().numpy()
+    if type(PSF_ref)   is torch.Tensor: PSF_ref   = PSF_ref.detach().cpu().numpy()
+    if type(PSF_estim) is torch.Tensor: PSF_estim = PSF_estim.detach().cpu().numpy()
 
     profile_0 = radial_profile(PSF_ref,   center)[:32+1]
     profile_1 = radial_profile(PSF_estim, center)[:32+1]
-
     profile_diff = np.abs(profile_1-profile_0) / profile_0.max() * 100 #[%]
 
     fig = plt.figure(figsize=(6,4), dpi=dpi)
@@ -612,7 +647,65 @@ def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300, scal
     ls = l1+l2+l3
     labs = [l.get_label() for l in ls]
     ax2.legend(ls, labs, loc=0)
-    #la chignon et tarte
+
+
+def plot_radial_profiles(PSF_refs, PSF_estims, model_label, title='', dpi=300, scale='log'):
+    from tools.utils import radial_profile, Center
+    if not isinstance(PSF_refs, list):   PSF_refs   = [PSF_refs]
+    if not isinstance(PSF_estims, list): PSF_estims = [PSF_estims]
+
+    n_profiles = len(PSF_refs)
+
+    center = Center(PSF_refs[0], centered=False)
+
+    radial_profiles_0 = []
+    radial_profiles_1 = []
+    diff_profile = []
+
+    for i in range(n_profiles):
+        if type(PSF_refs[i]) is torch.Tensor:
+            PSF_refs[i] = PSF_refs[i].detach().cpu().numpy()
+        if type(PSF_estims[i]) is torch.Tensor:
+            PSF_estims[i] = PSF_estims[i].detach().cpu().numpy()
+
+        profile_0 = radial_profile(PSF_refs[i].squeeze(), center)[:32 + 1]
+        profile_1 = radial_profile(PSF_estims[i].squeeze(), center)[:32 + 1]
+
+        radial_profiles_0.append(profile_0)
+        radial_profiles_1.append(profile_1)
+        diff_profile.append(np.abs(profile_1 - profile_0) / profile_0.max() * 100)  # [%]
+
+    mean_profile_0 = np.mean(radial_profiles_0, axis=0)
+    std_profile_0 = np.std(radial_profiles_0, axis=0)
+    mean_profile_1 = np.mean(radial_profiles_1, axis=0)
+    std_profile_1 = np.std(radial_profiles_1, axis=0)
+
+    mean_profile_diff = np.mean(diff_profile, axis=0)
+    std_profile_diff = np.std(diff_profile, axis=0)
+
+    fig = plt.figure(figsize=(6, 4), dpi=dpi)
+    ax = fig.add_subplot(111)
+    ax.set_title(title)
+    ax.set_xlabel('Pixels')
+    ax.set_ylabel('Relative intensity')
+    if scale == 'log': ax.set_yscale('log')
+    ax.set_xlim([0, len(mean_profile_1) - 1])
+    ax.grid()
+    ax2 = ax.twinx()
+    ax2.set_ylim([0, mean_profile_diff.max() * 1.5])
+    ax2.set_ylabel('Difference [%]')
+
+    l1 = ax.plot(mean_profile_1, label=model_label, linewidth=2)
+    l2 = ax.plot(mean_profile_0, label='Data', linewidth=2)
+    l3 = ax2.plot(mean_profile_diff, label='Difference', color='green', linewidth=1.5, linestyle='--')
+
+    ax.fill_between(range(len(mean_profile_1)), mean_profile_1 - std_profile_1, mean_profile_1 + std_profile_1, alpha=0.2)
+    ax.fill_between(range(len(mean_profile_0)), mean_profile_0 - std_profile_0, mean_profile_0 + std_profile_0, alpha=0.2)
+    ax2.fill_between(range(len(mean_profile_diff)), mean_profile_diff - std_profile_diff, mean_profile_diff + std_profile_diff, alpha=0.2, color='green')
+
+    ls = l1 + l2 + l3
+    labs = [l.get_label() for l in ls]
+    ax2.legend(ls, labs, loc=0)
 
 
 def plot_std(x,y, label, color, style):

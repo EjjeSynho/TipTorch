@@ -112,23 +112,25 @@ class SPHERE_loader():
 
 
     def get_detector_config(self):
-        if 'PIXSCAL' in self.hdr:
-            psInMas = float(self.hdr['PIXSCAL'])
-        else:
-            psInMas = 12.27
-        gain = float(self.hdr[0].header[h+'DET CHIP1 GAIN'])
-        ron  = float(self.hdr[0].header[h+'DET CHIP1 RON'])
-        if ron == 0:
-            ron = 4.0
+        psInMas = float(self.hdr['PIXSCAL']) if 'PIXSCAL' in self.hdr else 12.27
+
         # http://www.eso.org/observing/dfo/quality/SPHERE/reports/HEALTH/trend_report_IRDIS_DARK_ron_HC.html
-        DIT    = self.hdr[0].header[h+'DET SEQ1 DIT']
-        NDIT   = self.hdr[0].header[h+'DET NDIT']
+        DIT  = self.hdr[0].header[h+'DET SEQ1 DIT']
+        NDIT = self.hdr[0].header[h+'DET NDIT']
         try:
             NDSKIP = self.hdr[0].header[h+'DET NDSKIP']
         except:
             NDSKIP = 0
 
-        return psInMas, gain, ron, DIT, NDIT, NDSKIP
+        EXPTIME = self.hdr[0].header[h+'DET SEQ1 EXPTIME']
+
+        gain = float(self.hdr[0].header[h+'DET CHIP1 GAIN']) #IRDIS gain
+        ron  = float(self.hdr[0].header[h+'DET CHIP1 RON'])
+
+        if ron == 0:
+            ron = 10.0 if DIT < 1.0 else 4.0   # e- rms/pix/readout 
+
+        return psInMas, gain, ron, DIT, NDIT, NDSKIP, EXPTIME
 
 
     def get_star_coordinates(self):
@@ -209,7 +211,7 @@ class SPHERE_loader():
                 
             return id_start, id_end
 
-        # Initialize the recepies to match the entries wiith the telemetry
+        # Initialize the recepies to match the entries with the telemetry
         # sparta_IR_DTTS
         entries_DTTS = [('n_ADU', 'flux_IRLoop_ADU')]
 
@@ -245,6 +247,12 @@ class SPHERE_loader():
             ('temperature', 'air_temperature_30m[deg]'),
             ('winddir',     'winddir_30m'),
             ('windspeed',   'windspeed_30m')]
+        
+        #ecmwf
+        entries_ecmwf = [
+            ('temperature (200 mbar)', 'temperature (degrees)'),
+            ('winddir (200 mbar)', 'ecmwf_200mbar_winddir[deg]'),
+            ('windspeed (200 mbar)', 'ecmwf_200mbar_windspeed[m/s]')]
 
 
         def get_entry_value(df, entry, id_start, id_end):
@@ -273,7 +281,9 @@ class SPHERE_loader():
         sparta_atm_df = table_from_files(path_sub, 'sparta_atmospheric_params')
         mass_dimm_df  = table_from_files(path_sub, 'mass_dimm', condition=lambda x: x[0]=='m')
         asm_df        = table_from_files(path_sub, 'asm')
+        ecmwf_df      = table_from_files(path_sub, 'ecmwf')
 
+        ECMWF_data = {}
         SPARTA_data = {}
         MASSDIMM_data = {}
 
@@ -288,6 +298,7 @@ class SPHERE_loader():
         fill_dictionary(MASSDIMM_data, mass_dimm_df,  entries_mass_dimm, timestamp, T_exp)
         fill_dictionary(MASSDIMM_data, dimm_df,       entries_dimm,      timestamp, T_exp)
         fill_dictionary(MASSDIMM_data, asm_df,        entries_asm,       timestamp, T_exp)
+        fill_dictionary(ECMWF_data,    ecmwf_df,      entries_ecmwf,     timestamp, T_exp)
 
         # Get the closest available DTTS images
         try:
@@ -316,7 +327,7 @@ class SPHERE_loader():
         except:
             cube_array = np.nan
         
-        return SPARTA_data, MASSDIMM_data, cube_array
+        return SPARTA_data, MASSDIMM_data, ECMWF_data, cube_array
 
 
     def GetSpectrum(self):
@@ -431,15 +442,19 @@ class SPHERE_loader():
         TELAZ, TELALT, airmass = self.get_telescope_pointing()
         magnitudes, OB_NAME, RA, DEC = self.get_star_magnitudes()
         tau0, wDir, wSpeed, RHUM, pressure, fwhm = self.get_ambi_parameters()
-        psInMas, gain, ron, DIT, NDIT, NDSKIP = self.get_detector_config()
+        psInMas, gain, ron, DIT, NDIT, NDSKIP, exp_time = self.get_detector_config()
         
-        SPARTA_data, MASSDIMM_data, cube_array = self.GetTelemetryDTTS()
+        SPARTA_data, MASSDIMM_data, ECMWF_data, cube_array = self.GetTelemetryDTTS()
         spectrum = self.GetSpectrum()
 
         data = {
-            'spectra': spectrum,
+            'r0': SPARTA_data['r0'],
+            'FWHM': fwhm,
+            'Strehl': SPARTA_data['SR'],
+            'turb speed': MASSDIMM_data['MASSDIMM_turb_speed'],
 
             'DTTS': cube_array,
+            'spectra': spectrum,
 
             'tau0': {
                 'header': tau0,
@@ -448,7 +463,6 @@ class SPHERE_loader():
                 'MASS': MASSDIMM_data['MASS_tau0']
             },
 
-            'r0': SPARTA_data['r0'],
             'seeing': {
                 'SPARTA': SPARTA_data['seeing'],
                 'MASSDIMM': MASSDIMM_data['MASSDIMM_seeing'],
@@ -459,27 +473,33 @@ class SPHERE_loader():
                 'header': wSpeed,
                 'SPARTA': SPARTA_data['windspeed'],
                 'MASSDIMM': MASSDIMM_data['windspeed'],
+                '200 mbar': ECMWF_data['windspeed (200 mbar)']
             },
 
             'Wind direction': {
                 'header': wDir,
                 'MASSDIMM': MASSDIMM_data['winddir'],
+                '200 mbar': ECMWF_data['winddir (200 mbar)']
             },
 
             'Environment': {
                 'pressure': pressure,
                 'humidity': RHUM,
-                'temperature': MASSDIMM_data['temperature']
+                'temperature': MASSDIMM_data['temperature'],
+                'temperature (200 mbar)': ECMWF_data['temperature (200 mbar)']
             },
-
-            'FWHM': fwhm,
-            'Strehl': SPARTA_data['SR'],
-            'turb speed': MASSDIMM_data['MASSDIMM_turb_speed'],
 
             'Detector': {
                 'psInMas': psInMas,
                 'gain': gain,
                 'ron': ron
+            },
+
+            'Integration': {
+                'DIT': DIT,
+                'Num. DITs': NDIT,
+                'NDSKIP': NDSKIP,
+                'sequence time': exp_time
             },
 
             'WFS': {
@@ -561,6 +581,9 @@ def plot_sample(id):
     fig.tight_layout()
     plt.show()
 
+#%%
+
+plot_sample(1000)
 
 #%%
 def ReduceIRDISData():
