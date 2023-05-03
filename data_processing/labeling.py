@@ -4,6 +4,8 @@ import pickle
 import re
 from copy import deepcopy
 
+from globals import SPHERE_DATA_FOLDER
+
 def purify_filename(filename):
     pure_filename = os.path.splitext(os.path.basename(filename))[0]
     match = re.match(r'^(\d+)_', pure_filename)
@@ -53,7 +55,7 @@ for line in data:
 label_list = set(label_list)
 
 #%%
-newly_reduced = os.listdir('E:/ESO/Data/SPHERE/IRDIS_reduced/')
+newly_reduced = os.listdir(SPHERE_DATA_FOLDER + 'IRDIS_reduced/')
 
 newly_reduced_files = [purify_filename(file)[1] for file in newly_reduced]
 newly_reduced_ids   = [purify_filename(file)[0] for file in newly_reduced]
@@ -87,18 +89,18 @@ label_dict['no coronograph'] = no_corono
 #%%
 import json
 
-with open('E:/ESO/Data/SPHERE/labels.json', 'w') as f:
+with open(SPHERE_DATA_FOLDER+'labels.json', 'w') as f:
     json.dump(label_dict, f)
 
 #%%
 # Read json file
-with open('E:/ESO/Data/SPHERE/labels.json', 'r') as f:
+with open(SPHERE_DATA_FOLDER+'labels.json', 'r') as f:
     label_dict_0 = json.load(f)
 
 #%%
 
-images_valid_dir   = 'E:/ESO/Data/SPHERE/reduced_imgs/'
-images_invalid_dir = 'E:/ESO/Data/SPHERE/invalid_imgs/'
+images_valid_dir   = SPHERE_DATA_FOLDER+'reduced_imgs/'
+images_invalid_dir = SPHERE_DATA_FOLDER+'invalid_imgs/'
 
 images_valid = os.listdir(images_valid_dir)
 
@@ -115,7 +117,7 @@ labels_lists = ['doubles.txt', 'invalid.txt', 'Class A.txt', 'Class B.txt', 'Cla
 label_dict = {}
 for label_list in labels_lists:
     # Read file
-    with open('E:/ESO/Data/SPHERE/images/' + label_list, 'r') as f:
+    with open(SPHERE_DATA_FOLDER+'images/' + label_list, 'r') as f:
         files = f.readlines()
         files = [filename.rstrip() for filename in files]
 

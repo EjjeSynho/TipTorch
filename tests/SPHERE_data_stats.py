@@ -11,7 +11,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 
-with open('E:/ESO/Data/SPHERE/sphere_df.pickle', 'rb') as handle:
+from globals import SPHERE_DATA_FOLDER
+
+with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 #%%

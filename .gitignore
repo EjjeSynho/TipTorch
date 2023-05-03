@@ -5,3 +5,4 @@ __pycache__
 _pycache_
 tools/__pycache__/
 data/temp
+global_config.json

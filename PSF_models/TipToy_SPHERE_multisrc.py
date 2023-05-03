@@ -72,18 +72,30 @@ class TipToy(torch.nn.Module):
         self.HOloop_delay = self.config['RTC']['LoopDelaySteps_HO'] # [ms] (?)
         self.HOloop_gain  = self.config['RTC']['LoopGain_HO']
 
+        # Initialiaing the main optimizable parameters
         self.r0  = rad2arc*0.976*self.config['atmosphere']['Wavelength'] / self.config['atmosphere']['Seeing']
         self.L0  = self.config['atmosphere']['L0'] # [m]
         self.F   = torch.ones (self.N_src, self.N_wvl, device=self.device)
         self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
         self.dx  = torch.zeros(self.N_src, device=self.device)
         self.dy  = torch.zeros(self.N_src, device=self.device)
-        self.dn  = torch.zeros(self.N_src, device=self.device)
-        self.Jx  = torch.ones(self.N_src, device=self.device)
-        self.Jy  = torch.ones(self.N_src, device=self.device)
-        self.Jxy = torch.ones(self.N_src, device=self.device)
+        self.Jx  = torch.ones (self.N_src, device=self.device)*0.1
+        self.Jy  = torch.ones (self.N_src, device=self.device)*0.1
+        self.Jxy = torch.ones (self.N_src, device=self.device)*0.1
+        self._optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
 
-        self._optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']
+        if self.PSD_include['Moffat']:
+            self.amp   = torch.ones (self.N_src, device=self.device)*3.0  # Phase PSD Moffat amplitude [rad²]
+            self.b     = torch.ones (self.N_src, device=self.device)*1e-4 # Phase PSD background [rad² m²]
+            self.alpha = torch.ones (self.N_src, device=self.device)*0.1  # Phase PSD Moffat alpha [1/m]
+            self.beta  = torch.ones (self.N_src, device=self.device)*1.6  # Phase PSD Moffat beta power law
+            self.ratio = torch.ones (self.N_src, device=self.device)      # Phase PSD Moffat ellipticity
+            self.theta = torch.zeros(self.N_src, device=self.device)      # Phase PSD Moffat angle
+            self._optimizables += ['amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
+
+        if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
+            self.dn  = torch.zeros(self.N_src, device=self.device)
+            self._optimizables += ['dn']
 
         for name in self._optimizables:
             setattr(self, name, nn.Parameter(getattr(self, name)))
@@ -132,6 +144,11 @@ class TipToy(torch.nn.Module):
         self.k2 = self.kx**2 + self.ky**2
         self.k = torch.sqrt(self.k2)
 
+        if self.PSD_include['Moffat']:
+            self.kxy = self.kx * self.ky
+            self.kx2 = self.kx**2
+            self.ky2 = self.ky**2
+
         self.mask = torch.ones_like(self.k2, device=self.device)
         self.mask[self.k2 <= self.kc**2] = 0
         self.mask_corrected = 1.0-self.mask
@@ -168,6 +185,15 @@ class TipToy(torch.nn.Module):
         self.ky = pdims( self.ky, -1 )
         self.k  = pdims( self.k,  -1 )
         self.k2 = pdims( self.k2, -1 )
+
+        if self.PSD_include['Moffat']:
+            self.kx2_AO = pdims( self.kx2[corrected_ROI], -1 )
+            self.ky2_AO = pdims( self.ky2[corrected_ROI], -1 )
+            self.kxy_AO = pdims( self.kxy[corrected_ROI], -1 )
+
+            self.kxy = pdims( self.kxy, -1 )
+            self.kx2 = pdims( self.kx2, -1 )
+            self.ky2 = pdims( self.ky2, -1 )
 
         # For NGS-like alising 0th dimension is used to store shifted spatial frequency
         # This is thing is 5D: (aliased samples) x (N src) x (Atmospheric layers) x (kx) x (ky) TODO: NO, it's 4D
@@ -218,7 +244,7 @@ class TipToy(torch.nn.Module):
         all_samplings = self.sampling[ids]
 
         self.OTF_static =  {}  
-        for i,wvl in enumerate(all_wvls):
+        for i, wvl in enumerate(all_wvls):
             self.OTF_static[wvl] = torch.zeros([self.nOtf, self.nOtf], device=self.device)
             padded_pix = int(pupil_pix*all_samplings[i])
 
@@ -251,12 +277,12 @@ class TipToy(torch.nn.Module):
             return piston_filter
 
         self.piston_filter = PistonFilter(self.k_AO)
-        self.PR = PistonFilter(torch.hypot(self.km,self.kn))
+        self.PR = PistonFilter(torch.hypot(self.km, self.kn))
 
         # Diffraction-limited PSF
         self.PSF_DL = interpolate( \
             torch.abs(fft.fftshift(fft.ifft2(fft.fftshift(self.OTF_static)))), \
-            size=(self.nPix,self.nPix), mode='area' ).squeeze()
+            size=(self.nPix,self.nPix), mode='area' ).squeeze() #TODO: area interpolation, or...?
         
 
     def Update(self, reinit_grids=True):
@@ -264,11 +290,29 @@ class TipToy(torch.nn.Module):
         if reinit_grids: self.InitGrids()
 
 
-    def __init__(self, AO_config, norm_regime='sum', device=torch.device('cpu')):
+    def _initialize_PSDs_settings(self, TipTop_flag, PSFAO_flag):
+        # The full list of the supported PSD components
+        self.PSD_entries = ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'chromatism', 'Moffat']
+        # The list of the PSD components that are included in the current simulation
+        self.PSD_include = {key:False for key in self.PSD_entries}
+
+        if TipTop_flag:
+            self.PSD_include = {key:True for key in self.PSD_entries if key != 'Moffat'}
+        
+        self.PSD_include['Moffat'] = PSFAO_flag
+        self.PSD_include['fitting'] = True #TODO: open-loop case
+
+        if not TipTop_flag and not PSFAO_flag:
+            raise ValueError('At least one of the following must be True: TipTop or PSFAO')
+
+
+    def __init__(self, AO_config, norm_regime='sum', device=torch.device('cpu'), TipTop=True, PSFAO=False):
         super().__init__()
         
         self.device = device
         self.make_tensor = lambda x: torch.tensor(x, device=self.device) if type(x) is not torch.Tensor else x
+
+        self._initialize_PSDs_settings(TipTop, PSFAO)
 
         if self.device.type != 'cpu':
             self.start = torch.cuda.Event(enable_timing=True)
@@ -345,7 +389,7 @@ class TipToy(torch.nn.Module):
     def SpatioTemporalPSD(self):
         A = torch.ones([self.W_atm.shape[0], self.nOtf_AO, self.nOtf_AO], device=self.device) #TODO: fix it. A should be initialized differently
         Ff = self.Rx*self.SxAv + self.Ry*self.SyAv
-        psd_ST = (1+abs(Ff)**2 * self.h2 - 2*torch.real(Ff*self.h1*A)) * self.W_atm * self.mask_corrected_AO
+        psd_ST = (1 + abs(Ff)**2 * self.h2 - 2*torch.real(Ff*self.h1*A)) * self.W_atm * self.mask_corrected_AO
         return psd_ST
 
 
@@ -423,54 +467,115 @@ class TipToy(torch.nn.Module):
         
         # Noise variance calculation
         varNoise = self.WFS_excessive_factor * (varRON+varShot) # TODO: clarify with Benoit and Thierry
-
         return varNoise
+
+
+    def MoffatPSD(self, amp, b, alpha, beta, ratio, theta):
+        ax = alpha * ratio
+        ay = alpha / ratio
+
+        uxx = self.kx2_AO #.unsqueeze(0)
+        uxy = self.kxy_AO #.unsqueeze(0)
+        uyy = self.ky2_AO #.unsqueeze(0)
+
+        #def reduced_center_coord(uxx, uxy, uyy, ax, ay, theta):
+        c  = torch.cos(theta)
+        s  = torch.sin(theta)
+        s2 = torch.sin(2.0 * theta)
+
+        rxx = (c/ax)**2 + (s/ay)**2
+        rxy =  s2/ay**2 -  s2/ax**2
+        ryy = (c/ay)**2 + (s/ax)**2
+
+        uu = rxx*uxx + rxy*uxy + ryy*uyy
+
+        V = (1.0+uu)**(-beta) # Moffat shape
+
+        removeInside = 0.0
+        E = (beta-1) / (np.pi*ax*ay)
+        Fout = (1 +      (self.kc**2)/(ax*ay))**(1-beta)
+        Fin  = (1 + (removeInside**2)/(ax*ay))**(1-beta)
+        F = 1 / (Fin-Fout)
+
+        MoffatPSD = (amp * V*E*F + b) * self.mask_corrected_AO #.unsqueeze(0)
+        MoffatPSD[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
+
+        return MoffatPSD
 
     
     def DLPSF(self):
         return self.PSF_DL / self.norm_scale
 
 
-    def PSD2PSF(self):
-        r0  = pdims(self.r0,  2)
-        L0  = pdims(self.L0,  2)
+    def ComputePSD(self):
+        r0  = pdims(self.r0, 2)
+        L0  = pdims(self.L0, 2)
+
+        if self.PSD_include['Moffat']:
+            amp   = pdims(self.amp,   2)
+            b     = pdims(self.b,     2)
+            alpha = pdims(self.alpha, 2)
+            beta  = pdims(self.beta,  2)
+            ratio = pdims(self.ratio, 2)
+            theta = pdims(self.theta, 2)
+
+        if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
+            WFS_noise_var = torch.abs( pdims(self.dn,2) + pdims(self.NoiseVariance(r0.abs()),2) ) # [rad^2] at WFSing wavelength TODO: really?
+            self.vx = pdims( min_2d(self.wind_speed) * torch.cos(min_2d(self.wind_dir) * np.pi/180.0), 2 )
+            self.vy = pdims( min_2d(self.wind_speed) * torch.sin(min_2d(self.wind_dir) * np.pi/180.0), 2 )
+
+            self.Controller()
+            self.ReconstructionFilter(r0.abs(), L0.abs(), WFS_noise_var)
+
+        # All PSD components are computed in radians and here normalized to [nm^2]
+        dk = 2*self.kc/self.nOtf_AO
+        PSD_norm = lambda wvl: (dk*wvl*1e9/2/np.pi)**2
+
+        # Most contributors are computed for 500 [nm], wavelengths-dependant inputs as well are assumed for 500 [nm]
+        # But WFS operates on another wavelength, so this PSD components is normalized for WFSing wvl 
+        # Put all contributiors together and sum up the resulting PSD
+        self.PSDs = {entry: 0.0 for entry in self.PSD_entries}
+
+        if self.PSD_include['fitting']:
+            self.PSDs['fitting'] = self.VonKarmanPSD(r0.abs(), L0.abs()).unsqueeze(1) * PSD_norm(500e-9)
+    
+        if self.PSD_include['WFS noise']:
+            self.PSDs['WFS noise'] = self.NoisePSD(WFS_noise_var).unsqueeze(1) * PSD_norm(self.GS_wvl) #TODO: to what to normalize?
+        
+        if self.PSD_include['spatio-temporal']:
+            self.PSDs['spatio-temporal'] = self.SpatioTemporalPSD().unsqueeze(1) * PSD_norm(500e-9)
+        
+        if self.PSD_include['aliasing']:
+            self.PSDs['aliasing'] = self.AliasingPSD(r0.abs(), L0).unsqueeze(1) * PSD_norm(500e-9)
+        
+        if self.PSD_include['chromatism']:
+            self.PSDs['chromatism'] = self.ChromatismPSD(r0.abs(), L0.abs()) * PSD_norm(500e-9) # no need to add dimension since it's polychromatic already
+
+        if self.PSD_include['Moffat']:
+            self.PSDs['Moffat'] = self.MoffatPSD(amp, b.abs(), alpha, beta, ratio, theta).unsqueeze(1) * PSD_norm(500e-9)
+
+        #TODO: anisoplanatism!
+        #TODO: SLAO support!
+        #TODO: differential refraction!
+        
+        PSD = self.PSDs['fitting'] + self.PSD_padder(
+              self.PSDs['WFS noise'] + \
+              self.PSDs['spatio-temporal'] + \
+              self.PSDs['aliasing'] + \
+              self.PSDs['chromatism'] + \
+              self.PSDs['Moffat'])
+        
+        return PSD
+    
+
+    def PSD2PSF(self, PSD):
         F   = pdims(self.F,   2)
         dx  = pdims(self.dx,  2)
         dy  = pdims(self.dy,  2)
         bg  = pdims(self.bg,  2)
-        dn  = pdims(self.dn,  2)
         Jx  = pdims(self.Jx,  2)
         Jy  = pdims(self.Jy,  2)
         Jxy = pdims(self.Jxy, 2)
-
-        WFS_noise_var = torch.abs( dn + pdims(self.NoiseVariance(r0.abs()), 2) )
-        self.vx = pdims( min_2d(self.wind_speed) * torch.cos(min_2d(self.wind_dir) * np.pi/180.0), 2 )
-        self.vy = pdims( min_2d(self.wind_speed) * torch.sin(min_2d(self.wind_dir) * np.pi/180.0), 2 )
-
-        self.Controller()
-        self.ReconstructionFilter(r0.abs(), L0.abs(), WFS_noise_var)
-
-        dk = 2*self.kc/self.nOtf_AO
-
-        # All PSD components are computed in radians and here normalized to [nm^2]
-        PSD_norm = lambda wvl: (dk*wvl*1e9/2/np.pi)**2
-       
-        # Most contributors are computed for 500 [nm], wavelengths-dependant inputs as well are assumed for 500 [nm]
-        # But WFS operates on another wavelength, so this PSD components is normalized for WFSing wvl 
-        # Put all contributiors together and sum up the resulting PSD
-        self.PSDs = {
-            'fitting':         self.VonKarmanPSD(r0.abs(),L0.abs()) * PSD_norm(500e-9),
-            'WFS noise':       self.NoisePSD(WFS_noise_var) * PSD_norm(self.GS_wvl), #TODO: to what to normalize?
-            'spatio-temporal': self.SpatioTemporalPSD() * PSD_norm(500e-9),
-            'aliasing':        self.AliasingPSD(r0.abs(), L0) * PSD_norm(500e-9),
-            'chromatism':      self.ChromatismPSD(r0.abs(), L0.abs()) * PSD_norm(500e-9)
-        }
-
-        PSD = self.PSDs['fitting'].unsqueeze(1) + self.PSD_padder(
-              self.PSDs['WFS noise'].unsqueeze(1) + \
-              self.PSDs['spatio-temporal'].unsqueeze(1) + \
-              self.PSDs['aliasing'].unsqueeze(1) + \
-              self.PSDs['chromatism'] )
 
         # Computing OTF from PSD
         cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1
@@ -532,14 +637,14 @@ class TipToy(torch.nn.Module):
         return self
 
 
-    def forward(self, x=None):
+    def forward(self, x=None, PSD=None):
         if x is not None:
             for name, value in x.items():
                 if isinstance(getattr(self, name), nn.Parameter):
                     setattr(self, name, nn.Parameter(value))
                 else:
                     setattr(self, name, value)
-        return self.PSD2PSF()
+        return self.PSD2PSF(self.ComputePSD() if PSD is None else PSD)
 
 
     def StartTimer(self):

@@ -434,11 +434,7 @@ def BackgroundEstimate2(im, radius=90):
 
 
 def Center(im, centered=True):
-    if type(im) == torch.Tensor:
-        if im.device == torch.device(type='cpu'):
-            im = im.detach().numpy()
-        else:
-            im = im.detach().cpu().numpy()
+    if type(im) == torch.Tensor: im = im.detach().cpu().numpy()
     im = im.squeeze()
     WoG_ROI = 16
     center = np.array(np.unravel_index(np.argmax(im), im.shape))
@@ -542,6 +538,34 @@ class OptimizeTRF():
         return self.parameters
 
 
+def draw_PSF_stack(PSF_in, PSF_out, average=False):
+    ROI_size = 128
+    ROI = slice(PSF_in.shape[-2]//2-ROI_size//2, PSF_in.shape[-1]//2+ROI_size//2)
+    dPSF = (PSF_out - PSF_in).abs()
+
+    cut = lambda x: np.log(x.abs().detach().cpu().numpy()[..., ROI, ROI])
+
+    if average:
+        row = []
+        for wvl in range(PSF_in.shape[1]):
+            row.append(
+                np.hstack([cut(PSF_in[:, wvl,...].mean(dim=0)),
+                           cut(PSF_out[:, wvl,...].mean(dim=0)),
+                           cut(dPSF[:, wvl,...].mean(dim=0))]) )
+        plt.imshow(np.vstack(row))
+        plt.title('Sources average')
+        plt.show()
+
+    else:
+        for src in range(PSF_in.shape[0]):
+            row = []
+            for wvl in range(PSF_in.shape[1]):
+                row.append( np.hstack([cut(PSF_in[src, wvl,...]), cut(PSF_out[src, wvl,...]), cut(dPSF[src, wvl,...])]) )
+            plt.imshow(np.vstack(row))
+            plt.title('Source %d' % src)
+            plt.show()
+
+
 def FitGauss2D(PSF):
     nPix_crop = 16
     crop = slice(PSF.shape[0]//2-nPix_crop//2, PSF.shape[0]//2+nPix_crop//2)
@@ -571,7 +595,7 @@ def FitGauss2D(PSF):
 
     return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
 
-
+'''
 # Function to draw the radial profile of a PSF or of a PSF stack
 def radial_profile(data, center=None):
     # Enable work with PyTorch tensors as well
@@ -647,16 +671,69 @@ def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300, scal
     ls = l1+l2+l3
     labs = [l.get_label() for l in ls]
     ax2.legend(ls, labs, loc=0)
+'''
+
+# Function to calculate the radial profile of a PSF or of a PSF stack
+def radial_profile(data, center=None):
+    t2np = lambda x: x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x
+
+    def calc_profile(data, center=None):
+        if center is None:
+            center = (data.shape[0]//2, data.shape[1]//2)
+        y, x = np.indices((data.shape))
+        r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
+        r = r.astype('int')
+
+        tbin = np.bincount(r.ravel(), data.ravel())
+        nr = np.bincount(r.ravel())
+        radialprofile = tbin / nr
+        return radialprofile[0:data.shape[0]//2]
+
+    if len(data.shape) > 2:
+        raise ValueError('PSF stack of wrong dimensionality is passed!')
+
+    return calc_profile(t2np(data), t2np(center))
+
+
+def plot_radial_profile(PSFs, labels, title='', dpi=300, scale='log', colors=None):
+    from tools.utils import Center
+    # center_0 = Center(PSF_0, centered=False)
+    # center_1 = Center(PSF_0, centered=False)
+
+    if colors is None:
+        colors = ['tab:blue', 'tab:orange']
+
+    profile_0 = radial_profile(PSFs[0])[:32+1]
+    profile_1 = radial_profile(PSFs[1])[:32+1]
+    profile_diff = np.abs(profile_1-profile_0) / profile_0.max() * 100 #[%]
+
+    fig = plt.figure(figsize=(6,4), dpi=dpi)
+    ax = fig.add_subplot(111)
+    ax.set_title(title)
+    ax.set_xlabel('Pixels')
+    ax.set_ylabel('Relative intensity')
+    if scale == 'log': ax.set_yscale('log')
+    ax.set_xlim([0, len(profile_1)-1])
+    ax.grid()
+    ax2 = ax.twinx()
+    ax2.set_ylim([0, profile_diff.max()*1.5])
+    ax2.set_ylabel('Difference [%]')
+    
+    l3 = ax2.plot(profile_diff, label='Difference', color='green', linewidth=1.5, linestyle='--')
+    l2 = ax.plot(profile_0, label=labels[0], linewidth=2, color=colors[0])
+    l1 = ax.plot(profile_1, label=labels[1], linewidth=2, color=colors[1])
+
+    ls = l1+l2+l3
+    labs = [l.get_label() for l in ls]
+    ax2.legend(ls, labs, loc=0)
 
 
 def plot_radial_profiles(PSF_refs, PSF_estims, model_label, title='', dpi=300, scale='log'):
-    from tools.utils import radial_profile, Center
+    from tools.utils import radial_profile
     if not isinstance(PSF_refs, list):   PSF_refs   = [PSF_refs]
     if not isinstance(PSF_estims, list): PSF_estims = [PSF_estims]
 
     n_profiles = len(PSF_refs)
-
-    center = Center(PSF_refs[0], centered=False)
 
     radial_profiles_0 = []
     radial_profiles_1 = []
@@ -668,8 +745,8 @@ def plot_radial_profiles(PSF_refs, PSF_estims, model_label, title='', dpi=300, s
         if type(PSF_estims[i]) is torch.Tensor:
             PSF_estims[i] = PSF_estims[i].detach().cpu().numpy()
 
-        profile_0 = radial_profile(PSF_refs[i].squeeze(), center)[:32 + 1]
-        profile_1 = radial_profile(PSF_estims[i].squeeze(), center)[:32 + 1]
+        profile_0 = radial_profile(PSF_refs[i].squeeze())[:32+1]
+        profile_1 = radial_profile(PSF_estims[i].squeeze())[:32+1]
 
         radial_profiles_0.append(profile_0)
         radial_profiles_1.append(profile_1)

@@ -22,14 +22,15 @@ from pathlib import Path
 from tools.utils import GetROIaroundMax, mask_circle
 from scipy.ndimage.measurements import center_of_mass
 
+from globals import SPHERE_DATA_FOLDER
 
-ROOT = Path('E:/ESO/Data/SPHERE/IRDIS_RAW')
-path_dtts = Path('E:/ESO/Data/SPHERE/DTTS/')
+ROOT = Path(SPHERE_DATA_FOLDER+'IRDIS_RAW')
+path_dtts = Path(SPHERE_DATA_FOLDER+'DTTS/')
 
 folder_L = ROOT/'SPHERE_DC_DATA_LEFT/'
 folder_R = ROOT/'SPHERE_DC_DATA_RIGHT/'
 
-path_output = 'E:/ESO/Data/SPHERE/IRDIS_reduced/'
+path_output = SPHERE_DATA_FOLDER+'IRDIS_reduced/'
 
 h = 'HIERARCH ESO '
 
@@ -217,8 +218,10 @@ class SPHERE_loader():
 
         # sparta_visible_WFS
         entries_spart_vis = [
-            ('n_ph', 'flux_VisLoop[#photons/subaperture/frame]'),
-            ('rate', 'WFS frequency')]
+            ('n_ph',       'flux_VisLoop[#photons/subaperture/frame]'),
+            ('rate',       'WFS frequency'),
+            ('WFS filter', 'spectral_filter'),
+            ('WFS gain',   'WFS gain')]
 
         # sparta_atmospheric_params
         entries_spart_atm = [
@@ -251,17 +254,21 @@ class SPHERE_loader():
         #ecmwf
         entries_ecmwf = [
             ('temperature (200 mbar)', 'temperature (degrees)'),
-            ('winddir (200 mbar)', 'ecmwf_200mbar_winddir[deg]'),
-            ('windspeed (200 mbar)', 'ecmwf_200mbar_windspeed[m/s]')]
+            ('winddir (200 mbar)',     'ecmwf_200mbar_winddir[deg]'),
+            ('windspeed (200 mbar)',   'ecmwf_200mbar_windspeed[m/s]')]
 
 
         def get_entry_value(df, entry, id_start, id_end):
             if entry in df and id_start is not None and id_end is not None:
-                value = np.nanmedian(df[entry][id_start:id_end+1])
-                if not np.isreal(value) or np.isinf(value):
-                    return np.nan
+                if isinstance(df[entry][id_start:id_end+1].values[0], str):
+                    id = int(np.round(id_start/2+id_end/2))
+                    return df[entry][id:id+1].values[0]
                 else:
-                    return value
+                    value = np.nanmedian(df[entry][id_start:id_end+1])
+                    if not np.isreal(value) or np.isinf(value):
+                        return np.nan
+                    else:
+                        return value
             else:
                 return np.nan
             
@@ -326,7 +333,15 @@ class SPHERE_loader():
             cube_array = np.array( [np.array(tables.iloc[i]['PSF']) for i in range(*find_closest(tables, timestamp, T_exp))] )
         except:
             cube_array = np.nan
-        
+
+        #  Get WFS spectrum
+        if SPARTA_data['WFS filter'] == 'OPEN':
+            SPARTA_data['WFS wavelength'] = 658 #[nm]
+        elif SPARTA_data['WFS filter'] == 'LP_780':
+            SPARTA_data['WFS wavelength'] = 780 #[nm]
+        else:
+            SPARTA_data['WFS wavelength'] = np.nan
+
         return SPARTA_data, MASSDIMM_data, ECMWF_data, cube_array
 
 
@@ -428,12 +443,14 @@ class SPHERE_loader():
         mask_R = (wavelength_range > wvl0_R) & (wavelength_range < wvl2_R)
 
         spectrum = {
-            'range L':    wavelength_range[mask_L],
-            'range R':    wavelength_range[mask_R],
-            'spectrum L': transmission_L[mask_L],
-            'spectrum R': transmission_R[mask_R],
-            'central L':  wvl1_L,
-            'central R':  wvl1_R,
+            'filter common': filter_name_common,
+            'filter LR':     filter_name_LR,
+            'range L':       wavelength_range[mask_L],
+            'range R':       wavelength_range[mask_R],
+            'spectrum L':    transmission_L[mask_L],
+            'spectrum R':    transmission_R[mask_R],
+            'central L':     wvl1_L,
+            'central R':     wvl1_R,
         }
         return spectrum
 
@@ -504,7 +521,10 @@ class SPHERE_loader():
 
             'WFS': {
                 'Nph vis': SPARTA_data['n_ph'],
-                'rate': SPARTA_data['rate']
+                'rate': SPARTA_data['rate'],
+                'filter': SPARTA_data['WFS filter'],
+                'wavelegnth': SPARTA_data['WFS wavelength']*1e-9,
+                'gain': SPARTA_data['WFS gain'] 
             },
 
             'observation': {
@@ -582,8 +602,7 @@ def plot_sample(id):
     plt.show()
 
 #%%
-
-plot_sample(1000)
+# plot_sample(1000)
 
 #%%
 def ReduceIRDISData():
@@ -612,8 +631,8 @@ def SaveReducedAsImages():
     # Visualize PSFs and save them into temporary folder
     import matplotlib
 
-    folder = 'E:/ESO/Data/SPHERE/IRDIS_reduced/'
-    dir_save_imgs = 'E:/ESO/Data/SPHERE/reduced_imgs/'
+    folder = SPHERE_DATA_FOLDER+'IRDIS_reduced/'
+    dir_save_imgs = SPHERE_DATA_FOLDER+'reduced_imgs/'
 
     files = os.listdir(folder)
     crop = slice(128-32, 128+32)
@@ -653,9 +672,11 @@ def CreateSPHEREdataframe(save_df_dir=None):
         'Turb. speed',
         'Wind direction (header)',
         'Wind direction (MASSDIMM)',
+        'Wind direction (200 mbar)',
         'Wind speed (header)',
         'Wind speed (SPARTA)',
         'Wind speed (MASSDIMM)',
+        'Wind speed (200 mbar)',
         'Tau0 (header)',
         'Tau0 (SPARTA)',
         'Tau0 (MASSDIMM)',
@@ -663,8 +684,16 @@ def CreateSPHEREdataframe(save_df_dir=None):
         'Pressure',
         'Humidity',
         'Temperature',
+        'Temperature (200 mbar)',
         'Nph WFS',
-        'Rate']
+        'Rate',
+        'Filter common',
+        'Filter LR',
+        'Filter WFS',
+        'DIT Time',
+        'Num. DITs',
+        'Sequence time']
+
 
     main_df = {}
     for col in columns_main:
@@ -691,9 +720,11 @@ def CreateSPHEREdataframe(save_df_dir=None):
         main_df['Turb. speed'].append(data['turb speed'])
         main_df['Wind direction (header)'].append(data['Wind direction']['header'])
         main_df['Wind direction (MASSDIMM)'].append(data['Wind direction']['MASSDIMM'])
+        main_df['Wind direction (200 mbar)'].append(data['Wind direction']['200 mbar'])
         main_df['Wind speed (header)'].append(data['Wind speed']['header'])
         main_df['Wind speed (SPARTA)'].append(data['Wind speed']['SPARTA'])
         main_df['Wind speed (MASSDIMM)'].append(data['Wind speed']['MASSDIMM'])
+        main_df['Wind speed (200 mbar)'].append(data['Wind speed']['200 mbar'])
         main_df['Tau0 (header)'].append(data['tau0']['header'])
         main_df['Tau0 (SPARTA)'].append(data['tau0']['SPARTA'])
         main_df['Tau0 (MASSDIMM)'].append(data['tau0']['MASSDIMM'])
@@ -701,8 +732,15 @@ def CreateSPHEREdataframe(save_df_dir=None):
         main_df['Pressure'].append(data['Environment']['pressure'])
         main_df['Humidity'].append(data['Environment']['humidity'])
         main_df['Temperature'].append(data['Environment']['temperature'])
+        main_df['Temperature (200 mbar)'].append(data['Environment']['temperature (200 mbar)'])
         main_df['Nph WFS'].append(data['WFS']['Nph vis'])
         main_df['Rate'].append(data['WFS']['rate'])
+        main_df['Filter common'].append(data['spectra']['filter common'])
+        main_df['Filter LR'].append(data['spectra']['filter LR'])
+        main_df['Filter WFS'].append(data['WFS']['wavelegnth'])
+        main_df['DIT Time'].append(data['Integration']['DIT'])
+        main_df['Num. DITs'].append(data['Integration']['Num. DITs'])
+        main_df['Sequence time'].append(data['Integration']['sequence time'])
 
     main_df = pd.DataFrame(main_df)
 
@@ -786,7 +824,7 @@ def CreateSPHEREdataframe(save_df_dir=None):
 
 
     # Load labels information
-    with open('E:/ESO/Data/SPHERE/labels.json', 'r') as f:
+    with open(SPHERE_DATA_FOLDER+'labels.json', 'r') as f:
         labels = json.load(f)
 
     for key in ['Blurry', 'Noisy', 'Clipped', 'Crossed', 'Streched', 'Wingsgone']:
@@ -841,15 +879,15 @@ def CreateSPHEREdataframe(save_df_dir=None):
 
     return df
 
-# df = CreateSPHEREdataframe(save_df_dir='E:/ESO/Data/SPHERE/sphere_df.pickle')
+# df = CreateSPHEREdataframe(save_df_dir=SPHERE_DATA_FOLDER+'sphere_df.pickle')
 
 #%%
 def LoadSPHEREsampleByID(id): # searches for the sample with the specified ID in
-    with open('E:/ESO/Data/SPHERE/sphere_df.pickle', 'rb') as handle:
+    with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
         request_df = pickle.load(handle)
 
     file = request_df.loc[request_df.index == id]['Filename'].values[0]
-    full_filename = 'E:/ESO/Data/SPHERE/IRDIS_reduced/'+str(id)+'_'+file+'.pickle'
+    full_filename = SPHERE_DATA_FOLDER+'IRDIS_reduced/'+str(id)+'_'+file+'.pickle'
 
     with open(full_filename, 'rb') as handle:
         data_sample = pickle.load(handle)

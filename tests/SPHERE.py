@@ -10,195 +10,80 @@ import torch
 from torch import nn
 import numpy as np
 import matplotlib.pyplot as plt
-from data_processing.SPHERE_data import LoadSPHEREsampleByID
-from tools.parameter_parser import ParameterParser
-from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
+from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
+
 from tools.utils import OptimizeLBFGS
 from tools.utils import plot_radial_profile, plot_radial_profiles, SR
-from tools.utils import BackgroundEstimate, ParameterReshaper
+from tools.utils import ParameterReshaper, draw_PSF_stack
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
-from copy import deepcopy
 
+from globals import SPHERE_DATA_FOLDER, device
 
-device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
-# device = torch.device('cpu')
-
-make_tensor = lambda x: torch.tensor(x, device=device) if type(x) is not torch.Tensor else x
-
-def init_torch_param(x, N=None):
-    if N != None and N != 0:
-        return torch.tensor([x]*N, requires_grad=True, device=device).flatten()
-    else:
-        return torch.tensor(x, device=device, requires_grad=True).flatten()
-
-norm_regime = 'sum'
-only_left = False
 
 #%% Initialize data sample
-with open('E:/ESO/Data/SPHERE/sphere_df.pickle', 'rb') as handle:
+with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['invalid'] == False]
+psf_df = psf_df[psf_df['Num. DITs'] < 50]
 # psf_df = psf_df[psf_df['Class A'] == True]
 # psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
 # psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
 
 good_ids = psf_df.index.values.tolist()
 
+
 #%%
-def SamplesByIds(ids):
-    data_samples = []
-    for id in ids:
-        data_samples.append( LoadSPHEREsampleByID(id) )
-    return data_samples
-
-
-def SamplesFromDITs(id):
-    init_sample = LoadSPHEREsampleByID(id)
-    data_samples1 = []
-
-    N_DITs = init_sample['PSF L'].shape[0]
-    if N_DITs > 20: 
-        print('***** WARNING! '+str(N_DITs)+' DITs might be too many to fit into VRAM! *****')
-    else:
-        print('Split into '+str(N_DITs)+' samples')
-
-    for i in range(init_sample['PSF L'].shape[0]):
-        data_samples1.append( deepcopy(init_sample) )
-
-    for i, sample in enumerate(data_samples1):
-        sample['PSF L'] = init_sample['PSF L'][i,...][None,...]
-        sample['PSF R'] = init_sample['PSF R'][i,...][None,...]
-    return data_samples1
-
-
-def OnlyCentralWvl(samples):
-    for i in range(len(samples)):
-        buf = samples[i]['spectra'].copy()
-        samples[i]['spectra'] = [buf['central L']*1e-9, buf['central R']*1e-9]
-
-
-def GenerateImages(samples):
-    ims = []
-    bgs = []
-
-    # Preprocess input data so TipToy can understand it
-    for i in range(len(samples)):
-        bg_est = lambda x: BackgroundEstimate(x, radius=80).item()
-        check_center = lambda x: x[x.shape[0]//2, x.shape[1]//2] > 0 # for some reason, ssome images apperead flipped in sign
-
-        def process_PSF(x): # this function copllapses DITs and normalizes the image
-            x = x.sum(axis=0)
-            if   norm_regime == 'sum': x /= x.sum()
-            elif norm_regime == 'max': x /= x.max()
-            return x
-
-        buf_im = []
-        buf_bg = []
-
-        if 'PSF L' in samples[i].keys():
-            buf_im.append( process_PSF(samples[i]['PSF L']) )
-            if not check_center(buf_im[-1]): buf_im[-1] *= -1
-            buf_bg.append( bg_est(buf_im[-1]) )
-
-        if 'PSF R' in samples[i].keys():
-            buf_im.append( process_PSF(samples[i]['PSF R']) )
-            if not check_center(buf_im[-1]): buf_im[-1] *= -1
-            buf_bg.append( bg_est(buf_im[-1]) )
-
-        ims.append(np.stack(buf_im))
-        bgs.append(buf_bg)
-
-    # outputs torch parameters
-    return make_tensor(np.stack(ims)), make_tensor(np.stack(bgs))
-
-
 # dir_save_gif = 'C:/Users/akuznets/Projects/TipToy/data/temp/' + str(id) + '.gif'
 # save_GIF(A, duration=1e2, scale=4, path=dir_save_gif, colormap=cm.hot)
 
-
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
 # sample_ids = [578]
-sample_ids = [576]
-# sample_ids = [456]
+# sample_ids = [576]
+# sample_ids = [992]
+sample_ids = [456]
 # sample_ids = [465]
+# sample_ids = [1393]
 
-regime = '1P21I'
+# regime = '1P21I'
 # regime = '1P2NI'
-# regime = 'NP2NI'
+regime = 'NP2NI'
+norm_regime = 'sum'
 
-if regime == '1P21I':
-    data_samples = SamplesByIds(sample_ids)
-elif regime == 'NP2NI' or regime == '1P2NI':
-    if len(sample_ids) > 1:
-        print('****** Warning: Only one sample ID can be used in this regime! ******')
-    data_samples = SamplesFromDITs(sample_ids[0])
+data_samples, PSF_0, bg, norms, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device)
 
-OnlyCentralWvl(data_samples)
-PSF_0, bg = GenerateImages(data_samples)
-
-if regime == '1P2NI':
-    data_samples = [data_samples[0]]
-    bg = bg.mean(dim=0)
-
-# Manage config files
-path_ini = '../data/parameter_files/irdis.ini'
-
-config_file = ParameterParser(path_ini).params
-config_manager = ConfigManager(GetSPHEREonsky())
-merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
-config_manager.Convert(merged_config, framework='pytorch', device=device)
 
 
 #%% Initialize model
+from PSF_models.TipToy_SPHERE_multisrc import TipToy
+
 toy = TipToy(merged_config, norm_regime, device)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
 _ = toy({
-    'Jxy': torch.tensor([5.0]*toy.N_src, device=toy.device).flatten(),
-    'Jx':  torch.tensor([2.0]*toy.N_src, device=toy.device).flatten(),
-    'Jy':  torch.tensor([2.0]*toy.N_src, device=toy.device).flatten(),
+    'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    'Jy':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
     'bg':  bg.to(device)
 })
 
 
 #%%
-PSF_1 = toy.PSD2PSF()
+PSF_1 = toy()
 #print(toy.EndTimer())
 
 PSF_DL = toy.DLPSF()
 
-def draw_result(PSF_in, PSF_out):
-    ROI_size = 128
-    ROI = slice(PSF_in.shape[-2]//2-ROI_size//2, PSF_in.shape[-1]//2+ROI_size//2)
-    dPSF = (PSF_out - PSF_in).abs()
 
-    cut = lambda x: np.log(x.abs().detach().cpu().numpy()[..., ROI, ROI])
-
-    if regime == '1P2NI':
-        row = []
-        for wvl in range(PSF_in.shape[1]):
-            row.append(
-                np.hstack([cut(PSF_in[:, wvl,...].mean(dim=0)),
-                           cut(PSF_out[:, wvl,...].mean(dim=0)),
-                           cut(dPSF[:, wvl,...].mean(dim=0))]) )
-        plt.imshow(np.vstack(row))
-        plt.title('Sources average')
-        plt.show()
-
-    else:
-        for src in range(toy.N_src):
-            row = []
-            for wvl in range(PSF_in.shape[1]):
-                row.append( np.hstack([cut(PSF_in[src, wvl,...]), cut(PSF_out[src, wvl,...]), cut(dPSF[src, wvl,...])]) )
-            plt.imshow(np.vstack(row))
-            plt.title('Source %d' % src)
-            plt.show()
-
-draw_result(PSF_0, PSF_1)
+# draw_PSF_stack(PSF_0, PSF_1, average=True)
+draw_PSF_stack(PSF_0, PSF_1, average=False)
 
 
 #%% PSF fitting (no early-stopping)
+
+# toy = toy.to(torch.device('cpu'))
+# PSF_0 = PSF_0.cpu()
+
 loss = nn.L1Loss(reduction='sum')
 
 # Confines a value between 0 and the specified value
@@ -225,25 +110,54 @@ for i in range(20):
     optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
-PSF_1 = toy.PSD2PSF()
+PSF_1 = toy()
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 
-draw_result(PSF_0, PSF_1)
+draw_PSF_stack(PSF_0, PSF_1)
 
 #%%
 PSF_refs   = [ x for x in torch.split(PSF_0[:,0,...].squeeze().cpu(), 1, dim=0) ]
 PSF_estims = [ x for x in torch.split(PSF_1[:,0,...].squeeze().cpu(), 1, dim=0) ]
 
-# plot_radial_profiles(PSF_refs, PSF_estims, 'TipToy', title='IRDIS PSF', dpi=200)
-for i in range(PSF_0.shape[0]): plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=200)
+plot_radial_profiles(PSF_refs, PSF_estims, 'TipToy', title='IRDIS PSF', dpi=200)
+# # for i in range(PSF_0.shape[0]): plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=200)
+
+#%%
+b = PSF_0.mean(dim=0)[0,...].cpu().numpy()
+# b /= b.sum()
+
+c = PSF_1.mean(dim=0)[0,...].detach().cpu().numpy()
+# c /= c.sum()
+
+
+colors = [['tab:blue', 'tab:red'],
+          ['tab:blue', 'tab:orange'],
+          ['tab:red',  'tab:orange']]
+
+plot_radial_profile([b, c], ['Data',  'TipTop'], title=str(sample_ids[0]), dpi=200, colors=colors[1])
+
+#%% ================================= PSFAO fitting =================================
+
+from PSF_models.TipToy_SPHERE_multisrc import TipToy
+
+toy = TipToy(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
+
+toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
+_ = toy({
+    'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    'Jy':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    'bg':  bg.to(device)
+})
+
+
 
 #%% ================================= Read OOPAO sample =================================
-
 def SynthsByIds(target_id):
     import os
     import re
 
-    directory = 'E:/ESO/Data/SPHERE/IRDIS_synthetic/'
+    directory = SPHERE_DATA_FOLDER+'IRDIS_synthetic/'
     target_id = str(target_id)
 
     for filename in os.listdir(directory):
@@ -256,27 +170,7 @@ def SynthsByIds(target_id):
     return None
 
 
-def SynthsFromDITs(id):
-    init_sample = SynthsByIds(id)
-    data_samples1 = []
-
-    N_DITs = init_sample['PSF L'].shape[0]
-    if N_DITs > 20: 
-        print('***** WARNING! '+str(N_DITs)+' DITs might be too many to fit into VRAM! *****')
-    else:
-        print('Split into '+str(N_DITs)+' samples')
-
-    for i in range(init_sample['PSF L'].shape[0]):
-        data_samples1.append( deepcopy(init_sample) )
-
-    for i, sample in enumerate(data_samples1):
-        sample['PSF L'] = init_sample['PSF L'][i,...][None,...]
-        sample['PSF R'] = init_sample['PSF R'][i,...][None,...]
-    return data_samples1
-
-
-# data_synth = [SynthsByIds(sample_ids[0])]
-data_synth = SynthsFromDITs(sample_ids[0])
+data_synth = SamplesFromDITs(SynthsByIds(sample_ids[0]))
 
 PSF_2, bg = GenerateImages(data_synth)
 bg *= 0
@@ -300,15 +194,15 @@ toy = TipToy(synth_config, norm_regime, device)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
 _ = toy({
-    'Jxy': torch.tensor([5.0]*toy.N_src, device=toy.device).flatten(),
-    'Jx':  torch.tensor([2.0]*toy.N_src, device=toy.device).flatten(),
-    'Jy':  torch.tensor([2.0]*toy.N_src, device=toy.device).flatten(),
+    'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    'Jy':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
     'bg':  bg.to(device)
 })
 
 
 #%%
-PSF_3 = toy.PSD2PSF()
+PSF_3 = toy()
 PSF_DL = toy.DLPSF()
 
 
@@ -388,18 +282,32 @@ for i in range(20):
     optimizer_lbfgs.Optimize(PSF_2, [toy.wind_dir, toy.wind_speed], 3)
     optimizer_lbfgs.Optimize(PSF_2, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
-PSF_3 = toy.PSD2PSF()
+PSF_3 = toy()
 print('\nStrehl ratio: ', SR(PSF_3, PSF_DL))
 
-draw_result(PSF_2, PSF_3)
+draw_PSF_stack(PSF_2, PSF_3)
 #%%
+from skimage.filters import gaussian
 
-PSF_refs   = [ x for x in torch.split(PSF_2[:,0,...].squeeze().cpu(), 1, dim=0) ]
-PSF_estims = [ x for x in torch.split(PSF_3[:,0,...].squeeze().cpu(), 1, dim=0) ]
+a = PSF_2.mean(dim=0)[0,...].cpu().numpy()
+a /= a.sum()
+# a /= a.max()
 
-plot_radial_profiles(PSF_refs, PSF_estims, 'TipToy', title='IRDIS PSF', dpi=200)
+b = PSF_0.mean(dim=0)[0,...].cpu().numpy()
+# b /= b.sum()
+# b /= b.max()
 
-# for i in range(PSF_0.shape[0]): plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=200)
+c = PSF_3.mean(dim=0)[0,...].detach().cpu().numpy()
+# c /= c.sum()
+# c /= c.max()
+
+colors = [['tab:blue', 'tab:red'],
+          ['tab:blue', 'tab:orange'],
+          ['tab:red',  'tab:orange']]
+
+plot_radial_profile([b, a], ['Data',  'OOPAO'],  title=str(sample_ids[0]), dpi=200, colors=colors[0])
+plot_radial_profile([b, c], ['Data',  'TipTop'], title=str(sample_ids[0]), dpi=200, colors=colors[1])
+plot_radial_profile([a, c], ['OOPAO', 'TipTop'], title=str(sample_ids[0]), dpi=200, colors=colors[2])
 
 
 #%%
@@ -422,7 +330,7 @@ x1 = reshaper.unflatten(x0)
 #%%
 def run(x):
     p = reshaper.unflatten(x)
-    PSF_1 = toy.PSD2PSF(*p)
+    PSF_1 = toy(*p)
     # return loss_fn(PSF_1, PSF_0)
     return (PSF_1-PSF_0).detach().cpu().numpy().reshape(-1)
 
@@ -433,10 +341,10 @@ result = least_squares(run, x0, method='trf', ftol=1e-9, xtol=1e-9, gtol=1e-9, m
 #%%
 x1 = reshaper.unflatten(result.x)
 
-PSF_1 = toy.PSD2PSF(*x1)
+PSF_1 = toy(*x1)
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 
-draw_result(PSF_0, PSF_1)
+draw_PSF_stack(PSF_0, PSF_1)
 
 #%%
 # def rosen(x):
@@ -758,7 +666,7 @@ def PSFcomparator(dataset):
     Jxy = torch.tensor([2.0]*N_src,  device=toy.device)
 
     parameters = [r0, L0, F, dx, dy, bg, dn, Jx, Jy, Jxy]
-    PSFs_3 = toy.PSD2PSF(*parameters)
+    PSFs_3 = toy(*parameters)
 
     # Cross-check inputs from the fitted dataset
     PSFs_1 = torch.tensor([sample['fitted']['Img. fit'] for sample in dataset],  device=toy.device)
