@@ -29,9 +29,9 @@ psf_df = psf_df[psf_df['Num. DITs'] < 50]
 
 good_ids = psf_df.index.values.tolist()
 
-# regime = '1P21I'
+regime = '1P21I'
 # regime = '1P2NI'
-regime = 'NP2NI'
+# regime = 'NP2NI'
 norm_regime = 'sum'
 
 def gauss_fitter(PSF_stack):
@@ -48,7 +48,7 @@ to_store = lambda x: x.detach().cpu().numpy()
 
 def load_and_fit_sample(id):
     sample_ids = [id]
-    data_samples, PSF_0, bg, norms, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device)
+    PSF_0, bg, norms, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
 
     toy = TipToy(merged_config, norm_regime, device)
 
@@ -74,7 +74,7 @@ def load_and_fit_sample(id):
             window_loss(toy.Jx, 50).sum() * 0.5 + \
             window_loss(toy.Jy, 50).sum() * 0.5 + \
             window_loss(toy.Jxy, 400).sum() * 0.5 + \
-            window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum()
+            window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
         return z
 
     optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)

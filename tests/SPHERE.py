@@ -12,9 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
 
-from tools.utils import OptimizeLBFGS
-from tools.utils import plot_radial_profile, plot_radial_profiles, SR
-from tools.utils import ParameterReshaper, draw_PSF_stack
+from tools.utils import OptimizeLBFGS, ParameterReshaper, plot_radial_profiles, SR, draw_PSF_stack
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
 
 from globals import SPHERE_DATA_FOLDER, device
@@ -25,11 +23,11 @@ with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['invalid'] == False]
-psf_df = psf_df[psf_df['Num. DITs'] < 50]
-# psf_df = psf_df[psf_df['Class A'] == True]
+psf_df = psf_df[psf_df['mag R'] < 7]
+# psf_df = psf_df[psf_df['Num. DITs'] < 50]
+psf_df = psf_df[psf_df['Class A'] == True]
 # psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
-# psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
-
+psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
 good_ids = psf_df.index.values.tolist()
 
 
@@ -40,23 +38,20 @@ good_ids = psf_df.index.values.tolist()
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
 # sample_ids = [578]
 # sample_ids = [576]
-# sample_ids = [992]
-sample_ids = [456]
+sample_ids = [992]
+# sample_ids = [456]
 # sample_ids = [465]
 # sample_ids = [1393]
 
-# regime = '1P21I'
 # regime = '1P2NI'
-regime = 'NP2NI'
+regime = '1P21I'
+# regime = 'NP2NI'
 norm_regime = 'sum'
 
-data_samples, PSF_0, bg, norms, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device)
+PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
 
 
-
-#%% Initialize model
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
-
+#% Initialize model
 toy = TipToy(merged_config, norm_regime, device)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
@@ -67,23 +62,13 @@ _ = toy({
     'bg':  bg.to(device)
 })
 
-
-#%%
 PSF_1 = toy()
 #print(toy.EndTimer())
-
 PSF_DL = toy.DLPSF()
-
-
 # draw_PSF_stack(PSF_0, PSF_1, average=True)
 draw_PSF_stack(PSF_0, PSF_1, average=False)
 
-
 #%% PSF fitting (no early-stopping)
-
-# toy = toy.to(torch.device('cpu'))
-# PSF_0 = PSF_0.cpu()
-
 loss = nn.L1Loss(reduction='sum')
 
 # Confines a value between 0 and the specified value
@@ -97,12 +82,12 @@ def loss_fn(a,b):
         window_loss(toy.Jx, 50).sum() * 0.5 + \
         window_loss(toy.Jy, 50).sum() * 0.5 + \
         window_loss(toy.Jxy, 400).sum() * 0.5 + \
-        window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum()
+        window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
     return z
 
 optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
 
-for i in range(20):
+for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
     optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
@@ -111,35 +96,15 @@ for i in range(20):
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
 PSF_1 = toy()
+
+#%%
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
+draw_PSF_stack(PSF_0, PSF_1, average=True)
 
-draw_PSF_stack(PSF_0, PSF_1)
-
-#%%
-PSF_refs   = [ x for x in torch.split(PSF_0[:,0,...].squeeze().cpu(), 1, dim=0) ]
-PSF_estims = [ x for x in torch.split(PSF_1[:,0,...].squeeze().cpu(), 1, dim=0) ]
-
-plot_radial_profiles(PSF_refs, PSF_estims, 'TipToy', title='IRDIS PSF', dpi=200)
-# # for i in range(PSF_0.shape[0]): plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=200)
-
-#%%
-b = PSF_0.mean(dim=0)[0,...].cpu().numpy()
-# b /= b.sum()
-
-c = PSF_1.mean(dim=0)[0,...].detach().cpu().numpy()
-# c /= c.sum()
-
-
-colors = [['tab:blue', 'tab:red'],
-          ['tab:blue', 'tab:orange'],
-          ['tab:red',  'tab:orange']]
-
-plot_radial_profile([b, c], ['Data',  'TipTop'], title=str(sample_ids[0]), dpi=200, colors=colors[1])
+destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
+plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
 
 #%% ================================= PSFAO fitting =================================
-
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
-
 toy = TipToy(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
@@ -150,44 +115,34 @@ _ = toy({
     'bg':  bg.to(device)
 })
 
+#%%
+loss_fn = nn.L1Loss(reduction='sum')
 
+optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
+
+for i in range(20):
+    optimizer_lbfgs.Optimize(PSF_0, [toy.F, toy.dx, toy.dy], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.b], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.amp, toy.alpha, toy.beta], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.ratio, toy.theta], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
+
+PSF_1 = toy()
+
+#%%
+print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
+draw_PSF_stack(PSF_0, PSF_1, average=True)
+
+plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
 
 #%% ================================= Read OOPAO sample =================================
-def SynthsByIds(target_id):
-    import os
-    import re
 
-    directory = SPHERE_DATA_FOLDER+'IRDIS_synthetic/'
-    target_id = str(target_id)
+PSF_2, bg, norms, synth_samples, synth_config = SPHERE_preprocess(sample_ids, regime, norm_regime, synth=True)
 
-    for filename in os.listdir(directory):
-        match = re.match(r'(\d+)_synth.pickle', filename)
-        if match and match.group(1) == target_id:
-            # Load pickle file
-            with open(directory + filename, 'rb') as f:
-                data = pickle.load(f)
-                return data
-    return None
-
-
-data_synth = SamplesFromDITs(SynthsByIds(sample_ids[0]))
-
-PSF_2, bg = GenerateImages(data_synth)
-bg *= 0
-
-# Manage config files
-path_ini = '../data/parameter_files/irdis.ini'
-
-config_file = ParameterParser(path_ini).params
-
-config_manager = ConfigManager(GetSPHEREsynth())
-synth_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_synth])
-config_manager.Convert(synth_config, framework='pytorch', device=device)
-
-buf = synth_config['sources_science']['Wavelength']
-buf = torch.vstack([buf['central L'] * 1e-9, buf['central R'] * 1e-9]).T
-synth_config['sources_science']['Wavelength'] = buf
-
+# buf = synth_config['sources_science']['Wavelength']
+# buf = torch.vstack([buf['central L'] * 1e-9, buf['central R'] * 1e-9]).T
+# synth_config['sources_science']['Wavelength'] = buf
 
 #%% Initialize model
 toy = TipToy(synth_config, norm_regime, device)
@@ -200,32 +155,33 @@ _ = toy({
     'bg':  bg.to(device)
 })
 
-
-#%%
 PSF_3 = toy()
 PSF_DL = toy.DLPSF()
 
+#%%
 
-# def plt2PIL(fig=None):
-#     from PIL import Image
-#     # Render the figure on a canvas
-#     if fig is None:
-#         # fig = plt.gcf()
-#         canvas = plt.get_current_fig_manager().canvas
-#     else:
-#         canvas = fig.canvas
+'''
+def plt2PIL(fig=None):
+    from PIL import Image
+    # Render the figure on a canvas
+    if fig is None:
+        # fig = plt.gcf()
+        canvas = plt.get_current_fig_manager().canvas
+    else:
+        canvas = fig.canvas
 
-#     canvas.draw()
-#     rgba = canvas.buffer_rgba()
+    canvas.draw()
+    rgba = canvas.buffer_rgba()
 
-#     # Create a numpy array from the bytes
-#     buffer = np.array(rgba).tobytes()
-#     # Create a PIL image from the bytes
-#     pil_image = Image.frombuffer('RGBA', (canvas.get_width_height()), buffer, 'raw', 'RGBA', 0, 1)
+    # Create a numpy array from the bytes
+    buffer = np.array(rgba).tobytes()
+    # Create a PIL image from the bytes
+    pil_image = Image.frombuffer('RGBA', (canvas.get_width_height()), buffer, 'raw', 'RGBA', 0, 1)
 
-#     return pil_image
+    return pil_image
+'''
 
-
+'''
 def draw_result_PIL(PSF_in, PSF_out):
     ROI_size = 128
     ROI = slice(PSF_in.shape[-2]//2-ROI_size//2, PSF_in.shape[-1]//2+ROI_size//2)
@@ -255,7 +211,8 @@ def draw_result_PIL(PSF_in, PSF_out):
 
 
 draw_result_PIL(PSF_2, PSF_3)
-#%%
+'''
+#%
 loss = nn.L1Loss(reduction='sum')
 
 # Confines a value between 0 and the specified value
@@ -287,27 +244,17 @@ print('\nStrehl ratio: ', SR(PSF_3, PSF_DL))
 
 draw_PSF_stack(PSF_2, PSF_3)
 #%%
-from skimage.filters import gaussian
-
-a = PSF_2.mean(dim=0)[0,...].cpu().numpy()
-a /= a.sum()
-# a /= a.max()
-
-b = PSF_0.mean(dim=0)[0,...].cpu().numpy()
-# b /= b.sum()
-# b /= b.max()
-
-c = PSF_3.mean(dim=0)[0,...].detach().cpu().numpy()
-# c /= c.sum()
-# c /= c.max()
 
 colors = [['tab:blue', 'tab:red'],
           ['tab:blue', 'tab:orange'],
           ['tab:red',  'tab:orange']]
 
-plot_radial_profile([b, a], ['Data',  'OOPAO'],  title=str(sample_ids[0]), dpi=200, colors=colors[0])
-plot_radial_profile([b, c], ['Data',  'TipTop'], title=str(sample_ids[0]), dpi=200, colors=colors[1])
-plot_radial_profile([a, c], ['OOPAO', 'TipTop'], title=str(sample_ids[0]), dpi=200, colors=colors[2])
+
+print('\nStrehl ratio: ', SR(PSF_3, PSF_DL))
+draw_PSF_stack(PSF_2, PSF_3, average=True)
+
+plot_radial_profiles(destack(PSF_2), destack(PSF_3), 'OOPAO', 'TipToy', title='IRDIS PSF', dpi=200, colors = colors[2])
+# plot_radial_profiles(destack(PSF_0), destack(PSF_2), 'Data',  'OOPAO', title='IRDIS PSF', dpi=200, colors = colors[0])
 
 
 #%%

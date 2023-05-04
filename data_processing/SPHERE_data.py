@@ -212,8 +212,7 @@ class SPHERE_loader():
                 
             return id_start, id_end
 
-        # Initialize the recepies to match the entries with the telemetry
-        # sparta_IR_DTTS
+        # Initialize the match tables for entries <-> telemetry
         entries_DTTS = [('n_ADU', 'flux_IRLoop_ADU')]
 
         # sparta_visible_WFS
@@ -334,13 +333,10 @@ class SPHERE_loader():
         except:
             cube_array = np.nan
 
-        #  Get WFS spectrum
-        if SPARTA_data['WFS filter'] == 'OPEN':
-            SPARTA_data['WFS wavelength'] = 658 #[nm]
-        elif SPARTA_data['WFS filter'] == 'LP_780':
-            SPARTA_data['WFS wavelength'] = 780 #[nm]
-        else:
-            SPARTA_data['WFS wavelength'] = np.nan
+        #  Get the WFSing spectrum
+        if    SPARTA_data['WFS filter'] == 'OPEN':   SPARTA_data['WFS wavelength'] = 658 #[nm]
+        elif  SPARTA_data['WFS filter'] == 'LP_780': SPARTA_data['WFS wavelength'] = 780 #[nm]
+        else: SPARTA_data['WFS wavelength'] = np.nan
 
         return SPARTA_data, MASSDIMM_data, ECMWF_data, cube_array
 

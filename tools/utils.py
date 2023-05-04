@@ -392,22 +392,34 @@ def register_hooks(var):
     return make_dot
 
 
-def BackgroundEstimate(im, radius=90):
-    nPix = im.shape[-1]
-    buf_x, buf_y = np.meshgrid(
-        np.linspace(-nPix//2, nPix//2, nPix),
-        np.linspace(-nPix//2, nPix//2, nPix),
-        indexing = 'ij'
-    )
-    mask_noise = buf_x**2 + buf_y**2
-    mask_noise[mask_noise < radius**2] = 0
-    mask_noise[mask_noise > 0.0] = 1
-    if type(im) == torch.Tensor:
-        return torch.median(torch.tensor(im[mask_noise>0.])).item()
-    else:
-        return np.median(im[mask_noise>0.])
+def SPHERE_PSF_spiders_mask(crop, thick=9):
+    def draw_line(start_point, end_point, thickness=10):
+        from PIL import Image, ImageDraw
+        image = Image.new("RGB", (256,256), (255,255,255))
+        draw = ImageDraw.Draw(image)
+        draw.line([start_point, end_point], fill=(0,0,0), width=thickness)
+        return np.round(np.array(image).mean(axis=2) / 256).astype('uint')
+
+    w, h = 256, 256
+    dw, dh = 7, 7
+    line_mask = draw_line((w, h-dh), (w//2+dw, h//2), thick) * \
+                draw_line((0, h-dh), (w//2-dw, h//2), thick) * \
+                draw_line((w, dh),   (w//2+dw, h//2), thick) * \
+                draw_line((0, dh),   (w//2-dw, h//2), thick)
+    
+    crop = slice(line_mask.shape[0]//2-crop//2, line_mask.shape[0]//2+crop//2)
+    return line_mask[crop,crop]
 
 
+# def BackgroundEstimate(im, radius=90, spiders=1):
+#     mask_noise = (1-mask_circle(im.shape[-1], radius, center=(0,0), centered=True)) * spiders
+#     if type(im) == torch.Tensor:
+#         return torch.median(im[mask_noise>0]).item()
+#     else:
+#         return np.median(im[mask_noise>0.])
+
+
+'''
 def BackgroundEstimate2(im, radius=90):
     nPix = im.shape[-1]
     buf_x, buf_y = np.meshgrid(
@@ -431,6 +443,7 @@ def BackgroundEstimate2(im, radius=90):
         median_neg = np.median(im[mask_neg>0.])
         median_noise = 0.5*(median_pos+median_neg)
     return median_noise
+    '''
 
 
 def Center(im, centered=True):
@@ -595,83 +608,7 @@ def FitGauss2D(PSF):
 
     return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
 
-'''
-# Function to draw the radial profile of a PSF or of a PSF stack
-def radial_profile(data, center=None):
-    # Enable work with PyTorch tensors as well
-    if type(data) is torch.Tensor:
-        PSF_data = data.detach().cpu().numpy()
-    else:
-        PSF_data = data
 
-    PSF_center = center
-    if center is not None:
-        if type(center) is torch.Tensor: PSF_center = center.detach().cpu().numpy()
-
-    def radial_profile_individual(data, center=None):
-        if center is None:
-            center = (data.shape[0]//2, data.shape[1]//2)
-        y, x = np.indices((data.shape))
-        r = np.sqrt( (x-center[0])**2 + (y-center[1])**2 )
-        r = r.astype('int')
-
-        tbin = np.bincount(r.ravel(), data.ravel())
-        nr = np.bincount(r.ravel())
-        radialprofile = tbin / nr
-        return radialprofile[0:data.shape[0]//2]
-
-    if len(PSF_data.shape) == 2:
-        if type(data) is torch.Tensor:
-            return torch.Tensor(radial_profile_individual(PSF_data, PSF_center)).to(data.device)
-        else:
-            return radial_profile_individual(PSF_data, PSF_center)
-
-    elif len(PSF_data.shape) == 3:
-        profiles = []
-        for i in range(PSF_data.shape[0]):
-            if PSF_center is None:
-                profiles.append( radial_profile_individual(PSF_data[i,:,:]) )
-            else:
-                profiles.append( radial_profile_individual(PSF_data[i,:,:], PSF_center) )
-    
-        if type(data) is torch.Tensor:
-            return torch.Tensor(np.array(profiles)).to(data.device)
-        else:
-            return np.array(profiles)
-    else:
-        raise ValueError('PSF stack of wrong dimensionality is passed!')
-
-
-def plot_radial_profile(PSF_ref, PSF_estim, model_label, title='', dpi=300, scale='log'):
-    center = Center(PSF_ref, centered=False)
-
-    if type(PSF_ref)   is torch.Tensor: PSF_ref   = PSF_ref.detach().cpu().numpy()
-    if type(PSF_estim) is torch.Tensor: PSF_estim = PSF_estim.detach().cpu().numpy()
-
-    profile_0 = radial_profile(PSF_ref,   center)[:32+1]
-    profile_1 = radial_profile(PSF_estim, center)[:32+1]
-    profile_diff = np.abs(profile_1-profile_0) / profile_0.max() * 100 #[%]
-
-    fig = plt.figure(figsize=(6,4), dpi=dpi)
-    ax = fig.add_subplot(111)
-    ax.set_title(title)
-    ax.set_xlabel('Pixels')
-    ax.set_ylabel('Relative intensity')
-    if scale == 'log': ax.set_yscale('log')
-    ax.set_xlim([0, len(profile_1)-1])
-    ax.grid()
-    ax2 = ax.twinx()
-    ax2.set_ylim([0, profile_diff.max()*1.5])
-    ax2.set_ylabel('Difference [%]')
-    
-    l3 = ax2.plot(profile_diff, label='Difference', color='green', linewidth=1.5, linestyle='--')
-    l2 = ax.plot(profile_0, label='Data', linewidth=2)
-    l1 = ax.plot(profile_1, label=model_label, linewidth=2)
-
-    ls = l1+l2+l3
-    labs = [l.get_label() for l in ls]
-    ax2.legend(ls, labs, loc=0)
-'''
 
 # Function to calculate the radial profile of a PSF or of a PSF stack
 def radial_profile(data, center=None):
@@ -691,53 +628,19 @@ def radial_profile(data, center=None):
 
     if len(data.shape) > 2:
         raise ValueError('PSF stack of wrong dimensionality is passed!')
-
     return calc_profile(t2np(data), t2np(center))
 
 
-def plot_radial_profile(PSFs, labels, title='', dpi=300, scale='log', colors=None):
-    from tools.utils import Center
-    # center_0 = Center(PSF_0, centered=False)
-    # center_1 = Center(PSF_0, centered=False)
-
-    if colors is None:
-        colors = ['tab:blue', 'tab:orange']
-
-    profile_0 = radial_profile(PSFs[0])[:32+1]
-    profile_1 = radial_profile(PSFs[1])[:32+1]
-    profile_diff = np.abs(profile_1-profile_0) / profile_0.max() * 100 #[%]
-
-    fig = plt.figure(figsize=(6,4), dpi=dpi)
-    ax = fig.add_subplot(111)
-    ax.set_title(title)
-    ax.set_xlabel('Pixels')
-    ax.set_ylabel('Relative intensity')
-    if scale == 'log': ax.set_yscale('log')
-    ax.set_xlim([0, len(profile_1)-1])
-    ax.grid()
-    ax2 = ax.twinx()
-    ax2.set_ylim([0, profile_diff.max()*1.5])
-    ax2.set_ylabel('Difference [%]')
-    
-    l3 = ax2.plot(profile_diff, label='Difference', color='green', linewidth=1.5, linestyle='--')
-    l2 = ax.plot(profile_0, label=labels[0], linewidth=2, color=colors[0])
-    l1 = ax.plot(profile_1, label=labels[1], linewidth=2, color=colors[1])
-
-    ls = l1+l2+l3
-    labs = [l.get_label() for l in ls]
-    ax2.legend(ls, labs, loc=0)
-
-
-def plot_radial_profiles(PSF_refs, PSF_estims, model_label, title='', dpi=300, scale='log'):
+def plot_radial_profiles(PSF_refs, PSF_estims, label_refs, label_estim, title='', dpi=300, scale='log', colors=['tab:blue', 'tab:orange']):
     from tools.utils import radial_profile
-    if not isinstance(PSF_refs, list):   PSF_refs   = [PSF_refs]
-    if not isinstance(PSF_estims, list): PSF_estims = [PSF_estims]
+    if not isinstance(PSF_refs, list):   PSF_refs   = [PSF_refs.squeeze()]
+    if not isinstance(PSF_estims, list): PSF_estims = [PSF_estims.squeeze()]
 
     n_profiles = len(PSF_refs)
 
     radial_profiles_0 = []
     radial_profiles_1 = []
-    diff_profile = []
+    diff_profile      = []
 
     for i in range(n_profiles):
         if type(PSF_refs[i]) is torch.Tensor:
@@ -750,15 +653,16 @@ def plot_radial_profiles(PSF_refs, PSF_estims, model_label, title='', dpi=300, s
 
         radial_profiles_0.append(profile_0)
         radial_profiles_1.append(profile_1)
-        diff_profile.append(np.abs(profile_1 - profile_0) / profile_0.max() * 100)  # [%]
+
+        diff_profile.append(np.abs(profile_1-profile_0) / profile_0.max() * 100)  # [%]
 
     mean_profile_0 = np.mean(radial_profiles_0, axis=0)
-    std_profile_0 = np.std(radial_profiles_0, axis=0)
     mean_profile_1 = np.mean(radial_profiles_1, axis=0)
-    std_profile_1 = np.std(radial_profiles_1, axis=0)
+    std_profile_0  = np.std (radial_profiles_0, axis=0)
+    std_profile_1  = np.std (radial_profiles_1, axis=0)
 
     mean_profile_diff = np.mean(diff_profile, axis=0)
-    std_profile_diff = np.std(diff_profile, axis=0)
+    std_profile_diff  = np.std (diff_profile, axis=0)
 
     fig = plt.figure(figsize=(6, 4), dpi=dpi)
     ax = fig.add_subplot(111)
@@ -772,12 +676,12 @@ def plot_radial_profiles(PSF_refs, PSF_estims, model_label, title='', dpi=300, s
     ax2.set_ylim([0, mean_profile_diff.max() * 1.5])
     ax2.set_ylabel('Difference [%]')
 
-    l1 = ax.plot(mean_profile_1, label=model_label, linewidth=2)
-    l2 = ax.plot(mean_profile_0, label='Data', linewidth=2)
+    l1 = ax.plot(mean_profile_0, label=label_refs,  linewidth=2, color=colors[0])
+    l2 = ax.plot(mean_profile_1, label=label_estim, linewidth=2, color=colors[1])
     l3 = ax2.plot(mean_profile_diff, label='Difference', color='green', linewidth=1.5, linestyle='--')
 
-    ax.fill_between(range(len(mean_profile_1)), mean_profile_1 - std_profile_1, mean_profile_1 + std_profile_1, alpha=0.2)
-    ax.fill_between(range(len(mean_profile_0)), mean_profile_0 - std_profile_0, mean_profile_0 + std_profile_0, alpha=0.2)
+    ax.fill_between(range(len(mean_profile_0)), mean_profile_0-std_profile_0, mean_profile_0+std_profile_0, alpha=0.2, color=colors[0])
+    ax.fill_between(range(len(mean_profile_1)), mean_profile_1-std_profile_1, mean_profile_1+std_profile_1, alpha=0.2, color=colors[1])
     ax2.fill_between(range(len(mean_profile_diff)), mean_profile_diff - std_profile_diff, mean_profile_diff + std_profile_diff, alpha=0.2, color='green')
 
     ls = l1 + l2 + l3
@@ -785,7 +689,7 @@ def plot_radial_profiles(PSF_refs, PSF_estims, model_label, title='', dpi=300, s
     ax2.legend(ls, labs, loc=0)
 
 
-def plot_std(x,y, label, color, style):
+def plot_std(x,y, label, color, style): #TODO: deprecated
     y_m = y.mean(axis=0)
     y_s = y.std(axis=0)
     lower_bound = y_m-y_s
@@ -1000,3 +904,5 @@ def VLTpupilArea(instrument='SPHERE'): # [m2]
     relative_area = pupil.sum() / (np.pi*(pupil.shape[0]//2-6.5)**2)
     true_area = np.pi * 8**2 * relative_area
     return true_area
+
+# %%
