@@ -411,41 +411,6 @@ def SPHERE_PSF_spiders_mask(crop, thick=9):
     return line_mask[crop,crop]
 
 
-# def BackgroundEstimate(im, radius=90, spiders=1):
-#     mask_noise = (1-mask_circle(im.shape[-1], radius, center=(0,0), centered=True)) * spiders
-#     if type(im) == torch.Tensor:
-#         return torch.median(im[mask_noise>0]).item()
-#     else:
-#         return np.median(im[mask_noise>0.])
-
-
-'''
-def BackgroundEstimate2(im, radius=90):
-    nPix = im.shape[-1]
-    buf_x, buf_y = np.meshgrid(
-        np.linspace(-nPix//2, nPix//2, nPix),
-        np.linspace(-nPix//2, nPix//2, nPix),
-        indexing = 'ij'
-    )
-    mask_noise = buf_x**2 + buf_y**2
-    mask_noise[mask_noise < radius**2] = 0
-    mask_noise[mask_noise > 0.0] = 1
-    mask_pos = np.copy(mask_noise)
-    mask_pos[im*mask_noise < 0.0] = 0
-    mask_neg = np.copy(mask_noise)
-    mask_neg[im*mask_noise > 0.0] = 0
-    if type(im) == torch.Tensor:
-        median_pos = torch.median(torch.tensor(im[mask_pos>0.])).item()
-        median_neg = torch.median(torch.tensor(im[mask_neg>0.])).item()
-        median_noise = 0.5*(median_pos+median_neg)
-    else:
-        median_pos = np.median(im[mask_pos>0.])
-        median_neg = np.median(im[mask_neg>0.])
-        median_noise = 0.5*(median_pos+median_neg)
-    return median_noise
-    '''
-
-
 def Center(im, centered=True):
     if type(im) == torch.Tensor: im = im.detach().cpu().numpy()
     im = im.squeeze()

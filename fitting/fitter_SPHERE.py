@@ -2,6 +2,7 @@
 # %reload_ext autoreload
 # %autoreload 2
 
+import os
 import sys
 sys.path.insert(0, '..')
 
@@ -22,13 +23,17 @@ with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['invalid'] == False]
-psf_df = psf_df[psf_df['Num. DITs'] < 50]
+# psf_df = psf_df[psf_df['Num. DITs'] < 50]
 # psf_df = psf_df[psf_df['Class A'] == True]
 # psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
 # psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
 
 good_ids = psf_df.index.values.tolist()
 
+ids_fitted = [ int(file.split('.')[0])  for file in os.listdir(SPHERE_FITTING_FOLDER) ]
+good_ids = list(set(good_ids) - set(ids_fitted))
+
+#%%
 regime = '1P21I'
 # regime = '1P2NI'
 # regime = 'NP2NI'
@@ -119,8 +124,6 @@ for id in good_ids:
         save_data = load_and_fit_sample(id)
         with open(filename, 'wb') as handle:
             pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-        save_data = load_and_fit_sample(456)
 
     except Exception as e:
         print(e)
