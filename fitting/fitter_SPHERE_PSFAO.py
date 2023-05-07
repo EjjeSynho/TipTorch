@@ -55,41 +55,29 @@ def load_and_fit_sample(id):
     sample_ids = [id]
     PSF_0, bg, norms, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
 
-    toy = TipToy(merged_config, norm_regime, device)
+    toy = TipToy(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 
-    toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
+    toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
     _ = toy({
-        'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
-        'Jx':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
-        'Jy':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
+        'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+        'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+        'Jy':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
         'bg':  bg.to(device)
     })
 
     PSF_1 = toy()
     PSF_DL = toy.DLPSF()
 
-    loss = nn.L1Loss(reduction='sum')
-
-    window_loss = lambda x, x_max: \
-        torch.gt(x,0)*(0.01/x)**2 + torch.lt(x,0)*100 + 100*torch.gt(x,x_max)*(x-x_max)**2
-
-    def loss_fn(a,b):
-        z = loss(a,b) + \
-            window_loss(toy.r0, 0.5).sum() * 5.0 + \
-            window_loss(toy.Jx, 50).sum() * 0.5 + \
-            window_loss(toy.Jy, 50).sum() * 0.5 + \
-            window_loss(toy.Jxy, 400).sum() * 0.5 + \
-            window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
-        return z
+    loss_fn = nn.L1Loss(reduction='sum')
 
     optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
 
     for _ in range(20):
-        optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.F, toy.dx, toy.dy], 2)
         optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 5)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.b], 2)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.amp, toy.alpha, toy.beta], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.ratio, toy.theta], 3)
         optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
     PSF_1 = toy()
@@ -97,16 +85,19 @@ def load_and_fit_sample(id):
     save_data = {
         'config': merged_config,
         'F':   to_store(toy.F),
+        'b':   to_store(toy.b),
         'dx':  to_store(toy.dx),
         'dy':  to_store(toy.dy),
         'r0':  to_store(toy.r0),
-        'n':   to_store(toy.NoiseVariance(toy.r0.abs())),
-        'dn':  to_store(toy.dn),
-        'bg':  to_store(bg),
+        'amp':  to_store(toy.amp),
+        'beta':  to_store(toy.beta),
+        'alpha':  to_store(toy.alpha),
+        'theta':  to_store(toy.theta),
+        'ratio':  to_store(toy.ratio),
+        'bg':  to_store(toy.bg),
         'Jx':  to_store(toy.Jx),
         'Jy':  to_store(toy.Jy),
         'Jxy': to_store(toy.Jxy),
-        'Nph WFS': to_store(toy.WFS_Nph),
         'SR data': SR(PSF_0, PSF_DL),
         'SR fit':  SR(PSF_1, PSF_DL),
         'FWHM fit':  gauss_fitter(PSF_0), 

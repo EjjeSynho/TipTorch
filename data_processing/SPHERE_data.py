@@ -573,9 +573,8 @@ class SPHERE_loader():
 #%%
 
 # Load the data
-loader = SPHERE_loader(path_dtts)
-
 def plot_sample(id):
+    loader = SPHERE_loader(path_dtts)
     samp = loader.load(files_L[id], files_R[id])
 
     buf = samp['spectra'].copy()
@@ -597,7 +596,6 @@ def plot_sample(id):
     fig.tight_layout()
     plt.show()
 
-#%%
 # plot_sample(1000)
 
 #%%

@@ -71,33 +71,58 @@ class ConfigManager():
         return reduce(operator.getitem, items, root)
 
 
+    def process_value(self, x):
+        if x is None or isinstance(x, str) or isinstance(x, int):
+            return x
+        
+        elif isinstance(x, (list, tuple)):
+            if hasattr(x, '__len__') and len(x) == 1:
+                return self.process_value(x[0])
+            else:
+                return x
+            
+        elif isinstance(x, (torch.Tensor, np.ndarray)):
+            if x.ndim == 0:
+                return float(x.item())
+            else:
+                x = x.squeeze()
+                if x.ndim == 0:
+                    return float(x.item())
+                else:
+                    return x
+        else:
+            return float(x)
+
+
+    def process_dictionary(self, d):
+        """Collapse all singleton dimensions to ensure that later multiplification of dimensions will go fine"""
+        for key, value in d.items():
+            if isinstance(value, dict):
+                d[key] = self.process_dictionary(value)
+            else:
+                d[key] = self.process_value(value)
+        return d
+
+
     def is_valid(self, value):
         """Checks if value contains Nones"""
         not_None = lambda x: False if x is None else True
+        value = self.process_value(value)
         if hasattr(value, '__len__'):
             return np.all( np.array([self.is_valid(x) for x in value]) )
-        else: return not_None(value)
-
-    # Collapse all singleton dimensions to ensure that later multiplification of dimensions will go fine
-    def squeeze_values(self, config):
-        zero_d = lambda x: x.item() if x.ndim == 0 else x.tolist()
-        for entry in config:
-            value = config[entry]
-            if isinstance(value, dict):
-                self.squeeze_values(value)
-            elif isinstance(value, str):
-                pass
-            else:
-                value = zero_d( np.squeeze(np.array(value)) )
-            config[entry] = value
+        else:
+            return not_None(value)
 
 
     def Modify(self, config, modifier):
         buf_config = deepcopy(config)
         buf_modifier = deepcopy(modifier)
 
-        self.squeeze_values(buf_config)
-        self.squeeze_values(buf_modifier)
+        # self.squeeze_values(buf_config)
+        # self.squeeze_values(buf_modifier)
+        self.process_dictionary(buf_config)
+        self.process_dictionary(buf_modifier)
+
 
         for config_entry, modifier_entry, modifier_func in self.match_table:
             if modifier_func is None:
@@ -132,7 +157,7 @@ class ConfigManager():
                 value_to_set = [self.get_value(config, entry) for config in configs]
             self.set_value(new_config, entry, value_to_set)
 
-        new_config['NumberSources'] = len(configs)
+        new_config['NumberSources'] = int(len(configs))
         return new_config
 
 
@@ -141,9 +166,9 @@ class ConfigManager():
             if device is None: device = torch.device('cpu')
             convert_value = lambda x: torch.tensor(x, device=device).float()
         elif framework == 'numpy':
-            convert_value = lambda x: np.array(x).astype(np.float32)
+            convert_value = lambda x: np.array(x.cpu()) if isinstance(x, torch.Tensor) else np.array(x)
         elif framework == 'cupy':
-            convert_value = lambda x: cp.array(x, dtype=cp.float32)
+            convert_value = lambda x: cp.array(x.cpu()) if isinstance(x, torch.Tensor) else cp.array(x)
         else:
             raise NotImplementedError('Unknown framework name \"'+framework+'\"!')
 

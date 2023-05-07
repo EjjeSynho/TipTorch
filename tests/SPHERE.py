@@ -30,10 +30,7 @@ psf_df = psf_df[psf_df['Class A'] == True]
 psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
 good_ids = psf_df.index.values.tolist()
 
-
 #%%
-# dir_save_gif = 'C:/Users/akuznets/Projects/TipToy/data/temp/' + str(id) + '.gif'
-# save_GIF(A, duration=1e2, scale=4, path=dir_save_gif, colormap=cm.hot)
 
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
 # sample_ids = [578]
@@ -43,15 +40,16 @@ sample_ids = [992]
 # sample_ids = [465]
 # sample_ids = [1393]
 
-# regime = '1P2NI'
-regime = '1P21I'
+regime = '1P2NI'
+# regime = '1P21I'
 # regime = 'NP2NI'
 norm_regime = 'sum'
 
 PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
 
+bg *= 0
 
-#% Initialize model
+#%% Initialize model
 toy = TipToy(merged_config, norm_regime, device)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
@@ -82,11 +80,12 @@ def loss_fn(a,b):
         window_loss(toy.Jx, 50).sum() * 0.5 + \
         window_loss(toy.Jy, 50).sum() * 0.5 + \
         window_loss(toy.Jxy, 400).sum() * 0.5 + \
-        window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
+        window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum() * 0.5
     return z
+        # window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
 
 optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
-
+ 
 for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
@@ -96,6 +95,83 @@ for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
 PSF_1 = toy()
+
+#%%
+# bounds = {
+#     'r0' :         (0.05, 0.5),
+#     'bg' :         (-1e-5, 1e-5),
+#     'dn' :         (0, 0.05),
+#     'Jx' :         (-20, 20),
+#     'Jy' :         (-20, 20),
+#     'Jxy' :        (-200, 200),
+#     'dx' :         (-1.5, 1.5),
+#     'dy' :         (-1.5, 1.5),
+#     'wind_dir' :   (0, 360),
+#     'wind_speed' : (0, 35)
+# }
+
+bounds_dict = {
+    toy.r0 :         (0.05, 0.5),
+    toy.bg :         (-1e-5, 1e-5),
+    toy.dn :         (0, 0.05),
+    toy.Jx :         (0.1, 20),
+    toy.Jy :         (0.1, 20),
+    toy.Jxy :        (-200, 200),
+    toy.dx :         (-1.5, 1.5),
+    toy.dy :         (-1.5, 1.5),
+    toy.wind_dir :   (0, 360),
+    toy.wind_speed : (0, 35)
+}
+
+bounds = [bounds_dict[param] for param in toy.parameters()]
+
+from torch import optim
+
+loss = nn.L1Loss(reduction='sum')
+
+# def normalize_parameters(parameters, bounds):
+#     with torch.no_grad():
+#         for param, (lower, upper) in zip(parameters, bounds):
+#             param.div_(upper - lower)
+#             param.sub_(lower / (upper - lower))
+
+# def denormalize_parameters(parameters, bounds):
+#     with torch.no_grad():
+#         for param, (lower, upper) in zip(parameters, bounds):
+#             param = (param + lower/(upper-lower)) * (upper-lower)
+
+def project_parameters(parameters, bounds):
+    with torch.no_grad():
+        for param, (lower, upper) in zip(parameters, bounds):
+            torch.clamp(param, lower, upper)
+
+def optimize_with_boundary_conditions(model, loss_fn, bounds, lr=1, max_iter=20):
+    # Normalize parameters
+    # normalize_parameters(model.parameters(), bounds)
+    
+    optimizer = optim.LBFGS(model.parameters(), lr=lr, max_iter=max_iter)
+
+    def closure():
+        optimizer.zero_grad()
+        loss = loss_fn(toy(), PSF_0)
+        loss.backward()
+        return loss
+
+    for _ in range(max_iter):
+        optimizer.step(closure)
+        project_parameters(model.parameters(), bounds)
+
+    # Denormalize parameters
+    # denormalize_parameters(model.parameters(), bounds)
+
+    return model
+
+# Example usage:
+# Replace "your_model" with your model instance and "your_loss_fn" with your loss function
+# bounds = [(80, 100), (1e-6, 1e-4)]  # Example bounds for two parameters
+
+optimized_model = optimize_with_boundary_conditions(toy, loss_fn, bounds)
+
 
 #%%
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))

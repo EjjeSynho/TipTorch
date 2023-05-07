@@ -73,7 +73,6 @@ def GenerateImages(samples, norm_regime, device):
     check_center = lambda x: x if x[x.shape[-2]//2, x.shape[-1]//2] > 0 else x*-1 # for some reason, some images apperead flipped in sign
     make_tensor = lambda x: torch.tensor(x, device=device) if type(x) is not torch.Tensor else x
     mask_noise = (1-mask_circle(N_pix, 80, center=(0,0), centered=True)) * SPHERE_PSF_spiders_mask(N_pix, thick=10)
-    bg_est = lambda x: np.median(x[mask_noise > 0])
 
     # Prepare images for TipTop
     for i in range(len(samples)):
@@ -86,7 +85,7 @@ def GenerateImages(samples, norm_regime, device):
 
         def process_PSF(entry):
             PSF_  = check_center(samples[i][entry].squeeze())
-            bg_   = bg_est(PSF_)
+            bg_   = np.median(PSF_[mask_noise > 0])
             PSF_ -= bg_
             norm_ = PSF_norm(PSF_*(1-mask_noise))
             return (PSF_+bg_)/norm_, bg_/norm_, norm_
@@ -123,12 +122,11 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, synth=False):
         f = LoadSPHEREsynthByID if synth else LoadSPHEREsampleByID
         data_samples = SamplesFromDITs( f(sample_ids[0]) )
 
-    OnlyCentralWvl(data_samples)
-    PSF_0, bg, norms = GenerateImages(data_samples, norm_regime, device)
-
     if regime == '1P2NI':
         data_samples = [data_samples[0]]
-        bg = bg.mean(dim=0)
+
+    OnlyCentralWvl(data_samples)
+    PSF_0, bg, norms = GenerateImages(data_samples, norm_regime, device)
 
     # Manage config files
     path_ini = '../data/parameter_files/irdis.ini'

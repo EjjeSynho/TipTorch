@@ -19,7 +19,7 @@ class TipToy(torch.nn.Module):
     def InitValues(self):
         # Reading parameters from the file
         num_src = self.config['NumberSources']
-        self.N_src = num_src.int().item()
+        self.N_src = int(num_src)
         
         self.wvl = self.config['sources_science']['Wavelength']
         # self.wvl = self.wvl if self.wvl.ndim == 2 else self.wvl.unsqueeze(0).T
@@ -34,7 +34,7 @@ class TipToy(torch.nn.Module):
                 self.psInMas = self.psInMas[0]
 
         self.D     = self.config['telescope']['TelescopeDiameter']
-        self.nPix  = self.config['sensor_science']['FieldOfView'].int().item()
+        self.nPix  = int(self.config['sensor_science']['FieldOfView'])
         self.pitch = self.config['DM']['DmPitchs'] #[m]
         #self.h_DM  = self.AO_config['DM']['DmHeights'] # ????? what is h_DM?
         #self.nDM   = 1

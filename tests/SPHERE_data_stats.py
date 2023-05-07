@@ -64,12 +64,76 @@ with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
 # print histogramm using sns
 import seaborn as sns
 
-entry = 'Strehl'
-sns.kdeplot(data=psf_df, x=entry)
+entry = 'Wind speed (SPARTA)'
+# sns.kdeplot(data=psf_df, x=entry)
 sns.displot(data=psf_df, x=entry, kde=True)
 
 #%%
 
+import numpy as np
+import matplotlib.pyplot as plt
+from sklearn.neighbors import KernelDensity
+
+# Generate some random data
+np.random.seed(42)
+data = np.random.randn(100)
+
+# Reshape the data to be 2D (required by Scikit-learn)
+data_reshaped = data[:, np.newaxis]
+
+# Instantiate and fit the KernelDensity estimator
+kde = KernelDensity(kernel='gaussian', bandwidth=0.5).fit(data_reshaped)
+
+# Evaluate the density on a set of points
+x_points = np.linspace(-3, 3, 1000)[:, np.newaxis]
+log_density = kde.score_samples(x_points)
+
+# Plot the KDE
+plt.plot(x_points, np.exp(log_density))
+plt.show()
+#%%
+
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.neighbors import KernelDensity
+
+# Create a sample pandas DataFrame
+data = {'column1': np.random.randn(100)}
+df = pd.DataFrame(data)
+
+# Reshape the data to be 2D (required by Scikit-learn)
+data_reshaped = df['column1'].values[:, np.newaxis]
+
+# Instantiate and fit the KernelDensity estimator
+kde = KernelDensity(kernel='gaussian', bandwidth=0.5).fit(data_reshaped)
+
+# Evaluate the density on a set of points
+x_points = np.linspace(min(df['column1']), max(df['column1']), 1000)[:, np.newaxis]
+log_density = kde.score_samples(x_points)
+
+# Convert log density to probability
+probability = np.exp(log_density)
+
+# Find the boundaries where the probability is below 1%
+boundary_indices = np.where(probability < 0.025)
+
+# Extract the boundary values
+boundaries = x_points[boundary_indices]
+
+print("Boundaries where probability is below 1%:")
+print(boundaries)
+
+# Plot the KDE and the boundaries
+plt.plot(x_points, probability)
+plt.axhline(y=0.01, color='r', linestyle='--')
+plt.scatter(boundaries, [0.01]*len(boundaries), color='r', marker='x')
+plt.show()
+
+
+
+#%%
 # Plotting the KDE Plot
 sns.kdeplot(data = psf_df,
             x='Tau0 (header)',
