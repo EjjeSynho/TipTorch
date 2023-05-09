@@ -599,7 +599,8 @@ class TipToy(torch.nn.Module):
             self.norm_scale = PSF_out.sum(dim=(-2,-1), keepdim=True)
 
         # return PSF_out/self.norm_scale * F + bg #TODO: to put norm inside or not?
-        return (PSF_out*F + bg) / self.norm_scale #TODO: to put norm inside or not?
+        # return (PSF_out*F + bg) / self.norm_scale #TODO: to put norm inside or not?
+        return (PSF_out / self.norm_scale) * F + bg #TODO: to put norm inside or not?
 
 
     def _to_device_recursive(self, obj, device):

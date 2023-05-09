@@ -1,6 +1,6 @@
 #%%
-%reload_ext autoreload
-%autoreload 2
+# %reload_ext autoreload
+# %autoreload 2
 
 import sys
 sys.path.insert(0, '..')
@@ -8,12 +8,12 @@ sys.path.insert(0, '..')
 import pickle
 import torch
 from torch import nn
+from torch import optim
 import numpy as np
-import matplotlib.pyplot as plt
-from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
-
 from tools.utils import OptimizeLBFGS, ParameterReshaper, plot_radial_profiles, SR, draw_PSF_stack
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
+from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
+import matplotlib.pyplot as plt
 
 from globals import SPHERE_DATA_FOLDER, device
 
@@ -49,10 +49,11 @@ PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime
 
 bg *= 0
 
-#%% Initialize model
+#% Initialize model
 toy = TipToy(merged_config, norm_regime, device)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
+# toy.optimizables = ['r0', 'F', 'dn', 'Jx', 'Jy', 'Jxy']
 _ = toy({
     'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
     'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
@@ -66,6 +67,128 @@ PSF_DL = toy.DLPSF()
 # draw_PSF_stack(PSF_0, PSF_1, average=True)
 draw_PSF_stack(PSF_0, PSF_1, average=False)
 
+
+bounds_dict = {
+    'r0' :         (0.05, 0.5),
+    'bg' :         (-1e-5, 1e-5),
+    'F' :          (0.1, 2),
+    'dn' :         (0, 0.05),
+    'Jx' :         (-20, 20),
+    'Jy' :         (-20, 20),
+    'Jxy' :        (-200, 200),
+    'dx' :         (-1.5, 1.5),
+    'dy' :         (-1.5, 1.5),
+    'wind_dir' :   (0, 360),
+    'wind_speed' : (0, 35)
+}
+
+# bounds = [bounds_dict[name] for name, _ in toy.named_parameters()]
+
+#%%
+from scipy.optimize import least_squares
+
+class ParameterReshaper():
+    def __init__(self, model, bounds_dict):
+        super().__init__()
+
+        import functools
+        def prod(iterable):
+            return functools.reduce(lambda x, y: x * y, iterable)
+        
+        self.model  = model
+        self.device = model.device
+        self.parameter_names = [name for name, p in model.named_parameters() if p.requires_grad]
+        self.parameters_list = [getattr(self.model, name) for name in self.parameter_names]
+        self.p_shapes = [p.shape for p in self.parameters_list]
+        self.p_shapes_flat = [prod(shp) for shp in self.p_shapes]
+        self.N_p = len(self.p_shapes)
+        self.ids = [slice(sum(self.p_shapes_flat[:i]), sum(self.p_shapes_flat[:i+1])) for i in range(self.N_p)]
+        self.bounds_dict = bounds_dict
+
+    def flatten(self):
+        return torch.hstack([p.clone().detach().cpu().view(-1) for p in self.parameters_list])
+
+    def unflatten(self, p):
+        p_list = [ p[self.ids[i]].reshape(self.p_shapes[i]) for i in range(self.N_p) ]
+        for name, new_p in zip(self.parameter_names, p_list):
+            if type(new_p) != torch.tensor:
+                new_p = new_p.clone().detach().to(self.device)
+            param = getattr(self.model, name)
+            param.data.copy_(new_p)
+
+    def get_flattened_bounds(self):
+        lower_bounds, upper_bounds = [], []
+        for name, p_shape in zip(self.parameter_names, self.p_shapes):
+            lower, upper = self.bounds_dict[name]
+            lower_bound_tensor = torch.tensor(lower).to(self.device).expand(p_shape).view(-1).to(self.device)
+            upper_bound_tensor = torch.tensor(upper).to(self.device).expand(p_shape).view(-1).to(self.device)
+            lower_bounds.append(lower_bound_tensor)
+            upper_bounds.append(upper_bound_tensor)
+        return torch.hstack(lower_bounds), torch.hstack(upper_bounds)
+    
+
+reshaper = ParameterReshaper(toy, bounds_dict)
+x0 = reshaper.flatten().to(device).detach().cpu().numpy()
+
+x_l, x_h = reshaper.get_flattened_bounds()
+x_l = x_l.detach().cpu().numpy()
+x_h = x_h.detach().cpu().numpy()
+#%%
+# x0 = (x0 - x_l)/(x_h - x_l)
+
+'''
+from tools.utils import register_hooks
+from torchmin.optim.scipy_minimizer import ScipyMinimizer
+
+optimizer = ScipyMinimizer(toy.parameters(), method='bfgs', tol=1e-9)
+loss_fn = nn.L1Loss(reduction='sum')
+
+for i in range(20):
+    optimizer.zero_grad()
+    loss = loss_fn( toy(), PSF_0 )
+    # if np.isnan(loss.item()): return
+    # early_stopping(loss)
+    optimizer.step( lambda: loss_fn(toy(), PSF_0) )
+    loss.backward()
+    print(loss.item())
+
+'''
+#%
+
+def run(x):
+    x_ = x * (x_h-x_l) + x_l
+    reshaper.unflatten(torch.tensor(x_).to(device))
+    PSF_1 = toy()
+    return (PSF_1-PSF_0).detach().cpu().numpy().reshape(-1) * 100
+
+# result = least_squares(run, x0, method='trf', ftol=1e-9, xtol=1e-9, gtol=1e-9, max_nfev=1000, verbose=2, loss="linear")
+result = least_squares(run, x0, method='trf', bounds=(x_l, x_h), ftol=1e-10, xtol=1e-10, gtol=1e-10, max_nfev=1000, verbose=2, loss="linear")
+
+# def run(x):
+#     x_ = x * (x_h-x_l) + x_l
+#     reshaper.unflatten(x_)
+#     PSF_1 = toy()
+#     return (PSF_1-PSF_0).reshape(-1).sum().abs()
+
+
+# loss_fn = nn.L1Loss()
+
+# Q = loss_fn(PSF_0, PSF_1)
+# get_dot = register_hooks(Q)
+# Q.backward()
+# dot = get_dot()
+# #dot.save('tmp.dot') # to get .dot
+# #dot.render('tmp') # to get SVG
+# dot # in Jupyter, you can just render the variable
+
+
+# result = minimize(run, x0, method='dogleg')
+# x1 = result.x
+
+
+# reshaper.unflatten(torch.tensor(result.x).to(device))
+
+
 #%% PSF fitting (no early-stopping)
 loss = nn.L1Loss(reduction='sum')
 
@@ -73,16 +196,19 @@ loss = nn.L1Loss(reduction='sum')
 window_loss = lambda x, x_max: \
     torch.gt(x,0)*(0.01/x)**2 + torch.lt(x,0)*100 + 100*torch.gt(x,x_max)*(x-x_max)**2
 
+n_goal = toy.NoiseVariance(toy.r0).item() * 2
+
 # TODO: specify loss weights
 def loss_fn(a,b):
     z = loss(a,b) + \
-        window_loss(toy.r0, 0.5).sum() * 5.0 + \
-        window_loss(toy.Jx, 50).sum() * 0.5 + \
-        window_loss(toy.Jy, 50).sum() * 0.5 + \
+        window_loss(toy.r0,  0.5).sum() * 5.0 + \
+        window_loss(toy.Jx,  50).sum()  * 0.5 + \
+        window_loss(toy.Jy,  50).sum()  * 0.5 + \
         window_loss(toy.Jxy, 400).sum() * 0.5 + \
-        window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum() * 0.5
+        window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
     return z
-        # window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
+        # window_loss(toy.dn + toy.NoiseVariance(toy.r0s), n_goal).sum() * 0.5
+        # window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum() * 0.5
 
 optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
  
@@ -97,57 +223,54 @@ for i in range(10):
 PSF_1 = toy()
 
 #%%
-# bounds = {
-#     'r0' :         (0.05, 0.5),
-#     'bg' :         (-1e-5, 1e-5),
-#     'dn' :         (0, 0.05),
-#     'Jx' :         (-20, 20),
-#     'Jy' :         (-20, 20),
-#     'Jxy' :        (-200, 200),
-#     'dx' :         (-1.5, 1.5),
-#     'dy' :         (-1.5, 1.5),
-#     'wind_dir' :   (0, 360),
-#     'wind_speed' : (0, 35)
-# }
-
 bounds_dict = {
-    toy.r0 :         (0.05, 0.5),
-    toy.bg :         (-1e-5, 1e-5),
-    toy.dn :         (0, 0.05),
-    toy.Jx :         (0.1, 20),
-    toy.Jy :         (0.1, 20),
-    toy.Jxy :        (-200, 200),
-    toy.dx :         (-1.5, 1.5),
-    toy.dy :         (-1.5, 1.5),
-    toy.wind_dir :   (0, 360),
-    toy.wind_speed : (0, 35)
+    'r0' :         (0.05, 0.5),
+    'bg' :         (-1e-5, 1e-5),
+    'F' :          (0.1, 2),
+    'dn' :         (0, 0.05),
+    'Jx' :         (-20, 20),
+    'Jy' :         (-20, 20),
+    'Jxy' :        (-200, 200),
+    'dx' :         (-1.5, 1.5),
+    'dy' :         (-1.5, 1.5),
+    'wind_dir' :   (0, 360),
+    'wind_speed' : (0, 35)
 }
 
-bounds = [bounds_dict[param] for param in toy.parameters()]
-
-from torch import optim
+bounds = [bounds_dict[name] for name, _ in toy.named_parameters()]
 
 loss = nn.L1Loss(reduction='sum')
 
-# def normalize_parameters(parameters, bounds):
-#     with torch.no_grad():
-#         for param, (lower, upper) in zip(parameters, bounds):
-#             param.div_(upper - lower)
-#             param.sub_(lower / (upper - lower))
+def normalize_parameters(parameters, bounds):
+    with torch.no_grad():
+        for param, (lower, upper) in zip(parameters, bounds):
+            param /= upper-lower
+            param -= lower/(upper - lower)
 
-# def denormalize_parameters(parameters, bounds):
-#     with torch.no_grad():
-#         for param, (lower, upper) in zip(parameters, bounds):
-#             param = (param + lower/(upper-lower)) * (upper-lower)
+def denormalize_parameters(parameters, bounds):
+    with torch.no_grad():
+        for param, (lower, upper) in zip(parameters, bounds):
+            param = (param + lower/(upper-lower)) * (upper-lower)
+
 
 def project_parameters(parameters, bounds):
     with torch.no_grad():
         for param, (lower, upper) in zip(parameters, bounds):
+            below_lower = param < lower
+            above_upper = param > upper
+
+            if torch.any(below_lower):
+                param.data[below_lower] = 2 * lower - param.data[below_lower]
+
+            if torch.any(above_upper):
+                param.data[above_upper] = 2 * upper - param.data[above_upper]
+
             torch.clamp(param, lower, upper)
 
+
 def optimize_with_boundary_conditions(model, loss_fn, bounds, lr=1, max_iter=20):
-    # Normalize parameters
-    # normalize_parameters(model.parameters(), bounds)
+
+    normalize_parameters(model.parameters(), bounds)
     
     optimizer = optim.LBFGS(model.parameters(), lr=lr, max_iter=max_iter)
 
@@ -155,6 +278,7 @@ def optimize_with_boundary_conditions(model, loss_fn, bounds, lr=1, max_iter=20)
         optimizer.zero_grad()
         loss = loss_fn(toy(), PSF_0)
         loss.backward()
+        print('loss:', loss.item())
         return loss
 
     for _ in range(max_iter):
@@ -162,8 +286,7 @@ def optimize_with_boundary_conditions(model, loss_fn, bounds, lr=1, max_iter=20)
         project_parameters(model.parameters(), bounds)
 
     # Denormalize parameters
-    # denormalize_parameters(model.parameters(), bounds)
-
+    denormalize_parameters(model.parameters(), bounds)
     return model
 
 # Example usage:
@@ -210,7 +333,7 @@ PSF_1 = toy()
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 draw_PSF_stack(PSF_0, PSF_1, average=True)
 
-plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200, cutoff=64)
 
 #%% ================================= Read OOPAO sample =================================
 
@@ -370,6 +493,20 @@ print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 draw_PSF_stack(PSF_0, PSF_1)
 
 #%%
+
+
+# Select from the following methods:
+#  ['bfgs', 'l-bfgs', 'cg', 'newton-cg', 'newton-exact', 
+#   'trust-ncg', 'trust-krylov', 'trust-exact', 'dogleg']
+
+# BFGS
+result = minimize(run, x0, method='dogleg')
+x1 = result.x
+
+print(x1-x0)
+
+
+#%%
 # def rosen(x):
 #     return torch.sum(100*(x[..., 1:] - x[..., :-1]**2)**2 + (1 - x[..., :-1])**2)
 
@@ -391,24 +528,6 @@ print(x1-x0)
 
 # Newton Exact
 # result = minimize(rosen, x0, method='newton-exact')
-
-#%%
-
-params_copy = [p.clone().detach() for p in parameters]
-
-F, dx, dy, r0, dn, toy.WFS_Nph, bg, Jx, Jy, Jxy = params_copy
-
-ps = [[F, dx, dy],
-      [r0, dn, toy.WFS_Nph],
-      [bg],
-      [Jx, Jy, Jxy]]
-
-for p in ps[0]:
-    if p in params_copy:
-        print(p)
-
-# x0 = reshaper.flatten(ps[i]).to(device)
-# result = minimize(run, x0, method='dogleg')
 
 
 #%%

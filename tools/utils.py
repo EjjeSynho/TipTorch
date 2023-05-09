@@ -596,7 +596,7 @@ def radial_profile(data, center=None):
     return calc_profile(t2np(data), t2np(center))
 
 
-def plot_radial_profiles(PSF_refs, PSF_estims, label_refs, label_estim, title='', dpi=300, scale='log', colors=['tab:blue', 'tab:orange']):
+def plot_radial_profiles(PSF_refs, PSF_estims, label_refs, label_estim, title='', dpi=300, scale='log', colors=['tab:blue', 'tab:orange'], cutoff=32):
     from tools.utils import radial_profile
     if not isinstance(PSF_refs, list):   PSF_refs   = [PSF_refs.squeeze()]
     if not isinstance(PSF_estims, list): PSF_estims = [PSF_estims.squeeze()]
@@ -613,8 +613,8 @@ def plot_radial_profiles(PSF_refs, PSF_estims, label_refs, label_estim, title=''
         if type(PSF_estims[i]) is torch.Tensor:
             PSF_estims[i] = PSF_estims[i].detach().cpu().numpy()
 
-        profile_0 = radial_profile(PSF_refs[i].squeeze())[:32+1]
-        profile_1 = radial_profile(PSF_estims[i].squeeze())[:32+1]
+        profile_0 = radial_profile(PSF_refs[i].squeeze())[:cutoff+1]
+        profile_1 = radial_profile(PSF_estims[i].squeeze())[:cutoff+1]
 
         radial_profiles_0.append(profile_0)
         radial_profiles_1.append(profile_1)
