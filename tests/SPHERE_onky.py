@@ -35,19 +35,20 @@ good_ids = psf_df.index.values.tolist()
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
 # sample_ids = [578]
 # sample_ids = [576]
-sample_ids = [992]
+# sample_ids = [992]
+sample_ids = [1209]
 # sample_ids = [456]
 # sample_ids = [465]
-# sample_ids = [1393]
+# sample_ids = [1393] #50 DITs
 
-regime = '1P2NI'
+# regime = '1P2NI'
 # regime = '1P21I'
-# regime = 'NP2NI'
+regime = 'NP2NI'
 norm_regime = 'sum'
 
 PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
 
-bg *= 0
+# bg *= 0
 
 #% Initialize model
 toy = TipToy(merged_config, norm_regime, device)
@@ -196,7 +197,7 @@ loss = nn.L1Loss(reduction='sum')
 window_loss = lambda x, x_max: \
     torch.gt(x,0)*(0.01/x)**2 + torch.lt(x,0)*100 + 100*torch.gt(x,x_max)*(x-x_max)**2
 
-n_goal = toy.NoiseVariance(toy.r0).item() * 2
+# n_goal = toy.NoiseVariance(toy.r0).item() * 2
 
 # TODO: specify loss weights
 def loss_fn(a,b):
@@ -337,28 +338,64 @@ plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IR
 
 #%% ================================= Read OOPAO sample =================================
 
+# regime = 'NP2NI'
+regime = '1P21I'
+
 PSF_2, bg, norms, synth_samples, synth_config = SPHERE_preprocess(sample_ids, regime, norm_regime, synth=True)
 
-# buf = synth_config['sources_science']['Wavelength']
-# buf = torch.vstack([buf['central L'] * 1e-9, buf['central R'] * 1e-9]).T
-# synth_config['sources_science']['Wavelength'] = buf
+#%
+from tools.utils import rad2mas
+TT_res = synth_samples[0]['WFS']['tip/tilt residuals']
 
-#%% Initialize model
+D = synth_config['telescope']['TelescopeDiameter']
+ang_pix = synth_samples[0]['Detector']['psInMas'] / rad2mas
+
+
+jitter = lambda a: 2*2*a/D/ang_pix
+
+TT_jitter = jitter(TT_res)
+
+Jx = TT_jitter[:,0].std() * ang_pix * rad2mas * 2.355
+Jy = TT_jitter[:,1].std() * ang_pix * rad2mas * 2.355
+
+#% Initialize model
 toy = TipToy(synth_config, norm_regime, device)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
 _ = toy({
+    'r0': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    # 'wind_dir': torch.tensor([0.0, 0.0]*toy.N_src, device=toy.device).flatten(),
+    # 'wind_speed': torch.tensor([0.0, 0.0]*toy.N_src, device=toy.device).flatten(),
     'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-    'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-    'Jy':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    'Jx':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
+    'Jy':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
+    'dx':  torch.tensor([0.0]*toy.N_src, device=toy.device).flatten(),
+    'dy':  torch.tensor([0.0]*toy.N_src, device=toy.device).flatten(),
     'bg':  bg.to(device)
 })
+
+# toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
+# _ = toy({
+#     'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+#     'Jx':  torch.tensor([Jx]*toy.N_src, device=toy.device).flatten(),
+#     'Jy':  torch.tensor([Jy]*toy.N_src, device=toy.device).flatten(),
+#     'dx':  torch.tensor([-0.5]*toy.N_src, device=toy.device).flatten(),
+#     'dy':  torch.tensor([-0.5]*toy.N_src, device=toy.device).flatten(),
+#     'bg':  bg.to(device)
+# })
+
+
+from tools.utils import rad2arc
 
 PSF_3 = toy()
 PSF_DL = toy.DLPSF()
 
-#%%
+wind_dir   = synth_config['atmosphere']['WindSpeed'].clone().detach()
+wind_speed = synth_config['atmosphere']['WindDirection'].clone().detach()
+r0 = rad2arc*0.976*synth_config['atmosphere']['Wavelength'] / synth_config['atmosphere']['Seeing'].clone().detach()
 
+
+#%%
 '''
 def plt2PIL(fig=None):
     from PIL import Image
@@ -411,50 +448,6 @@ def draw_result_PIL(PSF_in, PSF_out):
 
 draw_result_PIL(PSF_2, PSF_3)
 '''
-#%
-loss = nn.L1Loss(reduction='sum')
-
-# Confines a value between 0 and the specified value
-window_loss = lambda x, x_max: \
-    torch.gt(x,0)*(0.01/x)**2 + torch.lt(x,0)*100 + 100*torch.gt(x,x_max)*(x-x_max)**2
-
-# TODO: specify loss weights
-def loss_fn(a,b):
-    z = loss(a,b) + \
-        window_loss(toy.r0, 0.5).sum() * 5.0 + \
-        window_loss(toy.Jx, 50).sum() * 0.5 + \
-        window_loss(toy.Jy, 50).sum() * 0.5 + \
-        window_loss(toy.Jxy, 400).sum() * 0.5 + \
-        window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum()
-    return z
-
-optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
-
-for i in range(20):
-    optimizer_lbfgs.Optimize(PSF_2, [toy.F], 3)
-    optimizer_lbfgs.Optimize(PSF_2, [toy.bg], 2)
-    optimizer_lbfgs.Optimize(PSF_2, [toy.dx, toy.dy], 3)
-    optimizer_lbfgs.Optimize(PSF_2, [toy.r0, toy.dn], 5)
-    optimizer_lbfgs.Optimize(PSF_2, [toy.wind_dir, toy.wind_speed], 3)
-    optimizer_lbfgs.Optimize(PSF_2, [toy.Jx, toy.Jy, toy.Jxy], 3)
-
-PSF_3 = toy()
-print('\nStrehl ratio: ', SR(PSF_3, PSF_DL))
-
-draw_PSF_stack(PSF_2, PSF_3)
-#%%
-
-colors = [['tab:blue', 'tab:red'],
-          ['tab:blue', 'tab:orange'],
-          ['tab:red',  'tab:orange']]
-
-
-print('\nStrehl ratio: ', SR(PSF_3, PSF_DL))
-draw_PSF_stack(PSF_2, PSF_3, average=True)
-
-plot_radial_profiles(destack(PSF_2), destack(PSF_3), 'OOPAO', 'TipToy', title='IRDIS PSF', dpi=200, colors = colors[2])
-# plot_radial_profiles(destack(PSF_0), destack(PSF_2), 'Data',  'OOPAO', title='IRDIS PSF', dpi=200, colors = colors[0])
-
 
 #%%
 # reconstruction_result = np.save('C:/Users/akuznets/Data/SPHERE/PSF_TipToy.npy', PSF_1.detach().cpu().numpy())
