@@ -4,7 +4,7 @@ import pickle
 import re
 from copy import deepcopy
 
-from globals import SPHERE_DATA_FOLDER
+from project_globals import SPHERE_DATA_FOLDER
 
 def purify_filename(filename):
     pure_filename = os.path.splitext(os.path.basename(filename))[0]

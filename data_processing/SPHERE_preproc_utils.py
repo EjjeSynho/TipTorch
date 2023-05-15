@@ -11,7 +11,7 @@ from tools.utils import SPHERE_PSF_spiders_mask, mask_circle
 from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
-from globals import MAX_NDIT, SPHERE_DATA_FOLDER, device
+from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER, device
 
 
 def LoadSPHEREsynthByID(target_id):
@@ -111,19 +111,23 @@ def GenerateImages(samples, norm_regime, device):
 
 
 def SPHERE_preprocess(sample_ids, regime, norm_regime, synth=False):
+    if regime == 'different':
+        data_samples = SamplesByIds(sample_ids, synth)
+        for datasample in data_samples:
+            datasample['PSF L'] = datasample['PSF L'].mean(axis=0)[None,...]
+            datasample['PSF R'] = datasample['PSF R'].mean(axis=0)[None,...]
+            
     if regime == '1P21I':
         data_samples = SamplesByIds(sample_ids, synth)
         data_samples[0]['PSF L'] = data_samples[0]['PSF L'].mean(axis=0)[None,...]
-        data_samples[0]['PSF R'] = data_samples[0]['PSF L'].mean(axis=0)[None,...]
+        data_samples[0]['PSF R'] = data_samples[0]['PSF R'].mean(axis=0)[None,...]
+        data_samples = [data_samples[0]]
 
     elif regime == 'NP2NI' or regime == '1P2NI':
         if len(sample_ids) > 1:
             print('****** Warning: Only one sample ID can be used in this regime! ******')
         f = LoadSPHEREsynthByID if synth else LoadSPHEREsampleByID
         data_samples = SamplesFromDITs( f(sample_ids[0]) )
-
-    if regime == '1P2NI':
-        data_samples = [data_samples[0]]
 
     OnlyCentralWvl(data_samples)
     PSF_0, bg, norms = GenerateImages(data_samples, norm_regime, device)

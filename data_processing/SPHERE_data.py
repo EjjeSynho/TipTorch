@@ -22,7 +22,7 @@ from pathlib import Path
 from tools.utils import GetROIaroundMax, mask_circle
 from scipy.ndimage.measurements import center_of_mass
 
-from globals import SPHERE_DATA_FOLDER
+from project_globals import SPHERE_DATA_FOLDER
 
 ROOT = Path(SPHERE_DATA_FOLDER+'IRDIS_RAW')
 path_dtts = Path(SPHERE_DATA_FOLDER+'DTTS/')

@@ -15,7 +15,7 @@ from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
 import matplotlib.pyplot as plt
 from tools.utils import rad2mas, rad2arc
 
-from globals import SPHERE_DATA_FOLDER, device
+from project_globals import SPHERE_DATA_FOLDER, device
 
 
 #%% Initialize data sample

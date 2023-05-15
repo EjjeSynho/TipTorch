@@ -15,7 +15,7 @@ from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
 from tools.utils import OptimizeLBFGS, SR, pdims, FitGauss2D
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
 
-from globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
+from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
 
 
 #% Initialize data sample

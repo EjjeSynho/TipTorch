@@ -15,7 +15,7 @@ from PSF_models.TipToy_SPHERE_multisrc import TipToy
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
 import matplotlib.pyplot as plt
 
-from globals import SPHERE_DATA_FOLDER, device
+from project_globals import SPHERE_DATA_FOLDER, device
 
 
 #%% Initialize data sample
@@ -31,7 +31,6 @@ psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
 good_ids = psf_df.index.values.tolist()
 
 #%%
-
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
 # sample_ids = [578]
 # sample_ids = [576]
@@ -329,6 +328,14 @@ for i in range(20):
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
 PSF_1 = toy()
+
+#%%
+
+toy.b.data *= -1
+toy.theta.data *= -1
+
+PSF_1 = toy()
+
 
 #%%
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
