@@ -245,6 +245,8 @@ images_dict = {
 fitted_df = pd.DataFrame(fitted_dict)
 fitted_df.set_index('ID', inplace=True)
 
+del fitted_dict, fitted_dict_raw, ids, images_data, images_fitted, selected_entries, fitted_folder, fitted_files, data
+
 #%
 fitted_ids = list( set( fitted_df.index.values.tolist() ).intersection( set(psf_df.index.values.tolist()) ) )
 fitted_df = fitted_df[fitted_df.index.isin(fitted_ids)]
@@ -440,13 +442,12 @@ class Gnosis2(nn.Module):
         super(Gnosis2, self).__init__()
         self.fc1 = nn.Linear(in_size, hidden_size)
         self.dropout1 = nn.Dropout(dropout_p)
-        self.fc2 = nn.Linear(hidden_size, hidden_size*2)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
         self.dropout2 = nn.Dropout(dropout_p)
-        # self.fc3 = nn.Linear(hidden_size, hidden_size*2)
-        # self.dropout3 = nn.Dropout(dropout_p)
-        # self.fc4 = nn.Linear(hidden_size*2, out_size)
-        # self.fc2 = nn.Linear(hidden_size*2, out_size)
-        self.fc3 = nn.Linear(hidden_size*2, out_size)
+        self.fc3 = nn.Linear(hidden_size, hidden_size*2)
+        self.dropout3 = nn.Dropout(dropout_p)
+        self.fc4 = nn.Linear(hidden_size*2, out_size)
+        
 
     def forward(self, x):
         x = torch.tanh(self.fc1(x))
@@ -454,8 +455,8 @@ class Gnosis2(nn.Module):
         x = torch.tanh(self.fc2(x))
         x = self.dropout2(x)
         x = torch.tanh(self.fc3(x))
-        # x = self.dropout3(x)
-        # x = torch.tanh(self.fc4(x))
+        x = self.dropout3(x)
+        x = torch.tanh(self.fc4(x))
         return x
     
 # Initialize the network, loss function and optimizer
@@ -532,31 +533,48 @@ from PSF_models.TipToy_SPHERE_multisrc import TipToy
 norm_regime = 'sum'
 regime = 'different'
 
-rand_ids = np.random.choice(len(X_valid_df), size=64)
-sample_ids = [X_valid_df.index.values.tolist()[rand_id] for rand_id in rand_ids]
-del rand_ids
-
-PSF_0, bg, norms, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
-
-#%%
-PSF_0_ = []
-PSF_1_ = []
-
-for i,id_im in enumerate([images_dict['ID'].index(sample_id) for sample_id in sample_ids]):
-    PSF_0_.append(images_dict['PSF (data)'][id_im][0,...] / norms[i,:][:,None, None].cpu().numpy())
-    PSF_1_.append(images_dict['PSF (fit)' ][id_im][0,...] / norms[i,:][:,None, None].cpu().numpy())
-    
-PSF_0_ = np.stack(PSF_0_)
-PSF_1_ = np.stack(PSF_1_)
-
-sample = psf_df_valid.loc[sample_ids]
-
-#%%
 fl_out_keys = list(fl_out.keys())
 
 gnosis2PAO = lambda Y: { fl_out_keys[i]: transforms_output[fl_out_keys[i]].backward(Y[:,i]) for i in range(len(fl_out_keys)) }
 in2gnosis  = lambda inp: torch.from_numpy(( np.stack([transforms_input[a].forward(inp[a].values) for a in fl_in.keys()]) )).float().to(device).T
 
+def GetImages(sample_ids, norms):
+    PSF_0_ = []
+    PSF_1_ = []
+
+    for i,id_im in enumerate([images_dict['ID'].index(sample_id) for sample_id in sample_ids]):
+        PSF_0_.append(images_dict['PSF (data)'][id_im][0,...] / norms[i,:][:,None, None].cpu().numpy())
+        PSF_1_.append(images_dict['PSF (fit)' ][id_im][0,...] / norms[i,:][:,None, None].cpu().numpy())
+        
+    PSF_0_ = np.stack(PSF_0_)
+    PSF_1_ = np.stack(PSF_1_)
+    return PSF_0_, PSF_1_
+
+
+def GetBatch(rand_ids):
+    sample_ids = [X_valid_df.index.values.tolist()[rand_id] for rand_id in rand_ids]
+
+    # PSF_0, bg, norms, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
+    _, _, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
+    PSF_0_, PSF_1_ = GetImages(sample_ids, norms)
+
+    batch = {
+        'confo': merged_config,
+        'PSF (data)': PSF_0_,
+        'PSF (fit)': PSF_1_,
+        'X': in2gnosis( psf_df_valid.loc[sample_ids] )
+    }
+    return batch
+
+
+rand_ids = np.arange(len(X_valid_df))
+np.random.shuffle(rand_ids)
+
+rand_ids = torch.split(torch.from_numpy(rand_ids), 64)
+
+batches = [GetBatch(rand_id) for rand_id in rand_ids]
+
+#%%
 X_test = in2gnosis(sample)
 Y_test = net(X_test)
 
@@ -586,9 +604,7 @@ PSF_pred  = toy.forward()
 
 #%%
 # from tools.utils import register_hooks
-
 # Q = loss_fn(PSF_pred, torch.ones_like(PSF_pred).to(device))
-
 # get_dot = register_hooks(Q)
 # Q.backward()
 # dot = get_dot()
@@ -596,20 +612,19 @@ PSF_pred  = toy.forward()
 # #dot.render('tmp') # to get SVG
 # dot # in Jupyter, you can just render the variable
 
-
-
 #%%
-# plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'Fit', title='IRDIS PSF', dpi=200, cutoff=64)
+# plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'Fit', title='NN PSFAO prediction', dpi=200, cutoff=64)
 
 PSF_pred_ = PSF_pred.cpu().detach().numpy()
 
-PSF_pred__ = PSF_pred_ / PSF_pred_.max(axis=(-2,-1))[...,None,None]
-PSF_1__    = PSF_1_    / PSF_1_.max(axis=(-2,-1))[...,None,None]
+# PSF_pred__ = PSF_pred_ / PSF_pred_.max(axis=(-2,-1))[...,None,None]
+# PSF_1__    = PSF_1_    / PSF_1_.max(axis=(-2,-1))[...,None,None]
 
 destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
 
-# plot_radial_profiles(destack(PSF_1__), destack(PSF_pred__), 'Fit', 'Predicted', title='IRDIS PSF', dpi=200, cutoff=64)
-plot_radial_profiles(destack(PSF_1_), destack(PSF_0_), 'Fit', 'Predicted', title='IRDIS PSF', dpi=200, cutoff=64)
+# plot_radial_profiles(destack(PSF_1__), destack(PSF_pred__), 'Fit', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=64)
+plot_radial_profiles(destack(PSF_1_), destack(PSF_pred_), 'Fit', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=64)
+# plot_radial_profiles(destack(PSF_1_), destack(PSF_0_), 'Fit', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=64)
 
 
 #%%

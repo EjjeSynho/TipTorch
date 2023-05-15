@@ -243,9 +243,9 @@ class TipToy(torch.nn.Module):
         all_wvls = self.wvl[ids].cpu().numpy().tolist()
         all_samplings = self.sampling[ids]
 
-        self.OTF_static =  {}  
+        self.OTF_static_dict =  {}  
         for i, wvl in enumerate(all_wvls):
-            self.OTF_static[wvl] = torch.zeros([self.nOtf, self.nOtf], device=self.device)
+            self.OTF_static_dict[wvl] = torch.zeros([self.nOtf, self.nOtf], device=self.device)
             padded_pix = int(pupil_pix*all_samplings[i])
 
             pupil_padded = torch.zeros([padded_pix, padded_pix], device=self.device)
@@ -254,17 +254,17 @@ class TipToy(torch.nn.Module):
                 padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2
             ] = pupil*apodizer
 
-            OTF_static = pdims( torch.real( fftAutoCorr(pupil_padded) ), -2)
-            OTF_static = interpolate(OTF_static, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze()
-            self.OTF_static[wvl] = OTF_static / OTF_static.max()
+            OTF_static_ = pdims( torch.real( fftAutoCorr(pupil_padded) ), -2)
+            OTF_static_ = interpolate(OTF_static_, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze()
+            self.OTF_static_dict[wvl] = OTF_static_.clone() / OTF_static_.max()
 
         buf_obj = []
         for obj_id in range(self.N_src): # iterate over all sources
             buf_wvl = []
             for wvl_id in range(self.wvl.shape[1]): # iterate over the lambdas of the current object
-                buf_wvl.append(self.OTF_static[self.wvl[obj_id,wvl_id].cpu().item()]) # get the OTF for the current wavelength
+                buf_wvl.append(self.OTF_static_dict[self.wvl[obj_id,wvl_id].cpu().item()]) # get the OTF for the current wavelength
             buf_obj.append(torch.stack(buf_wvl))
-        self.OTF_static = torch.stack(buf_obj) # stack all sources into the 3D tensor: N_wvl x nOtf x nOtf
+        self.OTF_static = torch.stack(buf_obj) # stack all sources into the 4D tensor: N_obj x N_wvl x nOtf x nOtf
 
         self.PSD_padder = torch.nn.ZeroPad2d((self.nOtf-self.nOtf_AO)//2)
 
