@@ -117,7 +117,7 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, synth=False):
             datasample['PSF L'] = datasample['PSF L'].mean(axis=0)[None,...]
             datasample['PSF R'] = datasample['PSF R'].mean(axis=0)[None,...]
             
-    if regime == '1P21I':
+    elif regime == '1P21I':
         data_samples = SamplesByIds(sample_ids, synth)
         data_samples[0]['PSF L'] = data_samples[0]['PSF L'].mean(axis=0)[None,...]
         data_samples[0]['PSF R'] = data_samples[0]['PSF R'].mean(axis=0)[None,...]
@@ -128,6 +128,9 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, synth=False):
             print('****** Warning: Only one sample ID can be used in this regime! ******')
         f = LoadSPHEREsynthByID if synth else LoadSPHEREsampleByID
         data_samples = SamplesFromDITs( f(sample_ids[0]) )
+
+    else:
+        raise ValueError('Unknown regime "{}"'.format(regime))
 
     OnlyCentralWvl(data_samples)
     PSF_0, bg, norms = GenerateImages(data_samples, norm_regime, device)

@@ -13,6 +13,7 @@ from torch import nn
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
 
 from tools.utils import OptimizeLBFGS, SR, pdims, FitGauss2D
+from tools.config_manager import ConfigManager, GetSPHEREonsky
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
 
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
@@ -53,7 +54,7 @@ to_store = lambda x: x.detach().cpu().numpy()
 
 def load_and_fit_sample(id):
     sample_ids = [id]
-    PSF_0, bg, norms, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
+    PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
 
     toy = TipToy(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 
@@ -82,6 +83,10 @@ def load_and_fit_sample(id):
 
     PSF_1 = toy()
 
+    config_manager = ConfigManager(GetSPHEREonsky())
+    config_manager.Convert(merged_config, framework='numpy')
+    config_manager.process_dictionary(merged_config)
+
     save_data = {
         'config': merged_config,
         'F':   to_store(toy.F),
@@ -98,8 +103,8 @@ def load_and_fit_sample(id):
         'Jx':  to_store(toy.Jx),
         'Jy':  to_store(toy.Jy),
         'Jxy': to_store(toy.Jxy),
-        'SR data': SR(PSF_0, PSF_DL),
-        'SR fit':  SR(PSF_1, PSF_DL),
+        'SR data': SR(PSF_0, PSF_DL).detach().cpu().numpy(),
+        'SR fit':  SR(PSF_1, PSF_DL).detach().cpu().numpy(),
         'FWHM fit':  gauss_fitter(PSF_0), 
         'FWHM data': gauss_fitter(PSF_1),
         'Img. data': to_store(PSF_0*pdims(norms,2)),

@@ -12,8 +12,6 @@ import time
 
 from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, pdims, min_2d
 
-#### THIS IS THE LATEST VERSION!!!! ######
-
 
 class TipToy(torch.nn.Module):
     def InitValues(self):
@@ -39,14 +37,12 @@ class TipToy(torch.nn.Module):
         #self.h_DM  = self.AO_config['DM']['DmHeights'] # ????? what is h_DM?
         #self.nDM   = 1
         self.kc    = 1/(2*self.pitch)
-
         #self.zenith_angle  = torch.tensor(self.AO_config['telescope']['ZenithAngle'], device=self.device) # [deg] #TODO: telescope zenith != sample zenith?
         self.zenith_angle  = self.config['telescope']['ZenithAngle']
         self.airmass       = 1.0 / torch.cos(self.zenith_angle * deg2rad)
 
-        self.GS_wvl     = self.config['sources_HO']['Wavelength'][0] #[m]
+        self.GS_wvl     = self.config['sources_HO']['Wavelength'][0].item() #[m]
         #self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
-        # min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
         self.wind_speed  = self.config['atmosphere']['WindSpeed']
         self.wind_dir    = self.config['atmosphere']['WindDirection']
         self.Cn2_weights = min_2d(self.config['atmosphere']['Cn2Weights'])
@@ -128,12 +124,28 @@ class TipToy(torch.nn.Module):
         # for all generated PSDs within one batch sampling musat be the same
         pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
 
+        self.psdsave = None
+
+        # self.sampling_factor = (torch.ceil(2.0/pixels_per_l_D)).int() # check how much it is less than Nyquist
+        # self.sampling = self.sampling_factor * pixels_per_l_D
+        # self.oversampling = self.sampling.max() / self.sampling
+        # self.nOtf = (self.nPix * self.sampling_factor.max() * self.oversampling.max()).round().int().item()
+        # self.nOtf += self.nOtf % 2
+
+        # self.dk = 1/self.D/self.sampling.max() # PSD spatial frequency step
+        # self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
+
         self.sampling_factor = (torch.ceil(2.0/pixels_per_l_D)).int() # check how much it is less than Nyquist
         self.sampling = self.sampling_factor * pixels_per_l_D
         self.nOtf = (self.nPix * self.sampling_factor.max()).item()
 
         self.dk = 1/self.D/self.sampling.min() # PSD spatial frequency step  TODO: or .max()?
         self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
+
+        # print('dk = ', self.dk.item())
+        # print('nOtf = ', self.nOtf)	
+        # print('sampling = ', self.sampling)
+        # print('sampling_factor = ', self.sampling_factor)
 
         # Initialize spatial frequencies
         self.kx, self.ky = torch.meshgrid(
@@ -500,6 +512,30 @@ class TipToy(torch.nn.Module):
         MoffatPSD = (amp * V*E*F + b) * self.mask_corrected_AO #.unsqueeze(0)
         MoffatPSD[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
 
+        
+        if self.psdsave is not None:
+            import pickle
+            import pathlib
+            from project_globals import DATA_FOLDER
+            dir_save_PSD = DATA_FOLDER/'temp'/ pathlib.Path(self.psdsave+'.pickle')
+            dir_to_save = {
+                'amp': amp,
+                'b': b,
+                'alpha': alpha,
+                'beta': beta,
+                'ratio': ratio,
+                'theta': theta,
+                'MoffatPSD': MoffatPSD,
+                'V': V,
+                'E': E,
+                'Fout': Fout,
+                'Fin': Fin
+            }
+            
+            with open(dir_save_PSD, 'wb') as f:
+                pickle.dump(dir_to_save, f)
+        
+            
         return MoffatPSD
 
     
@@ -565,6 +601,15 @@ class TipToy(torch.nn.Module):
               self.PSDs['chromatism'] + \
               self.PSDs['Moffat'])
         
+        # if self.psdsave is not None:
+        #     import pickle
+        #     import pathlib
+        #     from project_globals import DATA_FOLDER
+        #     dir_save_PSD = DATA_FOLDER/'temp'/ pathlib.Path(self.psdsave+'.pickle')
+        #     dir_to_save = { 'MoffatPSD': PSD }
+        #     with open(dir_save_PSD, 'wb') as f:
+        #         pickle.dump(dir_to_save, f)
+        
         return PSD
     
 
@@ -588,7 +633,7 @@ class TipToy(torch.nn.Module):
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         # Resulting OTF
         OTF = OTF_turb * self.OTF_static * fftPhasor * OTF_jitter
-
+        
         PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF, dim=(-2,-1))), dim=(-2,-1)) )
         PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='area')
 

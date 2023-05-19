@@ -516,12 +516,14 @@ class OptimizeTRF():
         return self.parameters
 
 
-def draw_PSF_stack(PSF_in, PSF_out, average=False):
+def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, max_val=1e16):
+    from matplotlib.colors import LogNorm
+    
     ROI_size = 128
     ROI = slice(PSF_in.shape[-2]//2-ROI_size//2, PSF_in.shape[-1]//2+ROI_size//2)
     dPSF = (PSF_out - PSF_in).abs()
 
-    cut = lambda x: np.log(x.abs().detach().cpu().numpy()[..., ROI, ROI])
+    cut = lambda x: x.abs().detach().cpu().numpy()[..., ROI, ROI]
 
     if average:
         row = []
@@ -530,7 +532,13 @@ def draw_PSF_stack(PSF_in, PSF_out, average=False):
                 np.hstack([cut(PSF_in[:, wvl,...].mean(dim=0)),
                            cut(PSF_out[:, wvl,...].mean(dim=0)),
                            cut(dPSF[:, wvl,...].mean(dim=0))]) )
-        plt.imshow(np.vstack(row))
+        row  = np.vstack(row)
+        if scale == 'log':
+            norm = LogNorm(vmin=np.maximum(row.min(), min_val), vmax=np.minimum(row.max(), max_val))
+        else:
+            norm = None
+        
+        plt.imshow(row, norm=norm)
         plt.title('Sources average')
         plt.show()
 
@@ -539,7 +547,13 @@ def draw_PSF_stack(PSF_in, PSF_out, average=False):
             row = []
             for wvl in range(PSF_in.shape[1]):
                 row.append( np.hstack([cut(PSF_in[src, wvl,...]), cut(PSF_out[src, wvl,...]), cut(dPSF[src, wvl,...])]) )
-            plt.imshow(np.vstack(row))
+            row  = np.vstack(row)
+            if scale == 'log':
+                norm = LogNorm(vmin=np.maximum(row.min(), min_val), vmax=np.minimum(row.max(), max_val))
+            else:
+                norm = None
+                
+            plt.imshow(row, norm=norm)
             plt.title('Source %d' % src)
             plt.show()
 

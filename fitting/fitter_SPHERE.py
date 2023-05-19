@@ -14,6 +14,7 @@ from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
 
 from tools.utils import OptimizeLBFGS, SR, pdims, FitGauss2D
 from PSF_models.TipToy_SPHERE_multisrc import TipToy
+from tools.config_manager import ConfigManager, GetSPHEREonsky
 
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
 
@@ -93,6 +94,11 @@ def load_and_fit_sample(id):
         optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
     PSF_1 = toy()
+    
+    config_manager = ConfigManager(GetSPHEREonsky())
+    config_manager.Convert(merged_config, framework='numpy')
+    config_manager.process_dictionary(merged_config)
+
 
     save_data = {
         'config': merged_config,
@@ -107,8 +113,8 @@ def load_and_fit_sample(id):
         'Jy':  to_store(toy.Jy),
         'Jxy': to_store(toy.Jxy),
         'Nph WFS': to_store(toy.WFS_Nph),
-        'SR data': SR(PSF_0, PSF_DL),
-        'SR fit':  SR(PSF_1, PSF_DL),
+        'SR data': SR(PSF_0, PSF_DL).detach().cpu().numpy(),
+        'SR fit':  SR(PSF_1, PSF_DL).detach().cpu().numpy(),
         'FWHM fit':  gauss_fitter(PSF_0), 
         'FWHM data': gauss_fitter(PSF_1),
         'Img. data': to_store(PSF_0*pdims(norms,2)),

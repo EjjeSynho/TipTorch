@@ -147,28 +147,38 @@ class DataTransformer:
 
 
 #%% Create fitted parameters dataset
-fitted_dict_raw = {key: [] for key in ['F','b','dx','dy','r0','amp','beta','alpha','theta','ratio','bg','Jx','Jy','Jxy']}
+entries_init = ['F','dx','dy','r0','dn', 'bg','Jx','Jy','Jxy']
+fitted_dict_raw = {key: [] for key in entries_init}
 ids = []
 
 images_data = []
 images_fitted = []
 
-fitted_folder = 'E:/ESO/Data/SPHERE/IRDIS_fitted_PAO_1P21I/'
+fitted_folder = 'E:/ESO/Data/SPHERE/IRDIS_fitted_1P21I/'
 fitted_files = os.listdir(fitted_folder)
 
-for file in tqdm(fitted_files):
-    id = int(file.split('.')[0])
+fitted_dict_raw['wind speed'] = []
+fitted_dict_raw['wind direction'] = []
 
+for file in tqdm(fitted_files):
+
+    id = int(file.split('.')[0])
     with open(fitted_folder + file, 'rb') as handle:
         data = pickle.load(handle)
         
+    ws = data['config']['atmosphere']['WindSpeed']
+    wd = data['config']['atmosphere']['WindDirection']
+
+    test = data['dn']
     images_data.append( data['Img. data'] )
     images_fitted.append( data['Img. fit'] )
 
-    for key in fitted_dict_raw.keys():
+    for key in entries_init:
         fitted_dict_raw[key].append(data[key])
+    fitted_dict_raw['wind speed'].append(ws)
+    fitted_dict_raw['wind direction'].append(wd)
     ids.append(id)
-    
+
 fitted_dict = {}
 fitted_dict['ID'] = np.array(ids)
 
@@ -202,7 +212,7 @@ fitted_ids = list( set( fitted_df.index.values.tolist() ).intersection( set(psf_
 fitted_df = fitted_df[fitted_df.index.isin(fitted_ids)]
 
 # Absolutize positive-only values
-for entry in ['b','r0','Jx','Jy','Jxy','ratio','alpha','F (left)','F (right)']:
+for entry in ['r0','Jx','Jy','Jxy', 'F (left)','F (right)', 'wind speed']:
     fitted_df[entry] = fitted_df[entry].abs()
 
 # threshold = 3 # in STDs
@@ -242,23 +252,20 @@ input_df = pd.DataFrame( {a: transforms_input[a].forward(psf_df[a].values) for a
 
 #%%
 fl_out = {          # boxcox gaussian uniform invert
-    'F (left)':   [True,  True,  False, False],
-    # 'F (right)':  [True,  True,  False, False],
-    'bg (left)':  [False, True,  False, False],
-    # 'bg (right)': [False, True,  False, False],
-    'b':          [True,  True,  False, False],
-    'dx':         [False, False, True,  False],
-    'dy':         [False, False, True,  False],
-    'r0':         [True,  False, True,  False],
-    'amp':        [True,  True,  False, False],
-    'beta':       [True,  True,  False, False],
-    'alpha':      [True,  False, True,  False],
-    'theta':      [False, False, True,  False],
-    'ratio':      [False, False, True,  False],
-    'Jx':         [True,  True,  False, False],
-    'Jy':         [True,  True,  False, False],
-    'Jxy':        [True,  True,  False, False]
+    'F (left)':       [True,  True,  False, False],
+    # 'F (right)':     [True,  True,  False, False],
+    'bg (left)':      [False, True,  False, False],
+    'dx':             [False, False, True,  False],
+    'dy':             [False, False, True,  False],
+    'r0':             [True,  False, True,  False],
+    'Jx':             [True,  True,  False, False],
+    'Jy':             [True,  True,  False, False],
+    'Jxy':            [True,  True,  False, False],
+    'wind speed':     [True,  True,  False, False],
+    'wind direction': [False, False, True,  False],
+    'dn':             [True,  True,  False, True ]
 }
+
 
 transforms_output = {\
     i: DataTransformer(fitted_df[i].values, boxcox=fl_out[i][0], gaussian=fl_out[i][1], uniform=fl_out[i][2], invert=fl_out[i][3]) for i in fl_out.keys() }
@@ -276,7 +283,32 @@ input_df.drop(rows_with_nan, inplace=True)
 fitted_df.drop(rows_with_nan, inplace=True)
 output_df.drop(rows_with_nan, inplace=True)
 
-print('Number of samples: {}'.format(len(psf_df)))
+#%
+# Multiply rows in 'b' column of fitted_df where corresponding 'b' value in output_df is less than 10^-5
+# indices_b = np.where(np.log10(np.abs(fitted_df['b'])) < -4.5)[0].tolist()
+# fitted_df.loc[fitted_df.index[indices_b], 'b'] *= 100
+
+# # # Add 0.01 to rows in 'r0' column of fitted_df where corresponding 'r0' value in output_df is NaN
+# indices_r0 = np.where(np.isnan(output_df['r0']))[0].tolist()
+# fitted_df.loc[fitted_df.index[indices_r0], 'r0'] += 0.01
+
+# # # Subtract 0.01 from rows in 'alpha' column of fitted_df where corresponding 'alpha' value in output_df is NaN
+# indices_alpha = np.where(np.isnan(output_df['alpha']))[0].tolist()
+# fitted_df.loc[fitted_df.index[indices_alpha], 'alpha'] += 0.01
+
+# indicices_Jxy = np.where(fitted_df['Jxy'] < 1.0)[0].tolist()
+# fitted_df.loc[fitted_df['Jxy'].index[indicices_Jxy], 'Jxy'] *= 3
+
+# output_df = pd.DataFrame( {a: transforms_output[a].forward(fitted_df[a].values) for a in fl_out.keys()} )
+
+# # # Subtract 0.01 from rows in 'alpha' column of fitted_df where corresponding 'alpha' value in output_df is NaN
+# indices_alpha = np.where(np.isnan(output_df['alpha']))[0].tolist()
+# fitted_df.loc[fitted_df.index[indices_alpha], 'alpha'] -= 0.025
+
+# indices_b = np.where(fitted_df['b'] > 0.4)[0].tolist()
+# fitted_df.loc[fitted_df.index[indices_b], 'b'] *= 0.5
+
+# output_df = pd.DataFrame( {a: transforms_output[a].forward(fitted_df[a].values) for a in fl_out.keys()} )
 
 #%%
 save_path = DATA_FOLDER/"temp/SPHERE params/psf_df"
@@ -348,8 +380,7 @@ for entry in output_df.columns.values.tolist():
 # 'bg (right)'
 
 # df_ultimate = pd.concat([input_df, output_df], axis=1)
-# df_ultimate = pd.concat([psf_df, fitted_df], axis=1)
-df_ultimate = pd.concat([psf_df], axis=1)
+df_ultimate = pd.concat([psf_df, fitted_df], axis=1)
 
 columns_to_drop = ['F (right)', 'bg (right)', 'λ right (nm)', 'Strehl']
 
@@ -379,29 +410,13 @@ sns.heatmap(spearman_corr, mask=mask, cmap=cmap, vmax=.3, center=0,
 plt.xticks(rotation=45, ha='right')
 # plt.yticks(rotation=45)
 plt.show()
+
 #%%
-
-# sns.kdeplot(data = input_df,
-#             x='Rate',
-#             y='Nph WFS',
-#             color='r', fill=True, Label='Iris_Setosa',
-#             cmap="Reds", thresh=0.02)
-
-# sns.kdeplot(data = input_df,
-#             x='r0 (SPARTA)',
-#             y='Tau0 (header)',
-#             color='r', fill=True, Label='Iris_Setosa',
-#             cmap="Reds", thresh=0.02)
-
-sns.pairplot(data=psf_df, vars=[
-    'Nph WFS',
-    'r0 (SPARTA)',
-    'Tau0 (header)',
-    'Wind speed (header)',
-    'FWHM'], corner=True, kind='kde')
-    # 'FWHM'], hue='λ left (nm)', kind='kde')
-
-
+'''
+ids_to_remain = set(psf_df.index.values).difference(ids_to_exclude_later)
+psf_df = psf_df[psf_df.index.isin(ids_to_remain)]
+fitted_df = fitted_df[fitted_df.index.isin(psf_df.index.values.tolist())]
+'''
 #%%
 import torch
 import torch.nn as nn
@@ -512,6 +527,30 @@ plt.legend()
 plt.grid()
 
 torch.save(net.state_dict(), WEIGHTS_FOLDER/'gnosis2_weights.dict')
+
+# %%
+
+# df_ultimate = pd.concat([input_df, output_df], axis=1)
+# df_ultimate = pd.concat([psf_df, fitted_df], axis=1)
+
+# seaborn scatter r0 vs jitter
+# sns.scatterplot(data=output_df, x='r0', y='alpha')
+
+# sns.scatterplot(data=fitted_df, x='r0', y='Jy', hue='alpha', palette='viridis')
+# sns.scatterplot(data=df_ultimate, x='r0', y='Jy', hue='λ left (nm)', palette='viridis')
+
+# sns.scatterplot(data=df_ultimate, x='beta', y='alpha')
+
+# plt.ylim(0, 0.5)
+# plt.xlim(0, 1)
+
+# sns.kdeplot(data = df_ultimate,
+#             x='theta',
+#             y='ratio',
+#             color='r', fill=True,
+#             cmap="Reds", thresh=0.02)
+
+
 
 #%%
 from tools.utils import plot_radial_profiles #, draw_PSF_stack
@@ -652,17 +691,9 @@ for epoch in range(epochs):
 
     #TODO: TipTorch config update
     
-torch.save(net.state_dict(), WEIGHTS_FOLDER/'gnosis2_weights_tuned.dict')
-
 #%%
-
-# net.load_state_dict(torch.load(WEIGHTS_FOLDER/'gnosis2_weights.dict'))
-
-net.load_state_dict(torch.load(WEIGHTS_FOLDER/'gnosis2_weights_tuned.dict'))
-
-#%%
-with torch.no_grad():
-    batch = batches_val[2] #np.random.choice(len(batches_val))]   
+with torch.no_grad():  
+    batch = batches_val[np.random.choice(len(batches_val))]   
     pred_test = gnosis2PAO(net(batch['X']))
 
     toy = TipToy(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
@@ -671,17 +702,17 @@ with torch.no_grad():
     PSF_pred = toy_run(toy, pred_test).detach().cpu().numpy()
     PSF_test = batch['PSF (data)'].detach().cpu().numpy()
     
-# rand_psf = np.random.choice(PSF_pred.shape2[0])
-# PSF_pred = PSF_pred[rand_psf,...][None,...]
-# PSF_test = PSF_test[rand_psf,...][None,...]
+rand_psf = np.random.choice(PSF_pred.shape[0])
+PSF_pred = PSF_pred[rand_psf,...][None,...]
+PSF_test = PSF_test[rand_psf,...][None,...]
     
 destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
 
 PSF_test_ = np.copy( PSF_test / PSF_test.max(axis=(-2,-1))[..., None, None] )
 PSF_pred_ = np.copy( PSF_pred / PSF_pred.max(axis=(-2,-1))[..., None, None] )
 
-plot_radial_profiles(destack(PSF_test_), destack(PSF_pred_), 'Data', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=32, scale='log')
-plot_radial_profiles(destack(PSF_test),  destack(PSF_pred),  'Data', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=32, scale='log')
+plot_radial_profiles(destack(PSF_test_), destack(PSF_pred_), 'Data', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=14, scale='linear')
+plot_radial_profiles(destack(PSF_test),  destack(PSF_pred),  'Data', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=14, scale='linear')
 
 
 #%%
@@ -694,9 +725,9 @@ toy.optimizables = []
 PSF_pred = toy_run(toy, gnosis2PAO(batch['Y'])).detach().cpu().numpy()  
 PSF_test = batch['PSF (fit)'].detach().cpu().numpy()    
     
-# rand_psf = np.random.choice(PSF_pred.shape[0])
-# PSF_pred = PSF_pred[rand_psf,...][None,...]
-# PSF_test = PSF_test[rand_psf,...][None,...]
+rand_psf = np.random.choice(PSF_pred.shape[0])
+PSF_pred = PSF_pred[rand_psf,...][None,...]
+PSF_test = PSF_test[rand_psf,...][None,...]
     
 destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
 
@@ -706,7 +737,7 @@ PSF_pred_ = np.copy( PSF_pred / PSF_pred.max(axis=(-2,-1))[..., None, None] )
 plot_radial_profiles(destack(PSF_test_), destack(PSF_pred_), 'From dataset', 'Converted', title='Fitted', dpi=200, cutoff=64)
 plot_radial_profiles(destack(PSF_test),  destack(PSF_pred),  'From dataset', 'Converted', title='Fitted', dpi=200, cutoff=64)
 
-#%% ================================================================================================================
+#%%
 %reload_ext autoreload
 %autoreload 2
 
