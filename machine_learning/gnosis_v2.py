@@ -890,18 +890,103 @@ plt.show()
 
 # %matplotlib inline
 
-#%%
+#%% ============================================================================
+# ==============================================================================
+# ==============================================================================
 
 
-dk =  0.026426762342453003
 
-sampling =  4.3715, 4.6636
+%reload_ext autoreload
+%autoreload 2
 
-dk =  0.03660716116428375
+import sys
+sys.path.append('..')
 
-sampling =  3.3667, 3.3667
+from tools.config_manager import ConfigManager, GetSPHEREonsky
+from PSF_models.TipToy_SPHERE_multisrc import TipToy
+import matplotlib.pyplot as plt
+from torch.nn.functional import interpolate
 
-dk =  0.026426762342453003
+from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
+from tools.utils import draw_PSF_stack, plot_radial_profiles
+from project_globals import device
+import pickle
+import torch
+from pprint import pprint
 
-sampling = 4.3715, 4.6636,
-           3.3667, 3.3667
+norm_regime = 'sum'
+
+fitted_folder = 'E:/ESO/Data/SPHERE/IRDIS_fitted_PAO_1P21I/'
+fitted_files = os.listdir(fitted_folder)
+
+selected_files = [fitted_files[20]] #, fitted_files[40] ]
+sample_ids = [ int(file.split('.')[0]) for file in selected_files ]
+
+regime = '1P21I'
+
+
+tensy = lambda x: torch.tensor(x).to(device)
+
+PSF_0, bg, norms, data_samples, init_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
+norms = norms[:, None, None].cpu().numpy() 
+
+with open(fitted_folder + selected_files[0], 'rb') as handle:
+    data = pickle.load(handle)
+
+toy = TipToy(init_config, norm_regime, device, TipTop=False, PSFAO=True)
+toy.optimizables = []
+
+data['dx']  = 0
+data['dy']  = 0
+data['Jx']  = 0
+data['Jy']  = 0
+data['Jxy'] = 0
+data['F'] = data['F'] * 0 + 1
+data['bg'] = data['bg'] * 0
+
+toy.F     = tensy( data['F']     ).squeeze()
+toy.bg    = tensy( data['bg']    ).squeeze()
+toy.Jy    = tensy( data['Jy']    ).flatten()
+toy.Jxy   = tensy( data['Jxy']   ).flatten()
+toy.Jx    = tensy( data['Jx']    ).flatten()
+toy.dx    = tensy( data['dx']    ).flatten()
+toy.dy    = tensy( data['dy']    ).flatten()
+toy.b     = tensy( data['b']     ).flatten()
+toy.r0    = tensy( data['r0']    ).flatten()
+toy.amp   = tensy( data['amp']   ).flatten()
+toy.beta  = tensy( data['beta']  ).flatten()
+toy.theta = tensy( data['theta'] ).flatten()
+toy.alpha = tensy( data['alpha'] ).flatten()
+toy.ratio = tensy( data['ratio'] ).flatten()
+
+
+PSFs_pred_1 = toy().detach().clone()
+# PSFs_test_1 = torch.tensor( data['Img. fit'][0,...] / norms).to(device)
+
+#%
+toy.oversampling = 2.#0-1e-5
+toy.Update()
+toy.optimizables = []
+
+toy.F     = tensy( data['F']     ).squeeze()
+toy.bg    = tensy( data['bg']    ).squeeze()
+toy.Jy    = tensy( data['Jy']    ).flatten()
+toy.Jxy   = tensy( data['Jxy']   ).flatten()
+toy.Jx    = tensy( data['Jx']    ).flatten()
+toy.dx    = tensy( data['dx']    ).flatten()
+toy.dy    = tensy( data['dy']    ).flatten()
+toy.b     = tensy( data['b']     ).flatten()
+toy.r0    = tensy( data['r0']    ).flatten()
+toy.amp   = tensy( data['amp']   ).flatten()
+toy.beta  = tensy( data['beta']  ).flatten()
+toy.theta = tensy( data['theta'] ).flatten()
+toy.alpha = tensy( data['alpha'] ).flatten()
+toy.ratio = tensy( data['ratio'] ).flatten()
+
+PSFs_pred_2 = toy().detach().clone()
+
+plot_radial_profiles(PSFs_pred_1[:,0,...], PSFs_pred_2[:,0,...], 'Before Update', 'After', title='PSFs', dpi=200, cutoff=32, scale='log')
+plt.show()
+draw_PSF_stack(PSFs_pred_1, PSFs_pred_2)
+
+# %%

@@ -14,6 +14,15 @@ from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, pdims, min_2d
 
 
 class TipToy(torch.nn.Module):
+    
+    def InitPupils(self):
+        pupil_path = self.config['telescope']['PathPupil']
+        pupil_apodizer = self.config['telescope']['PathApodizer']
+        
+        self.pupil    = self.make_tensor(fits.getdata(pupil_path).astype('float'))
+        self.apodizer = self.make_tensor(fits.getdata(pupil_apodizer).astype('float'))
+    
+    
     def InitValues(self):
         # Reading parameters from the file
         num_src = self.config['NumberSources']
@@ -119,6 +128,11 @@ class TipToy(torch.nn.Module):
                 setattr(self, name, buffer)
 
 
+    def _fftAutoCorr(self, x):
+        x_fft = fft.fft2(x)
+        return fft.fftshift( fft.ifft2(x_fft*torch.conj(x_fft))/x.size(0)*x.size(1) )
+
+
     def InitGrids(self):
         # Initialize grids
         # for all generated PSDs within one batch sampling musat be the same
@@ -126,26 +140,12 @@ class TipToy(torch.nn.Module):
 
         self.psdsave = None
 
-        # self.sampling_factor = (torch.ceil(2.0/pixels_per_l_D)).int() # check how much it is less than Nyquist
-        # self.sampling = self.sampling_factor * pixels_per_l_D
-        # self.oversampling = self.sampling.max() / self.sampling
-        # self.nOtf = (self.nPix * self.sampling_factor.max() * self.oversampling.max()).round().int().item()
-        # self.nOtf += self.nOtf % 2
-
-        # self.dk = 1/self.D/self.sampling.max() # PSD spatial frequency step
-        # self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
-
-        self.sampling_factor = (torch.ceil(2.0/pixels_per_l_D)).int() # check how much it is less than Nyquist
+        self.sampling_factor = (torch.ceil(2.0/pixels_per_l_D) * self.oversampling).int() # check how much it is less than Nyquist
         self.sampling = self.sampling_factor * pixels_per_l_D
         self.nOtf = (self.nPix * self.sampling_factor.max()).item()
 
         self.dk = 1/self.D/self.sampling.min() # PSD spatial frequency step  TODO: or .max()?
         self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
-
-        # print('dk = ', self.dk.item())
-        # print('nOtf = ', self.nOtf)	
-        # print('sampling = ', self.sampling)
-        # print('sampling_factor = ', self.sampling_factor)
 
         # Initialize spatial frequencies
         self.kx, self.ky = torch.meshgrid(
@@ -169,14 +169,10 @@ class TipToy(torch.nn.Module):
         self.nOtf_AO += self.nOtf_AO % 2
 
         # Comb samples involved in alising PSD calculation
-        n_times = min(4,max(2,int(np.ceil(self.nOtf/self.nOtf_AO/2))))
-        ids = []
-        for mi in range(-n_times,n_times):
-            for ni in range(-n_times,n_times):
-                if mi or ni: #exclude (0,0)
-                    ids.append([mi,ni])
-        ids = np.array(ids)
-
+        n_times = min(4, max(2, int(np.ceil(self.nOtf/self.nOtf_AO/2)) ) )
+        # ids = np.array( [[i, j] for i in range(-n_times, n_times+1) for j in range(-n_times, n_times+1) if i != 0 or j != 0] )
+        ids = np.array( [[i, j] for i in range(-n_times+1, n_times) for j in range(-n_times+1, n_times) if i != 0 or j != 0] )
+        
         m = self.make_tensor(ids[:,0])
         n = self.make_tensor(ids[:,1])
         self.N_combs = m.shape[0]
@@ -211,9 +207,6 @@ class TipToy(torch.nn.Module):
         # This is thing is 5D: (aliased samples) x (N src) x (Atmospheric layers) x (kx) x (ky) TODO: NO, it's 4D
         self.km = self.kx_AO.repeat([self.N_combs,1,1,1]) - pdims(m/self.WFS_d_sub, 3)
         self.kn = self.ky_AO.repeat([self.N_combs,1,1,1]) - pdims(n/self.WFS_d_sub, 3)
-        
-        # self.km = self.km.unsqueeze(2)
-        # self.kn = self.kn.unsqueeze(2)
 
         # Initialize OTF frequencies
         self.U, self.V = torch.meshgrid(
@@ -228,34 +221,14 @@ class TipToy(torch.nn.Module):
         self.V2  = self.V**2
         self.UV  = self.U*self.V
         self.UV2 = self.U**2 + self.V**2
-
-        pupil_path = self.config['telescope']['PathPupil']
-        pupil_apodizer = self.config['telescope']['PathApodizer']
-
-        pupil    = self.make_tensor(fits.getdata(pupil_path).astype('float'))
-        apodizer = self.make_tensor(fits.getdata(pupil_apodizer).astype('float'))
-
-        pupil_pix  = pupil.shape[0]
-
-        # padded_pix = int(pupil_pix*self.sampling)
-        # pupil_padded = torch.zeros([padded_pix, padded_pix], device=self.device)
-        # pupil_padded[
-        #     padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2,
-        #     padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2
-        # ] = pupil*apodizer
-        # self.OTF_static = pdims(torch.real(fftAutoCorr(pupil_padded)), -2)
-        # self.OTF_static = interpolate(self.OTF_static, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze(0).squeeze(0)
-        # self.OTF_static = pdims( self.OTF_static / self.OTF_static.max(), -1 )
-
-        def fftAutoCorr(x):
-            x_fft = fft.fft2(x)
-            return fft.fftshift( fft.ifft2(x_fft*torch.conj(x_fft))/x.size(0)*x.size(1) )
+        
+        pupil_pix  = self.pupil.shape[0]
 
         ids = np.unravel_index(np.unique(self.wvl.cpu().numpy(), return_index=True)[1], self.wvl.shape)
         all_wvls = self.wvl[ids].cpu().numpy().tolist()
         all_samplings = self.sampling[ids]
 
-        self.OTF_static_dict =  {}  
+        self.OTF_static_dict = {}
         for i, wvl in enumerate(all_wvls):
             self.OTF_static_dict[wvl] = torch.zeros([self.nOtf, self.nOtf], device=self.device)
             padded_pix = int(pupil_pix*all_samplings[i])
@@ -264,9 +237,9 @@ class TipToy(torch.nn.Module):
             pupil_padded[
                 padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2,
                 padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2
-            ] = pupil*apodizer
+            ] = self.pupil * self.apodizer
 
-            OTF_static_ = pdims( torch.real( fftAutoCorr(pupil_padded) ), -2)
+            OTF_static_ = pdims( torch.real( self._fftAutoCorr(pupil_padded) ), -2)
             OTF_static_ = interpolate(OTF_static_, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze()
             self.OTF_static_dict[wvl] = OTF_static_.clone() / OTF_static_.max()
 
@@ -282,7 +255,7 @@ class TipToy(torch.nn.Module):
 
         # Piston filter
         def PistonFilter(f):
-            x = (np.pi*self.D*f).cpu().numpy() #TODO: find Bessel analog for pytorch
+            x = (np.pi*self.D*f).cpu().numpy()
             R = spc.j1(x)/x
             piston_filter = self.make_tensor(1.0-4*R**2)
             piston_filter[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
@@ -292,13 +265,16 @@ class TipToy(torch.nn.Module):
         self.PR = PistonFilter(torch.hypot(self.km, self.kn))
 
         # Diffraction-limited PSF
-        self.PSF_DL = interpolate( \
-            torch.abs(fft.fftshift(fft.ifft2(fft.fftshift(self.OTF_static)))), \
-            size=(self.nPix,self.nPix), mode='area' ).squeeze() #TODO: area interpolation, or...?
+        # self.PSF_DL = interpolate( \
+        #     torch.abs(fft.fftshift(fft.ifft2(fft.fftshift(self.OTF_static)))), \
+        #     size=(self.nPix,self.nPix), mode='bicubic' ).squeeze()
+        #TODO: proper PSF DL
+        self.PSF_DL = None
         
 
-    def Update(self, reinit_grids=True):
+    def Update(self, reinit_grids=True, reinit_pupils=False):
         self.InitValues()
+        if reinit_pupils: self.InitPupils()
         if reinit_grids: self.InitGrids()
 
 
@@ -333,9 +309,12 @@ class TipToy(torch.nn.Module):
         self.norm_regime = norm_regime
         self.norm_scale  = self.make_tensor(1.0) # TODO: num obj x num wvl
 
+        self.oversampling = 1.0
+
         # Read data and initialize AO system
         self.config = AO_config
         self.InitValues()
+        self.InitPupils()
         self.InitGrids()
         self.PSDs = {}
 
@@ -633,9 +612,10 @@ class TipToy(torch.nn.Module):
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         # Resulting OTF
         OTF = OTF_turb * self.OTF_static * fftPhasor * OTF_jitter
+        # OTF = OTF_turb
         
         PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF, dim=(-2,-1))), dim=(-2,-1)) )
-        PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='area')
+        PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='bicubic')
 
         if self.norm_regime == 'max':
             self.norm_scale = torch.amax(PSF_out, dim=(-2,-1), keepdim=True)
