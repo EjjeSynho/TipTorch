@@ -10,10 +10,12 @@ import scipy.special as spc
 from astropy.io import fits
 import time
 
+import matplotlib.pyplot as plt
+
 from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, pdims, min_2d
 
 
-class TipToy(torch.nn.Module):
+class TipTorch(torch.nn.Module):
     
     def InitPupils(self):
         pupil_path = self.config['telescope']['PathPupil']
@@ -136,22 +138,27 @@ class TipToy(torch.nn.Module):
     def InitGrids(self):
         # Initialize grids
         # for all generated PSDs within one batch sampling musat be the same
+
+        to_odd  = lambda f: int( np.ceil(f)//2 * 2 + 1 )
+        to_even = lambda f: int( np.ceil(f)//2 * 2 )
+
+        # Manage sampling
         pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
-
-        self.psdsave = None
-
-        self.sampling_factor = (torch.ceil(2.0/pixels_per_l_D) * self.oversampling).int() # check how much it is less than Nyquist
+        self.sampling_factor = torch.ceil(2.0/pixels_per_l_D) * self.oversampling # to avoid aliasing or to provide oversampling
         self.sampling = self.sampling_factor * pixels_per_l_D
-        self.nOtf = (self.nPix * self.sampling_factor.max()).item()
+        self.nOtf = self.nPix * self.sampling_factor.max().item()
+        self.nOtf = to_odd(self.nOtf) #Force nOtf to be odd
 
         self.dk = 1/self.D/self.sampling.min() # PSD spatial frequency step  TODO: or .max()?
         self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 
+        def gen_grid(N):
+            factor = 0.5*(1-N%2)
+            return torch.meshgrid(*[torch.linspace(-N//2+N%2+factor, N//2-factor, N, device=self.device)]*2, indexing = 'ij')
+
         # Initialize spatial frequencies
-        self.kx, self.ky = torch.meshgrid(
-            torch.linspace(-self.nOtf/2, self.nOtf/2-1, self.nOtf, device=self.device)*self.dk + 1e-10,
-            torch.linspace(-self.nOtf/2, self.nOtf/2-1, self.nOtf, device=self.device)*self.dk + 1e-10,
-            indexing = 'ij')
+        self.kx, self.ky = gen_grid(self.nOtf) # PSD spatial frequencies
+        self.kx, self.ky = self.kx * self.dk + 1e-10, self.ky * self.dk + 1e-10
 
         self.k2 = self.kx**2 + self.ky**2
         self.k = torch.sqrt(self.k2)
@@ -161,27 +168,18 @@ class TipToy(torch.nn.Module):
             self.kx2 = self.kx**2
             self.ky2 = self.ky**2
 
-        self.mask = torch.ones_like(self.k2, device=self.device)
-        self.mask[self.k2 <= self.kc**2] = 0
-        self.mask_corrected = 1.0-self.mask
-
-        self.nOtf_AO = int(2*self.kc/self.dk)
-        self.nOtf_AO += self.nOtf_AO % 2
-
-        # Comb samples involved in alising PSD calculation
-        n_times = min(4, max(2, int(np.ceil(self.nOtf/self.nOtf_AO/2)) ) )
-        # ids = np.array( [[i, j] for i in range(-n_times, n_times+1) for j in range(-n_times, n_times+1) if i != 0 or j != 0] )
-        ids = np.array( [[i, j] for i in range(-n_times+1, n_times) for j in range(-n_times+1, n_times) if i != 0 or j != 0] )
+        # Compute the frequency mask for the AO corrected and uncorrected regions
+        self.mask_corrected = torch.zeros_like(self.k2).int()
+        self.mask_corrected[self.k2 <= self.kc**2] = 1.0
+        self.mask = 1.0-self.mask_corrected
         
-        m = self.make_tensor(ids[:,0])
-        n = self.make_tensor(ids[:,1])
-        self.N_combs = m.shape[0]
+        mask_slice = self.mask_corrected[self.mask_corrected.shape[0]//2, :].tolist()
+        first_one = mask_slice.index(1)
+        last_one = len(mask_slice)-mask_slice[::-1].index(1)-1 # detect the borders of the correction area
+        self.nOtf_AO = last_one-first_one+1
 
-        corrected_ROI = slice(self.nOtf//2-self.nOtf_AO//2, self.nOtf//2+self.nOtf_AO//2)
-        corrected_ROI = (corrected_ROI,corrected_ROI)
-
-        self.mask_AO = self.mask[corrected_ROI]
-        self.mask_corrected_AO = pdims( self.mask_corrected[corrected_ROI], -1 )
+        corrected_ROI = (slice(first_one, last_one+1), slice(first_one, last_one+1))
+        self.mask_corrected_AO = pdims(self.mask_corrected[corrected_ROI], -1)
         self.mask = pdims( self.mask, -1 )
 
         self.kx_AO = pdims( self.kx[corrected_ROI], -1 )
@@ -203,44 +201,48 @@ class TipToy(torch.nn.Module):
             self.kx2 = pdims( self.kx2, -1 )
             self.ky2 = pdims( self.ky2, -1 )
 
-        # For NGS-like alising 0th dimension is used to store shifted spatial frequency
-        # This is thing is 5D: (aliased samples) x (N src) x (Atmospheric layers) x (kx) x (ky) TODO: NO, it's 4D
-        self.km = self.kx_AO.repeat([self.N_combs,1,1,1]) - pdims(m/self.WFS_d_sub, 3)
-        self.kn = self.ky_AO.repeat([self.N_combs,1,1,1]) - pdims(n/self.WFS_d_sub, 3)
+        if self.PSD_include['aliasing']:
+            # Comb samples involved in alising PSD calculation
+            n_times = min(4, max(2, int(np.ceil(self.nOtf/self.nOtf_AO/2)) ) )
+            # ids = np.array( [[i, j] for i in range(-n_times, n_times+1) for j in range(-n_times, n_times+1) if i != 0 or j != 0] )
+            ids = np.array( [[i, j] for i in range(-n_times+1, n_times) for j in range(-n_times+1, n_times) if i != 0 or j != 0] )
+            
+            # For NGS-like alising 0th dimension is used to store shifted spatial frequency
+            # This is thing is 5D: (aliased samples) x (N src) x (Atmospheric layers) x (kx) x (ky) TODO: NO, it's 4D
+            m = self.make_tensor(ids[:,0])
+            n = self.make_tensor(ids[:,1])
+            self.N_combs = m.shape[0]
+            
+            self.km = self.kx_AO.repeat([self.N_combs,1,1,1]) - pdims(m/self.WFS_d_sub, 3)
+            self.kn = self.ky_AO.repeat([self.N_combs,1,1,1]) - pdims(n/self.WFS_d_sub, 3)
 
         # Initialize OTF frequencies
-        self.U, self.V = torch.meshgrid(
-            torch.linspace(0, self.nOtf-1, self.nOtf, device=self.device),
-            torch.linspace(0, self.nOtf-1, self.nOtf, device=self.device),
-            indexing = 'ij')
-
-        self.U = pdims( (self.U-self.nOtf/2) * 2/self.nOtf, -1 )
-        self.V = pdims( (self.V-self.nOtf/2) * 2/self.nOtf, -1 )
+        self.U, self.V = gen_grid(self.nOtf)
+        self.U, self.V = pdims(self.U/self.nOtf, -1), pdims(self.V/self.nOtf, -1)
 
         self.U2  = self.U**2
         self.V2  = self.V**2
         self.UV  = self.U*self.V
         self.UV2 = self.U**2 + self.V**2
         
-        pupil_pix  = self.pupil.shape[0]
-
+        # Compute pupil polychromatic OTFs
         ids = np.unravel_index(np.unique(self.wvl.cpu().numpy(), return_index=True)[1], self.wvl.shape)
         all_wvls = self.wvl[ids].cpu().numpy().tolist()
         all_samplings = self.sampling[ids]
 
+        pupil_pixels = self.pupil.shape[0]
         self.OTF_static_dict = {}
         for i, wvl in enumerate(all_wvls):
-            self.OTF_static_dict[wvl] = torch.zeros([self.nOtf, self.nOtf], device=self.device)
-            padded_pix = int(pupil_pix*all_samplings[i])
+            pupil_padded = torch.nn.ZeroPad2d( \
+                int(pupil_pixels*all_samplings[i]/2 - pupil_pixels/2) ) (self.pupil*self.apodizer)
+        
+            fl_even = self.nOtf % 2 == 0 and pupil_padded.shape[0] % 2 == 0
+            pupil_padded = pupil_padded[:-1, :-1] if fl_even else pupil_padded # to center-align if number of pixels is even
 
-            pupil_padded = torch.zeros([padded_pix, padded_pix], device=self.device)
-            pupil_padded[
-                padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2,
-                padded_pix//2-pupil_pix//2 : padded_pix//2+pupil_pix//2
-            ] = self.pupil * self.apodizer
-
-            OTF_static_ = pdims( torch.real( self._fftAutoCorr(pupil_padded) ), -2)
-            OTF_static_ = interpolate(OTF_static_, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze()
+            OTF_static_ = interpolate(\
+                torch.real(self._fftAutoCorr(pupil_padded))[None,None,...],
+                size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze()
+ 
             self.OTF_static_dict[wvl] = OTF_static_.clone() / OTF_static_.max()
 
         buf_obj = []
@@ -253,16 +255,20 @@ class TipToy(torch.nn.Module):
 
         self.PSD_padder = torch.nn.ZeroPad2d((self.nOtf-self.nOtf_AO)//2)
 
-        # Piston filter
+        # Piston filter, filters centering pixel
         def PistonFilter(f):
             x = (np.pi*self.D*f).cpu().numpy()
             R = spc.j1(x)/x
             piston_filter = self.make_tensor(1.0-4*R**2)
-            piston_filter[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
+            if self.nOtf_AO % 2: # supress the central pixel if the number of pixels is odd
+                piston_filter[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
             return piston_filter
 
+        # Detects oddity to determine if piston needed
         self.piston_filter = PistonFilter(self.k_AO)
-        self.PR = PistonFilter(torch.hypot(self.km, self.kn))
+        
+        if self.PSD_include['aliasing']:
+            self.PR = PistonFilter(torch.hypot(self.km, self.kn))
 
         # Diffraction-limited PSF
         # self.PSF_DL = interpolate( \
@@ -294,7 +300,7 @@ class TipToy(torch.nn.Module):
             raise ValueError('At least one of the following must be True: TipTop or PSFAO')
 
 
-    def __init__(self, AO_config, norm_regime='sum', device=torch.device('cpu'), TipTop=True, PSFAO=False):
+    def __init__(self, AO_config, norm_regime='sum', device=torch.device('cpu'), TipTop=True, PSFAO=False, oversampling=1):
         super().__init__()
         
         self.device = device
@@ -309,8 +315,9 @@ class TipToy(torch.nn.Module):
         self.norm_regime = norm_regime
         self.norm_scale  = self.make_tensor(1.0) # TODO: num obj x num wvl
 
-        self.oversampling = 1.0
-
+        self.oversampling = oversampling
+        self.psdsave = None
+    
         # Read data and initialize AO system
         self.config = AO_config
         self.InitValues()
@@ -465,11 +472,10 @@ class TipToy(torch.nn.Module):
         ax = alpha * ratio
         ay = alpha / ratio
 
-        uxx = self.kx2_AO #.unsqueeze(0)
-        uxy = self.kxy_AO #.unsqueeze(0)
-        uyy = self.ky2_AO #.unsqueeze(0)
+        uxx = self.kx2_AO
+        uxy = self.kxy_AO
+        uyy = self.ky2_AO
 
-        #def reduced_center_coord(uxx, uxy, uyy, ax, ay, theta):
         c  = torch.cos(theta)
         s  = torch.sin(theta)
         s2 = torch.sin(2.0 * theta)
@@ -488,10 +494,9 @@ class TipToy(torch.nn.Module):
         Fin  = (1 + (removeInside**2)/(ax*ay))**(1-beta)
         F = 1 / (Fin-Fout)
 
-        MoffatPSD = (amp * V*E*F + b) * self.mask_corrected_AO #.unsqueeze(0)
-        MoffatPSD[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
-
+        MoffatPSD = (amp * V*E*F + b) * self.mask_corrected_AO * self.piston_filter
         
+        '''        
         if self.psdsave is not None:
             import pickle
             import pathlib
@@ -513,7 +518,7 @@ class TipToy(torch.nn.Module):
             
             with open(dir_save_PSD, 'wb') as f:
                 pickle.dump(dir_to_save, f)
-        
+        '''
             
         return MoffatPSD
 
@@ -549,7 +554,7 @@ class TipToy(torch.nn.Module):
         # Most contributors are computed for 500 [nm], wavelengths-dependant inputs as well are assumed for 500 [nm]
         # But WFS operates on another wavelength, so this PSD components is normalized for WFSing wvl 
         # Put all contributiors together and sum up the resulting PSD
-        self.PSDs = {entry: 0.0 for entry in self.PSD_entries}
+        self.PSDs = {entry: self.make_tensor(0.0) for entry in self.PSD_entries}
 
         if self.PSD_include['fitting']:
             self.PSDs['fitting'] = self.VonKarmanPSD(r0.abs(), L0.abs()).unsqueeze(1) * PSD_norm(500e-9)
@@ -580,6 +585,10 @@ class TipToy(torch.nn.Module):
               self.PSDs['chromatism'] + \
               self.PSDs['Moffat'])
         
+        # plt.figure(1)
+        # plt.imshow(torch.log10(PSD).squeeze().cpu().numpy())
+        # plt.show()
+        
         # if self.psdsave is not None:
         #     import pickle
         #     import pathlib
@@ -601,10 +610,13 @@ class TipToy(torch.nn.Module):
         Jy  = pdims(self.Jy,  2)
         Jxy = pdims(self.Jxy, 2)
 
+        self.PSD = PSD
+
         # Computing OTF from PSD
         cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1
+
         # Computing the Structure Function from the covariance
-        SF = torch.abs(cov).amax(dim=(-2,-1), keepdim=True) - cov
+        SF = cov.abs().amax(dim=(-2,-1), keepdim=True) - cov.abs()
         # Phasor to shift the PSF with the subpixel accuracy
         fftPhasor  = torch.exp(-np.pi*1j*pdims(self.sampling_factor,2) * (self.U*dx + self.V*dy).unsqueeze(1))
         OTF_turb   = torch.exp(-0.5*SF*pdims(2*np.pi*1e-9/self.wvl,2)**2)
@@ -612,10 +624,19 @@ class TipToy(torch.nn.Module):
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         # Resulting OTF
         OTF = OTF_turb * self.OTF_static * fftPhasor * OTF_jitter
-        # OTF = OTF_turb
         
-        PSF = torch.abs( fft.fftshift(fft.ifft2(fft.fftshift(OTF, dim=(-2,-1))), dim=(-2,-1)) )
-        PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='bicubic')
+        center_aligner = self.make_tensor(1.0)
+        if self.nPix%2 == 0:
+            OTF = OTF[...,:-1,:-1]
+            center_aligner = \
+                torch.exp(-1j*np.pi*(self.U[...,:-1,:-1]+self.V[...,:-1,:-1])*(1-self.nPix%2))
+
+        PSF = torch.abs( fft.fftshift(fft.ifft2(fft.ifftshift(OTF*center_aligner, dim=(-2,-1))), dim=(-2,-1)) )
+
+        if OTF.shape[-1] != self.nPix:
+            PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='bilinear')
+        else:
+            PSF_out = PSF
 
         if self.norm_regime == 'max':
             self.norm_scale = torch.amax(PSF_out, dim=(-2,-1), keepdim=True)
@@ -623,8 +644,6 @@ class TipToy(torch.nn.Module):
         elif self.norm_regime == 'sum':
             self.norm_scale = PSF_out.sum(dim=(-2,-1), keepdim=True)
 
-        # return PSF_out/self.norm_scale * F + bg #TODO: to put norm inside or not?
-        # return (PSF_out*F + bg) / self.norm_scale #TODO: to put norm inside or not?
         return (PSF_out / self.norm_scale) * F + bg #TODO: to put norm inside or not?
 
 

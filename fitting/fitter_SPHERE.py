@@ -13,7 +13,7 @@ from torch import nn
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
 
 from tools.utils import OptimizeLBFGS, SR, pdims, FitGauss2D
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
+from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from tools.config_manager import ConfigManager, GetSPHEREonsky
 
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
@@ -56,7 +56,7 @@ def load_and_fit_sample(id):
     sample_ids = [id]
     PSF_0, bg, norms, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
 
-    toy = TipToy(merged_config, norm_regime, device)
+    toy = TipTorch(merged_config, norm_regime, device)
 
     toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
     _ = toy({

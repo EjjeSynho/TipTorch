@@ -1,6 +1,6 @@
 #%%
-# %reload_ext autoreload
-# %autoreload 2
+%reload_ext autoreload
+%autoreload 2
 
 import sys
 sys.path.insert(0, '..')
@@ -11,7 +11,7 @@ from torch import nn
 from torch import optim
 import numpy as np
 from tools.utils import OptimizeLBFGS, ParameterReshaper, plot_radial_profiles, SR, draw_PSF_stack
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
+from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
 import matplotlib.pyplot as plt
 
@@ -35,14 +35,15 @@ good_ids = psf_df.index.values.tolist()
 # sample_ids = [578]
 # sample_ids = [576]
 # sample_ids = [992]
-sample_ids = [1209]
+# sample_ids = [1209]
 # sample_ids = [456]
 # sample_ids = [465]
 # sample_ids = [1393] #50 DITs
+sample_ids = [1408]
 
 # regime = '1P2NI'
-# regime = '1P21I'
-regime = 'NP2NI'
+regime = '1P21I'
+# regime = 'NP2NI'
 norm_regime = 'sum'
 
 PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
@@ -50,7 +51,7 @@ PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime
 # bg *= 0
 
 #% Initialize model
-toy = TipToy(merged_config, norm_regime, device)
+toy = TipTorch(merged_config, norm_regime, device)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
 # toy.optimizables = ['r0', 'F', 'dn', 'Jx', 'Jy', 'Jxy']
@@ -63,7 +64,7 @@ _ = toy({
 
 PSF_1 = toy()
 #print(toy.EndTimer())
-PSF_DL = toy.DLPSF()
+# PSF_DL = toy.DLPSF()
 # draw_PSF_stack(PSF_0, PSF_1, average=True)
 draw_PSF_stack(PSF_0, PSF_1, average=False)
 
@@ -297,14 +298,14 @@ optimized_model = optimize_with_boundary_conditions(toy, loss_fn, bounds)
 
 
 #%%
-print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
+# print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 draw_PSF_stack(PSF_0, PSF_1, average=True)
 
 destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
 plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
 
 #%% ================================= PSFAO fitting =================================
-toy = TipToy(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
+toy = TipTorch(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
 _ = toy({

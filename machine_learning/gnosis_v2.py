@@ -963,7 +963,7 @@ toy.ratio = tensy( data['ratio'] ).flatten()
 PSFs_pred_1 = toy().detach().clone()
 # PSFs_test_1 = torch.tensor( data['Img. fit'][0,...] / norms).to(device)
 
-#%
+#%%
 toy.oversampling = 2.#0-1e-5
 toy.Update()
 toy.optimizables = []
@@ -987,6 +987,9 @@ PSFs_pred_2 = toy().detach().clone()
 
 plot_radial_profiles(PSFs_pred_1[:,0,...], PSFs_pred_2[:,0,...], 'Before Update', 'After', title='PSFs', dpi=200, cutoff=32, scale='log')
 plt.show()
+
+#%%
+%matplotlib qt
 draw_PSF_stack(PSFs_pred_1, PSFs_pred_2)
 
 # %%

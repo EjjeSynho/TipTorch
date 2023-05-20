@@ -516,14 +516,14 @@ class OptimizeTRF():
         return self.parameters
 
 
-def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, max_val=1e16):
+def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, max_val=1e16, crop=128):
     from matplotlib.colors import LogNorm
     
-    ROI_size = 128
-    ROI = slice(PSF_in.shape[-2]//2-ROI_size//2, PSF_in.shape[-1]//2+ROI_size//2)
+
+    ROI = slice(PSF_in.shape[-2]//2-crop//2, PSF_in.shape[-1]//2+crop//2)
     dPSF = (PSF_out - PSF_in).abs()
 
-    cut = lambda x: x.abs().detach().cpu().numpy()[..., ROI, ROI]
+    cut = lambda x: x.abs().detach().cpu().numpy()[..., ROI, ROI] if crop is not None else x.abs().detach().cpu().numpy()
 
     if average:
         row = []
