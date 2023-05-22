@@ -121,7 +121,7 @@ plt.imshow(OTF_static_1)
 
 
 
-#%%
+
 #%% ============================================================================
 norm_regime = 'sum'
 
@@ -135,7 +135,7 @@ regime = '1P21I'
 
 tensy = lambda x: torch.tensor(x).to(device)
 
-PSF_0, bg, norms, data_samples, init_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
+PSF_0, bg, norms, data_samples, init_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device)
 norms = norms[:, None, None].cpu().numpy()
 
 with open(fitted_folder + selected_files[0], 'rb') as handle:
@@ -143,16 +143,18 @@ with open(fitted_folder + selected_files[0], 'rb') as handle:
 
 init_config['sensor_science']['FieldOfView'] = 255
 
-start = torch.cuda.Event(enable_timing=True)
-end   = torch.cuda.Event(enable_timing=True)
+# start = torch.cuda.Event(enable_timing=True)
+# end   = torch.cuda.Event(enable_timing=True)
 
 
-toy = TipTorch(init_config, norm_regime, device, TipTop=False, PSFAO=True)#, oversampling=1)
-
-with profiler.profile(with_stack=True, profile_memory=True) as prof:
-    toy.Update(reinit_grids=True, reinit_pupils=False)
+toy = TipTorch(init_config, norm_regime, device, TipTop=False, PSFAO=True, oversampling=2)
+torch.cuda.empty_cache()
+#%%
+# with profiler.profile(with_stack=True, profile_memory=True) as prof:
+# toy.oversampling = 2
+# toy.Update(reinit_grids=True, reinit_pupils=False)
     
-print(prof.key_averages(group_by_stack_n=5).table(sort_by='self_cpu_time_total', row_limit=5))
+# print(prof.key_averages(group_by_stack_n=5).table(sort_by='self_cpu_time_total', row_limit=5))
 
 toy.optimizables = []
 
@@ -179,7 +181,6 @@ toy.theta = tensy( data['theta'] ).flatten()
 toy.alpha = tensy( data['alpha'] ).flatten()
 toy.ratio = tensy( data['ratio'] ).flatten()
 
-#%%
 # start.record()
 PSFs_pred_1 = toy().detach().clone()
 # PSFs_test_1 = torch.tensor( data['Img. fit'][0,...] / norms).to(device)
@@ -192,25 +193,14 @@ PSFs_pred_1 = toy().detach().clone()
 # print(start.elapsed_time(end))
 
 # plt.imshow(torch.log10(PSFs_pred_1[0,0,...].abs()).cpu().numpy())
-plt.imshow(torch.abs(PSFs_pred_1[0,0,...].abs()).cpu().numpy())
 
 
-
-#%%
-
-#%%
-
-test = toy.OTF.detach().cpu().numpy()
-
-with open('../data/test.pkl', 'wb') as handle:
-    pickle.dump(test, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    
-with open('../data/test.pkl', 'rb') as handle:
-    test = pickle.load(handle)
 
 #%%
 toy = TipTorch(init_config, norm_regime, device, TipTop=False, PSFAO=True, oversampling=4)
 toy.optimizables = []
+
+torch.cuda.empty_cache()
 
 toy.F     = tensy( data['F']     ).squeeze()
 toy.bg    = tensy( data['bg']    ).squeeze()
@@ -229,7 +219,6 @@ toy.ratio = tensy( data['ratio'] ).flatten()
 
 PSFs_pred_2 = toy().detach().clone()
 
-a_2 = toy.PSD.detach().cpu().clone()
 
 plot_radial_profiles(PSFs_pred_1[:,0,...], PSFs_pred_2[:,0,...], 'Before Update', 'After', title='PSFs', dpi=200, cutoff=32, scale='log')
 plt.show()

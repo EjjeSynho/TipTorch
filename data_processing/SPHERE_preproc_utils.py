@@ -11,7 +11,7 @@ from tools.utils import SPHERE_PSF_spiders_mask, mask_circle
 from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
-from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER, device
+from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER #, device
 
 
 def LoadSPHEREsynthByID(target_id):
@@ -110,7 +110,7 @@ def GenerateImages(samples, norm_regime, device):
     return make_tensor(np.stack(ims)), make_tensor(np.stack(bgs)), make_tensor(np.stack(normas)).squeeze()
 
 
-def SPHERE_preprocess(sample_ids, regime, norm_regime, synth=False):
+def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
     if regime == 'different':
         data_samples = SamplesByIds(sample_ids, synth)
         for datasample in data_samples:

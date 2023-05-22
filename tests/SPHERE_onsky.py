@@ -46,7 +46,7 @@ regime = '1P21I'
 # regime = 'NP2NI'
 norm_regime = 'sum'
 
-PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
+PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device)
 PSF_0 = PSF_0[...,1:,1:]
 merged_config['sensor_science']['FieldOfView'] = 255
 
