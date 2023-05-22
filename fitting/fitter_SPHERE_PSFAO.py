@@ -32,6 +32,7 @@ psf_df = psf_df[psf_df['invalid'] == False]
 good_ids = psf_df.index.values.tolist()
 
 ids_fitted = [ int(file.split('.')[0]) for file in os.listdir(SPHERE_FITTING_FOLDER) ]
+
 good_ids = list(set(good_ids) - set(ids_fitted))
 
 #%%
@@ -55,6 +56,8 @@ to_store = lambda x: x.detach().cpu().numpy()
 def load_and_fit_sample(id):
     sample_ids = [id]
     PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
+    PSF_0 = PSF_0[...,1:,1:]
+    merged_config['sensor_science']['FieldOfView'] = 255
 
     toy = TipTorch(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 

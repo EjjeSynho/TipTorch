@@ -21,7 +21,7 @@ import numpy as np
 from torch import fft
 
 from pprint import pprint
-
+import torch.autograd.profiler as profiler
 
 #%%
 # %matplotlib qt
@@ -122,6 +122,7 @@ plt.imshow(OTF_static_1)
 
 
 #%%
+#%% ============================================================================
 norm_regime = 'sum'
 
 fitted_folder = 'E:/ESO/Data/SPHERE/IRDIS_fitted_PAO_1P21I/'
@@ -135,14 +136,24 @@ regime = '1P21I'
 tensy = lambda x: torch.tensor(x).to(device)
 
 PSF_0, bg, norms, data_samples, init_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
-init_config['sensor_science']['FieldOfView'] = 255
-norms = norms[:, None, None].cpu().numpy() 
+norms = norms[:, None, None].cpu().numpy()
 
 with open(fitted_folder + selected_files[0], 'rb') as handle:
     data = pickle.load(handle)
 
-'''
-toy = TipToy(init_config, norm_regime, device, TipTop=False, PSFAO=True, oversampling=2)
+init_config['sensor_science']['FieldOfView'] = 255
+
+start = torch.cuda.Event(enable_timing=True)
+end   = torch.cuda.Event(enable_timing=True)
+
+
+toy = TipTorch(init_config, norm_regime, device, TipTop=False, PSFAO=True)#, oversampling=1)
+
+with profiler.profile(with_stack=True, profile_memory=True) as prof:
+    toy.Update(reinit_grids=True, reinit_pupils=False)
+    
+print(prof.key_averages(group_by_stack_n=5).table(sort_by='self_cpu_time_total', row_limit=5))
+
 toy.optimizables = []
 
 data['dx']  = 0
@@ -150,8 +161,8 @@ data['dy']  = 0
 data['Jx']  = 0
 data['Jy']  = 0
 data['Jxy'] = 0
-data['F'] = data['F'] * 0 + 1
-data['bg'] = data['bg'] * 0
+data['F']   = data['F'] * 0 + 1
+data['bg']  = data['bg'] * 0
 
 toy.F     = tensy( data['F']     ).squeeze()
 toy.bg    = tensy( data['bg']    ).squeeze()
@@ -168,34 +179,83 @@ toy.theta = tensy( data['theta'] ).flatten()
 toy.alpha = tensy( data['alpha'] ).flatten()
 toy.ratio = tensy( data['ratio'] ).flatten()
 
+#%%
+# start.record()
 PSFs_pred_1 = toy().detach().clone()
 # PSFs_test_1 = torch.tensor( data['Img. fit'][0,...] / norms).to(device)
+# a_1 = toy.PSD.detach().cpu().clone()
 
-plt.figure(2)
-plt.imshow(np.log10(PSFs_pred_1[0,0,...].abs().cpu().numpy()), vmin=-8, vmax=-1.75)
-plt.colorbar()
-plt.show()
-'''
+# PSD_1 = toy.PSD.detach().cpu().numpy()
+#%
+# end.record()
+# torch.cuda.synchronize()
+# print(start.elapsed_time(end))
+
+# plt.imshow(torch.log10(PSFs_pred_1[0,0,...].abs()).cpu().numpy())
+plt.imshow(torch.abs(PSFs_pred_1[0,0,...].abs()).cpu().numpy())
 
 
-toy = TipTorch(init_config, norm_regime, device, TipTop=True, PSFAO=False)
+
+#%%
+
+#%%
+
+test = toy.OTF.detach().cpu().numpy()
+
+with open('../data/test.pkl', 'wb') as handle:
+    pickle.dump(test, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    
+with open('../data/test.pkl', 'rb') as handle:
+    test = pickle.load(handle)
+
+#%%
+toy = TipTorch(init_config, norm_regime, device, TipTop=False, PSFAO=True, oversampling=4)
 toy.optimizables = []
 
-# toy.PSD_include['fitting'] = False
-# toy.PSD_include['WFS noise'] = False
-# toy.PSD_include['spatio-temporal'] = True                                 111                                                                                                                                                                                                                                                                                                     
-# toy.PSD_include['aliasing'] = False
-# toy.PSD_include['chromatism'] = False
+toy.F     = tensy( data['F']     ).squeeze()
+toy.bg    = tensy( data['bg']    ).squeeze()
+toy.Jy    = tensy( data['Jy']    ).flatten()
+toy.Jxy   = tensy( data['Jxy']   ).flatten()
+toy.Jx    = tensy( data['Jx']    ).flatten()
+toy.dx    = tensy( data['dx']    ).flatten()
+toy.dy    = tensy( data['dy']    ).flatten()
+toy.b     = tensy( data['b']     ).flatten()
+toy.r0    = tensy( data['r0']    ).flatten()
+toy.amp   = tensy( data['amp']   ).flatten()
+toy.beta  = tensy( data['beta']  ).flatten()
+toy.theta = tensy( data['theta'] ).flatten()
+toy.alpha = tensy( data['alpha'] ).flatten()
+toy.ratio = tensy( data['ratio'] ).flatten()
 
-# toy.wind_speed *= 0
-# toy.wind_dir *= 0
+PSFs_pred_2 = toy().detach().clone()
 
-PSFs_pred_1 = toy().detach().clone()
+a_2 = toy.PSD.detach().cpu().clone()
 
-plt.figure(1)
-plt.imshow(np.log10(PSFs_pred_1[0,0,...].abs().cpu().numpy()), vmin=-8, vmax=-1.75)
-plt.colorbar()
+plot_radial_profiles(PSFs_pred_1[:,0,...], PSFs_pred_2[:,0,...], 'Before Update', 'After', title='PSFs', dpi=200, cutoff=32, scale='log')
 plt.show()
+
+#%%
+
+%matplotlib qt
+draw_PSF_stack(PSFs_pred_1, PSFs_pred_2)
+
+#%%
+plt.figure(1)
+plt.imshow(PSFs_pred_1[0,0,...].cpu().numpy())
+plt.show()
+
+plt.figure(2)
+plt.imshow(PSFs_pred_2[0,0,...].cpu().numpy())
+plt.show()
+
+# %%
+
+a_2_ = interpolate(a_2, size=(a_1.shape[-2:]), mode='bilinear')
+
+#%
+# draw_PSF_stack(a_1/a_1.sum(), a_2_/a_2_.sum())
+
+plot_radial_profiles((a_1/a_1.sum())[:,0,...], (a_2_/a_2_.sum())[:,0,...], 'Before Update', 'After', title='PSFs', dpi=200, cutoff=32, scale='log')
 
 
 #%%

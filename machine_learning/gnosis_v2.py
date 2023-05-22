@@ -437,11 +437,11 @@ X_train_df = X_train_df.drop(rows_with_nan, axis=0)
 
 assert Y_train_df.index.values.tolist() == X_train_df.index.values.tolist()
 
-X_train = torch.from_numpy(X_train_df.values).float().to(device)
-Y_train = torch.from_numpy(Y_train_df.values).float().to(device)
+X_train = torch.nan_to_num(torch.from_numpy(X_train_df.values).float().to(device))
+Y_train = torch.nan_to_num(torch.from_numpy(Y_train_df.values).float().to(device))
 
-X_val   = torch.from_numpy(X_valid_df.values).float().to(device)
-Y_val   = torch.from_numpy(Y_valid_df.values).float().to(device)
+X_val   = torch.nan_to_num(torch.from_numpy(X_valid_df.values).float().to(device))
+Y_val   = torch.nan_to_num(torch.from_numpy(Y_valid_df.values).float().to(device))
 
 #%%
 # Define the network architecture
@@ -485,7 +485,7 @@ loss_trains = []
 loss_vals = []
 
 # Training loop
-num_iters = 50
+num_iters = 40
 
 for epoch in range(num_iters):  # number of epochs
     optimizer.zero_grad()   # zero the gradient buffers
@@ -516,7 +516,7 @@ torch.save(net.state_dict(), WEIGHTS_FOLDER/'gnosis2_weights.dict')
 #%%
 from tools.utils import plot_radial_profiles #, draw_PSF_stack
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
+from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 
 norm_regime = 'sum'
 
@@ -569,7 +569,7 @@ def GetBatch(rand_ids, read_mode):
 def GetRandIDs(length):
     rand_ids = np.arange(length)
     np.random.shuffle(rand_ids)
-    rand_ids = torch.split(torch.from_numpy(rand_ids), 64)
+    rand_ids = torch.split(torch.from_numpy(rand_ids), 32)
     return rand_ids
 
 
@@ -618,7 +618,7 @@ for epoch in range(epochs):
     for batch in batches_train:
         optimizer.zero_grad()
         
-        toy = TipToy(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
+        toy = TipTorch(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
         toy.optimizables = []
         
         PSF_pred = toy_run(toy, gnosis2PAO(net(batch['X'])))
@@ -636,7 +636,7 @@ for epoch in range(epochs):
 
         for batch in batches_val:
                 
-            toy = TipToy(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
+            toy = TipTorch(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
             toy.optimizables = []
             
             PSF_pred = toy_run(toy, gnosis2PAO(net(batch['X'])))
@@ -649,6 +649,7 @@ for epoch in range(epochs):
     print('  Train loss:  %.4f' % (np.array(loss_train_average).mean()))
     print('  Valid. loss: %.4f' % (np.array(loss_valid_average).mean()))
     print('')
+    torch.cuda.empty_cache()
 
     #TODO: TipTorch config update
     
@@ -665,29 +666,41 @@ with torch.no_grad():
     batch = batches_val[2] #np.random.choice(len(batches_val))]   
     pred_test = gnosis2PAO(net(batch['X']))
 
-    toy = TipToy(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
+    toy = TipTorch(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
     toy.optimizables = []
 
     PSF_pred = toy_run(toy, pred_test).detach().cpu().numpy()
     PSF_test = batch['PSF (data)'].detach().cpu().numpy()
     
-# rand_psf = np.random.choice(PSF_pred.shape2[0])
-# PSF_pred = PSF_pred[rand_psf,...][None,...]
-# PSF_test = PSF_test[rand_psf,...][None,...]
+rand_psf = np.random.choice(PSF_pred.shape[0])
+PSF_pred = PSF_pred[rand_psf,...][None,...]
+PSF_test = PSF_test[rand_psf,...][None,...]
     
 destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
 
 PSF_test_ = np.copy( PSF_test / PSF_test.max(axis=(-2,-1))[..., None, None] )
 PSF_pred_ = np.copy( PSF_pred / PSF_pred.max(axis=(-2,-1))[..., None, None] )
 
-plot_radial_profiles(destack(PSF_test_), destack(PSF_pred_), 'Data', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=32, scale='log')
+#%%
+# plot_radial_profiles(destack(PSF_test_), destack(PSF_pred_), 'Data', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=32, scale='log')
+
 plot_radial_profiles(destack(PSF_test),  destack(PSF_pred),  'Data', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=32, scale='log')
+plt.savefig(DATA_FOLDER/'PSF_radial.pdf', dpi=200)
+
+#%%
+from tools.utils import draw_PSF_stack
+
+plt.figure(figsize=(10,10))
+
+draw_PSF_stack(torch.tensor(PSF_test), torch.tensor(PSF_pred))
+
+plt.savefig(DATA_FOLDER/'PSF_stack.pdf', dpi=200)
 
 
 #%%
 batch = batches_val[np.random.choice(len(batches_val))] 
 
-toy = TipToy(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
+toy = TipTorch(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
 toy.optimizables = []
 
 
@@ -714,7 +727,7 @@ import sys
 sys.path.append('..')
 
 from tools.config_manager import ConfigManager, GetSPHEREonsky
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
+from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 import matplotlib.pyplot as plt
 from torch.nn.functional import interpolate
 
@@ -754,7 +767,7 @@ for file, sample in zip(selected_files,sample_ids):
     with open(fitted_folder + file, 'rb') as handle:
         data = pickle.load(handle)
 
-    toy = TipToy(init_config, norm_regime, device, TipTop=False, PSFAO=True)
+    toy = TipTorch(init_config, norm_regime, device, TipTop=False, PSFAO=True)
     toy.optimizables = []
 
     toy.F     = tensy( data['F']     ).squeeze()
@@ -794,7 +807,7 @@ for file in selected_files:
     with open(fitted_folder + file, 'rb') as handle:
         datas.append( pickle.load(handle) )
 
-toy = TipToy(init_config, norm_regime, device, TipTop=False, PSFAO=True)
+toy = TipTorch(init_config, norm_regime, device, TipTop=False, PSFAO=True)
 toy.optimizables = []
 
 tensy = lambda x: torch.tensor(x).to(device)
@@ -889,107 +902,3 @@ plt.colorbar()
 plt.show()
 
 # %matplotlib inline
-
-#%% ============================================================================
-# ==============================================================================
-# ==============================================================================
-
-
-
-%reload_ext autoreload
-%autoreload 2
-
-import sys
-sys.path.append('..')
-
-from tools.config_manager import ConfigManager, GetSPHEREonsky
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
-import matplotlib.pyplot as plt
-from torch.nn.functional import interpolate
-
-from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
-from tools.utils import draw_PSF_stack, plot_radial_profiles
-from project_globals import device
-import pickle
-import torch
-from pprint import pprint
-
-norm_regime = 'sum'
-
-fitted_folder = 'E:/ESO/Data/SPHERE/IRDIS_fitted_PAO_1P21I/'
-fitted_files = os.listdir(fitted_folder)
-
-selected_files = [fitted_files[20]] #, fitted_files[40] ]
-sample_ids = [ int(file.split('.')[0]) for file in selected_files ]
-
-regime = '1P21I'
-
-
-tensy = lambda x: torch.tensor(x).to(device)
-
-PSF_0, bg, norms, data_samples, init_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
-norms = norms[:, None, None].cpu().numpy() 
-
-with open(fitted_folder + selected_files[0], 'rb') as handle:
-    data = pickle.load(handle)
-
-toy = TipToy(init_config, norm_regime, device, TipTop=False, PSFAO=True)
-toy.optimizables = []
-
-data['dx']  = 0
-data['dy']  = 0
-data['Jx']  = 0
-data['Jy']  = 0
-data['Jxy'] = 0
-data['F'] = data['F'] * 0 + 1
-data['bg'] = data['bg'] * 0
-
-toy.F     = tensy( data['F']     ).squeeze()
-toy.bg    = tensy( data['bg']    ).squeeze()
-toy.Jy    = tensy( data['Jy']    ).flatten()
-toy.Jxy   = tensy( data['Jxy']   ).flatten()
-toy.Jx    = tensy( data['Jx']    ).flatten()
-toy.dx    = tensy( data['dx']    ).flatten()
-toy.dy    = tensy( data['dy']    ).flatten()
-toy.b     = tensy( data['b']     ).flatten()
-toy.r0    = tensy( data['r0']    ).flatten()
-toy.amp   = tensy( data['amp']   ).flatten()
-toy.beta  = tensy( data['beta']  ).flatten()
-toy.theta = tensy( data['theta'] ).flatten()
-toy.alpha = tensy( data['alpha'] ).flatten()
-toy.ratio = tensy( data['ratio'] ).flatten()
-
-
-PSFs_pred_1 = toy().detach().clone()
-# PSFs_test_1 = torch.tensor( data['Img. fit'][0,...] / norms).to(device)
-
-#%%
-toy.oversampling = 2.#0-1e-5
-toy.Update()
-toy.optimizables = []
-
-toy.F     = tensy( data['F']     ).squeeze()
-toy.bg    = tensy( data['bg']    ).squeeze()
-toy.Jy    = tensy( data['Jy']    ).flatten()
-toy.Jxy   = tensy( data['Jxy']   ).flatten()
-toy.Jx    = tensy( data['Jx']    ).flatten()
-toy.dx    = tensy( data['dx']    ).flatten()
-toy.dy    = tensy( data['dy']    ).flatten()
-toy.b     = tensy( data['b']     ).flatten()
-toy.r0    = tensy( data['r0']    ).flatten()
-toy.amp   = tensy( data['amp']   ).flatten()
-toy.beta  = tensy( data['beta']  ).flatten()
-toy.theta = tensy( data['theta'] ).flatten()
-toy.alpha = tensy( data['alpha'] ).flatten()
-toy.ratio = tensy( data['ratio'] ).flatten()
-
-PSFs_pred_2 = toy().detach().clone()
-
-plot_radial_profiles(PSFs_pred_1[:,0,...], PSFs_pred_2[:,0,...], 'Before Update', 'After', title='PSFs', dpi=200, cutoff=32, scale='log')
-plt.show()
-
-#%%
-%matplotlib qt
-draw_PSF_stack(PSFs_pred_1, PSFs_pred_2)
-
-# %%

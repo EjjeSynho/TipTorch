@@ -16,6 +16,7 @@ MAX_NDIT = folder_data["Max NDITs"]
 DEVICE = folder_data["device"]
 
 device = torch.device(DEVICE) if torch.cuda.is_available else torch.device('cpu')
+# device = torch.device('cpu')
 
 # # Print the folder paths to check if they are assigned correctly
 # if __name__ == "__main__":

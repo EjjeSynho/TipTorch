@@ -54,8 +54,10 @@ to_store = lambda x: x.detach().cpu().numpy()
 
 def load_and_fit_sample(id):
     sample_ids = [id]
-    PSF_0, bg, norms, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
-
+    PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
+    PSF_0 = PSF_0[...,1:,1:]
+    merged_config['sensor_science']['FieldOfView'] = 255
+    
     toy = TipTorch(merged_config, norm_regime, device)
 
     toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
@@ -76,7 +78,7 @@ def load_and_fit_sample(id):
 
     def loss_fn(a,b):
         z = loss(a,b) + \
-            window_loss(toy.r0, 0.5).sum() * 5.0 + \
+            window_loss(toy.r0, 0.5).sum() * 1.0 + \
             window_loss(toy.Jx, 50).sum() * 0.5 + \
             window_loss(toy.Jy, 50).sum() * 0.5 + \
             window_loss(toy.Jxy, 400).sum() * 0.5 + \

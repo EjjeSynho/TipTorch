@@ -32,14 +32,14 @@ good_ids = psf_df.index.values.tolist()
 
 #%%
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
-# sample_ids = [578]
+sample_ids = [578]
 # sample_ids = [576]
 # sample_ids = [992]
 # sample_ids = [1209]
 # sample_ids = [456]
 # sample_ids = [465]
 # sample_ids = [1393] #50 DITs
-sample_ids = [1408]
+# sample_ids = [1408]
 
 # regime = '1P2NI'
 regime = '1P21I'
@@ -47,6 +47,8 @@ regime = '1P21I'
 norm_regime = 'sum'
 
 PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
+PSF_0 = PSF_0[...,1:,1:]
+merged_config['sensor_science']['FieldOfView'] = 255
 
 # bg *= 0
 
@@ -64,10 +66,10 @@ _ = toy({
 
 PSF_1 = toy()
 #print(toy.EndTimer())
-# PSF_DL = toy.DLPSF()
-# draw_PSF_stack(PSF_0, PSF_1, average=True)
-draw_PSF_stack(PSF_0, PSF_1, average=False)
+PSF_DL = toy.DLPSF()
 
+draw_PSF_stack(PSF_0, PSF_1, average=True)
+#%%
 
 bounds_dict = {
     'r0' :         (0.05, 0.5),
@@ -197,19 +199,15 @@ loss = nn.L1Loss(reduction='sum')
 window_loss = lambda x, x_max: \
     torch.gt(x,0)*(0.01/x)**2 + torch.lt(x,0)*100 + 100*torch.gt(x,x_max)*(x-x_max)**2
 
-# n_goal = toy.NoiseVariance(toy.r0).item() * 2
-
 # TODO: specify loss weights
 def loss_fn(a,b):
     z = loss(a,b) + \
-        window_loss(toy.r0,  0.5).sum() * 5.0 + \
+        window_loss(toy.r0,  0.5).sum() * 1.0 + \
         window_loss(toy.Jx,  50).sum()  * 0.5 + \
         window_loss(toy.Jy,  50).sum()  * 0.5 + \
         window_loss(toy.Jxy, 400).sum() * 0.5 + \
         window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
     return z
-        # window_loss(toy.dn + toy.NoiseVariance(toy.r0s), n_goal).sum() * 0.5
-        # window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum() * 0.5
 
 optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
  
@@ -217,7 +215,7 @@ for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
     optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 5)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
 
@@ -320,20 +318,13 @@ loss_fn = nn.L1Loss(reduction='sum')
 
 optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
 
-for i in range(20):
+for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [toy.F, toy.dx, toy.dy], 2)
     optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
     optimizer_lbfgs.Optimize(PSF_0, [toy.b], 2)
     optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.amp, toy.alpha, toy.beta], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.ratio, toy.theta], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
-
-PSF_1 = toy()
-
-#%%
-
-toy.b.data *= -1
-toy.theta.data *= -1
 
 PSF_1 = toy()
 

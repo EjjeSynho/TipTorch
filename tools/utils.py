@@ -540,7 +540,7 @@ def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, m
         
         plt.imshow(row, norm=norm)
         plt.title('Sources average')
-        plt.show()
+        # plt.show()
 
     else:
         for src in range(PSF_in.shape[0]):
@@ -555,7 +555,7 @@ def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, m
                 
             plt.imshow(row, norm=norm)
             plt.title('Source %d' % src)
-            plt.show()
+            # plt.show()
 
 
 def FitGauss2D(PSF):

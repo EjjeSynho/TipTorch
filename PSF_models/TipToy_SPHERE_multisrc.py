@@ -14,98 +14,101 @@ import matplotlib.pyplot as plt
 
 from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, pdims, min_2d
 
+import torch.autograd.profiler as profiler
 
 class TipTorch(torch.nn.Module):
     
     def InitPupils(self):
-        pupil_path = self.config['telescope']['PathPupil']
-        pupil_apodizer = self.config['telescope']['PathApodizer']
+        with profiler.record_function("INIT PUPLAS"):
+            pupil_path = self.config['telescope']['PathPupil']
+            pupil_apodizer = self.config['telescope']['PathApodizer']
+            
+            self.pupil    = self.make_tensor(fits.getdata(pupil_path).astype('float'))
+            self.apodizer = self.make_tensor(fits.getdata(pupil_apodizer).astype('float'))
         
-        self.pupil    = self.make_tensor(fits.getdata(pupil_path).astype('float'))
-        self.apodizer = self.make_tensor(fits.getdata(pupil_apodizer).astype('float'))
-    
-    
+        
     def InitValues(self):
-        # Reading parameters from the file
-        num_src = self.config['NumberSources']
-        self.N_src = int(num_src)
-        
-        self.wvl = self.config['sources_science']['Wavelength']
-        # self.wvl = self.wvl if self.wvl.ndim == 2 else self.wvl.unsqueeze(0).T
-        self.wvl = min_2d(self.wvl)
-        self.N_wvl = self.wvl.shape[-1]
+        with profiler.record_function("INIT PARAMETERS"):
+            # Reading parameters from the file
+            num_src = self.config['NumberSources']
+            self.N_src = int(num_src)
+            
+            self.wvl = self.config['sources_science']['Wavelength']
+            # self.wvl = self.wvl if self.wvl.ndim == 2 else self.wvl.unsqueeze(0).T
+            self.wvl = min_2d(self.wvl)
+            self.N_wvl = self.wvl.shape[-1]
 
-        # Setting internal parameters
-        self.psInMas = self.config['sensor_science']['PixelScale'] #[mas]
-        if isinstance(self.psInMas, torch.Tensor):
-            if self.psInMas.dim() > 0:
-                if not torch.all(self.psInMas == self.psInMas[0]).item(): raise ValueError('All pixel scales must be the same for all samples')
-                self.psInMas = self.psInMas[0]
+            # Setting internal parameters
+            self.psInMas = self.config['sensor_science']['PixelScale'] #[mas]
+            if isinstance(self.psInMas, torch.Tensor):
+                if self.psInMas.dim() > 0:
+                    if not torch.all(self.psInMas == self.psInMas[0]).item(): raise ValueError('All pixel scales must be the same for all samples')
+                    self.psInMas = self.psInMas[0]
 
-        self.D     = self.config['telescope']['TelescopeDiameter']
-        self.nPix  = int(self.config['sensor_science']['FieldOfView'])
-        self.pitch = self.config['DM']['DmPitchs'] #[m]
-        #self.h_DM  = self.AO_config['DM']['DmHeights'] # ????? what is h_DM?
-        #self.nDM   = 1
-        self.kc    = 1/(2*self.pitch)
-        #self.zenith_angle  = torch.tensor(self.AO_config['telescope']['ZenithAngle'], device=self.device) # [deg] #TODO: telescope zenith != sample zenith?
-        self.zenith_angle  = self.config['telescope']['ZenithAngle']
-        self.airmass       = 1.0 / torch.cos(self.zenith_angle * deg2rad)
+            self.D     = self.config['telescope']['TelescopeDiameter']
+            self.nPix  = int(self.config['sensor_science']['FieldOfView'])
+            self.pitch = self.config['DM']['DmPitchs'] #[m]
+            #self.h_DM  = self.AO_config['DM']['DmHeights'] # ????? what is h_DM?
+            #self.nDM   = 1
+            self.kc    = 1/(2*self.pitch)
+            #self.zenith_angle  = torch.tensor(self.AO_config['telescope']['ZenithAngle'], device=self.device) # [deg] #TODO: telescope zenith != sample zenith?
+            self.zenith_angle  = self.config['telescope']['ZenithAngle']
+            self.airmass       = 1.0 / torch.cos(self.zenith_angle * deg2rad)
 
-        self.GS_wvl     = self.config['sources_HO']['Wavelength'][0].item() #[m]
-        #self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
-        self.wind_speed  = self.config['atmosphere']['WindSpeed']
-        self.wind_dir    = self.config['atmosphere']['WindDirection']
-        self.Cn2_weights = min_2d(self.config['atmosphere']['Cn2Weights'])
-        self.Cn2_heights = min_2d(self.config['atmosphere']['Cn2Heights']) * self.airmass.unsqueeze(1) # [m]
-        
-        #self.stretch     = 1.0 / (1.0-self.Cn2_heights/self.GS_height)
-        self.h  = self.Cn2_heights #* self.stretch
-        self.nL = self.Cn2_heights.size(0)
+            self.GS_wvl     = self.config['sources_HO']['Wavelength'][0].item() #[m]
+            #self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
+            self.wind_speed  = self.config['atmosphere']['WindSpeed']
+            self.wind_dir    = self.config['atmosphere']['WindDirection']
+            self.Cn2_weights = min_2d(self.config['atmosphere']['Cn2Weights'])
+            self.Cn2_heights = min_2d(self.config['atmosphere']['Cn2Heights']) * self.airmass.unsqueeze(1) # [m]
+            
+            #self.stretch     = 1.0 / (1.0-self.Cn2_heights/self.GS_height)
+            self.h  = self.Cn2_heights #* self.stretch
+            self.nL = self.Cn2_heights.size(0)
 
-        self.WFS_d_sub = self.config['sensor_HO']['SizeLenslets'] #TODO: seems like it's absent
-        self.WFS_n_sub = self.config['sensor_HO']['NumberLenslets']
+            self.WFS_d_sub = self.config['sensor_HO']['SizeLenslets'] #TODO: seems like it's absent
+            self.WFS_n_sub = self.config['sensor_HO']['NumberLenslets']
 
-        self.WFS_det_clock_rate = self.config['sensor_HO']['ClockRate'].flatten() # [(?)]
-        self.WFS_FOV = self.config['sensor_HO']['FieldOfView']
-        self.WFS_RON = self.config['sensor_HO']['SigmaRON']
-        self.WFS_psInMas = self.config['sensor_HO']['PixelScale']
-        self.WFS_wvl = self.make_tensor(self.GS_wvl) #TODO: clarify this
-        self.WFS_spot_FWHM = self.make_tensor(self.config['sensor_HO']['SpotFWHM'][0])
-        self.WFS_excessive_factor = self.config['sensor_HO']['ExcessNoiseFactor']
-        self.WFS_Nph = self.config['sensor_HO']['NumberPhotons']
+            self.WFS_det_clock_rate = self.config['sensor_HO']['ClockRate'].flatten() # [(?)]
+            self.WFS_FOV = self.config['sensor_HO']['FieldOfView']
+            self.WFS_RON = self.config['sensor_HO']['SigmaRON']
+            self.WFS_psInMas = self.config['sensor_HO']['PixelScale']
+            self.WFS_wvl = self.make_tensor(self.GS_wvl) #TODO: clarify this
+            self.WFS_spot_FWHM = self.make_tensor(self.config['sensor_HO']['SpotFWHM'][0])
+            self.WFS_excessive_factor = self.config['sensor_HO']['ExcessNoiseFactor']
+            self.WFS_Nph = self.config['sensor_HO']['NumberPhotons']
 
-        self.HOloop_rate  = self.config['RTC']['SensorFrameRate_HO'] # [Hz] (?)
-        self.HOloop_delay = self.config['RTC']['LoopDelaySteps_HO'] # [ms] (?)
-        self.HOloop_gain  = self.config['RTC']['LoopGain_HO']
+            self.HOloop_rate  = self.config['RTC']['SensorFrameRate_HO'] # [Hz] (?)
+            self.HOloop_delay = self.config['RTC']['LoopDelaySteps_HO'] # [ms] (?)
+            self.HOloop_gain  = self.config['RTC']['LoopGain_HO']
 
-        # Initialiaing the main optimizable parameters
-        self.r0  = rad2arc*0.976*self.config['atmosphere']['Wavelength'] / self.config['atmosphere']['Seeing']
-        self.L0  = self.config['atmosphere']['L0'] # [m]
-        self.F   = torch.ones (self.N_src, self.N_wvl, device=self.device)
-        self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
-        self.dx  = torch.zeros(self.N_src, device=self.device)
-        self.dy  = torch.zeros(self.N_src, device=self.device)
-        self.Jx  = torch.ones (self.N_src, device=self.device)*0.1
-        self.Jy  = torch.ones (self.N_src, device=self.device)*0.1
-        self.Jxy = torch.ones (self.N_src, device=self.device)*0.1
-        self._optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
+            # Initialiaing the main optimizable parameters
+            self.r0  = rad2arc*0.976*self.config['atmosphere']['Wavelength'] / self.config['atmosphere']['Seeing']
+            self.L0  = self.config['atmosphere']['L0'] # [m]
+            self.F   = torch.ones (self.N_src, self.N_wvl, device=self.device)
+            self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
+            self.dx  = torch.zeros(self.N_src, device=self.device)
+            self.dy  = torch.zeros(self.N_src, device=self.device)
+            self.Jx  = torch.ones (self.N_src, device=self.device)*0.1
+            self.Jy  = torch.ones (self.N_src, device=self.device)*0.1
+            self.Jxy = torch.ones (self.N_src, device=self.device)*0.1
+            self._optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
 
-        if self.PSD_include['Moffat']:
-            self.amp   = torch.ones (self.N_src, device=self.device)*3.0  # Phase PSD Moffat amplitude [rad²]
-            self.b     = torch.ones (self.N_src, device=self.device)*1e-4 # Phase PSD background [rad² m²]
-            self.alpha = torch.ones (self.N_src, device=self.device)*0.1  # Phase PSD Moffat alpha [1/m]
-            self.beta  = torch.ones (self.N_src, device=self.device)*1.6  # Phase PSD Moffat beta power law
-            self.ratio = torch.ones (self.N_src, device=self.device)      # Phase PSD Moffat ellipticity
-            self.theta = torch.zeros(self.N_src, device=self.device)      # Phase PSD Moffat angle
-            self._optimizables += ['amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
+            if self.PSD_include['Moffat']:
+                self.amp   = torch.ones (self.N_src, device=self.device)*3.0  # Phase PSD Moffat amplitude [rad²]
+                self.b     = torch.ones (self.N_src, device=self.device)*1e-4 # Phase PSD background [rad² m²]
+                self.alpha = torch.ones (self.N_src, device=self.device)*0.1  # Phase PSD Moffat alpha [1/m]
+                self.beta  = torch.ones (self.N_src, device=self.device)*1.6  # Phase PSD Moffat beta power law
+                self.ratio = torch.ones (self.N_src, device=self.device)      # Phase PSD Moffat ellipticity
+                self.theta = torch.zeros(self.N_src, device=self.device)      # Phase PSD Moffat angle
+                self._optimizables += ['amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
 
-        if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
-            self.dn  = torch.zeros(self.N_src, device=self.device)
-            self._optimizables += ['dn']
+            if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
+                self.dn  = torch.zeros(self.N_src, device=self.device)
+                self._optimizables += ['dn']
 
-        for name in self._optimizables:
-            setattr(self, name, nn.Parameter(getattr(self, name)))
+            for name in self._optimizables:
+                setattr(self, name, nn.Parameter(getattr(self, name)))
 
 
     @property
@@ -136,150 +139,154 @@ class TipTorch(torch.nn.Module):
 
 
     def InitGrids(self):
-        # Initialize grids
-        # for all generated PSDs within one batch sampling musat be the same
+        with profiler.record_function("INIT GRIDDIES"):
+            # Initialize grids
+            # for all generated PSDs within one batch sampling musat be the same
 
-        to_odd  = lambda f: int( np.ceil(f)//2 * 2 + 1 )
-        to_even = lambda f: int( np.ceil(f)//2 * 2 )
+            to_odd = lambda f: int( np.ceil(f)//2 * 2 - 1) if not f % 2 else int(f)
+            # to_even = lambda f: int( np.ceil(f)//2 * 2 )
 
-        # Manage sampling
-        pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
-        self.sampling_factor = torch.ceil(2.0/pixels_per_l_D) * self.oversampling # to avoid aliasing or to provide oversampling
-        self.sampling = self.sampling_factor * pixels_per_l_D
-        self.nOtf = self.nPix * self.sampling_factor.max().item()
-        self.nOtf = to_odd(self.nOtf) #Force nOtf to be odd
+            # Manage sampling
+            pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
+            self.sampling_factor = torch.ceil(2.0/pixels_per_l_D) * self.oversampling # to avoid aliasing or to provide oversampling
+            self.sampling = self.sampling_factor * pixels_per_l_D
+            self.nOtf = self.nPix * self.sampling_factor.max().item()
+            self.nOtf = to_odd(self.nOtf) #Forces nOtf to be odd
 
-        self.dk = 1/self.D/self.sampling.min() # PSD spatial frequency step  TODO: or .max()?
-        self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
+            self.dk = 1/self.D/self.sampling.max() # PSD spatial frequency step
+            self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 
-        def gen_grid(N):
-            factor = 0.5*(1-N%2)
-            return torch.meshgrid(*[torch.linspace(-N//2+N%2+factor, N//2-factor, N, device=self.device)]*2, indexing = 'ij')
+            def gen_grid(N):
+                factor = 0.5*(1-N%2)
+                return torch.meshgrid(*[torch.linspace(-N//2+N%2+factor, N//2-factor, N, device=self.device)]*2, indexing = 'ij')
 
-        # Initialize spatial frequencies
-        self.kx, self.ky = gen_grid(self.nOtf) # PSD spatial frequencies
-        self.kx, self.ky = self.kx * self.dk + 1e-10, self.ky * self.dk + 1e-10
+            # Initialize spatial frequencies
+            self.kx, self.ky = gen_grid(self.nOtf) # PSD spatial frequencies
+            self.kx, self.ky = self.kx * self.dk, self.ky * self.dk
+            self.kx[..., self.nOtf//2, self.nOtf//2] = 1e-8 # Avoid division by zero
+            self.ky[..., self.nOtf//2, self.nOtf//2] = 1e-8 # Avoid division by zero
 
-        self.k2 = self.kx**2 + self.ky**2
-        self.k = torch.sqrt(self.k2)
+            self.k2 = self.kx**2 + self.ky**2
+            self.k = torch.sqrt(self.k2)
 
-        if self.PSD_include['Moffat']:
-            self.kxy = self.kx * self.ky
-            self.kx2 = self.kx**2
-            self.ky2 = self.ky**2
+            if self.PSD_include['Moffat']:
+                self.kxy = self.kx * self.ky
+                self.kx2 = self.kx**2
+                self.ky2 = self.ky**2
 
-        # Compute the frequency mask for the AO corrected and uncorrected regions
-        self.mask_corrected = torch.zeros_like(self.k2).int()
-        self.mask_corrected[self.k2 <= self.kc**2] = 1.0
-        self.mask = 1.0-self.mask_corrected
-        
-        mask_slice = self.mask_corrected[self.mask_corrected.shape[0]//2, :].tolist()
-        first_one = mask_slice.index(1)
-        last_one = len(mask_slice)-mask_slice[::-1].index(1)-1 # detect the borders of the correction area
-        self.nOtf_AO = last_one-first_one+1
-
-        corrected_ROI = (slice(first_one, last_one+1), slice(first_one, last_one+1))
-        self.mask_corrected_AO = pdims(self.mask_corrected[corrected_ROI], -1)
-        self.mask = pdims( self.mask, -1 )
-
-        self.kx_AO = pdims( self.kx[corrected_ROI], -1 )
-        self.ky_AO = pdims( self.ky[corrected_ROI], -1 )
-        self.k_AO  = pdims( self.k [corrected_ROI], -1 )
-        self.k2_AO = pdims( self.k2[corrected_ROI], -1 )
-
-        self.kx = pdims( self.kx, -1 )
-        self.ky = pdims( self.ky, -1 )
-        self.k  = pdims( self.k,  -1 )
-        self.k2 = pdims( self.k2, -1 )
-
-        if self.PSD_include['Moffat']:
-            self.kx2_AO = pdims( self.kx2[corrected_ROI], -1 )
-            self.ky2_AO = pdims( self.ky2[corrected_ROI], -1 )
-            self.kxy_AO = pdims( self.kxy[corrected_ROI], -1 )
-
-            self.kxy = pdims( self.kxy, -1 )
-            self.kx2 = pdims( self.kx2, -1 )
-            self.ky2 = pdims( self.ky2, -1 )
-
-        if self.PSD_include['aliasing']:
-            # Comb samples involved in alising PSD calculation
-            n_times = min(4, max(2, int(np.ceil(self.nOtf/self.nOtf_AO/2)) ) )
-            # ids = np.array( [[i, j] for i in range(-n_times, n_times+1) for j in range(-n_times, n_times+1) if i != 0 or j != 0] )
-            ids = np.array( [[i, j] for i in range(-n_times+1, n_times) for j in range(-n_times+1, n_times) if i != 0 or j != 0] )
+            # Compute the frequency mask for the AO corrected and uncorrected regions
+            self.mask_corrected = torch.zeros_like(self.k2).int()
+            self.mask_corrected[self.k2 <= self.kc**2] = 1.0
+            self.mask = 1.0 - self.mask_corrected
             
-            # For NGS-like alising 0th dimension is used to store shifted spatial frequency
-            # This is thing is 5D: (aliased samples) x (N src) x (Atmospheric layers) x (kx) x (ky) TODO: NO, it's 4D
-            m = self.make_tensor(ids[:,0])
-            n = self.make_tensor(ids[:,1])
-            self.N_combs = m.shape[0]
+            mask_slice = self.mask_corrected[self.mask_corrected.shape[0]//2, :].tolist()
+            first_one = mask_slice.index(1)
+            last_one = len(mask_slice)-mask_slice[::-1].index(1)-1 # detect the borders of the correction area
+            self.nOtf_AO = last_one-first_one+1
+
+            corrected_ROI = (slice(first_one, last_one+1), slice(first_one, last_one+1))
+            self.mask_corrected_AO = pdims(self.mask_corrected[corrected_ROI], -1)
+            self.mask = pdims( self.mask, -1 )
+
+            self.kx_AO = pdims( self.kx[corrected_ROI], -1 )
+            self.ky_AO = pdims( self.ky[corrected_ROI], -1 )
+            self.k_AO  = pdims( self.k [corrected_ROI], -1 )
+            self.k2_AO = pdims( self.k2[corrected_ROI], -1 )
+
+            self.kx = pdims( self.kx, -1 )
+            self.ky = pdims( self.ky, -1 )
+            self.k  = pdims( self.k,  -1 )
+            self.k2 = pdims( self.k2, -1 )
+
+            if self.PSD_include['Moffat']:
+                self.kx2_AO = pdims( self.kx2[corrected_ROI], -1 )
+                self.ky2_AO = pdims( self.ky2[corrected_ROI], -1 )
+                self.kxy_AO = pdims( self.kxy[corrected_ROI], -1 )
+
+                self.kxy = pdims( self.kxy, -1 )
+                self.kx2 = pdims( self.kx2, -1 )
+                self.ky2 = pdims( self.ky2, -1 )
+
+            if self.PSD_include['aliasing']:
+                # Comb samples involved in alising PSD calculation
+                n_times = min(4, max(2, int(np.ceil(self.nOtf/self.nOtf_AO/2)) ) )
+                # ids = np.array( [[i, j] for i in range(-n_times, n_times+1) for j in range(-n_times, n_times+1) if i != 0 or j != 0] )
+                ids = np.array( [[i, j] for i in range(-n_times+1, n_times) for j in range(-n_times+1, n_times) if i != 0 or j != 0] )
+                
+                # For NGS-like alising 0th dimension is used to store shifted spatial frequency
+                # This is thing is 5D: (aliased samples) x (N src) x (Atmospheric layers) x (kx) x (ky) TODO: NO, it's 4D
+                m = self.make_tensor(ids[:,0])
+                n = self.make_tensor(ids[:,1])
+                self.N_combs = m.shape[0]
+                
+                self.km = self.kx_AO.repeat([self.N_combs,1,1,1]) - pdims(m/self.WFS_d_sub, 3)
+                self.kn = self.ky_AO.repeat([self.N_combs,1,1,1]) - pdims(n/self.WFS_d_sub, 3)
+
+            # Initialize OTF frequencies
+            self.U, self.V = gen_grid(self.nOtf)
+            self.U, self.V = pdims(self.U/self.nOtf, -1), pdims(self.V/self.nOtf, -1)
+
+            self.U2  = self.U**2
+            self.V2  = self.V**2
+            self.UV  = self.U*self.V
+            self.UV2 = self.U**2 + self.V**2
             
-            self.km = self.kx_AO.repeat([self.N_combs,1,1,1]) - pdims(m/self.WFS_d_sub, 3)
-            self.kn = self.ky_AO.repeat([self.N_combs,1,1,1]) - pdims(n/self.WFS_d_sub, 3)
+            self.center_aligner = torch.exp( 1j*np.pi*(self.U+self.V) * (1-self.nPix%2))
 
-        # Initialize OTF frequencies
-        self.U, self.V = gen_grid(self.nOtf)
-        self.U, self.V = pdims(self.U/self.nOtf, -1), pdims(self.V/self.nOtf, -1)
+        with profiler.record_function("COMPUTE PUPLAS"):
+            # Compute pupil polychromatic OTFs
+            ids = np.unravel_index(np.unique(self.wvl.cpu().numpy(), return_index=True)[1], self.wvl.shape)
+            all_wvls = self.wvl[ids].cpu().numpy().tolist()
+            all_samplings = self.sampling[ids]
 
-        self.U2  = self.U**2
-        self.V2  = self.V**2
-        self.UV  = self.U*self.V
-        self.UV2 = self.U**2 + self.V**2
+            pupil_pixels = self.pupil.shape[0]
+            for i, wvl in enumerate(all_wvls):
+                if wvl not in self.OTF_static_dict.keys():
+                    pupil_padded = torch.nn.ZeroPad2d( \
+                        int(pupil_pixels*all_samplings[i]/2 - pupil_pixels/2) ) (self.pupil*self.apodizer)
+                
+                    fl_even = self.nOtf % 2 == 0 and pupil_padded.shape[0] % 2 == 0
+                    pupil_padded = pupil_padded[:-1, :-1] if fl_even else pupil_padded # to center-align if number of pixels is even
+
+                    OTF_static_ = interpolate(\
+                        torch.real(self._fftAutoCorr(pupil_padded))[None,None,...],
+                        size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze()
         
-        # Compute pupil polychromatic OTFs
-        ids = np.unravel_index(np.unique(self.wvl.cpu().numpy(), return_index=True)[1], self.wvl.shape)
-        all_wvls = self.wvl[ids].cpu().numpy().tolist()
-        all_samplings = self.sampling[ids]
+                    self.OTF_static_dict[wvl] = OTF_static_ / OTF_static_.max()
 
-        pupil_pixels = self.pupil.shape[0]
-        self.OTF_static_dict = {}
-        for i, wvl in enumerate(all_wvls):
-            pupil_padded = torch.nn.ZeroPad2d( \
-                int(pupil_pixels*all_samplings[i]/2 - pupil_pixels/2) ) (self.pupil*self.apodizer)
-        
-            fl_even = self.nOtf % 2 == 0 and pupil_padded.shape[0] % 2 == 0
-            pupil_padded = pupil_padded[:-1, :-1] if fl_even else pupil_padded # to center-align if number of pixels is even
+            buf_obj = []
+            for obj_id in range(self.N_src): # iterate over all sources
+                buf_wvl = []
+                for wvl_id in range(self.wvl.shape[1]): # iterate over the lambdas of the current object
+                    buf_wvl.append(self.OTF_static_dict[self.wvl[obj_id,wvl_id].cpu().item()]) # get the OTF for the current wavelength
+                buf_obj.append(torch.stack(buf_wvl))
+            self.OTF_static = torch.stack(buf_obj) # stack all sources into the 4D tensor: N_obj x N_wvl x nOtf x nOtf
 
-            OTF_static_ = interpolate(\
-                torch.real(self._fftAutoCorr(pupil_padded))[None,None,...],
-                size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze()
- 
-            self.OTF_static_dict[wvl] = OTF_static_.clone() / OTF_static_.max()
+            self.PSD_padder = torch.nn.ZeroPad2d((self.nOtf-self.nOtf_AO)//2)
 
-        buf_obj = []
-        for obj_id in range(self.N_src): # iterate over all sources
-            buf_wvl = []
-            for wvl_id in range(self.wvl.shape[1]): # iterate over the lambdas of the current object
-                buf_wvl.append(self.OTF_static_dict[self.wvl[obj_id,wvl_id].cpu().item()]) # get the OTF for the current wavelength
-            buf_obj.append(torch.stack(buf_wvl))
-        self.OTF_static = torch.stack(buf_obj) # stack all sources into the 4D tensor: N_obj x N_wvl x nOtf x nOtf
+            # Piston filter, filters centering pixel
+            def PistonFilter(f):
+                x = (np.pi*self.D*f).cpu().numpy()
+                R = spc.j1(x)/x
+                piston_filter = self.make_tensor(1.0-4*R**2)
+                piston_filter[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 1-self.nOtf_AO%2
+                return piston_filter
 
-        self.PSD_padder = torch.nn.ZeroPad2d((self.nOtf-self.nOtf_AO)//2)
+            # Detects oddity to determine if piston needed
+            self.piston_filter = PistonFilter(self.k_AO)
+            
+            if self.PSD_include['aliasing']:
+                self.PR = PistonFilter(torch.hypot(self.km, self.kn))
 
-        # Piston filter, filters centering pixel
-        def PistonFilter(f):
-            x = (np.pi*self.D*f).cpu().numpy()
-            R = spc.j1(x)/x
-            piston_filter = self.make_tensor(1.0-4*R**2)
-            if self.nOtf_AO % 2: # supress the central pixel if the number of pixels is odd
-                piston_filter[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0.0
-            return piston_filter
-
-        # Detects oddity to determine if piston needed
-        self.piston_filter = PistonFilter(self.k_AO)
-        
-        if self.PSD_include['aliasing']:
-            self.PR = PistonFilter(torch.hypot(self.km, self.kn))
-
-        # Diffraction-limited PSF
-        # self.PSF_DL = interpolate( \
-        #     torch.abs(fft.fftshift(fft.ifft2(fft.fftshift(self.OTF_static)))), \
-        #     size=(self.nPix,self.nPix), mode='bicubic' ).squeeze()
-        #TODO: proper PSF DL
-        self.PSF_DL = None
+            # Diffraction-limited PSF
+            self.PSF_DL = self.OTF2PSF(self.OTF_static)
         
 
     def Update(self, reinit_grids=True, reinit_pupils=False):
+        optimizables_copy = [i for i in self.optimizables]
+        self.optimizables = []
         self.InitValues()
+        self.optimizables = optimizables_copy
         if reinit_pupils: self.InitPupils()
         if reinit_grids: self.InitGrids()
 
@@ -293,7 +300,7 @@ class TipTorch(torch.nn.Module):
         if TipTop_flag:
             self.PSD_include = {key:True for key in self.PSD_entries if key != 'Moffat'}
         
-        self.PSD_include['Moffat'] = PSFAO_flag
+        self.PSD_include['Moffat']  = PSFAO_flag
         self.PSD_include['fitting'] = True #TODO: open-loop case
 
         if not TipTop_flag and not PSFAO_flag:
@@ -307,6 +314,7 @@ class TipTorch(torch.nn.Module):
         self.make_tensor = lambda x: torch.tensor(x, device=self.device) if type(x) is not torch.Tensor else x
 
         self._initialize_PSDs_settings(TipTop, PSFAO)
+        self.OTF_static_dict = {}
 
         if self.device.type != 'cpu':
             self.start = torch.cuda.Event(enable_timing=True)
@@ -314,6 +322,8 @@ class TipTorch(torch.nn.Module):
 
         self.norm_regime = norm_regime
         self.norm_scale  = self.make_tensor(1.0) # TODO: num obj x num wvl
+        self.normalizer  = torch.sum if self.norm_regime == 'sum' else torch.amax
+
 
         self.oversampling = oversampling
         self.psdsave = None
@@ -495,31 +505,7 @@ class TipTorch(torch.nn.Module):
         F = 1 / (Fin-Fout)
 
         MoffatPSD = (amp * V*E*F + b) * self.mask_corrected_AO * self.piston_filter
-        
-        '''        
-        if self.psdsave is not None:
-            import pickle
-            import pathlib
-            from project_globals import DATA_FOLDER
-            dir_save_PSD = DATA_FOLDER/'temp'/ pathlib.Path(self.psdsave+'.pickle')
-            dir_to_save = {
-                'amp': amp,
-                'b': b,
-                'alpha': alpha,
-                'beta': beta,
-                'ratio': ratio,
-                'theta': theta,
-                'MoffatPSD': MoffatPSD,
-                'V': V,
-                'E': E,
-                'Fout': Fout,
-                'Fin': Fin
-            }
-            
-            with open(dir_save_PSD, 'wb') as f:
-                pickle.dump(dir_to_save, f)
-        '''
-            
+              
         return MoffatPSD
 
     
@@ -585,21 +571,14 @@ class TipTorch(torch.nn.Module):
               self.PSDs['chromatism'] + \
               self.PSDs['Moffat'])
         
-        # plt.figure(1)
-        # plt.imshow(torch.log10(PSD).squeeze().cpu().numpy())
-        # plt.show()
-        
-        # if self.psdsave is not None:
-        #     import pickle
-        #     import pathlib
-        #     from project_globals import DATA_FOLDER
-        #     dir_save_PSD = DATA_FOLDER/'temp'/ pathlib.Path(self.psdsave+'.pickle')
-        #     dir_to_save = { 'MoffatPSD': PSD }
-        #     with open(dir_save_PSD, 'wb') as f:
-        #         pickle.dump(dir_to_save, f)
-        
         return PSD
     
+
+    def OTF2PSF(self, OTF):
+        s = tuple([OTF.shape[-2] + 1-self.nPix%2]*2)
+        PSF = fft.fftshift(fft.ifft2(fft.ifftshift(OTF*self.center_aligner, dim=(-2,-1)), s=s), dim=(-2,-1)).abs()
+        return interpolate(PSF, size=(self.nPix, self.nPix), mode='bilinear') if OTF.shape[-1] != self.nPix else PSF           
+
 
     def PSD2PSF(self, PSD):
         F   = pdims(self.F,   2)
@@ -610,41 +589,23 @@ class TipTorch(torch.nn.Module):
         Jy  = pdims(self.Jy,  2)
         Jxy = pdims(self.Jxy, 2)
 
-        self.PSD = PSD
-
         # Computing OTF from PSD
         cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1
-
         # Computing the Structure Function from the covariance
         SF = cov.abs().amax(dim=(-2,-1), keepdim=True) - cov.abs()
         # Phasor to shift the PSF with the subpixel accuracy
-        fftPhasor  = torch.exp(-np.pi*1j*pdims(self.sampling_factor,2) * (self.U*dx + self.V*dy).unsqueeze(1))
-        OTF_turb   = torch.exp(-0.5*SF*pdims(2*np.pi*1e-9/self.wvl,2)**2)
+        fftPhasor = torch.exp( -np.pi*1j * pdims(self.sampling_factor,2) * (self.U*dx + self.V*dy).unsqueeze(1) )
+        OTF_turb  = torch.exp( -0.5 * SF * pdims(2*np.pi*1e-9/self.wvl,2)**2 )
         # Compute the residual tip/tilt kernel
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         # Resulting OTF
         OTF = OTF_turb * self.OTF_static * fftPhasor * OTF_jitter
-        
-        center_aligner = self.make_tensor(1.0)
-        if self.nPix%2 == 0:
-            OTF = OTF[...,:-1,:-1]
-            center_aligner = \
-                torch.exp(-1j*np.pi*(self.U[...,:-1,:-1]+self.V[...,:-1,:-1])*(1-self.nPix%2))
 
-        PSF = torch.abs( fft.fftshift(fft.ifft2(fft.ifftshift(OTF*center_aligner, dim=(-2,-1))), dim=(-2,-1)) )
+        PSF_out = self.OTF2PSF(OTF)
 
-        if OTF.shape[-1] != self.nPix:
-            PSF_out = interpolate(PSF, size=(self.nPix,self.nPix), mode='bilinear')
-        else:
-            PSF_out = PSF
+        self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)
 
-        if self.norm_regime == 'max':
-            self.norm_scale = torch.amax(PSF_out, dim=(-2,-1), keepdim=True)
-        
-        elif self.norm_regime == 'sum':
-            self.norm_scale = PSF_out.sum(dim=(-2,-1), keepdim=True)
-
-        return (PSF_out / self.norm_scale) * F + bg #TODO: to put norm inside or not?
+        return (PSF_out / self.norm_scale) * F + bg
 
 
     def _to_device_recursive(self, obj, device):
