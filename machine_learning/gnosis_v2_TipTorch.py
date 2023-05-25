@@ -33,8 +33,6 @@ psf_df = psf_df[~pd.isnull(psf_df['Nph WFS'])]
 psf_df = psf_df[~pd.isnull(psf_df['Strehl'])]
 psf_df = psf_df[~pd.isnull(psf_df['FWHM'])]
 psf_df = psf_df[psf_df['Nph WFS'] < 5000]
-# psf_df = psf_df[psf_df['λ left (nm)'] > 1600]
-# psf_df = psf_df[psf_df['λ left (nm)'] < 1700]
 
 ids_class_C = set(psf_df.index[psf_df['Class C'] == True])
 ids_wvls = set(psf_df.index[psf_df['λ left (nm)'] > 1600]).intersection(set(psf_df.index[psf_df['λ left (nm)'] < 1700]))
@@ -75,7 +73,7 @@ class DataTransformer:
 
         self.uniform_scaler     = lambda x, a, b: (x-a)/(b-a)
         self.inv_uniform_scaler = lambda x, a, b: x*(b-a)+a
-                        
+
         self.one_minus     = lambda x: 1-x if self.invert_flag else x
         self.inv_one_minus = lambda x: 1-x if self.invert_flag else x
         
@@ -201,34 +199,26 @@ images_dict = {
     'PSF (fit)': images_fitted
 }
 
-#%%
 fitted_df = pd.DataFrame(fitted_dict)
 fitted_df.set_index('ID', inplace=True)
 
-del fitted_dict, fitted_dict_raw, ids, images_data, images_fitted, fitted_folder, fitted_files, data
+# del fitted_dict, fitted_dict_raw, ids, images_data, images_fitted, fitted_folder, fitted_files, data
 
-#%
 fitted_ids = list( set( fitted_df.index.values.tolist() ).intersection( set(psf_df.index.values.tolist()) ) )
 fitted_df = fitted_df[fitted_df.index.isin(fitted_ids)]
-
+#%%
 # Absolutize positive-only values
 for entry in ['r0','Jx','Jy','Jxy', 'F (left)','F (right)', 'wind speed']:
     fitted_df[entry] = fitted_df[entry].abs()
 
-# threshold = 3 # in STDs
-# bad_alpha = np.where(np.abs(fitted_df['alpha']) > threshold * fitted_df['alpha'].std())[0].tolist()
-# bad_beta  = np.where(np.abs(fitted_df['beta'])  > threshold * fitted_df['beta'].std())[0].tolist()
-# bad_amp   = np.where(np.abs(fitted_df['amp'])   > threshold * fitted_df['amp'].std())[0].tolist()
-# bad_ratio = np.where(np.abs(fitted_df['ratio']) > 2)[0].tolist()
-# bad_theta = np.where(np.abs(fitted_df['theta']) > 3)[0].tolist()
+exlude_samples = set( fitted_df.index[fitted_df['dn'] < -1].values.tolist() )
+exlude_samples = exlude_samples.union( set( fitted_df.index[fitted_df['r0'] > 0.49].values.tolist() ) )
+exlude_samples = exlude_samples.union( set( fitted_df.index[fitted_df['dy'].abs() > 3].values.tolist() ) )
+exlude_samples = exlude_samples.union( set( fitted_df.index[fitted_df['dx'].abs() > 3].values.tolist() ) )
+exlude_samples = list(exlude_samples)
 
-# exclude_ids = set(bad_alpha + bad_beta + bad_amp + bad_ratio + bad_theta)
-# exlude_samples = [fitted_df.iloc[id].name for id in exclude_ids]
-
-# for id in exlude_samples:
-#     fitted_df = fitted_df.drop(id)
-
-# psf_df = psf_df[psf_df.index.isin(fitted_df.index.values.tolist())]
+fitted_df.drop(exlude_samples, inplace=True)
+psf_df.drop(exlude_samples, inplace=True)
 
 #%% Create Input parameters dataset
 fl_in = {                      # boxcox gaussian uniform invert
@@ -263,9 +253,8 @@ fl_out = {          # boxcox gaussian uniform invert
     'Jxy':            [True,  True,  False, False],
     'wind speed':     [True,  True,  False, False],
     'wind direction': [False, False, True,  False],
-    'dn':             [True,  True,  False, True ]
+    'dn':             [False, True,  False, False ]
 }
-
 
 transforms_output = {\
     i: DataTransformer(fitted_df[i].values, boxcox=fl_out[i][0], gaussian=fl_out[i][1], uniform=fl_out[i][2], invert=fl_out[i][3]) for i in fl_out.keys() }
@@ -311,112 +300,94 @@ output_df.drop(rows_with_nan, inplace=True)
 # output_df = pd.DataFrame( {a: transforms_output[a].forward(fitted_df[a].values) for a in fl_out.keys()} )
 
 #%%
-save_path = DATA_FOLDER/"temp/SPHERE params/psf_df"
+save_path = DATA_FOLDER/"temp/SPHERE params TipTorch/psf_df"
 for entry in selected_entries:
     sns.displot(data=psf_df, x=entry, kde=True, bins=20)
     plt.savefig(save_path/f"{entry}.png")
     plt.close()
 
-save_path = DATA_FOLDER/"temp/SPHERE params/fitted_df"
+save_path = DATA_FOLDER/"temp/SPHERE params TipTorch/fitted_df"
 for entry in fitted_df.columns.values.tolist():
     sns.displot(data=fitted_df, x=entry, kde=True, bins=20)
     plt.savefig(save_path/f"{entry}.png")
     plt.close()
 
-save_path = DATA_FOLDER/"temp/SPHERE params/input_df"
+save_path = DATA_FOLDER/"temp/SPHERE params TipTorch/input_df"
 for entry in fl_in.keys():
     sns.displot(data=input_df, x=entry, kde=True, bins=20)
     plt.savefig(save_path/f"{entry}.png")
     plt.close()
 
-save_path = DATA_FOLDER/"temp/SPHERE params/output_df"
+save_path = DATA_FOLDER/"temp/SPHERE params TipTorch/output_df"
 for entry in output_df.columns.values.tolist():
     sns.displot(data=output_df, x=entry, kde=True, bins=20)
     plt.savefig(save_path/f"{entry}.png")
     plt.close()
 
 inp_inv_df = pd.DataFrame( {a: transforms_input[a].backward(input_df[a].values) for a in fl_in.keys()} )
-save_path = DATA_FOLDER/"temp/SPHERE params/inp_inv_df"
+save_path = DATA_FOLDER/"temp/SPHERE params TipTorch/inp_inv_df"
 for entry in fl_in.keys():
     sns.displot(data=inp_inv_df, x=entry, kde=True, bins=20)
     plt.savefig(save_path/f"{entry}.png")
     plt.close()
 
 out_inv_df = pd.DataFrame( {a: transforms_output[a].backward(output_df[a].values) for a in fl_out.keys()} )
-save_path = DATA_FOLDER/"temp/SPHERE params/out_inv_df"
+save_path = DATA_FOLDER/"temp/SPHERE params TipTorch/out_inv_df"
 for entry in output_df.columns.values.tolist():
     sns.displot(data=out_inv_df, x=entry, kde=True, bins=20)
     plt.savefig(save_path/f"{entry}.png")
     plt.close()
 
 #%%
-# 'Airmass'
-# 'r0 (SPARTA)'
-# 'FWHM'
-# 'Strehl'
-# 'Wind direction (header)'
-# 'Wind speed (header)'
-# 'Tau0 (header)'
-# 'Nph WFS'
-# 'Rate'
-# 'λ left (nm)'
-# 'λ right (nm)'
+import matplotlib.pyplot as plt
+import seaborn as sns
+import numpy as np
+import pandas as pd
 
-# 'b'
-# 'dx'
-# 'dy'
-# 'r0'
-# 'amp'
-# 'beta'
-# 'alpha'
-# 'theta'
-# 'ratio'
-# 'Jx'
-# 'Jy'
-# 'Jxy'
-# 'F (left)'
-# 'F (right)'
-# 'bg (left)'
-# 'bg (right)'
+# assume we have two dataframes, df1 and df2
+df1 = psf_df
+df2 = fitted_df
 
-# df_ultimate = pd.concat([input_df, output_df], axis=1)
-df_ultimate = pd.concat([psf_df, fitted_df], axis=1)
-
-columns_to_drop = ['F (right)', 'bg (right)', 'λ right (nm)', 'Strehl']
+# concat the two dataframes
+df = pd.concat([df1, df2], axis=1)
+df = df.sort_index(axis=1)
+columns_to_drop = ['F (right)', 'bg (right)', 'λ right (nm)'] #, 'Strehl']
 
 for column_to_drop in columns_to_drop:
-    if column_to_drop in df_ultimate.columns:
-        df_ultimate = df_ultimate.drop(column_to_drop, axis=1)
+    if column_to_drop in df.columns:
+        df = df.drop(column_to_drop, axis=1)
 
-df_ultimate = df_ultimate.sort_index(axis=1)
+# calculate the correlation
+corr = df.corr(method='kendall')
 
-# corr_method = 'pearson'
-# corr_method = 'spearman'
-corr_method = 'kendall'
+# generate a mask for the upper triangle
+mask = np.triu(np.ones_like(corr, dtype=bool))
 
-spearman_corr = df_ultimate.corr(method=corr_method)
-
-# Generate a mask for the upper triangle
-mask = np.triu(np.ones_like(spearman_corr, dtype=bool))
-
-# Set up the matplotlib figure
+# set up the matplotlib figure
 f, ax = plt.subplots(figsize=(11, 9))
-ax.set_title("Correlation matrix ({})".format(corr_method))
-# Generate a custom diverging colormap
+
+# generate a custom diverging colormap
 cmap = sns.diverging_palette(230, 20, as_cmap=True)
-# Draw the heatmap with the mask and correct aspect ratio
-sns.heatmap(spearman_corr, mask=mask, cmap=cmap, vmax=.3, center=0,
-            square=True, linewidths=.5, cbar_kws={"shrink": .5})
+
+# draw the heatmap with the mask and correct aspect ratio
+sns.heatmap(corr, mask=mask, cmap=cmap, vmax=.3, center=0, square=True, linewidths=.5, cbar_kws={"shrink": .5})
+
+# set the xtick labels
+ax.set_xticklabels(df.columns)
+
+# color the labels: red for df1, green for df2
+colors = ['Black' if label in df1.columns else 'teal' for label in df.columns]
+for color, label in zip(colors, ax.get_xticklabels()):
+    label.set_color(color)
+
+for color, label in zip(colors, ax.get_yticklabels()):
+    label.set_color(color)
+
 plt.xticks(rotation=45, ha='right')
-# plt.yticks(rotation=45)
+plt.title("Correlation matrix (Kendall)")
 plt.show()
 
-#%%
-'''
-ids_to_remain = set(psf_df.index.values).difference(ids_to_exclude_later)
-psf_df = psf_df[psf_df.index.isin(ids_to_remain)]
-fitted_df = fitted_df[fitted_df.index.isin(psf_df.index.values.tolist())]
-'''
+
 #%%
 import torch
 import torch.nn as nn
@@ -452,11 +423,11 @@ X_train_df = X_train_df.drop(rows_with_nan, axis=0)
 
 assert Y_train_df.index.values.tolist() == X_train_df.index.values.tolist()
 
-X_train = torch.from_numpy(X_train_df.values).float().to(device)
-Y_train = torch.from_numpy(Y_train_df.values).float().to(device)
+X_train = torch.nan_to_num(torch.from_numpy(X_train_df.values).float().to(device))
+Y_train = torch.nan_to_num(torch.from_numpy(Y_train_df.values).float().to(device))
 
-X_val   = torch.from_numpy(X_valid_df.values).float().to(device)
-Y_val   = torch.from_numpy(Y_valid_df.values).float().to(device)
+X_val   = torch.nan_to_num(torch.from_numpy(X_valid_df.values).float().to(device))
+Y_val   = torch.nan_to_num(torch.from_numpy(Y_valid_df.values).float().to(device))
 
 #%%
 # Define the network architecture
@@ -470,7 +441,6 @@ class Gnosis2(nn.Module):
         self.fc3 = nn.Linear(hidden_size, hidden_size*2)
         self.dropout3 = nn.Dropout(dropout_p)
         self.fc4 = nn.Linear(hidden_size*2, out_size)
-        
 
     def forward(self, x):
         x = torch.tanh(self.fc1(x))
@@ -515,7 +485,7 @@ for epoch in range(num_iters):  # number of epochs
         y_pred_val = net(X_val)
         loss_val = loss_fn(y_pred_val, Y_val)
         loss_vals.append(loss_val.detach().cpu().item())
-        # print('Epoch [%d/%d], Val Loss: %.4f' % (epoch+1, 100, loss_val.item()))
+        print('Epoch [%d/%d], Val Loss: %.4f' % (epoch+1, 100, loss_val.item()))
 
 loss_trains = np.array(loss_trains)
 loss_vals = np.array(loss_vals)
@@ -526,95 +496,35 @@ plt.plot(loss_vals, label='Val')
 plt.legend()
 plt.grid()
 
-torch.save(net.state_dict(), WEIGHTS_FOLDER/'gnosis2_weights.dict')
+torch.save(net.state_dict(), WEIGHTS_FOLDER/'gnosis2_TT_weights.dict')
+
 
 # %%
-
-# df_ultimate = pd.concat([input_df, output_df], axis=1)
-# df_ultimate = pd.concat([psf_df, fitted_df], axis=1)
-
-# seaborn scatter r0 vs jitter
-# sns.scatterplot(data=output_df, x='r0', y='alpha')
-
-# sns.scatterplot(data=fitted_df, x='r0', y='Jy', hue='alpha', palette='viridis')
-# sns.scatterplot(data=df_ultimate, x='r0', y='Jy', hue='λ left (nm)', palette='viridis')
-
-# sns.scatterplot(data=df_ultimate, x='beta', y='alpha')
-
-# plt.ylim(0, 0.5)
-# plt.xlim(0, 1)
-
-# sns.kdeplot(data = df_ultimate,
-#             x='theta',
-#             y='ratio',
-#             color='r', fill=True,
-#             cmap="Reds", thresh=0.02)
-
-
-
-#%%
 from tools.utils import plot_radial_profiles #, draw_PSF_stack
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
+from PSF_models.TipToy_SPHERE_multisrc import TipTorch
+from tools.parameter_parser import ParameterParser
+from tools.config_manager import ConfigManager, GetSPHEREonsky
+from project_globals import device
 
 norm_regime = 'sum'
+
+_, _, norms, _, config_file = SPHERE_preprocess([0], '1P21I', norm_regime, device)
+toy = TipTorch(config_file, norm_regime, device)
+toy.optimizables = []
 
 fl_out_keys = list(fl_out.keys())
 fl_in_keys  = list(fl_in.keys())
 
-gnosis2PAO = lambda Y: { fl_out_keys[i]: transforms_output[fl_out_keys[i]].backward(Y[:,i]) for i in range(len(fl_out_keys)) }
-gnosis2in  = lambda X: { fl_in_keys[i]:  transforms_input[fl_in_keys[i]].backward(X[:,i])   for i in range(len(fl_in_keys))  }
-in2gnosis  = lambda inp: torch.from_numpy(( np.stack([transforms_input[a].forward(inp[a].values)  for a in fl_in_keys]) )).float().to(device).T
-PAO2gnosis = lambda out: torch.from_numpy(( np.stack([transforms_output[a].forward(out[a].values) for a in fl_out_keys]) )).float().to(device).T
+gnosis2TT = lambda Y: { fl_out_keys[i]: transforms_output[fl_out_keys[i]].backward(Y[:,i]) for i in range(len(fl_out_keys)) }
+gnosis2in = lambda X: { fl_in_keys[i]:  transforms_input[fl_in_keys[i]].backward(X[:,i])   for i in range(len(fl_in_keys))  }
+in2gnosis = lambda inp: torch.from_numpy(( np.stack([transforms_input[a].forward(inp[a].values)  for a in fl_in_keys]) )).float().to(device).T
+TT2gnosis = lambda out: torch.from_numpy(( np.stack([transforms_output[a].forward(out[a].values) for a in fl_out_keys]) )).float().to(device).T
 
 # psf_df --> in --> gnosis --> out --> PAO --> image
 
-def GetImages(sample_ids, norms):
-    PSF_0_ = []
-    PSF_1_ = []
 
-    for i,id_im in enumerate([images_dict['ID'].index(sample_id) for sample_id in sample_ids]):
-        PSF_0_.append(images_dict['PSF (data)'][id_im][0,...] / norms[i,:][:,None, None].cpu().numpy())
-        PSF_1_.append(images_dict['PSF (fit)' ][id_im][0,...] / norms[i,:][:,None, None].cpu().numpy())
-        
-    PSF_0_ = torch.tensor(np.stack(PSF_0_)).float()
-    PSF_1_ = torch.tensor(np.stack(PSF_1_)).float()
-    return PSF_0_, PSF_1_
-
-
-def GetBatch(rand_ids, read_mode):
-    if read_mode == 'valid':
-        sample_ids = [psf_df_valid.index.values.tolist()[rand_id] for rand_id in rand_ids]
-    elif read_mode == 'train':
-        sample_ids = [psf_df_train.index.values.tolist()[rand_id] for rand_id in rand_ids]
-    else:
-        raise ValueError('Mode must be either "valid" or "train"')
-    
-    # PSF_0, bg, norms, data_samples, merged_config = SPHERE_preprocess(sample_ids, 'different', norm_regime)
-    _, _, norms, _, merged_config = SPHERE_preprocess(sample_ids, 'different', norm_regime)
-    PSF_0_, PSF_1_ = GetImages(sample_ids, norms)
-
-    batch = {
-        'ids': sample_ids,
-        'confo': merged_config,
-        'PSF (data)': PSF_0_,
-        'PSF (fit)':  PSF_1_,
-        'X': in2gnosis ( psf_df_valid.loc[sample_ids] )    if read_mode == 'valid' else in2gnosis ( psf_df_train.loc[sample_ids]    ),
-        'Y': PAO2gnosis( fitted_df_valid.loc[sample_ids] ) if read_mode == 'valid' else PAO2gnosis( fitted_df_train.loc[sample_ids] )
-    }
-    return batch
-
-
-def GetRandIDs(length):
-    rand_ids = np.arange(length)
-    np.random.shuffle(rand_ids)
-    rand_ids = torch.split(torch.from_numpy(rand_ids), 64)
-    return rand_ids
-
-
-batches_train = [GetBatch(rand_id, 'train') for rand_id in tqdm(GetRandIDs(len(X_train_df)))]
-batches_val   = [GetBatch(rand_id, 'valid') for rand_id in tqdm(GetRandIDs(len(X_valid_df)))]
-
+#%%
 def toy_run(model, dictionary):
         model.F     = dictionary['F (left)'].repeat(2,1).T
         model.bg    = dictionary['bg (left)'].repeat(2,1).T
@@ -623,316 +533,110 @@ def toy_run(model, dictionary):
         model.Jx    = dictionary['Jx']
         model.dx    = dictionary['dx']
         model.dy    = dictionary['dy']
-        model.b     = dictionary['b']
+        model.dn    = dictionary['dn']
         model.r0    = dictionary['r0']
-        model.amp   = dictionary['amp']
-        model.beta  = dictionary['beta']
-        model.theta = dictionary['theta']
-        model.alpha = dictionary['alpha']
-        model.ratio = dictionary['ratio']
-        
+        model.wind_dir = dictionary['wind direction']
+        model.wind_speed = dictionary['wind speed']
         return model.forward()
 
-#%%
-# Load weights
-net.load_state_dict(torch.load(WEIGHTS_FOLDER/'gnosis2_weights.dict'))
-
-#%%
-optimizer = optim.Adam(net.parameters(), lr=0.001)
-# optimizer = optim.LBFGS(net.parameters(), lr=1, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-
-loss_PSF = nn.L1Loss(reduction='sum')
-
-def loss_fn(output, target):
-    return loss_PSF(output, target) #+ torch.amax(torch.abs(output-target), dim=(-2,-1)).sum() * 1e1
-    # return torch.amax(torch.abs(output-target), dim=(-2,-1)).mean() * 1e2
-
-
-epochs = 26
-torch.cuda.empty_cache()
-
-for epoch in range(epochs):
-    loss_train_average = []
+def toy_run_direct(model, dict_data):
+        model.F     = torch.tensor([1.,1.]).to(device)
+        model.bg    = torch.tensor([0.,0.]).to(device)
+        model.Jy    = torch.tensor([1.]).to(device)
+        model.Jxy   = torch.tensor([1.]).to(device)
+        model.Jx    = torch.tensor([1.]).to(device)
+        model.dx    = torch.tensor([0.]).to(device)
+        model.dy    = torch.tensor([0.]).to(device)
+        model.dn    = torch.tensor([0.]).to(device)
+        model.r0    = torch.tensor([dict_data['r0 (SPARTA)'].values.item()]).to(device)
+        model.wind_dir = torch.tensor([dict_data['Wind direction (header)'].values.item()]).to(device)
+        model.wind_speed = torch.tensor([dict_data['Wind speed (header)'].values.item()]).to(device)
+        return model.forward()
     
-    for batch in batches_train:
-        optimizer.zero_grad()
-        
-        toy = TipToy(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
-        toy.optimizables = []
-        
-        PSF_pred = toy_run(toy, gnosis2PAO(net(batch['X'])))
-        
-        loss = loss_fn(PSF_pred, batch['PSF (data)'].to(device))
-        loss.backward()
-        loss_train_average.append(loss.item())
-        
-        # optimizer.step(lambda: loss_fn(toy_run(toy, gnosis2PAO(net(batch['X']))), batch['PSF (data)'].to(device)))
-        optimizer.step()
-        torch.cuda.empty_cache()
-        
+def toy_run_mixed(model, dict_data, dict_pred):
+        model.F     = torch.tensor([1.,1.]).to(device)
+        model.bg    = torch.tensor([0.,0.]).to(device)  
+        model.Jy    = dict_pred['Jy']
+        model.Jxy   = dict_pred['Jxy']
+        model.Jx    = dict_pred['Jx']
+        model.dx    = dict_pred['dx']
+        model.dy    = dict_pred['dy']
+        model.dn    = dict_pred['dn']
+        model.r0    = dict_pred['r0']
+        model.wind_dir = torch.tensor([dict_data['Wind direction (header)'].values.item()]).to(device)
+        model.wind_speed = torch.tensor([dict_data['Wind speed (header)'].values.item()]).to(device)
+        return model.forward()
+    
+destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
+
+temp_dict = {
+    'ID': [],
+    'PSF (data)': [],
+    'config': []
+}
+
+for id in tqdm(psf_df.index.values.tolist()):
+    PSF_0, _, norms, _, config_file = SPHERE_preprocess([id], '1P21I', norm_regime, device)
+    PSF_0 = PSF_0[...,1:,1:]
+    config_file['sensor_science']['FieldOfView'] = 255
+    temp_dict['ID'].append(id)
+    temp_dict['PSF (data)'].append(PSF_0)
+    temp_dict['config'].append(config_file)
+
+
+#%%
+val_ids = psf_df_valid.index.values.tolist()
+
+sample_id = np.random.choice(val_ids)
+
+PSF_0s = []
+PSF_1s = []
+
+for sample_id in tqdm(val_ids):
+    sample_ids = [sample_id]
+    test_in  = psf_df_valid.loc[sample_ids]
+    test_out = fitted_df_valid.loc[sample_ids]
+
+    inp = psf_df_valid.loc[sample_ids]
+    out = fitted_df_valid.loc[sample_ids]
+
+    X = in2gnosis(inp)
+    Y = TT2gnosis(out)
+
     with torch.no_grad():
-        loss_valid_average = []
-
-        for batch in batches_val:
-                
-            toy = TipToy(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
-            toy.optimizables = []
+        try:
+            Y_pred = net(X)
+            params = gnosis2TT(Y)
+            # params = gnosis2TT(Y_pred)
             
-            PSF_pred = toy_run(toy, gnosis2PAO(net(batch['X'])))
+            # PSF_0, _, norms, _, config_file = SPHERE_preprocess(sample_ids, '1P21I', norm_regime, device)
+            # PSF_0 = PSF_0[...,1:,1:]
+            # config_file['sensor_science']['FieldOfView'] = 255
+
+            config_file = temp_dict['config'][temp_dict['ID'].index(sample_id)]
+            PSF_0 = temp_dict['PSF (data)'][temp_dict['ID'].index(sample_id)]
+
+            # toy = TipTorch(config_file, norm_regime, device)
+            # toy.optimizables = []
+
+            toy.config = config_file
+            toy.Update(reinit_grids=True, reinit_pupils=False)
             
-            loss = loss_fn(PSF_pred, batch['PSF (data)'].to(device))
-            loss_valid_average.append(loss.item())
-            torch.cuda.empty_cache()
+            PSF_1 = toy_run(toy, params)
+            # PSF_1 = toy_run_direct(toy, inp)
+            # PSF_1 = toy_run_mixed(toy, inp, params)
             
-    print('Epoch %d/%d: ' % (epoch+1, epochs))
-    print('  Train loss:  %.4f' % (np.array(loss_train_average).mean()))
-    print('  Valid. loss: %.4f' % (np.array(loss_valid_average).mean()))
-    print('')
-
-    #TODO: TipTorch config update
-    
-#%%
-with torch.no_grad():  
-    batch = batches_val[np.random.choice(len(batches_val))]   
-    pred_test = gnosis2PAO(net(batch['X']))
-
-    toy = TipToy(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
-    toy.optimizables = []
-
-    PSF_pred = toy_run(toy, pred_test).detach().cpu().numpy()
-    PSF_test = batch['PSF (data)'].detach().cpu().numpy()
-    
-rand_psf = np.random.choice(PSF_pred.shape[0])
-PSF_pred = PSF_pred[rand_psf,...][None,...]
-PSF_test = PSF_test[rand_psf,...][None,...]
-    
-destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
-
-PSF_test_ = np.copy( PSF_test / PSF_test.max(axis=(-2,-1))[..., None, None] )
-PSF_pred_ = np.copy( PSF_pred / PSF_pred.max(axis=(-2,-1))[..., None, None] )
-
-plot_radial_profiles(destack(PSF_test_), destack(PSF_pred_), 'Data', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=14, scale='linear')
-plot_radial_profiles(destack(PSF_test),  destack(PSF_pred),  'Data', 'Predicted', title='NN PSFAO prediction', dpi=200, cutoff=14, scale='linear')
-
-
-#%%
-batch = batches_val[np.random.choice(len(batches_val))] 
-
-toy = TipToy(batch['confo'], norm_regime, device, TipTop=False, PSFAO=True)
-toy.optimizables = []
-
-
-PSF_pred = toy_run(toy, gnosis2PAO(batch['Y'])).detach().cpu().numpy()  
-PSF_test = batch['PSF (fit)'].detach().cpu().numpy()    
-    
-rand_psf = np.random.choice(PSF_pred.shape[0])
-PSF_pred = PSF_pred[rand_psf,...][None,...]
-PSF_test = PSF_test[rand_psf,...][None,...]
-    
-destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
-
-PSF_test_ = np.copy( PSF_test / PSF_test.max(axis=(-2,-1))[..., None, None] )
-PSF_pred_ = np.copy( PSF_pred / PSF_pred.max(axis=(-2,-1))[..., None, None] )
-
-plot_radial_profiles(destack(PSF_test_), destack(PSF_pred_), 'From dataset', 'Converted', title='Fitted', dpi=200, cutoff=64)
-plot_radial_profiles(destack(PSF_test),  destack(PSF_pred),  'From dataset', 'Converted', title='Fitted', dpi=200, cutoff=64)
-
-#%%
-%reload_ext autoreload
-%autoreload 2
-
-import sys
-sys.path.append('..')
-
-from tools.config_manager import ConfigManager, GetSPHEREonsky
-from PSF_models.TipToy_SPHERE_multisrc import TipToy
-import matplotlib.pyplot as plt
-from torch.nn.functional import interpolate
-
-from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
-from tools.utils import draw_PSF_stack, plot_radial_profiles
-from project_globals import device
-import pickle
-import torch
-from pprint import pprint
-
-norm_regime = 'sum'
-
-fitted_folder = 'E:/ESO/Data/SPHERE/IRDIS_fitted_PAO_1P21I/'
-fitted_files = os.listdir(fitted_folder)
-
-# selected_files = [fitted_files[20], fitted_files[30], fitted_files[50], fitted_files[40] ]
-selected_files = [fitted_files[20], fitted_files[30]] #, fitted_files[40] ]
-# selected_files = [ fitted_files[20] ]
-sample_ids = [ int(file.split('.')[0]) for file in selected_files ]
-
-regime = 'different'
-
-psdsaves = ['PSD_1', 'PSD_2', 'PSD_double']
-
-#%%============================================================================
-PSFs_test_1 = []
-PSFs_pred_1 = []
-tensy = lambda x: torch.tensor(x).to(device)
-
-c = 0
-
-for file, sample in zip(selected_files,sample_ids):
-
-    PSF_0, bg, norms, data_samples, init_config = SPHERE_preprocess([sample], regime, norm_regime)
-    norms = norms[:, None, None].cpu().numpy() 
-
-    with open(fitted_folder + file, 'rb') as handle:
-        data = pickle.load(handle)
-
-    toy = TipToy(init_config, norm_regime, device, TipTop=False, PSFAO=True)
-    toy.optimizables = []
-
-    toy.F     = tensy( data['F']     ).squeeze()
-    toy.bg    = tensy( data['bg']    ).squeeze()
-    toy.Jy    = tensy( data['Jy']    ).flatten()
-    toy.Jxy   = tensy( data['Jxy']   ).flatten()
-    toy.Jx    = tensy( data['Jx']    ).flatten()
-    toy.dx    = tensy( data['dx']    ).flatten()
-    toy.dy    = tensy( data['dy']    ).flatten()
-    toy.b     = tensy( data['b']     ).flatten()
-    toy.r0    = tensy( data['r0']    ).flatten()
-    toy.amp   = tensy( data['amp']   ).flatten()
-    toy.beta  = tensy( data['beta']  ).flatten()
-    toy.theta = tensy( data['theta'] ).flatten()
-    toy.alpha = tensy( data['alpha'] ).flatten()
-    toy.ratio = tensy( data['ratio'] ).flatten()
-
-    toy.psdsave = psdsaves[c]
-    c += 1
-
-    PSFs_pred_1.append( toy().detach().clone()[0,...] )
-    PSFs_test_1.append( torch.tensor( data['Img. fit'][0,...] / norms).to(device) )
-
-PSFs_test_1 = torch.stack(PSFs_test_1)
-PSFs_pred_1 = torch.stack(PSFs_pred_1)
-
-# draw_PSF_stack(PSFs_test_1, PSFs_pred_1)
-
-#%%============================================================================
-PSF_0, bg, norms, data_samples, init_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
-
-if len(sample_ids) == 1:
-    norms = norms[None,...]
-
-datas = []
-for file in selected_files:
-    with open(fitted_folder + file, 'rb') as handle:
-        datas.append( pickle.load(handle) )
-
-toy = TipToy(init_config, norm_regime, device, TipTop=False, PSFAO=True)
-toy.optimizables = []
-
-tensy = lambda x: torch.tensor(x).to(device)
-
-toy.F     = tensy( [data['F']     for data in datas] ).squeeze()
-toy.bg    = tensy( [data['bg']    for data in datas] ).squeeze()
-toy.Jy    = tensy( [data['Jy']    for data in datas] ).flatten()
-toy.Jxy   = tensy( [data['Jxy']   for data in datas] ).flatten()
-toy.Jx    = tensy( [data['Jx']    for data in datas] ).flatten()
-toy.dx    = tensy( [data['dx']    for data in datas] ).flatten()
-toy.dy    = tensy( [data['dy']    for data in datas] ).flatten()
-toy.b     = tensy( [data['b']     for data in datas] ).flatten()
-toy.r0    = tensy( [data['r0']    for data in datas] ).flatten()
-toy.amp   = tensy( [data['amp']   for data in datas] ).flatten()
-toy.beta  = tensy( [data['beta']  for data in datas] ).flatten()
-toy.theta = tensy( [data['theta'] for data in datas] ).flatten()
-toy.alpha = tensy( [data['alpha'] for data in datas] ).flatten()
-toy.ratio = tensy( [data['ratio'] for data in datas] ).flatten()
-
-
-PSFs_test = []
-for i in range(len(datas)):
-    PSFs_test.append( torch.tensor( datas[i]['Img. fit'][0,...] / norms[i,:,None,None].cpu().numpy() ).to(device) )
-PSFs_test = torch.stack(PSFs_test)
-
-
-if len(sample_ids) != 1:
-    PSFs_test = PSFs_test.squeeze()
-
-toy.psdsave = psdsaves[-1]
-PSF_pred = toy()
-    
-# draw_PSF_stack(PSFs_test, PSF_pred)
-draw_PSF_stack(PSFs_pred_1, PSF_pred, scale='log', min_val=1e-7, max_val=1e16)
-
-plot_radial_profiles(PSFs_pred_1[0,0,...].unsqueeze(0), PSF_pred[0,0,...].unsqueeze(0), 'L_1', 'L', title='PSFs', dpi=200, cutoff=14, scale='linear')
-
-
-#%%
-# from tools.utils import register_hooks
-# Q = loss_fn(PSF_pred, torch.ones_like(PSF_pred).to(device))
-# get_dot = register_hooks(Q)
-# Q.backward()
-# dot = get_dot()
-# #dot.save('tmp.dot') # to get .dot
-# #dot.render('tmp') # to get SVG
-# dot # in Jupyter, you can just render the variable
-
-#%% ============================================================================
-# ==============================================================================
-# ==============================================================================
-
-reado = 'C:/Users/akuznets/Projects/TipToy/data/temp/'
-
-with open(reado + 'PSD_double.pickle', 'rb') as handle:
-    PSD_double = pickle.load(handle)
-with open(reado + 'PSD_1.pickle', 'rb') as handle:
-    PSD_1 = pickle.load(handle)
-with open(reado + 'PSD_2.pickle', 'rb') as handle:
-    PSD_2 = pickle.load(handle)
-
-#%%
-psd_1 = PSD_1['MoffatPSD'].squeeze()
-psd_2 = PSD_2['MoffatPSD'].squeeze()
-psd_3 = PSD_double['MoffatPSD'].squeeze()
-
-test_1 = psd_1.squeeze()
-test_2 = psd_3[0,...]
-# plt.imshow(torch.log10((test_1-test_2*0.01).abs()).cpu().numpy())
-# test_1 = psd_2.squeeze()
-# test_2 = psd_3[1,...]
-
-test_1_ = interpolate(test_1.unsqueeze(0).unsqueeze(0), size=(test_2.shape[-2], test_2.shape[-1]), mode='bicubic').squeeze() #* (test_1.shape[0] / test_2.shape[0])**2 
-test_2_ = interpolate(test_2.unsqueeze(0).unsqueeze(0), size=(test_1.shape[-2], test_1.shape[-1]), mode='bicubic').squeeze() #* (test_2.shape[0] / test_1.shape[0])**2
-
-# el_croppo = slice(test_2.shape[0]//2-test_1.shape[0]//2, test_2.shape[0]//2+test_1.shape[0]//2)
-el_croppo = slice(test_1.shape[0]//2-test_2.shape[0]//2, test_1.shape[0]//2+test_2.shape[0]//2)
-el_croppo = (el_croppo, el_croppo)
-
-test_1 = test_1[el_croppo]
-
-# plot_radial_profiles(test_1_.unsqueeze(0), test_2.unsqueeze(0), 'Interp', 'Supersamp', title='Moffats', dpi=200, cutoff=14, scale='linear')
-# plot_radial_profiles(test_1.unsqueeze(0), test_2_.unsqueeze(0), 'Supersamp', 'Interp', title='Moffats', dpi=200, cutoff=14, scale='linear')
-plot_radial_profiles(test_1.unsqueeze(0), test_2.unsqueeze(0), 'Supersamp', 'Interp', title='Moffats', dpi=200, cutoff=14, scale='linear')
-
-#%%
-%matplotlib qt
-test = torch.hstack([test_2, test_1,(test_1-test_2).abs()])
-
-plt.imshow(torch.log10(test.abs()).cpu().numpy())
-plt.colorbar()
-plt.show()
-
-# %matplotlib inline
+        except:
+            print('Error in sample %d' % sample_id)
+        
+        PSF_0s.append(PSF_0)
+        PSF_1s.append(PSF_1)
 
 #%%
 
+PSF_0s_ = torch.stack(PSF_0s).squeeze()
+PSF_1s_ = torch.stack(PSF_1s).squeeze()
 
-dk =  0.026426762342453003
+plot_radial_profiles(destack(PSF_0s_),  destack(PSF_1s_),  'Data', 'Predicted', title='Fitted TipTop', dpi=200, cutoff=32, scale='log')
 
-sampling =  4.3715, 4.6636
-
-dk =  0.03660716116428375
-
-sampling =  3.3667, 3.3667
-
-dk =  0.026426762342453003
-
-sampling = 4.3715, 4.6636,
-           3.3667, 3.3667
+# %%

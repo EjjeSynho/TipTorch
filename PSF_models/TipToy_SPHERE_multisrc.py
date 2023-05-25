@@ -156,6 +156,11 @@ class TipTorch(torch.nn.Module):
         self.dk = 1/self.D/self.sampling.max() # PSD spatial frequency step
         self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
 
+        # print('Sampling factor: ', *self.sampling_factor.detach().squeeze().cpu().numpy().tolist())
+        # print('Sampling: ', *self.sampling.detach().squeeze().cpu().numpy().tolist())
+        # print('Wavelengths: ', *(self.wvl*1e9).detach().squeeze().cpu().numpy().tolist())
+        # print('dk: ', self.dk)
+        
         def gen_grid(N):
             factor = 0.5*(1-N%2)
             return torch.meshgrid(*[torch.linspace(-N//2+N%2+factor, N//2-factor, N, device=self.device)]*2, indexing = 'ij')
@@ -336,8 +341,7 @@ class TipTorch(torch.nn.Module):
         self.norm_regime = norm_regime
         self.norm_scale  = self.make_tensor(1.0) # TODO: num obj x num wvl
         self.normalizer  = torch.sum if self.norm_regime == 'sum' else torch.amax
-
-
+        
         self.oversampling = oversampling
         self.psdsave = None
     
@@ -584,6 +588,8 @@ class TipTorch(torch.nn.Module):
               self.PSDs['chromatism'] + \
               self.PSDs['Moffat'])
         
+        self.PSD = PSD
+        
         return PSD
     
 
@@ -603,9 +609,9 @@ class TipTorch(torch.nn.Module):
         Jxy = pdims(self.Jxy, 2)
 
         # Computing OTF from PSD
-        cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1
+        cov = fft.fftshift(fft.fft2(fft.fftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1 #TODO: real FFT?
         # Computing the Structure Function from the covariance
-        SF = cov.abs().amax(dim=(-2,-1), keepdim=True) - cov.abs()
+        SF = 2*(cov.abs().amax(dim=(-2,-1), keepdim=True) - cov.abs())
         # Phasor to shift the PSF with the subpixel accuracy
         fftPhasor = torch.exp( -np.pi*1j * pdims(self.sampling_factor,2) * (self.U*dx + self.V*dy).unsqueeze(1) )
         OTF_turb  = torch.exp( -0.5 * SF * pdims(2*np.pi*1e-9/self.wvl,2)**2 )
@@ -613,6 +619,8 @@ class TipTorch(torch.nn.Module):
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         # Resulting OTF
         OTF = OTF_turb * self.OTF_static * fftPhasor * OTF_jitter
+
+        self.OTF = OTF
 
         PSF_out = self.OTF2PSF(OTF)
 
