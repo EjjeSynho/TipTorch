@@ -142,6 +142,7 @@ fitted_df.sort_index(inplace=True)
 
 #%% Compute data transformations
 from data_processing.normalizers import BoxCox, Uniform, TransformSequence, Invert, DataTransformer
+
 '''
 fl_in = {                      # boxcox gaussian uniform invert
     'Airmass':                 [True,  False, True,  False],
@@ -161,7 +162,6 @@ transforms_input = {\
 
 input_df = pd.DataFrame( {a: transforms_input[a].forward(psf_df[a].values) for a in fl_in.keys()} )
 input_df.index = psf_df.index
-
 
 fl_out = {          # boxcox gaussian uniform invert
     'F (left)':   [True,  True,  False, False],
@@ -183,33 +183,44 @@ fl_out = {          # boxcox gaussian uniform invert
 }
 
 transforms_output = { i: DataTransformer(fitted_df[i].values, boxcox=fl_out[i][0], gaussian=fl_out[i][1], uniform=fl_out[i][2], invert=fl_out[i][3]) for i in fl_out.keys() }
+output_df = pd.DataFrame( {a: transforms_output[a].forward(fitted_df[a].values) for a in transforms_output.keys()} )
+output_df.index = fitted_df.index
 '''
 
 transforms_input = {}
-transforms_input['Airmass']                 = TransformSequence( transforms = [ BoxCox(lmbda=-2.532), Uniform(a=0.0, b=0.312) ])
-transforms_input['r0 (SPARTA)']             = TransformSequence( transforms = [ BoxCox(lmbda=0.20), Uniform(a=-1.8, b=-1.0) ])
+# transforms_input['Airmass']                 = TransformSequence( transforms = [ BoxCox(lmbda=-2.532), Uniform(a=0.0, b=0.312) ])
+transforms_input['Airmass']                 = TransformSequence( transforms = [ Uniform(a=1.0, b=2.2) ])
+# transforms_input['r0 (SPARTA)']             = TransformSequence( transforms = [ BoxCox(lmbda=0.20), Uniform(a=-1.8, b=-1.0) ])
+transforms_input['r0 (SPARTA)']             = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
 transforms_input['Wind direction (header)'] = TransformSequence( transforms = [ Uniform(a=0, b=360) ])
-transforms_input['Wind speed (header)']     = TransformSequence( transforms = [ BoxCox(lmbda=0.4), Uniform(a=0.5, b=5) ])
-transforms_input['Tau0 (header)']           = TransformSequence( transforms = [ BoxCox(data=psf_df['Tau0 (header)']), Uniform(a=-5.5, b=-4) ])
+# transforms_input['Wind speed (header)']     = TransformSequence( transforms = [ BoxCox(lmbda=0.4), Uniform(a=0.5, b=5) ])
+transforms_input['Wind speed (header)']     = TransformSequence( transforms = [ Uniform(a=0.0, b=17.5) ])
+# transforms_input['Tau0 (header)']           = TransformSequence( transforms = [ BoxCox(data=psf_df['Tau0 (header)']), Uniform(a=-5.5, b=-4) ])
+transforms_input['Tau0 (header)']           = TransformSequence( transforms = [ Uniform(a=0.0, b=0.025) ])
 transforms_input['λ left (nm)']             = TransformSequence( transforms = [ Uniform(a=psf_df['λ left (nm)'].min(), b=psf_df['λ left (nm)'].max()) ])
 transforms_input['λ right (nm)']            = TransformSequence( transforms = [ Uniform(a=psf_df['λ right (nm)'].min(), b=psf_df['λ right (nm)'].max()) ])
 transforms_input['Rate']                    = TransformSequence( transforms = [ Uniform(a=psf_df['Rate'].min(), b=psf_df['Rate'].max()) ])
-transforms_input['FWHM']                    = TransformSequence( transforms = [ BoxCox(lmbda=-0.7), Uniform(a=-0.2, b=0.5) ])
-transforms_input['Nph WFS']                 = TransformSequence( transforms = [ BoxCox(lmbda=-0.25), Uniform(a=1, b=3) ])
-transforms_input['Strehl']                  = TransformSequence( transforms = [ Invert(), BoxCox(lmbda=0.1), Uniform(a=-2.25, b=-0.5) ])
+# transforms_input['FWHM']                    = TransformSequence( transforms = [ BoxCox(lmbda=-0.7), Uniform(a=-0.2, b=0.5) ])
+transforms_input['FWHM']                    = TransformSequence( transforms = [ Uniform(a=0.5, b=3.0) ])
+# transforms_input['Nph WFS']                 = TransformSequence( transforms = [ BoxCox(lmbda=-0.25), Uniform(a=1, b=3) ])
+transforms_input['Nph WFS']                 = TransformSequence( transforms = [ Uniform(a=0, b=1000) ])
+# transforms_input['Strehl']                  = TransformSequence( transforms = [ Invert(), BoxCox(lmbda=0.1), Uniform(a=-2.25, b=-0.5) ])
+transforms_input['Strehl']                  = TransformSequence( transforms = [ Uniform(a=0.015, b=1.0) ])
 
 input_df = pd.DataFrame( {a: transforms_input[a].forward(psf_df[a].values) for a in transforms_input.keys()} )
 input_df.index = psf_df.index
 
-
 transforms_output = {}
 # transforms_output['amp']        = TransformSequence( transforms = [ BoxCox(lmbda=-1.5), Uniform(a=0.525, b=0.675) ])
-transforms_output['amp']        = TransformSequence( transforms = [ Uniform(a=0., b=20.) ])
-transforms_output['r0']         = TransformSequence( transforms = [ BoxCox(lmbda=-0.002), Uniform(a=-3.75, b=2) ])
+transforms_output['amp']        = TransformSequence( transforms = [ Uniform(a=0.0, b=20.) ])
+# transforms_output['r0']         = TransformSequence( transforms = [ BoxCox(lmbda=-0.0), Uniform(a=-3.75, b=2) ])
+transforms_output['r0']         = TransformSequence( transforms = [ Uniform(a=0.0, b=3.0) ])
 # transforms_output['alpha']      = TransformSequence( transforms = [ BoxCox(lmbda=-0.034), Uniform(a=-4, b=-1) ])
 transforms_output['alpha']      = TransformSequence( transforms = [ Uniform(a=0.0, b=0.4) ])
-transforms_output['ratio']      = TransformSequence( transforms = [ BoxCox(lmbda=-0.01), Uniform(a=-0.42, b=0.6) ])
-transforms_output['b']          = TransformSequence( transforms = [ BoxCox(lmbda=0.3454), Uniform(a=-2.5, b=-1.5) ])
+# transforms_output['ratio']      = TransformSequence( transforms = [ BoxCox(lmbda=-0.0), Uniform(a=-0.42, b=0.6) ])
+transforms_output['ratio']      = TransformSequence( transforms = [ Uniform(a=0.6, b=1.6) ])
+# transforms_output['b']          = TransformSequence( transforms = [ BoxCox(lmbda=0.3454), Uniform(a=-2.5, b=-1.5) ])
+transforms_output['b']          = TransformSequence( transforms = [ Uniform(a=0.0, b=0.3) ])
 # transforms_output['beta']       = TransformSequence( transforms = [ BoxCox(lmbda=-1.384), Uniform(a=0.25, b=0.575) ])
 transforms_output['beta']       = TransformSequence( transforms = [ Uniform(a=0.0, b=10.0) ])
 transforms_output['theta']      = TransformSequence( transforms = [ Uniform(a=-1, b=1) ])
@@ -229,7 +240,64 @@ output_df.index = fitted_df.index
 
 rows_with_nan = output_df.index[output_df.isna().any(axis=1)].values.tolist()
 
-#%
+
+'''
+entry = 'ratio'
+
+A = fitted_df[entry].values
+B = transforms_output[entry].forward(A)
+C = transforms_output[entry].backward(B)
+
+test_df = pd.DataFrame({'A': A, 'B': B, 'C': C})
+
+sns.displot(test_df, x='A', bins=20)
+sns.displot(test_df, x='B', bins=20)
+sns.displot(test_df, x='C', bins=20)
+'''
+
+
+def SaveTransformedResults():
+    save_path = DATA_FOLDER/"temp/SPHERE params/psf_df"
+    for entry in selected_entries:
+        sns.displot(data=psf_df, x=entry, kde=True, bins=20)
+        plt.savefig(save_path/f"{entry}.png")
+        plt.close()
+
+    save_path = DATA_FOLDER/"temp/SPHERE params/fitted_df"
+    for entry in fitted_df.columns.values.tolist():
+        sns.displot(data=fitted_df, x=entry, kde=True, bins=20)
+        plt.savefig(save_path/f"{entry}.png")
+        plt.close()
+
+    save_path = DATA_FOLDER/"temp/SPHERE params/input_df"
+    for entry in transforms_input.keys():
+        sns.displot(data=input_df, x=entry, kde=True, bins=20)
+        plt.savefig(save_path/f"{entry}.png")
+        plt.close()
+
+    save_path = DATA_FOLDER/"temp/SPHERE params/output_df"
+    for entry in output_df.columns.values.tolist():
+        sns.displot(data=output_df, x=entry, kde=True, bins=20)
+        plt.savefig(save_path/f"{entry}.png")
+        plt.close()
+
+    inp_inv_df = pd.DataFrame( {a: transforms_input[a].backward(input_df[a].values) for a in transforms_input.keys()} )
+    save_path = DATA_FOLDER/"temp/SPHERE params/inp_inv_df"
+    for entry in transforms_input.keys():
+        sns.displot(data=inp_inv_df, x=entry, kde=True, bins=20)
+        plt.savefig(save_path/f"{entry}.png")
+        plt.close()
+
+    out_inv_df = pd.DataFrame( {a: transforms_output[a].backward(output_df[a].values) for a in transforms_output.keys()} )
+    save_path = DATA_FOLDER/"temp/SPHERE params/out_inv_df"
+    for entry in output_df.columns.values.tolist():
+        sns.displot(data=out_inv_df, x=entry, kde=True, bins=20)
+        plt.savefig(save_path/f"{entry}.png")
+        plt.close()
+
+# SaveTransformedResults()
+
+#%%
 psf_df.drop(rows_with_nan, inplace=True)
 input_df.drop(rows_with_nan, inplace=True)
 fitted_df.drop(rows_with_nan, inplace=True)
@@ -325,45 +393,6 @@ for i in range(len(psf_df_batches_valid)):
     
 # for i in range(len(psf_df_batches_valid)):
 #     print(len(psf_df_batches_valid[i]), len(fitted_df_batches_valid[i]))
-
-#%%
-save_path = DATA_FOLDER/"temp/SPHERE params/psf_df"
-for entry in selected_entries:
-    sns.displot(data=psf_df, x=entry, kde=True, bins=20)
-    plt.savefig(save_path/f"{entry}.png")
-    plt.close()
-
-save_path = DATA_FOLDER/"temp/SPHERE params/fitted_df"
-for entry in fitted_df.columns.values.tolist():
-    sns.displot(data=fitted_df, x=entry, kde=True, bins=20)
-    plt.savefig(save_path/f"{entry}.png")
-    plt.close()
-
-save_path = DATA_FOLDER/"temp/SPHERE params/input_df"
-for entry in transforms_input.keys():
-    sns.displot(data=input_df, x=entry, kde=True, bins=20)
-    plt.savefig(save_path/f"{entry}.png")
-    plt.close()
-
-save_path = DATA_FOLDER/"temp/SPHERE params/output_df"
-for entry in output_df.columns.values.tolist():
-    sns.displot(data=output_df, x=entry, kde=True, bins=20)
-    plt.savefig(save_path/f"{entry}.png")
-    plt.close()
-
-inp_inv_df = pd.DataFrame( {a: transforms_input[a].backward(input_df[a].values) for a in transforms_input.keys()} )
-save_path = DATA_FOLDER/"temp/SPHERE params/inp_inv_df"
-for entry in transforms_input.keys():
-    sns.displot(data=inp_inv_df, x=entry, kde=True, bins=20)
-    plt.savefig(save_path/f"{entry}.png")
-    plt.close()
-
-out_inv_df = pd.DataFrame( {a: transforms_output[a].backward(output_df[a].values) for a in transforms_output.keys()} )
-save_path = DATA_FOLDER/"temp/SPHERE params/out_inv_df"
-for entry in output_df.columns.values.tolist():
-    sns.displot(data=out_inv_df, x=entry, kde=True, bins=20)
-    plt.savefig(save_path/f"{entry}.png")
-    plt.close()
 
 #%%
 # df_ultimate = pd.concat([input_df, output_df], axis=1)
@@ -683,13 +712,17 @@ plot_radial_profiles(destack(PSF_0s_),  destack(PSF_1s_),  'Data', 'Predicted', 
 
 
 #%%
+net = Gnosis2(X_train.shape[1], Y_train.shape[1], 100, 0.25)
+net.to(device)
+net.double()
+#%%
 optimizer = optim.Adam(net.parameters(), lr=0.001)
 # optimizer = optim.LBFGS(net.parameters(), lr=1, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
 
-loss_PSF = nn.L1Loss(reduction='mean')
+loss_PSF = nn.L1Loss(reduction='sum')
 
 def loss_fn(output, target):
-    return loss_PSF(output, target) #+ torch.amax(torch.abs(output-target), dim=(-2,-1)).sum() * 1e1
+    return loss_PSF(output, target) + torch.amax(torch.abs(output-target), dim=(-2,-1)).sum() * 1e1
     # return torch.amax(torch.abs(output-target), dim=(-2,-1)).mean() * 1e2
 
 epochs = 26
@@ -698,11 +731,9 @@ torch.cuda.empty_cache()
 toy = TipTorch(batches_dict_train[0]['configs'], norm_regime, device, TipTop=False, PSFAO=True)
 toy.optimizables = []
 
-net = Gnosis2(X_train.shape[1], Y_train.shape[1], 100, 0.25)
-net.to(device)
 
-optimizer = optim.Adam(net.parameters(), lr=0.00005)
-loss_fn = nn.L1Loss(reduction='sum')
+optimizer = optim.Adam(net.parameters(), lr=0.00001)
+# loss_fn = nn.L1Loss(reduction='sum')
 
 for epoch in range(epochs):
     loss_train_average = []
@@ -712,7 +743,7 @@ for epoch in range(epochs):
         toy.config = batch['configs']
         toy.Update(reinit_grids=True, reinit_pupils=False)
         
-        X = batch['X'].float().to(device)
+        X = batch['X'].to(device)
         PSF_0 = batch['PSF (data)'].to(device)
         
         PSF_pred = toy_run(toy, gnosis2PAO(net(X)))
@@ -730,7 +761,7 @@ for epoch in range(epochs):
             toy.config = batch['configs']
             toy.Update(reinit_grids=True, reinit_pupils=False)
 
-            X = batch['X'].float().to(device)
+            X = batch['X'].to(device)
             PSF_0 = batch['PSF (data)'].to(device)
 
             PSF_pred = toy_run(toy, gnosis2PAO(net(X)))
@@ -766,14 +797,14 @@ for i, batch in tqdm(enumerate(batches_dict_valid)):
     # Read data
     PSF_0 = batch['PSF (data)']
     config_file = batch['configs']
-    X = batch['X'].float().to(device)
-    Y = batch['Y'].float().to(device)
-            
+    X = batch['X'].to(device)
+    Y = batch['Y'].to(device)
+
     toy.config = config_file
     toy.Update(reinit_grids=True, reinit_pupils=False)
 
-    # params_pred = gnosis2PAO(net(X))
-    params_pred = gnosis2PAO(Y)
+    params_pred = gnosis2PAO(net(X))
+    # params_pred = gnosis2PAO(Y)
 
     PSF_1 = toy_run(toy, params_pred )
     
@@ -782,7 +813,6 @@ for i, batch in tqdm(enumerate(batches_dict_valid)):
 
     plot_radial_profiles(destack(PSF_0),  destack(PSF_1),  'Data', 'Predicted', title='NN prediction', dpi=200, cutoff=32, scale='log')
     plt.show()
-
 
 
 #%%
@@ -853,7 +883,7 @@ def UnitTest_Batch_vs_Individuals():
 
 def UnitTest_TransformsBackprop():
     batch = batches_dict_valid[5]
-    _, Y  = batch['X'].double(), batch['Y'].double()
+    _, Y  = batch['X'].double().to(device), batch['Y'].double().to(device)
 
     keys_test = [
         'F (left)',
@@ -906,7 +936,7 @@ def UnitTest_TipTorch_transform_out():
             return model.forward()
 
     batch = batches_dict_valid[5]
-    Y = batch['Y'].double()
+    Y = batch['Y'].double().to(device)
 
     toy = TipTorch(batch['configs'], norm_regime, device)
     toy.optimizables = []
@@ -919,7 +949,7 @@ def UnitTest_TipTorch_transform_out():
     optimizer = optim.LBFGS([vec], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
     loss_fn = nn.L1Loss(reduction='sum')
 
-    for _ in range(100):
+    for _ in range(27):
         optimizer.zero_grad()
         PSF_1 = toy_run2(toy, gnosis2PAO(vec * Y))
         loss = loss_fn(PSF_1, PSF_0_)
@@ -954,11 +984,12 @@ def UnitTest_TipTorch_and_NN():
 
     batch = batches_dict_valid[5]
     sample_ids = batch['ids']
-    X = batch['X'].float()
-    Y = batch['Y'].float()
+    X = batch['X'].double().to(device)
+    Y = batch['Y'].double().to(device)
 
     net = Agnosis(Y.shape[1])
     net.to(device)
+    net.double()
 
     toy = TipTorch(batch['configs'], norm_regime, device)
     toy.optimizables = []
@@ -968,7 +999,7 @@ def UnitTest_TipTorch_and_NN():
     optimizer = optim.Adam(net.parameters(), lr=0.0005)
     loss_fn = nn.L1Loss(reduction='sum')
 
-    for _ in range(1000):
+    for _ in range(100):
         optimizer.zero_grad()
         PSF_1 = toy_run2(toy, gnosis2PAO(net(Y)))
         loss = loss_fn(PSF_1, PSF_0_)
@@ -976,6 +1007,11 @@ def UnitTest_TipTorch_and_NN():
         optimizer.step( lambda: loss_fn( PSF_0_, toy_run2(toy, gnosis2PAO(net(Y))) ))
         print('Current loss:', loss.item(), end='\r')
        
+
+# UnitTest_Batch_vs_Individuals()
+# UnitTest_TransformsBackprop()
+# UnitTest_TipTorch_transform_out()
+# UnitTest_TipTorch_and_NN()
 
 
 #%%

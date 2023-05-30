@@ -469,7 +469,7 @@ class OptimizeLBFGS:
             if np.isnan(loss.item()): return
             early_stopping(loss)
 
-            loss.backward()
+            loss.backward() #retain_graph=True)
             optimizer.step( lambda: self.loss_fn(self.model(), PSF_ref) )
 
             if self.verbous:

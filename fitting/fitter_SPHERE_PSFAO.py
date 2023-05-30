@@ -61,7 +61,8 @@ def load_and_fit_sample(id):
 
     toy = TipTorch(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 
-    toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
+    optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
+    toy.optimizables = optimizables
     _ = toy({
         'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
         'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
@@ -72,14 +73,23 @@ def load_and_fit_sample(id):
     PSF_1 = toy()
     PSF_DL = toy.DLPSF()
 
-    loss_fn = nn.L1Loss(reduction='sum')
+    mask_in  = toy.mask_rim_in.unsqueeze(1).float()
+    mask_out = toy.mask_rim_out.unsqueeze(1).float()
+
+    loss = nn.L1Loss(reduction='sum')
+
+    def loss_fn(a,b):
+        z = loss(a,b) + \
+            torch.lt(torch.mean(toy.PSD*mask_in), torch.mean(toy.PSD*mask_out))
+        return z
 
     optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
 
-    for _ in range(20):
-        optimizer_lbfgs.Optimize(PSF_0, [toy.F, toy.dx, toy.dy], 2)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.b], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 5)
+    for i in range(10):
+        optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.b], 3)
         optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.amp, toy.alpha, toy.beta], 3)
         optimizer_lbfgs.Optimize(PSF_0, [toy.ratio, toy.theta], 3)
         optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
@@ -88,31 +98,33 @@ def load_and_fit_sample(id):
 
     config_manager = ConfigManager(GetSPHEREonsky())
     config_manager.Convert(merged_config, framework='numpy')
-    config_manager.process_dictionary(merged_config)
+    # config_manager.process_dictionary(merged_config)
 
     save_data = {
-        'config': merged_config,
-        'F':   to_store(toy.F),
-        'b':   to_store(toy.b),
-        'dx':  to_store(toy.dx),
-        'dy':  to_store(toy.dy),
-        'r0':  to_store(toy.r0),
-        'amp':  to_store(toy.amp),
-        'beta':  to_store(toy.beta),
-        'alpha':  to_store(toy.alpha),
-        'theta':  to_store(toy.theta),
-        'ratio':  to_store(toy.ratio),
-        'bg':  to_store(toy.bg),
-        'Jx':  to_store(toy.Jx),
-        'Jy':  to_store(toy.Jy),
-        'Jxy': to_store(toy.Jxy),
-        'SR data': SR(PSF_0, PSF_DL).detach().cpu().numpy(),
-        'SR fit':  SR(PSF_1, PSF_DL).detach().cpu().numpy(),
+        'comments':  'No J_msqr is used here, with PSD regularization',
+        'optimized': optimizables,
+        'config':    merged_config,
+        'F':         to_store(toy.F),
+        'b':         to_store(toy.b),
+        'dx':        to_store(toy.dx),
+        'dy':        to_store(toy.dy),
+        'r0':        to_store(toy.r0),
+        'amp':       to_store(toy.amp),
+        'beta':      to_store(toy.beta),
+        'alpha':     to_store(toy.alpha),
+        'theta':     to_store(toy.theta),
+        'ratio':     to_store(toy.ratio),
+        'bg':        to_store(toy.bg),
+        'Jx':        to_store(toy.Jx),
+        'Jy':        to_store(toy.Jy),
+        'Jxy':       to_store(toy.Jxy),
+        'SR data':   SR(PSF_0, PSF_DL).detach().cpu().numpy(),
+        'SR fit':    SR(PSF_1, PSF_DL).detach().cpu().numpy(),
         'FWHM fit':  gauss_fitter(PSF_0), 
         'FWHM data': gauss_fitter(PSF_1),
         'Img. data': to_store(PSF_0*pdims(norms,2)),
         'Img. fit':  to_store(PSF_1*pdims(norms,2)),
-        'loss': loss_fn(PSF_1, PSF_0).item()
+        'loss':      loss_fn(PSF_1, PSF_0).item()
     }
     return save_data
 

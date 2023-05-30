@@ -95,10 +95,10 @@ class TipTorch(torch.nn.Module):
         self._optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
 
         if self.PSD_include['Moffat']:
-            self.amp   = torch.ones (self.N_src, device=self.device)*3.0  # Phase PSD Moffat amplitude [rad²]
-            self.b     = torch.ones (self.N_src, device=self.device)*1e-4 # Phase PSD background [rad² m²]
+            self.amp   = torch.ones (self.N_src, device=self.device)*4.0  # Phase PSD Moffat amplitude [rad²]
+            self.b     = torch.ones (self.N_src, device=self.device)*0.01 # Phase PSD background [rad² m²]
             self.alpha = torch.ones (self.N_src, device=self.device)*0.1  # Phase PSD Moffat alpha [1/m]
-            self.beta  = torch.ones (self.N_src, device=self.device)*1.6  # Phase PSD Moffat beta power law
+            self.beta  = torch.ones (self.N_src, device=self.device)*2  # Phase PSD Moffat beta power law
             self.ratio = torch.ones (self.N_src, device=self.device)      # Phase PSD Moffat ellipticity
             self.theta = torch.zeros(self.N_src, device=self.device)      # Phase PSD Moffat angle
             self._optimizables += ['amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
@@ -165,24 +165,43 @@ class TipTorch(torch.nn.Module):
             factor = 0.5*(1-N%2)
             return torch.meshgrid(*[torch.linspace(-N//2+N%2+factor, N//2-factor, N, device=self.device)]*2, indexing = 'ij')
 
+        def stabilize(tensor, eps=1e-9): # Add to increase numerical stability by replacing near-zero values with eps
+            tensor[torch.abs(tensor) < eps] = eps
+            return tensor
+
         # Initialize spatial frequencies
         self.kx, self.ky = gen_grid(self.nOtf) # PSD spatial frequencies
         self.kx, self.ky = self.kx * self.dk, self.ky * self.dk
-        self.kx[..., self.nOtf//2, self.nOtf//2] = 1e-8 # Avoid division by zero
-        self.ky[..., self.nOtf//2, self.nOtf//2] = 1e-8 # Avoid division by zero
 
         self.k2 = self.kx**2 + self.ky**2
         self.k = torch.sqrt(self.k2)
+
+        stabilize(self.kx)
+        stabilize(self.ky)
+        stabilize(self.k2)
+        stabilize(self.k )
 
         if self.PSD_include['Moffat']:
             self.kxy = self.kx * self.ky
             self.kx2 = self.kx**2
             self.ky2 = self.ky**2
+            
+            stabilize(self.kxy)
+            stabilize(self.kx2)
+            stabilize(self.ky2)
 
         # Compute the frequency mask for the AO corrected and uncorrected regions
+        rim_width = 0.1
         self.mask_corrected = torch.zeros_like(self.k2).int()
-        self.mask_corrected[self.k2 <= self.kc**2] = 1.0
-        self.mask = 1.0 - self.mask_corrected
+        self.mask_rim_in    = torch.zeros_like(self.k2).int() # masks to select the regions close to the corrected/uncorrected freqs split
+        self.mask_rim_out   = torch.zeros_like(self.k2).int()
+        self.mask_corrected[self.k2 <= self.kc**2] = 1
+        self.mask_rim_in   [self.k2 <= (1-rim_width)*self.kc**2] = 1
+        self.mask_rim_out  [self.k2 <= (1+rim_width)*self.kc**2] = 1
+        self.mask_rim_in  = self.mask_corrected - self.mask_rim_in
+        self.mask_rim_out = self.mask_rim_out - self.mask_corrected
+        
+        self.mask = 1 - self.mask_corrected
         
         mask_slice = self.mask_corrected[self.mask_corrected.shape[0]//2, :].tolist()
         first_one = mask_slice.index(1)
@@ -191,8 +210,11 @@ class TipTorch(torch.nn.Module):
 
         corrected_ROI = (slice(first_one, last_one+1), slice(first_one, last_one+1))
         self.mask_corrected_AO = pdims(self.mask_corrected[corrected_ROI], -1)
-        self.mask = pdims( self.mask, -1 )
+        self.mask         = pdims( self.mask, -1 )
+        self.mask_rim_out = pdims( self.mask_rim_out, -1 )
+        self.mask_rim_in  = pdims( self.mask_rim_in, -1 )
 
+        # Computing frequency grids for the AO corrected and uncorrected regions
         self.kx_AO = pdims( self.kx[corrected_ROI], -1 )
         self.ky_AO = pdims( self.ky[corrected_ROI], -1 )
         self.k_AO  = pdims( self.k [corrected_ROI], -1 )
@@ -235,6 +257,11 @@ class TipTorch(torch.nn.Module):
         self.V2  = self.V**2
         self.UV  = self.U*self.V
         self.UV2 = self.U**2 + self.V**2
+        
+        stabilize(self.U2 )
+        stabilize(self.V2 )
+        stabilize(self.UV )
+        stabilize(self.UV2)
         
         self.center_aligner = torch.exp( 1j*np.pi*(self.U+self.V) * (1-self.nPix%2))
 
@@ -287,7 +314,7 @@ class TipTorch(torch.nn.Module):
             R = spc.j1(x)/x
             piston_filter = self.make_tensor(1.0-4*R**2)
             piston_filter[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 1-self.nOtf_AO%2
-            return piston_filter
+            return stabilize(piston_filter)
 
         # Detects oddity to determine if piston needed
         self.piston_filter = PistonFilter(self.k_AO)
@@ -402,13 +429,13 @@ class TipTorch(torch.nn.Module):
         Wn = WFS_noise_var / (2*self.kc)**2 #TODO: should it be kc for 500 nm?
         # TODO: isn't this one computed for the WFSing wvl?
 
-        self.W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * (500e-9/self.GS_wvl)**2 #TODO: clarify this
+        self.W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * self.piston_filter   #TODO: clarify this V
 
-        gPSD = torch.abs(self.SxAv)**2 + torch.abs(self.SyAv)**2 + MV*Wn/self.W_atm
+        gPSD = torch.abs(self.SxAv)**2 + torch.abs(self.SyAv)**2 + MV*Wn/self.W_atm / (500e-9/self.GS_wvl)**2
         self.Rx = torch.conj(self.SxAv) / gPSD
         self.Ry = torch.conj(self.SyAv) / gPSD
-        self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0
-        self.Ry[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 0
+        self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-9 # For numerical stability
+        self.Ry[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-9
 
     
     def SpatioTemporalPSD(self):
@@ -462,11 +489,11 @@ class TipTorch(torch.nn.Module):
     def ChromatismPSD(self, r0, L0):
         # wvlRef = self.wvl[:,0].flatten() if self.wvl.ndim > 1 else self.wvl #TODO: wavelength dependency!
         wvlRef = self.wvl
-        W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * self.piston_filter
+        # W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * self.piston_filter
         IOR = lambda lmbd: 23.7+6839.4/(130-(lmbd*1.e6)**(-2))+45.47/(38.9-(lmbd*1.e6)**(-2))
         n2 = IOR(self.GS_wvl)
         n1 = IOR(wvlRef)
-        chromatic_PSD = pdims(((n2-n1)/n2)**2, 2) * W_atm.unsqueeze(1)
+        chromatic_PSD = pdims(((n2-n1)/n2)**2, 2) * self.W_atm.unsqueeze(1)
         return chromatic_PSD
 
 
@@ -492,7 +519,7 @@ class TipTorch(torch.nn.Module):
         
         # Noise variance calculation
         varNoise = self.WFS_excessive_factor * (varRON+varShot) # TODO: clarify with Benoit and Thierry
-        return varNoise
+        return varNoise * (500e-9/self.GS_wvl)**2
 
 
     def MoffatPSD(self, amp, b, alpha, beta, ratio, theta):
@@ -563,7 +590,7 @@ class TipTorch(torch.nn.Module):
             self.PSDs['fitting'] = self.VonKarmanPSD(r0.abs(), L0.abs()).unsqueeze(1) * PSD_norm(500e-9)
     
         if self.PSD_include['WFS noise']:
-            self.PSDs['WFS noise'] = self.NoisePSD(WFS_noise_var).unsqueeze(1) * PSD_norm(self.GS_wvl) #TODO: to what to normalize?
+            self.PSDs['WFS noise'] = self.NoisePSD(WFS_noise_var).unsqueeze(1) * PSD_norm(500e-9) #TODO: to what to normalize?
         
         if self.PSD_include['spatio-temporal']:
             self.PSDs['spatio-temporal'] = self.SpatioTemporalPSD().unsqueeze(1) * PSD_norm(500e-9)
@@ -608,6 +635,8 @@ class TipTorch(torch.nn.Module):
         Jy  = pdims(self.Jy,  2)
         Jxy = pdims(self.Jxy, 2)
 
+        # Removing the DC component
+        PSD[...,self.nOtf_AO//2,self.nOtf_AO//2] = 0.0
         # Computing OTF from PSD
         cov = fft.fftshift(fft.fft2(fft.fftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1 #TODO: real FFT?
         # Computing the Structure Function from the covariance

@@ -58,21 +58,41 @@ def load_and_fit_sample(id):
     PSF_0 = PSF_0[...,1:,1:]
     merged_config['sensor_science']['FieldOfView'] = 255
     
+    delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
+
+    merged_config['RTC']['LoopDelaySteps_HO'] = delay(merged_config['RTC']['SensorFrameRate_HO'])
+
+    Jx = merged_config['sensor_HO']['Jitter X'].abs()
+    Jy = merged_config['sensor_HO']['Jitter Y'].abs()
+    # J_msqr = torch.sqrt(Jx**2 + Jy**2)
+    merged_config['sensor_HO']['NumberPhotons'] *= merged_config['RTC']['SensorFrameRate_HO']
+
+        
     toy = TipTorch(merged_config, norm_regime, device)
 
-    toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
+    optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
+
+    toy.optimizables = optimizables
     _ = toy({
-        'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
-        'Jx':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
-        'Jy':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
+        # 'Jx':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
+        # 'Jy':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
+        'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+        # 'Jx':  J_msqr.flatten(),
+        # 'Jy':  J_msqr.flatten(),
+        'Jx':  Jx.flatten(),
+        'Jy':  Jy.flatten(),
         'bg':  bg.to(device)
     })
 
     PSF_1 = toy()
     PSF_DL = toy.DLPSF()
 
+    mask_in  = toy.mask_rim_in.unsqueeze(1).float()
+    mask_out = toy.mask_rim_out.unsqueeze(1).float()
+
     loss = nn.L1Loss(reduction='sum')
 
+    '''
     window_loss = lambda x, x_max: \
         torch.gt(x,0)*(0.01/x)**2 + torch.lt(x,0)*100 + 100*torch.gt(x,x_max)*(x-x_max)**2
 
@@ -83,45 +103,51 @@ def load_and_fit_sample(id):
             window_loss(toy.Jy, 50).sum() * 0.5 + \
             window_loss(toy.Jxy, 400).sum() * 0.5 + \
             window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
+            torch.lt(torch.max(toy.PSD*mask_in), torch.max(toy.PSD*mask_out)).float() #+ \        
         return z
+    '''
+    
+    loss_fn = loss
 
     optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
 
-    for _ in range(20):
+    optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 5)
+    for _ in range(10):
         optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
         optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 5)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
+        # optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 5)
+        # optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.Jxy], 3)
 
     PSF_1 = toy()
     
     config_manager = ConfigManager(GetSPHEREonsky())
     config_manager.Convert(merged_config, framework='numpy')
-    config_manager.process_dictionary(merged_config)
-
+    # config_manager.process_dictionary(merged_config)
 
     save_data = {
-        'config': merged_config,
-        'F':   to_store(toy.F),
-        'dx':  to_store(toy.dx),
-        'dy':  to_store(toy.dy),
-        'r0':  to_store(toy.r0),
-        'n':   to_store(toy.NoiseVariance(toy.r0.abs())),
-        'dn':  to_store(toy.dn),
-        'bg':  to_store(bg),
-        'Jx':  to_store(toy.Jx),
-        'Jy':  to_store(toy.Jy),
-        'Jxy': to_store(toy.Jxy),
-        'Nph WFS': to_store(toy.WFS_Nph),
-        'SR data': SR(PSF_0, PSF_DL).detach().cpu().numpy(),
-        'SR fit':  SR(PSF_1, PSF_DL).detach().cpu().numpy(),
+        'comments':  'No J_msqr is used here, photons are multiplied by rate, no PSD regularization',
+        'optimized': optimizables,
+        'config':    merged_config,
+        'F':         to_store(toy.F),
+        'dx':        to_store(toy.dx),
+        'dy':        to_store(toy.dy),
+        'r0':        to_store(toy.r0),
+        'n':         to_store(toy.NoiseVariance(toy.r0.abs())),
+        'dn':        to_store(toy.dn),
+        'bg':        to_store(bg),
+        'Jx':        to_store(toy.Jx),
+        'Jy':        to_store(toy.Jy),
+        'Jxy':       to_store(toy.Jxy),
+        'Nph WFS':   to_store(toy.WFS_Nph),
+        'SR data':   SR(PSF_0, PSF_DL).detach().cpu().numpy(),
+        'SR fit':    SR(PSF_1, PSF_DL).detach().cpu().numpy(),
         'FWHM fit':  gauss_fitter(PSF_0), 
         'FWHM data': gauss_fitter(PSF_1),
         'Img. data': to_store(PSF_0*pdims(norms,2)),
         'Img. fit':  to_store(PSF_1*pdims(norms,2)),
-        'loss': loss_fn(PSF_1, PSF_0).item()
+        'loss':      loss_fn(PSF_1, PSF_0).item()
     }
     return save_data
 

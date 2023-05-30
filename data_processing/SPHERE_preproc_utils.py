@@ -57,15 +57,22 @@ def SamplesFromDITs(init_sample):
 
 
 def OnlyCentralWvl(samples):
-    for i in range(len(samples)):
-        buf = samples[i]['spectra'].copy()
-        samples[i]['spectra'] = [buf['central L']*1e-9, buf['central R']*1e-9]
+    if isinstance(samples, list):
+        for i in range(len(samples)):
+            buf = samples[i]['spectra'].copy()
+            samples[i]['spectra'] = [buf['central L']*1e-9, buf['central R']*1e-9]
+    else:
+        buf = samples['spectra'].copy()
+        samples['spectra'] = [buf['central L']*1e-9, buf['central R']*1e-9]
 
 
-def GenerateImages(samples, norm_regime, device):
+def GenerateImages(samples, norm_regime, device=torch.device('cpu'), numpy=False):
     ims = []
     bgs = []
     normas = []
+    
+    if not isinstance(samples, list):
+        samples = [samples]
 
     N_pix = samples[0]['PSF L'].shape[-1]
     
@@ -107,7 +114,10 @@ def GenerateImages(samples, norm_regime, device):
         normas.append(buf_norms)
 
     # outputs torch parameters
-    return make_tensor(np.stack(ims)), make_tensor(np.stack(bgs)), make_tensor(np.stack(normas)).squeeze()
+    if not numpy:
+        return make_tensor(np.stack(ims)), make_tensor(np.stack(bgs)), make_tensor(np.stack(normas)).squeeze()
+    else:
+        return np.stack(ims), np.stack(bgs), np.squeeze(np.stack(normas))
 
 
 def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):

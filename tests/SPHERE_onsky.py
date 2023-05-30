@@ -7,39 +7,85 @@ sys.path.insert(0, '..')
 
 import pickle
 import torch
+import numpy as np
+import matplotlib.pyplot as plt
 from torch import nn
 from torch import optim
-import numpy as np
-from tools.utils import OptimizeLBFGS, ParameterReshaper, plot_radial_profiles, SR, draw_PSF_stack
+from tools.utils import ParameterReshaper, plot_radial_profiles, SR, draw_PSF_stack
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
-import matplotlib.pyplot as plt
+from pprint import pprint
+from tools.parameter_parser import ParameterParser
+from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 
 from project_globals import SPHERE_DATA_FOLDER, device
-
 
 #%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['invalid'] == False]
-psf_df = psf_df[psf_df['mag R'] < 7]
+# psf_df = psf_df[psf_df['mag R'] < 7]
 # psf_df = psf_df[psf_df['Num. DITs'] < 50]
-psf_df = psf_df[psf_df['Class A'] == True]
+# psf_df = psf_df[psf_df['Class A'] == True]
 # psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
-psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
+# psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
 good_ids = psf_df.index.values.tolist()
+
+# psf_df['Jitter X'] = psf_df['Jitter X'].abs()
+# psf_df['Jitter Y'] = psf_df['Jitter Y'].abs()
+
+def compress(row):
+    if row['Class A']: return 'A'
+    elif row['Class B']: return 'B'
+    elif row['Class C']: return 'C'
+    else: return 'misc'
+
+psf_df['Class'] = psf_df.apply(compress, axis=1)
+
+#%%
+
+import seaborn as sns
+
+# sns.scatterplot(data=psf_df, x='Jitter X', y='Wind speed (header)', type='kde')
+
+# sns.kdeplot(data=psf_df, x="Jitter X", y='r0 (SPARTA)', fill=False, alpha=.5)
+
+sns.displot(psf_df, x='Jitter X', bins=20)
+
+#%%
+import numpy as np
+from scipy.stats import rankdata
+from sklearn.preprocessing import StandardScaler
+
+# suppose x is your gamma-distributed data
+x = np.random.gamma(shape=1, scale=1, size=1000)
+
+# compute the ranks of the data
+x_ranks = rankdata(x)
+
+# map the ranks to the quantiles of the standard normal distribution
+x_norm = np.sort(np.random.normal(size=len(x)))
+x_transformed = x_norm[x_ranks.argsort()]
+
+# Now standardize the data to have 0 mean and standard deviation 1
+scaler = StandardScaler()
+x_standardized = scaler.fit_transform(x_transformed.reshape(-1, 1))
+
+# Now, x_standardized should be approximately normally distributed with mean 0 and standard deviation 1.
+
+_ = plt.hist(x)
 
 #%%
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581
-sample_ids = [578]
-# sample_ids = [576]
+# sample_ids = [578] # aliasing is stronger than von Karman
+# sample_ids = [576] # same here
 # sample_ids = [992]
-# sample_ids = [1209]
+# sample_ids = [1209] # high noise
 # sample_ids = [456]
 # sample_ids = [465]
 # sample_ids = [1393] #50 DITs
-# sample_ids = [1408]
+sample_ids = [1408]
 
 # regime = '1P2NI'
 regime = '1P21I'
@@ -47,20 +93,73 @@ regime = '1P21I'
 norm_regime = 'sum'
 
 PSF_0, bg, _, data_samples, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device)
+
 PSF_0 = PSF_0[...,1:,1:]
 merged_config['sensor_science']['FieldOfView'] = 255
+delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
 
-# bg *= 0
+merged_config['RTC']['LoopDelaySteps_HO'] = delay(merged_config['RTC']['SensorFrameRate_HO'])
 
-#% Initialize model
+Jx = merged_config['sensor_HO']['Jitter X'].abs()
+Jy = merged_config['sensor_HO']['Jitter Y'].abs()
+J_msqr = torch.sqrt(Jx**2 + Jy**2)
+merged_config['sensor_HO']['NumberPhotons'] *= merged_config['RTC']['SensorFrameRate_HO']
+
+
+
+# 'fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'chromatism', 'Moffat'
+
+
+#%% Initialize model
+'''
+path_ini = 'C:/Users/akuznets/Projects/TipToy/data/parameter_files/irdis.ini'
+merged_config = ParameterParser(path_ini).params
+merged_config['NumberSources'] = 1
+
+config_manager = ConfigManager( GetSPHEREonsky() )
+config_manager.Convert(merged_config, framework='pytorch', device=device)
+
+merged_config['telescope']['ZenithAngle'] = torch.tensor([merged_config['telescope']['ZenithAngle']]).to(device)
+merged_config['atmosphere']['Cn2Weights'] = merged_config['atmosphere']['Cn2Weights'].unsqueeze(0)
+merged_config['atmosphere']['Cn2Heights'] = merged_config['atmosphere']['Cn2Heights'].unsqueeze(0)
+merged_config['atmosphere']['Seeing'] = torch.tensor([merged_config['atmosphere']['Seeing']]).to(device)
+merged_config['atmosphere']['L0'] = torch.tensor([merged_config['atmosphere']['L0']]).to(device)
+merged_config['RTC']['SensorFrameRate_HO'] = torch.tensor([merged_config['RTC']['SensorFrameRate_HO']]).to(device)
+
+merged_config['RTC']['LoopDelaySteps_HO'] = torch.tensor([merged_config['RTC']['LoopDelaySteps_HO']]).to(device)
+merged_config['RTC']['LoopGain_HO'] = torch.tensor([merged_config['RTC']['LoopGain_HO']]).to(device)
+'''
+# merged_config['sources_science']['Wavelength'] = [merged_config['sources_science']['Wavelength'][0]]
+
+
+from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 toy = TipTorch(merged_config, norm_regime, device)
 
-toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
+# toy.PSD_include['aliasing'] = False
+# toy.PSD_include['spatio-temporal'] = False
+# toy.PSD_include['WFS noise'] = False
+# toy.PSD_include['chromatism'] = False
+# toy.PSD_include['Moffat'] = False
+# toy.PSD_include['fitting'] = True
+
+_ = toy()
+
+# print(toy.PSDs['spatio-temporal'].max())
+
+# plt.imshow(torch.log10(toy.PSD[0,0,...]).detach().cpu().numpy())
+# plt.show()
+
+#%
+# toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
+# toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_speed']
+toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']
 # toy.optimizables = ['r0', 'F', 'dn', 'Jx', 'Jy', 'Jxy']
 _ = toy({
     'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-    'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-    'Jy':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    # 'Jx':  J_msqr.flatten(),
+    # 'Jy':  J_msqr.flatten(),
+    'Jx':  Jx.flatten(),
+    'Jy':  Jy.flatten(),
     'bg':  bg.to(device)
 })
 
@@ -68,9 +167,31 @@ PSF_1 = toy()
 #print(toy.EndTimer())
 PSF_DL = toy.DLPSF()
 
-draw_PSF_stack(PSF_0, PSF_1, average=True)
-#%%
+# draw_PSF_stack(PSF_0, PSF_1, average=True)
+mask_in  = toy.mask_rim_in.unsqueeze(1).float()
+mask_out = toy.mask_rim_out.unsqueeze(1).float()
 
+'''
+test_1 = toy.PSD * toy.mask_rim_in.unsqueeze(1)
+test_2 = toy.PSD * toy.mask_rim_out.unsqueeze(1)
+test_3 = toy.PSD * (toy.mask_rim_in.unsqueeze(1) + toy.mask_rim_out.unsqueeze(1))
+
+plt.imshow(test_1[0,...].mean(dim=0).squeeze().detach().cpu().numpy())
+plt.show()
+plt.imshow(test_2[0,...].mean(dim=0).squeeze().detach().cpu().numpy())
+plt.show()
+plt.imshow(test_3[0,...].mean(dim=0).squeeze().detach().cpu().numpy())
+plt.show()
+
+print(torch.mean(test_1))
+print(torch.mean(test_2))
+# print(torch.mean(test_3))
+
+plt.imshow(torch.log10(toy.PSD[0,...].mean(dim=0)).squeeze().detach().cpu().numpy())
+plt.show()
+'''
+
+#%%
 bounds_dict = {
     'r0' :         (0.05, 0.5),
     'bg' :         (-1e-5, 1e-5),
@@ -193,33 +314,54 @@ result = least_squares(run, x0, method='trf', bounds=(x_l, x_h), ftol=1e-10, xto
 
 
 #%% PSF fitting (no early-stopping)
+from tools.utils import OptimizeLBFGS, mask_circle
 loss = nn.L1Loss(reduction='sum')
+
+fft_DL = torch.fft.fftshift(torch.fft.fft2(PSF_DL)).detach()
+R = np.ceil(140 * 0.8).astype(int)
+FFT_ROI = slice(PSF_1.shape[-2]//2-R//2, PSF_1.shape[-2]//2+R//2)
+mask = torch.tensor(mask_circle(PSF_1.shape[-1], R//2, center=(0,0), centered=True)).to(device).unsqueeze(0).unsqueeze(0) + 1e-4
+
+def FFT_loss(PSF_0, PSF_1):
+    fft_0  = torch.fft.fftshift(torch.fft.fft2(PSF_0))
+    fft_1  = torch.fft.fftshift(torch.fft.fft2(PSF_1))
+    # plt.imshow(torch.log10(fft_1/fft_DL*mask)[0,0,FFT_ROI,FFT_ROI].abs().detach().cpu().numpy())
+    # plt.imshow(torch.abs(lossy[0,0,FFT_ROI,FFT_ROI]).detach().cpu().numpy())
+    return torch.mean(torch.abs((fft_1-fft_0)/fft_DL*mask)[...,FFT_ROI,FFT_ROI]**0.3)
 
 # Confines a value between 0 and the specified value
 window_loss = lambda x, x_max: \
     torch.gt(x,0)*(0.01/x)**2 + torch.lt(x,0)*100 + 100*torch.gt(x,x_max)*(x-x_max)**2
 
 # TODO: specify loss weights
-def loss_fn(a,b):
+def loss_fn1(a,b):
+        # window_loss(toy.r0,  0.5).sum() * 1.0 + \
+        # window_loss(toy.Jx,  50 ).sum() * 0.5 + \
+        # window_loss(toy.Jy,  50 ).sum() * 0.5 + \
+        # window_loss(toy.Jxy, 400).sum() * 0.5 + \
     z = loss(a,b) + \
-        window_loss(toy.r0,  0.5).sum() * 1.0 + \
-        window_loss(toy.Jx,  50).sum()  * 0.5 + \
-        window_loss(toy.Jy,  50).sum()  * 0.5 + \
-        window_loss(toy.Jxy, 400).sum() * 0.5 + \
-        window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
+        window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1 + \
+        torch.lt(torch.max(toy.PSD*mask_in), torch.max(toy.PSD*mask_out)).float() #+ \
+        # FFT_loss(a,b)
     return z
 
-optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
+loss_fn1 = loss
+
+optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn1)
  
+optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 5)
+    
 for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
     optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
+    # optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 3)
+    # optimizer_lbfgs.Optimize(PSF_0, [toy.dn], 3)
+    # optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.Jxy], 3)
 
 PSF_1 = toy()
+
 
 #%%
 bounds_dict = {
@@ -306,22 +448,33 @@ plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IR
 toy = TipTorch(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
+
 _ = toy({
     'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-    'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-    'Jy':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+    # 'Jx':  J_msqr.flatten(),
+    # 'Jy':  J_msqr.flatten(),
+    'Jx':  Jx.flatten(),
+    'Jy':  Jy.flatten(),
     'bg':  bg.to(device)
 })
 
 #%%
-loss_fn = nn.L1Loss(reduction='sum')
+loss = nn.L1Loss(reduction='sum')
+
+# TODO: specify loss weights
+def loss_fn(a,b):
+    z = loss(a,b) + \
+        torch.lt(torch.mean(toy.PSD*mask_in), torch.mean(toy.PSD*mask_out))
+    return z
 
 optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
 
+
+optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 5)
 for i in range(10):
-    optimizer_lbfgs.Optimize(PSF_0, [toy.F, toy.dx, toy.dy], 2)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 2)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.b], 2)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.b], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.amp, toy.alpha, toy.beta], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.ratio, toy.theta], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)

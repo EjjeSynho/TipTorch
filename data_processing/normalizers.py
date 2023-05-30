@@ -217,10 +217,10 @@ class Gauss:
         self.mu, self.std = stats.norm.fit(data)
         
     def forward(self, x):
-        return (x-self.mu)/self.std
+        return (x-self.mu) / self.std
     
     def backward(self, y):
-        return y*self.std+self.mu
+        return y * self.std + self.mu
     
     def __call__(self, x):
         return self.forward(x)

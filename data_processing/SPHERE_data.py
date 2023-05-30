@@ -218,6 +218,9 @@ class SPHERE_loader():
         # sparta_visible_WFS
         entries_spart_vis = [
             ('n_ph',       'flux_VisLoop[#photons/subaperture/frame]'),
+            ('WFS flux',   'flux_VisLoop[#photons/s]'),
+            ('Jitter X',   'Jitter X (avg)'),
+            ('Jitter Y',   'Jitter Y (avg)'),
             ('rate',       'WFS frequency'),
             ('WFS filter', 'spectral_filter'),
             ('WFS gain',   'WFS gain')]
@@ -368,7 +371,7 @@ class SPHERE_loader():
                     return np.nan
 
         def get_filter_wavelength(filter_name):
-            if filter_name in ['CLEAR','P0-90', 'P45-135']:
+            if filter_name in ['CLEAR', 'P0-90', 'P45-135']:
                 return np.nan
             
             filter_data = {
@@ -517,6 +520,9 @@ class SPHERE_loader():
 
             'WFS': {
                 'Nph vis': SPARTA_data['n_ph'],
+                'Flux vis': SPARTA_data['WFS flux'],
+                'TT jitter X': SPARTA_data['Jitter X'],
+                'TT jitter Y': SPARTA_data['Jitter Y'],
                 'rate': SPARTA_data['rate'],
                 'filter': SPARTA_data['WFS filter'],
                 'wavelegnth': SPARTA_data['WFS wavelength']*1e-9,
@@ -580,6 +586,9 @@ def plot_sample(id):
     buf = samp['spectra'].copy()
     buf = [buf['central L']*1e-9, buf['central R']*1e-9]
     samp['spectra'] = buf
+
+    print(samp['WFS']['TT jitter X'])
+    print(samp['WFS']['TT jitter Y'])
 
     PSF_L_0 = samp['PSF L'].sum(axis=0)
     PSF_R_0 = samp['PSF R'].sum(axis=0)
@@ -675,11 +684,14 @@ def CreateSPHEREdataframe(save_df_dir=None):
         'Tau0 (SPARTA)',
         'Tau0 (MASSDIMM)',
         'Tau0 (MASS)',
+        'Jitter X',
+        'Jitter Y',
         'Pressure',
         'Humidity',
         'Temperature',
         'Temperature (200 mbar)',
         'Nph WFS',
+        'Flux WFS',
         'Rate',
         'Filter common',
         'Filter LR',
@@ -728,6 +740,9 @@ def CreateSPHEREdataframe(save_df_dir=None):
         main_df['Temperature'].append(data['Environment']['temperature'])
         main_df['Temperature (200 mbar)'].append(data['Environment']['temperature (200 mbar)'])
         main_df['Nph WFS'].append(data['WFS']['Nph vis'])
+        main_df['Flux WFS'].append(data['WFS']['Flux vis'])
+        main_df['Jitter X'].append(data['WFS']['TT jitter X'])
+        main_df['Jitter Y'].append(data['WFS']['TT jitter Y'])
         main_df['Rate'].append(data['WFS']['rate'])
         main_df['Filter common'].append(data['spectra']['filter common'])
         main_df['Filter LR'].append(data['spectra']['filter LR'])
