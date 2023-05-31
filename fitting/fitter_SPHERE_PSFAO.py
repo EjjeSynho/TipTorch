@@ -18,6 +18,9 @@ from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
 
+actual_folder = SPHERE_FITTING_FOLDER[-1]+'_PAO/'
+
+# device = torch.device('cuda:0')
 
 #% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
@@ -31,7 +34,7 @@ psf_df = psf_df[psf_df['invalid'] == False]
 
 good_ids = psf_df.index.values.tolist()
 
-ids_fitted = [ int(file.split('.')[0]) for file in os.listdir(SPHERE_FITTING_FOLDER) ]
+ids_fitted = [ int(file.split('.')[0]) for file in os.listdir(actual_folder) ]
 
 good_ids = list(set(good_ids) - set(ids_fitted))
 
@@ -58,15 +61,18 @@ def load_and_fit_sample(id):
     PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
     PSF_0 = PSF_0[...,1:,1:]
     merged_config['sensor_science']['FieldOfView'] = 255
-
+    
+    Jx = merged_config['sensor_HO']['Jitter X'].abs()
+    Jy = merged_config['sensor_HO']['Jitter Y'].abs()
+    
     toy = TipTorch(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 
     optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
     toy.optimizables = optimizables
     _ = toy({
         'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-        'Jx':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-        'Jy':  torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
+        'Jx':  Jx.flatten(),
+        'Jy':  Jy.flatten(),
         'bg':  bg.to(device)
     })
 
@@ -101,36 +107,38 @@ def load_and_fit_sample(id):
     # config_manager.process_dictionary(merged_config)
 
     save_data = {
-        'comments':  'No J_msqr is used here, with PSD regularization',
-        'optimized': optimizables,
-        'config':    merged_config,
-        'F':         to_store(toy.F),
-        'b':         to_store(toy.b),
-        'dx':        to_store(toy.dx),
-        'dy':        to_store(toy.dy),
-        'r0':        to_store(toy.r0),
-        'amp':       to_store(toy.amp),
-        'beta':      to_store(toy.beta),
-        'alpha':     to_store(toy.alpha),
-        'theta':     to_store(toy.theta),
-        'ratio':     to_store(toy.ratio),
-        'bg':        to_store(toy.bg),
-        'Jx':        to_store(toy.Jx),
-        'Jy':        to_store(toy.Jy),
-        'Jxy':       to_store(toy.Jxy),
-        'SR data':   SR(PSF_0, PSF_DL).detach().cpu().numpy(),
-        'SR fit':    SR(PSF_1, PSF_DL).detach().cpu().numpy(),
-        'FWHM fit':  gauss_fitter(PSF_0), 
-        'FWHM data': gauss_fitter(PSF_1),
-        'Img. data': to_store(PSF_0*pdims(norms,2)),
-        'Img. fit':  to_store(PSF_1*pdims(norms,2)),
-        'loss':      loss_fn(PSF_1, PSF_0).item()
+        'comments':    'No J_msqr is used here, with PSD regularization',
+        'optimized':   optimizables,
+        'config':      merged_config,
+        'F':           to_store(toy.F),
+        'b':           to_store(toy.b),
+        'dx':          to_store(toy.dx),
+        'dy':          to_store(toy.dy),
+        'r0':          to_store(toy.r0),
+        'amp':         to_store(toy.amp),
+        'beta':        to_store(toy.beta),
+        'alpha':       to_store(toy.alpha),
+        'theta':       to_store(toy.theta),
+        'ratio':       to_store(toy.ratio),
+        'bg':          to_store(toy.bg),
+        'Jx':          to_store(toy.Jx),
+        'Jy':          to_store(toy.Jy),
+        'Jxy':         to_store(toy.Jxy),
+        'SR data':     SR(PSF_0, PSF_DL).detach().cpu().numpy(),
+        'SR fit':      SR(PSF_1, PSF_DL).detach().cpu().numpy(),
+        'FWHM fit':    gauss_fitter(PSF_0), 
+        'FWHM data':   gauss_fitter(PSF_1),
+        'Img. data':   to_store(PSF_0*pdims(norms,2)),
+        'Img. fit':    to_store(PSF_1*pdims(norms,2)),
+        'Data norms':  to_store(norms),
+        'Model norms': to_store(toy.norm_scale),
+        'loss':        loss_fn(PSF_1, PSF_0).item()
     }
     return save_data
 
 
 for id in good_ids:
-    filename = SPHERE_FITTING_FOLDER + str(id) + '.pickle'
+    filename = actual_folder + str(id) + '.pickle'
     try:
         save_data = load_and_fit_sample(id)
         with open(filename, 'wb') as handle:

@@ -133,7 +133,8 @@ merged_config['RTC']['LoopGain_HO'] = torch.tensor([merged_config['RTC']['LoopGa
 
 
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
-toy = TipTorch(merged_config, norm_regime, device)
+# toy = TipTorch(merged_config, norm_regime, device)
+toy = TipTorch(merged_config, None, device)
 
 # toy.PSD_include['aliasing'] = False
 # toy.PSD_include['spatio-temporal'] = False

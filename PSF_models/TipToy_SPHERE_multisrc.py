@@ -367,7 +367,13 @@ class TipTorch(torch.nn.Module):
 
         self.norm_regime = norm_regime
         self.norm_scale  = self.make_tensor(1.0) # TODO: num obj x num wvl
-        self.normalizer  = torch.sum if self.norm_regime == 'sum' else torch.amax
+        
+        if self.norm_regime == 'sum':
+            self.normalizer = torch.sum
+        elif self.norm_regime == 'max':
+            self.normalizer = torch.amax
+        else:
+            self.normalizer = lambda x, dim, keepdim: self.make_tensor(1.0)
         
         self.oversampling = oversampling
         self.psdsave = None

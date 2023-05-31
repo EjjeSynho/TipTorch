@@ -18,6 +18,7 @@ from tools.config_manager import ConfigManager, GetSPHEREonsky
 
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
 
+# device = torch.device('cuda:0')
 
 #% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
@@ -127,27 +128,29 @@ def load_and_fit_sample(id):
     # config_manager.process_dictionary(merged_config)
 
     save_data = {
-        'comments':  'No J_msqr is used here, photons are multiplied by rate, no PSD regularization',
-        'optimized': optimizables,
-        'config':    merged_config,
-        'F':         to_store(toy.F),
-        'dx':        to_store(toy.dx),
-        'dy':        to_store(toy.dy),
-        'r0':        to_store(toy.r0),
-        'n':         to_store(toy.NoiseVariance(toy.r0.abs())),
-        'dn':        to_store(toy.dn),
-        'bg':        to_store(bg),
-        'Jx':        to_store(toy.Jx),
-        'Jy':        to_store(toy.Jy),
-        'Jxy':       to_store(toy.Jxy),
-        'Nph WFS':   to_store(toy.WFS_Nph),
-        'SR data':   SR(PSF_0, PSF_DL).detach().cpu().numpy(),
-        'SR fit':    SR(PSF_1, PSF_DL).detach().cpu().numpy(),
-        'FWHM fit':  gauss_fitter(PSF_0), 
-        'FWHM data': gauss_fitter(PSF_1),
-        'Img. data': to_store(PSF_0*pdims(norms,2)),
-        'Img. fit':  to_store(PSF_1*pdims(norms,2)),
-        'loss':      loss_fn(PSF_1, PSF_0).item()
+        'comments':    'No J_msqr is used here, photons are multiplied by rate, no PSD regularization',
+        'optimized':   optimizables,
+        'config':      merged_config,
+        'bg':          to_store(bg),
+        'F':           to_store(toy.F),
+        'dx':          to_store(toy.dx),
+        'dy':          to_store(toy.dy),
+        'r0':          to_store(toy.r0),
+        'n':           to_store(toy.NoiseVariance(toy.r0.abs())),
+        'dn':          to_store(toy.dn),
+        'Jx':          to_store(toy.Jx),
+        'Jy':          to_store(toy.Jy),
+        'Jxy':         to_store(toy.Jxy),
+        'Nph WFS':     to_store(toy.WFS_Nph),
+        'SR data':     SR(PSF_0, PSF_DL).detach().cpu().numpy(),
+        'SR fit':      SR(PSF_1, PSF_DL).detach().cpu().numpy(),
+        'FWHM fit':    gauss_fitter(PSF_0), 
+        'FWHM data':   gauss_fitter(PSF_1),
+        'Img. data':   to_store(PSF_0*pdims(norms,2)),
+        'Img. fit':    to_store(PSF_1*pdims(norms,2)),
+        'Data norms':  to_store(norms),
+        'Model norms': to_store(toy.norm_scale),
+        'loss':        loss_fn(PSF_1, PSF_0).item()
     }
     return save_data
 

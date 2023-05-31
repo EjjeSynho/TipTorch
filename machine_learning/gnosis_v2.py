@@ -51,8 +51,14 @@ selected_entries = ['Airmass',
                     'Tau0 (header)',
                     'Nph WFS',
                     'Rate',
+                    'Jitter X',
+                    'Jitter Y',
                     'λ left (nm)',
                     'λ right (nm)']
+
+psf_df['Nph WFS'] *= psf_df['Rate']
+psf_df['Jitter X'] = psf_df['Jitter X'].abs()
+psf_df['Jitter Y'] = psf_df['Jitter Y'].abs()
 
 psf_df = psf_df[selected_entries]
 psf_df.sort_index(inplace=True)
@@ -115,7 +121,6 @@ else:
     with open('E:/ESO/Data/SPHERE/fitted_df_PAO.pickle', 'rb') as handle:
         print('Loading dataframe "fitted_df_PAO.pickle"...')
         fitted_df = pickle.load(handle)
-#%
 
 fitted_ids = list( set( fitted_df.index.values.tolist() ).intersection( set(psf_df.index.values.tolist()) ) )
 fitted_df = fitted_df[fitted_df.index.isin(fitted_ids)]
@@ -206,6 +211,9 @@ transforms_input['FWHM']                    = TransformSequence( transforms = [ 
 transforms_input['Nph WFS']                 = TransformSequence( transforms = [ Uniform(a=0, b=1000) ])
 # transforms_input['Strehl']                  = TransformSequence( transforms = [ Invert(), BoxCox(lmbda=0.1), Uniform(a=-2.25, b=-0.5) ])
 transforms_input['Strehl']                  = TransformSequence( transforms = [ Uniform(a=0.015, b=1.0) ])
+transforms_input['Jitter X']                = TransformSequence( transforms = [ Uniform(a=0.0,   b=60.0) ])
+transforms_input['Jitter Y']                = TransformSequence( transforms = [ Uniform(a=0.0,   b=60.0) ])
+
 
 input_df = pd.DataFrame( {a: transforms_input[a].forward(psf_df[a].values) for a in transforms_input.keys()} )
 input_df.index = psf_df.index
