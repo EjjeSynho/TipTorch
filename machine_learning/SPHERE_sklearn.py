@@ -44,6 +44,11 @@ psf_df = psf_df[~pd.isnull(psf_df['r0 (SPARTA)'])]
 psf_df = psf_df[~pd.isnull(psf_df['Nph WFS'])]
 psf_df = psf_df[~pd.isnull(psf_df['Strehl'])]
 psf_df = psf_df[~pd.isnull(psf_df['FWHM'])]
+# psf_df = psf_df[~pd.isnull(psf_df['Wind direction (MASSDIMM)'])]
+# psf_df = psf_df[~pd.isnull(psf_df['Wind speed (MASSDIMM)'])]
+# psf_df = psf_df[~pd.isnull(psf_df['Tau0 (MASSDIMM)'])]
+# psf_df = psf_df[~pd.isnull(psf_df['Seeing (MASSDIMM)'])]
+
 # psf_df = psf_df[psf_df['Nph WFS'] < 5000]
 # psf_df = psf_df[psf_df['λ left (nm)'] > 1600]
 # psf_df = psf_df[psf_df['λ left (nm)'] < 1700]
@@ -52,6 +57,7 @@ psf_df = psf_df[~pd.isnull(psf_df['FWHM'])]
 # psf_df = psf_df[~pd.isnull(psf_df['Humidity'])]
 # psf_df = psf_df[~pd.isnull(psf_df['Temperature'])]
 
+#%%
 good_fits_folder = 'E:/ESO/Data/SPHERE/good_fits_TipTorch/'
 
 files = os.listdir(good_fits_folder)
@@ -75,24 +81,27 @@ fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
 from data_processing.normalizers import Uniform, TransformSequence
 
 transforms_input = {}
-transforms_input['Airmass']                 = TransformSequence( transforms = [ Uniform(a=1.0, b=2.2) ])
-transforms_input['r0 (SPARTA)']             = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
-transforms_input['Wind direction (header)'] = TransformSequence( transforms = [ Uniform(a=0, b=360) ])
-transforms_input['Wind speed (header)']     = TransformSequence( transforms = [ Uniform(a=0.0, b=17.5) ])
-transforms_input['Tau0 (header)']           = TransformSequence( transforms = [ Uniform(a=0.0, b=0.025) ])
-transforms_input['λ left (nm)']             = TransformSequence( transforms = [ Uniform(a=psf_df['λ left (nm)'].min(), b=psf_df['λ left (nm)'].max()) ])
-transforms_input['λ right (nm)']            = TransformSequence( transforms = [ Uniform(a=psf_df['λ right (nm)'].min(), b=psf_df['λ right (nm)'].max()) ])
-transforms_input['Rate']                    = TransformSequence( transforms = [ Uniform(a=psf_df['Rate'].min(), b=psf_df['Rate'].max()) ])
-transforms_input['FWHM']                    = TransformSequence( transforms = [ Uniform(a=0.5, b=3.0) ])
-transforms_input['Nph WFS']                 = TransformSequence( transforms = [ Uniform(a=0, b=2e6) ])
-transforms_input['Strehl']                  = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
-transforms_input['Jitter X']                = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
-transforms_input['Jitter Y']                = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
-transforms_input['Turb. speed']             = TransformSequence( transforms = [ Uniform(a=0.0, b=25.0) ])
-transforms_input['Humidity']                = TransformSequence( transforms = [ Uniform(a=3.0, b=51.0) ])
-transforms_input['Pressure']                = TransformSequence( transforms = [ Uniform(a=740, b=750) ])
-transforms_input['Temperature']             = TransformSequence( transforms = [ Uniform(a=0, b=25) ])
-
+transforms_input['Airmass']                   = TransformSequence( transforms = [ Uniform(a=1.0, b=2.2) ])
+transforms_input['r0 (SPARTA)']               = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
+transforms_input['Seeing (MASSDIMM)']         = TransformSequence( transforms = [ Uniform(a=0.3, b=1.5) ])
+transforms_input['Wind direction (header)']   = TransformSequence( transforms = [ Uniform(a=0, b=360) ])
+transforms_input['Wind speed (header)']       = TransformSequence( transforms = [ Uniform(a=0.0, b=17.5) ])
+transforms_input['Wind direction (MASSDIMM)'] = TransformSequence( transforms = [ Uniform(a=0, b=360) ])
+transforms_input['Wind speed (MASSDIMM)']     = TransformSequence( transforms = [ Uniform(a=0.0, b=17.5) ])
+transforms_input['Tau0 (header)']             = TransformSequence( transforms = [ Uniform(a=0.0, b=0.025) ])
+transforms_input['Tau0 (MASSDIMM)']           = TransformSequence( transforms = [ Uniform(a=0.0, b=0.02) ])
+transforms_input['λ left (nm)']               = TransformSequence( transforms = [ Uniform(a=psf_df['λ left (nm)'].min(), b=psf_df['λ left (nm)'].max()) ])
+transforms_input['λ right (nm)']              = TransformSequence( transforms = [ Uniform(a=psf_df['λ right (nm)'].min(), b=psf_df['λ right (nm)'].max()) ])
+transforms_input['Rate']                      = TransformSequence( transforms = [ Uniform(a=psf_df['Rate'].min(), b=psf_df['Rate'].max()) ])
+transforms_input['FWHM']                      = TransformSequence( transforms = [ Uniform(a=0.5, b=3.0) ])
+transforms_input['Nph WFS']                   = TransformSequence( transforms = [ Uniform(a=0, b=2e6) ])
+transforms_input['Strehl']                    = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
+transforms_input['Jitter X']                  = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
+transforms_input['Jitter Y']                  = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
+transforms_input['Turb. speed']               = TransformSequence( transforms = [ Uniform(a=0.0, b=25.0) ])
+transforms_input['Humidity']                  = TransformSequence( transforms = [ Uniform(a=3.0, b=51.0) ])
+transforms_input['Pressure']                  = TransformSequence( transforms = [ Uniform(a=740, b=750) ])
+transforms_input['Temperature']               = TransformSequence( transforms = [ Uniform(a=0, b=25) ])
 
 input_df = pd.DataFrame( {a: transforms_input[a].forward(psf_df[a].values) for a in transforms_input.keys()} )
 input_df.index = psf_df.index
@@ -138,35 +147,38 @@ output_df.drop(rows_with_nan, inplace=True)
 good_ids = psf_df.index.values.tolist()
 print(len(good_ids), 'samples are in the dataset')
 
-
+#%%
 def corr_plot(data, entry_x, entry_y, lims=None):
-
-    j = sns.jointplot(data=data, x=entry_x, y=entry_y, kind="kde", space=0, fill=True)
-    # Draw a 1:1 line
-    # Set equal aspect ratio
+    j = sns.jointplot(data=data, x=entry_x, y=entry_y, kind="kde", space=0, alpha = 0.8, fill=True, colormap='royalblue' )
+    i = sns.scatterplot(data=data, x=entry_x, y=entry_y, alpha=0.5, ax=j.ax_joint, color = 'black', s=10)
+    sns.set_style("darkgrid")
+    
     j.ax_joint.set_aspect('equal')
-    # Optionally, you can set the same limits for both axes
     lims = [np.min([j.ax_joint.get_xlim(), j.ax_joint.get_ylim()]),
             np.max([j.ax_joint.get_xlim(), j.ax_joint.get_ylim()])]
 
     j.ax_joint.set_xlim(lims)
     j.ax_joint.set_ylim(lims)
     j.ax_joint.plot([lims[0], lims[1]], [lims[0], lims[1]], 'gray', linewidth=1.5, linestyle='--')
-
+    
+    # plt.grid()
     plt.show()
 
-#%%
-sns.kdeplot(data=fitted_df, x='F', y='J', fill=True, thresh=0.02, palette='viridis')
+# sns.kdeplot(data=fitted_df, x='F', y='J', fill=True, thresh=0.02, palette='viridis')
 
 #%% =======================================================================================================
 #% Select the entries to be used in training
 selected_entries_X = [
-    #   'Airmass',
+        'Airmass',
         'r0 (SPARTA)',
+        # 'Seeing (MASSDIMM)',
         # 'FWHM',
+        # 'Wind direction (MASSDIMM)',
+        # 'Wind speed (MASSDIMM)',
         'Wind direction (header)',
         'Wind speed (header)',
         'Tau0 (header)',
+        # 'Tau0 (MASSDIMM)',
         'Nph WFS',
         'Rate',
     #   'Jitter X',
@@ -200,7 +212,6 @@ y_pred_reg = reg.predict(X_test)
 # y_pred = y_pred_reg
 
 err = np.abs(y_test-y_pred) * 100
-
 print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
 print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
 print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
@@ -208,11 +219,11 @@ print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
 print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
 
 test_df = pd.DataFrame({
-    'SR pred': transforms_input['Strehl'].backward(y_pred),
-    'SR test': transforms_input['Strehl'].backward(y_test),
+    'SR predicted': transforms_input['Strehl'].backward(y_pred),
+    'SR from data': transforms_input['Strehl'].backward(y_test),
 })
 
-corr_plot(test_df, 'SR pred', 'SR test')
+corr_plot(test_df, 'SR predicted', 'SR from data')
 
 #%%
 maximum_oulier = y_test[np.where(err == err.max())[0].item()]

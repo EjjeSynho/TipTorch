@@ -99,13 +99,13 @@ def GenerateImages(samples, norm_regime, device=torch.device('cpu'), numpy=False
             norm_ = PSF_norm(PSF_*(1-mask_noise))
             return (PSF_+bg_)/norm_, bg_/norm_, norm_
 
-        if 'PSF L' in samples[i].keys():
+        if 'PSF L' in samples[i].keys() and samples[i]['PSF L'] is not None:
             PSF, bg, norm = process_PSF('PSF L')
             buf_norms[0] = norm
             buf_bg[0] = bg
             buf_im.append(PSF)
 
-        if 'PSF R' in samples[i].keys():
+        if 'PSF R' in samples[i].keys() and samples[i]['PSF R'] is not None:
             PSF, bg, norm = process_PSF('PSF R')
             buf_norms[1] = norm
             buf_bg[1] = bg
@@ -131,8 +131,10 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
             
     elif regime == '1P21I':
         data_samples = SamplesByIds(sample_ids, synth)
-        data_samples[0]['PSF L'] = data_samples[0]['PSF L'].mean(axis=0)[None,...]
-        data_samples[0]['PSF R'] = data_samples[0]['PSF R'].mean(axis=0)[None,...]
+        if data_samples[0]['PSF L'] is not None:
+            data_samples[0]['PSF L'] = data_samples[0]['PSF L'].mean(axis=0)[None,...]
+        if data_samples[0]['PSF R'] is not None:
+            data_samples[0]['PSF R'] = data_samples[0]['PSF R'].mean(axis=0)[None,...]
         data_samples = [data_samples[0]]
 
     elif regime == 'NP2NI' or regime == '1P2NI':
@@ -155,8 +157,10 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
     config_manager = ConfigManager( GetSPHEREsynth() if synth else GetSPHEREonsky() )
     merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
     config_manager.Convert(merged_config, framework='pytorch', device=device)
-
-    merged_config['RTC']['LoopDelaySteps_HO'] = frame_delay(merged_config['RTC']['SensorFrameRate_HO'])
+    
+    if not synth:
+        merged_config['RTC']['LoopDelaySteps_HO'] = frame_delay(merged_config['RTC']['SensorFrameRate_HO'])
+   
     merged_config['sensor_HO']['NumberPhotons'] *= merged_config['RTC']['SensorFrameRate_HO']
     merged_config['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
 
