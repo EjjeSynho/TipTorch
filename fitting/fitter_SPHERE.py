@@ -11,7 +11,6 @@ import pickle
 import torch
 from torch import nn
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
-
 from tools.utils import OptimizeLBFGS, SR, pdims, FitGauss2D
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from tools.config_manager import ConfigManager, GetSPHEREonsky
@@ -55,31 +54,24 @@ to_store = lambda x: x.detach().cpu().numpy()
 
 def load_and_fit_sample(id):
     sample_ids = [id]
-    PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
-    PSF_0 = PSF_0[...,1:,1:]
-    merged_config['sensor_science']['FieldOfView'] = 255
-    
-    delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
-
-    merged_config['RTC']['LoopDelaySteps_HO'] = delay(merged_config['RTC']['SensorFrameRate_HO'])
+    PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device)
 
     Jx = merged_config['sensor_HO']['Jitter X'].abs()
     Jy = merged_config['sensor_HO']['Jitter Y'].abs()
-    # J_msqr = torch.sqrt(Jx**2 + Jy**2)
-    merged_config['sensor_HO']['NumberPhotons'] *= merged_config['RTC']['SensorFrameRate_HO']
 
-        
-    toy = TipTorch(merged_config, norm_regime, device)
+    # toy = TipTorch(merged_config, norm_regime, device)
+    toy = TipTorch(merged_config, None, device)
 
     optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
 
     toy.optimizables = optimizables
     _ = toy({
         # 'Jx':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
-        # 'Jy':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
-        'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-        # 'Jx':  J_msqr.flatten(),
-        # 'Jy':  J_msqr.flatten(),
+        # 'Jy':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),   
+        'F':   torch.tensor([0.89, 0.91]*toy.N_src, device=toy.device).flatten(),
+        'Jx':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
+        'Jy':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
+        'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
         'Jx':  Jx.flatten(),
         'Jy':  Jy.flatten(),
         'bg':  bg.to(device)
@@ -88,8 +80,8 @@ def load_and_fit_sample(id):
     PSF_1 = toy()
     PSF_DL = toy.DLPSF()
 
-    mask_in  = toy.mask_rim_in.unsqueeze(1).float()
-    mask_out = toy.mask_rim_out.unsqueeze(1).float()
+    # mask_in  = toy.mask_rim_in.unsqueeze(1).float()
+    # mask_out = toy.mask_rim_out.unsqueeze(1).float()
 
     loss = nn.L1Loss(reduction='sum')
 
@@ -111,7 +103,7 @@ def load_and_fit_sample(id):
     loss_fn = loss
 
     optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
-
+    
     optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 5)
     for _ in range(10):
         optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
@@ -128,7 +120,7 @@ def load_and_fit_sample(id):
     # config_manager.process_dictionary(merged_config)
 
     save_data = {
-        'comments':    'No J_msqr is used here, photons are multiplied by rate, no PSD regularization',
+        'comments':    'Photons are multiplied by rate, no PSD regularization',
         'optimized':   optimizables,
         'config':      merged_config,
         'bg':          to_store(bg),
@@ -148,13 +140,14 @@ def load_and_fit_sample(id):
         'FWHM data':   gauss_fitter(PSF_1),
         'Img. data':   to_store(PSF_0*pdims(norms,2)),
         'Img. fit':    to_store(PSF_1*pdims(norms,2)),
+        'PSD':         to_store(toy.PSD),
         'Data norms':  to_store(norms),
         'Model norms': to_store(toy.norm_scale),
         'loss':        loss_fn(PSF_1, PSF_0).item()
     }
     return save_data
 
-
+#%%
 for id in good_ids:
     filename = SPHERE_FITTING_FOLDER + str(id) + '.pickle'
     try:
@@ -166,16 +159,4 @@ for id in good_ids:
         print(e)
         print('Failed to fit sample', id)
         continue
-
-#%%
-# from tools.utils import SR, plot_radial_profiles, draw_PSF_stack
-
-# print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
-
-# draw_PSF_stack(PSF_0, PSF_1)
-
-# PSF_refs   = [ x for x in torch.split(PSF_0[:,0,...].squeeze().cpu(), 1, dim=0) ]
-# PSF_estims = [ x for x in torch.split(PSF_1[:,0,...].squeeze().cpu(), 1, dim=0) ]
-
-# plot_radial_profiles(PSF_refs, PSF_estims, 'TipToy', title='IRDIS PSF', dpi=200)
-# # # for i in range(PSF_0.shape[0]): plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=200)
+    

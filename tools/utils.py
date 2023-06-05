@@ -635,13 +635,13 @@ def plot_radial_profiles(PSF_refs, PSF_estims, label_refs, label_estim, title=''
 
         diff_profile.append(np.abs(profile_1-profile_0) / profile_0.max() * 100)  # [%]
 
-    mean_profile_0 = np.mean(radial_profiles_0, axis=0)
-    mean_profile_1 = np.mean(radial_profiles_1, axis=0)
-    std_profile_0  = np.std (radial_profiles_0, axis=0)
-    std_profile_1  = np.std (radial_profiles_1, axis=0)
+    mean_profile_0 = np.nanmean(radial_profiles_0, axis=0)
+    mean_profile_1 = np.nanmean(radial_profiles_1, axis=0)
+    std_profile_0  = np.nanstd (radial_profiles_0, axis=0)
+    std_profile_1  = np.nanstd (radial_profiles_1, axis=0)
 
-    mean_profile_diff = np.mean(diff_profile, axis=0)
-    std_profile_diff  = np.std (diff_profile, axis=0)
+    mean_profile_diff = np.nanmean(diff_profile, axis=0)
+    std_profile_diff  = np.nanstd (diff_profile, axis=0)
 
     fig = plt.figure(figsize=(6, 4), dpi=dpi)
     ax = fig.add_subplot(111)
@@ -652,7 +652,7 @@ def plot_radial_profiles(PSF_refs, PSF_estims, label_refs, label_estim, title=''
     ax.set_xlim([0, len(mean_profile_1) - 1])
     ax.grid()
     ax2 = ax.twinx()
-    ax2.set_ylim([0, mean_profile_diff.max() * 1.5])
+    ax2.set_ylim([0, np.nanmax(mean_profile_diff) * 1.5])
     ax2.set_ylabel('Difference [%]')
 
     l1 = ax.plot(mean_profile_0, label=label_refs,  linewidth=2, color=colors[0])

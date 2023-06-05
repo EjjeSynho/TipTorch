@@ -125,8 +125,6 @@ for label_list in labels_lists:
     label_dict[label_list[:-4]] = files
 
 #%%
-
-
 label_dict['Blurry'] = label_dict_0['Blurry']
 label_dict['Noisy'] = label_dict_0['Noisy']
 label_dict['Clipped'] = label_dict_0['Clipped']

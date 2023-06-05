@@ -34,7 +34,6 @@ path_output = SPHERE_DATA_FOLDER+'IRDIS_reduced/'
 
 h = 'HIERARCH ESO '
 
-
 #%%
 def GetFilesList():
     files_L = []

@@ -13,6 +13,9 @@ from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
 from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER #, device
 
+# delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
+frame_delay = lambda r: r/1e3 * 2.3 # delay of 2.3 frames for 1000 Hz loop rate
+
 
 def LoadSPHEREsynthByID(target_id):
     directory = SPHERE_DATA_FOLDER+'IRDIS_synthetic/'
@@ -34,7 +37,6 @@ def SamplesByIds(ids, synth=False):
     for id in ids:
         data_samples.append(f(id))
     return data_samples
-
 
 
 def SamplesFromDITs(init_sample):
@@ -144,7 +146,8 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
 
     OnlyCentralWvl(data_samples)
     PSF_0, bg, norms = GenerateImages(data_samples, norm_regime, device)
-
+    PSF_0 = PSF_0[...,1:,1:]
+    
     # Manage config files
     path_ini = '../data/parameter_files/irdis.ini'
 
@@ -152,6 +155,10 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
     config_manager = ConfigManager( GetSPHEREsynth() if synth else GetSPHEREonsky() )
     merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
     config_manager.Convert(merged_config, framework='pytorch', device=device)
+
+    merged_config['RTC']['LoopDelaySteps_HO'] = frame_delay(merged_config['RTC']['SensorFrameRate_HO'])
+    merged_config['sensor_HO']['NumberPhotons'] *= merged_config['RTC']['SensorFrameRate_HO']
+    merged_config['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
 
     return PSF_0, bg, norms, data_samples, merged_config
 

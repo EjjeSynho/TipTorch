@@ -642,7 +642,7 @@ class TipTorch(torch.nn.Module):
         Jxy = pdims(self.Jxy, 2)
 
         # Removing the DC component
-        PSD[...,self.nOtf_AO//2,self.nOtf_AO//2] = 0.0
+        PSD[..., self.nOtf_AO//2, self.nOtf_AO//2] = 0.0
         # Computing OTF from PSD
         cov = fft.fftshift(fft.fft2(fft.fftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1 #TODO: real FFT?
         # Computing the Structure Function from the covariance
