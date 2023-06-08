@@ -15,8 +15,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import GridSearchCV
-from sklearn.model_selection import RandomizedSearchCV
+from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error
 from project_globals import SPHERE_DATA_FOLDER, DATA_FOLDER, device
@@ -35,6 +34,12 @@ with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
 
 with open('E:/ESO/Data/SPHERE/fitted_df.pickle', 'rb') as handle:
     fitted_df = pickle.load(handle)
+
+with open('E:/ESO/Data/SPHERE/synth_df.pickle', 'rb') as handle:
+    synth_df = pickle.load(handle)
+
+with open('E:/ESO/Data/SPHERE/synth_fitted_df.pickle', 'rb') as handle:
+    synth_fitted_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['invalid'] == False]
 psf_df = psf_df[psf_df['LWE'] == False]
@@ -57,6 +62,8 @@ psf_df = psf_df[~pd.isnull(psf_df['FWHM'])]
 # psf_df = psf_df[~pd.isnull(psf_df['Humidity'])]
 # psf_df = psf_df[~pd.isnull(psf_df['Temperature'])]
 
+psf_df['Seeing (SPARTA)'] = seeing(psf_df['r0 (SPARTA)'],500e-9)
+
 #%%
 good_fits_folder = 'E:/ESO/Data/SPHERE/good_fits_TipTorch/'
 
@@ -76,6 +83,11 @@ fitted_df['SR fit']  = 0.5 * (fitted_df['SR fit (left)'] + fitted_df['SR fit (ri
 fitted_df['SR data'] = 0.5 * (fitted_df['SR data (left)'] + fitted_df['SR data (right)'])
 fitted_df['J']       = np.sqrt(fitted_df['Jx'].pow(2) + fitted_df['Jy'].pow(2))
 fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
+
+synth_fitted_df['SR fit']  = 0.5 * (fitted_df['SR fit (left)'] + fitted_df['SR fit (right)'])
+synth_fitted_df['SR data'] = 0.5 * (fitted_df['SR data (left)'] + fitted_df['SR data (right)'])
+synth_fitted_df['J']       = np.sqrt(fitted_df['Jx'].pow(2) + fitted_df['Jy'].pow(2))
+synth_fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
 
 #%% Compute data transformations
 from data_processing.normalizers import Uniform, TransformSequence
@@ -102,9 +114,16 @@ transforms_input['Turb. speed']               = TransformSequence( transforms = 
 transforms_input['Humidity']                  = TransformSequence( transforms = [ Uniform(a=3.0, b=51.0) ])
 transforms_input['Pressure']                  = TransformSequence( transforms = [ Uniform(a=740, b=750) ])
 transforms_input['Temperature']               = TransformSequence( transforms = [ Uniform(a=0, b=25) ])
+transforms_input['ITTM pos (std)']            = TransformSequence( transforms = [ Uniform(a=0, b=0.25) ])
+transforms_input['Focus']                     = TransformSequence( transforms = [ Uniform(a=-1, b=1.5) ])
+transforms_input['DM pos (std)']              = TransformSequence( transforms = [ Uniform(a=0.125, b=0.275) ])
+transforms_input['ITTM pos (avg)']            = TransformSequence( transforms = [ Uniform(a=-0.1, b=0.1) ])
+transforms_input['DM pos (avg)']              = TransformSequence( transforms = [ Uniform(a=-0.025, b=0.025) ])
+transforms_input['Seeing (SPARTA)']           = TransformSequence( transforms = [ Uniform(a=0.2, b=1.1) ])
 
 input_df = pd.DataFrame( {a: transforms_input[a].forward(psf_df[a].values) for a in transforms_input.keys()} )
 input_df.index = psf_df.index
+
 
 transforms_output = {}
 transforms_output['r0']              = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
@@ -129,9 +148,9 @@ transforms_output['SR fit (right)']  = TransformSequence( transforms = [ Uniform
 transforms_output['SR data']         = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
 transforms_output['SR fit']          = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
 
-
 output_df = pd.DataFrame( {a: transforms_output[a].forward(fitted_df[a].values) for a in transforms_output.keys()} )
 output_df.index = fitted_df.index
+
 
 rows_with_nan = output_df.index[output_df.isna().any(axis=1)].values.tolist()
 rows_with_nan += fitted_df.index[fitted_df['F (right)'] > 2].values.tolist()
@@ -147,7 +166,6 @@ output_df.drop(rows_with_nan, inplace=True)
 good_ids = psf_df.index.values.tolist()
 print(len(good_ids), 'samples are in the dataset')
 
-#%%
 def corr_plot(data, entry_x, entry_y, lims=None):
     j = sns.jointplot(data=data, x=entry_x, y=entry_y, kind="kde", space=0, alpha = 0.8, fill=True, colormap='royalblue' )
     i = sns.scatterplot(data=data, x=entry_x, y=entry_y, alpha=0.5, ax=j.ax_joint, color = 'black', s=10)
@@ -164,31 +182,41 @@ def corr_plot(data, entry_x, entry_y, lims=None):
     # plt.grid()
     plt.show()
 
-# sns.kdeplot(data=fitted_df, x='F', y='J', fill=True, thresh=0.02, palette='viridis')
+#%%
+from tools.utils import seeing
 
-#%% =======================================================================================================
+# sns.kdeplot(data=fitted_df, x='F', y='J', fill=True, thresh=0.02, palette='viridis')
+# sns.kdeplot(data=psf_df, x='r0 (SPARTA)', y='DM pos (std)', fill=True, thresh=0.02, palette='viridis')
+sns.kdeplot(data=psf_df, x='Strehl', y='DM pos (avg)', fill=True, thresh=0.02, palette='viridis')
+
+
+#%% ================ Telemetry SR from telemetry ===================
 #% Select the entries to be used in training
 selected_entries_X = [
         'Airmass',
-        'r0 (SPARTA)',
         # 'Seeing (MASSDIMM)',
         # 'FWHM',
         # 'Wind direction (MASSDIMM)',
         # 'Wind speed (MASSDIMM)',
+        # 'Tau0 (MASSDIMM)',
+        'Seeing (SPARTA)',
         'Wind direction (header)',
         'Wind speed (header)',
         'Tau0 (header)',
-        # 'Tau0 (MASSDIMM)',
+        'r0 (SPARTA)',
         'Nph WFS',
         'Rate',
-    #   'Jitter X',
-    #   'Jitter Y',
         'λ left (nm)',
         'λ right (nm)',
-    #   'Turb. speed',
-    #   'Pressure',
-    #   'Humidity',
-    #   'Temperature'
+        # 'Jitter X',
+        # 'Jitter Y',
+        # 'Turb. speed',
+        # 'Pressure',
+        # 'Humidity'
+        # 'Temperature'
+        # 'ITTM pos (std)',
+        # 'Focus',
+        # 'DM pos (std)'
     ]
 
 selected_entries_Y = ['Strehl']
@@ -225,7 +253,211 @@ test_df = pd.DataFrame({
 
 corr_plot(test_df, 'SR predicted', 'SR from data')
 
+#%% ================ Fitted SR from telemetry ===================
+#% Select the entries to be used in training
+selected_entries_X = [
+        'Airmass',
+        'r0 (SPARTA)',
+        # 'Seeing (MASSDIMM)',
+        # 'FWHM',
+        # 'Wind direction (MASSDIMM)',
+        # 'Wind speed (MASSDIMM)',
+        'Wind direction (header)',
+        'Wind speed (header)',
+        'Tau0 (header)',
+        # 'Tau0 (MASSDIMM)',
+        'Nph WFS',
+        'Rate',
+    #   'Jitter X',
+    #   'Jitter Y',
+        'λ left (nm)',
+        'λ right (nm)',
+    #   'Turb. speed',
+    #   'Pressure',
+    #   'Humidity',
+    #   'Temperature'
+    ]
+
+selected_entries_Y = ['SR fit']
+
+X_df = input_df[selected_entries_X]
+Y_df = output_df[selected_entries_Y]
+
+X = X_df.to_numpy()
+Y = Y_df.to_numpy()[:,0]
+
+# Split the dataset into a training set and a test set
+X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
+#%
+gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
+reg = LinearRegression()
+reg.fit(X_train, y_train)
+gbr.fit(X_train, y_train)
+y_pred = gbr.predict(X_test)
+y_pred_reg = reg.predict(X_test)
+
+# y_pred = y_pred_reg
+
+err = np.abs(y_test-y_pred) * 100
+print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
+print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
+print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
+print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
+print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
+
+test_df = pd.DataFrame({
+    'SR predicted': transforms_input['Strehl'].backward(y_pred),
+    'SR from data': transforms_input['Strehl'].backward(y_test),
+})
+
+corr_plot(test_df, 'SR predicted', 'SR from data')
+#%% ================ Fitted parameters (J,F) from telemetry ===================
+#% Select the entries to be used in training
+selected_entries_X = [
+        'Airmass',
+        'r0 (SPARTA)',
+        # 'Seeing (MASSDIMM)',
+        # 'FWHM',
+        # 'Wind direction (MASSDIMM)',
+        # 'Wind speed (MASSDIMM)',
+        'Wind direction (header)',
+        'Wind speed (header)',
+        'Tau0 (header)',
+        # 'Tau0 (MASSDIMM)',
+        'Nph WFS',
+        'Rate',
+    #   'Jitter X',
+    #   'Jitter Y',
+        'λ left (nm)',
+        'λ right (nm)',
+    #   'Turb. speed',
+    #   'Pressure',
+    #   'Humidity',
+    #   'Temperature'
+    ]
+
+selected_entries_Y = ['J']
+
+X_df = input_df[selected_entries_X]
+Y_df = output_df[selected_entries_Y]
+
+X = X_df.to_numpy()
+Y = Y_df.to_numpy()[:,0]
+
+# Split the dataset into a training set and a test set
+X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
+#%
+gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
+reg = LinearRegression()
+reg.fit(X_train, y_train)
+gbr.fit(X_train, y_train)
+y_pred = gbr.predict(X_test)
+y_pred_reg = reg.predict(X_test)
+
+# y_pred = y_pred_reg
+
+err = np.abs(y_test-y_pred) * 100
+print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
+print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
+print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
+print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
+print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
+
+test_df = pd.DataFrame({
+    'J predicted': transforms_output['J'].backward(y_pred),
+    'J test': transforms_output['J'].backward(y_test),
+})
+
+corr_plot(test_df, 'J predicted', 'J test')
+
+#%% ================ Land of synths ===================
+synth_df = synth_df[synth_df['invalid'] == False]
+
+with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
+    synth_psf_df = pickle.load(handle)
+
+valid_ids = list( set( synth_df.index.values.tolist() ).intersection( set(synth_df.index.values.tolist()) ) )
+synth_psf_df = synth_psf_df.loc[valid_ids]
+
+synth_input_df = pd.DataFrame( {a: transforms_input[a].forward(synth_psf_df[a].values) for a in transforms_input.keys()} )
+synth_input_df.index = synth_psf_df.index
+
+synth_output_df = pd.DataFrame( {a: transforms_output[a].forward(synth_fitted_df[a].values) for a in transforms_output.keys()} )
+synth_output_df.index = synth_fitted_df.index
+
+rows_with_nan = synth_output_df.index[synth_output_df.isna().any(axis=1)].values.tolist()
+rows_with_nan += synth_fitted_df.index[synth_fitted_df['F (right)'] > 2].values.tolist()
+rows_with_nan += synth_fitted_df.index[synth_fitted_df['Jxy'] > 300].values.tolist()
+rows_with_nan += synth_fitted_df.index[synth_fitted_df['Jx'] > 70].values.tolist()
+rows_with_nan += synth_fitted_df.index[synth_fitted_df['Jy'] > 70].values.tolist()
+
+synth_psf_df.drop(rows_with_nan, inplace=True)
+synth_input_df.drop(rows_with_nan, inplace=True)
+synth_fitted_df.drop(rows_with_nan, inplace=True)
+synth_output_df.drop(rows_with_nan, inplace=True)
+
 #%%
+#% Select the entries to be used in training
+selected_entries_X = [
+        'Airmass',
+        'r0 (SPARTA)',
+        # 'Seeing (MASSDIMM)',
+        # 'FWHM',
+        # 'Wind direction (MASSDIMM)',
+        # 'Wind speed (MASSDIMM)',
+        'Wind direction (header)',
+        'Wind speed (header)',
+        'Tau0 (header)',
+        # 'Tau0 (MASSDIMM)',
+        'Nph WFS',
+        'Rate',
+    #   'Jitter X',
+    #   'Jitter Y',
+        'λ left (nm)',
+        'λ right (nm)',
+    #   'Turb. speed',
+    #   'Pressure',
+    #   'Humidity',
+    #   'Temperature'
+    ]
+
+selected_entries_Y = ['SR fit']
+
+X_df = synth_input_df[selected_entries_X]
+Y_df = synth_output_df[selected_entries_Y]
+
+X = X_df.to_numpy()
+Y = Y_df.to_numpy()[:,0]
+
+# Split the dataset into a training set and a test set
+X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
+#%
+gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
+reg = LinearRegression()
+reg.fit(X_train, y_train)
+gbr.fit(X_train, y_train)
+y_pred = gbr.predict(X_test)
+y_pred_reg = reg.predict(X_test)
+
+# y_pred = y_pred_reg
+
+err = np.abs(y_test-y_pred) * 100
+print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
+print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
+print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
+print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
+print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
+
+test_df = pd.DataFrame({
+    'SR predicted': transforms_output['SR fit'].backward(y_pred),
+    'SR test': transforms_output['SR fit'].backward(y_test),
+})
+
+corr_plot(test_df, 'SR predicted', 'SR test')
+
+
+
+#%% ========================= AAAAAAAAAAA ==============================
 maximum_oulier = y_test[np.where(err == err.max())[0].item()]
 outlier_sample = X_df.iloc[Y.tolist().index(maximum_oulier)]
 outlier_input = psf_df.loc[outlier_sample.name]
@@ -245,7 +477,7 @@ selected_entries_X = [
     # 'Wind direction (header)',
 
 # selected_entries_Y = ['SR fit']
-selected_entries_Y = ['Jy']
+selected_entries_Y = ['J']
 
 X_df = merged_df[selected_entries_X]
 Y_df = merged_df[selected_entries_Y]

@@ -23,12 +23,18 @@ with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
 
 psf_df = psf_df[psf_df['invalid'] == False]
 
+# open synth df
+with open(SPHERE_DATA_FOLDER+'synth_df.pickle', 'rb') as handle:
+    synth_df = pickle.load(handle)
+    
+
 #%% ================================= Read OOPAO sample =================================
 regime = '1P21I'
 norm_regime = 'sum'
 
-sample_ids = [132]
+# sample_ids = [132]
 # sample_ids = [1209]
+sample_ids = [1452]
 
 #% Initialize model
 PSF_2, bg, norms, synth_samples, synth_config = SPHERE_preprocess(sample_ids, regime, norm_regime, synth=True, device=device)

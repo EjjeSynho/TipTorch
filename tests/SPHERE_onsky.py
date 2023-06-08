@@ -82,7 +82,8 @@ _ = plt.hist(x)
 # sample_ids = [578]
 # sample_ids = [576]
 # sample_ids = [992]
-sample_ids = [1209] # high noise
+# sample_ids = [1209] # high noise
+sample_ids = [1452] # high noise
 # sample_ids = [456]
 # sample_ids = [465]
 # sample_ids = [1393] #50 DITs
@@ -457,11 +458,12 @@ toy = TipTorch(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
 
 _ = toy({
-    'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-    # 'Jx':  J_msqr.flatten(),
-    # 'Jy':  J_msqr.flatten(),
-    'Jx':  Jx.flatten(),
-    'Jy':  Jy.flatten(),
+    # 'Jx':  Jx.flatten(),
+    # 'Jy':  Jy.flatten(),
+    'F':   torch.tensor([0.89, 0.91]*toy.N_src, device=toy.device).flatten(),
+    'Jx':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
+    'Jy':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
+    'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
     'bg':  bg.to(device)
 })
 
@@ -482,9 +484,11 @@ for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.b], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.amp, toy.alpha, toy.beta], 3)
+    # optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.amp, toy.alpha, toy.beta], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.amp, toy.alpha, toy.beta], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.ratio, toy.theta], 3)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.Jxy], 3)
 
 PSF_1 = toy()
 

@@ -56,24 +56,19 @@ def load_and_fit_sample(id):
     sample_ids = [id]
     PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device)
 
-    Jx = merged_config['sensor_HO']['Jitter X'].abs()
-    Jy = merged_config['sensor_HO']['Jitter Y'].abs()
+    # Jx = merged_config['sensor_HO']['Jitter X'].abs()
+    # Jy = merged_config['sensor_HO']['Jitter Y'].abs()
 
     # toy = TipTorch(merged_config, norm_regime, device)
     toy = TipTorch(merged_config, None, device)
 
     optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
-
     toy.optimizables = optimizables
     _ = toy({
-        # 'Jx':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
-        # 'Jy':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),   
         'F':   torch.tensor([0.89, 0.91]*toy.N_src, device=toy.device).flatten(),
         'Jx':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
         'Jy':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
         'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
-        'Jx':  Jx.flatten(),
-        'Jy':  Jy.flatten(),
         'bg':  bg.to(device)
     })
 

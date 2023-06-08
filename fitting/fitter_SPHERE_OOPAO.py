@@ -135,7 +135,7 @@ def load_and_fit_sample(id):
         'SR fit':      SR(PSF_3, PSF_DL).detach().cpu().numpy(),
         'FWHM fit':    gauss_fitter(PSF_2), 
         'FWHM data':   gauss_fitter(PSF_3),
-        'Img. data':   to_store(PSF_2*pdims(norms,2)),
+        'Img. data':   to_store(PSF_2*pdims(norms,2)),  #FIX WLV PROBLEM n only left is presents
         'Img. fit':    to_store(PSF_3*pdims(norms,2)),
         'PSD':         to_store(toy.PSD),
         'Data norms':  to_store(norms),

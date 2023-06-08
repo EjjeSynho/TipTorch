@@ -25,7 +25,8 @@ for file in tqdm(files):
     plt.figure(figsize=(5,5))
     plt.title(id)
     plt.imshow(np.log10(imag[el_croppo]))
-    plt.savefig(save_path / Path(id + '.png'))
+    if not os.path.exists(save_path / Path(id + '.png')):
+        plt.savefig(save_path / Path(id + '.png'))
     plt.axis('off')
     
 #%% filter good images
@@ -40,7 +41,7 @@ for file in tqdm(files):
     with open(samples_path / Path(file), 'rb') as handle:
         sample = pickle.load(handle)
         
-    id = file.split('_')[0]
+    id = int( file.split('_')[0] )
     sample_dict = { 'ID': id }
     
     if id in good_ids:
@@ -57,3 +58,4 @@ synth_df.sort_index(inplace=True)
 #%% Save dataframe
 with open(SPHERE_DATA_FOLDER / Path('synth_df.pickle'), 'wb') as handle:
     pickle.dump(synth_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
+

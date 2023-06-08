@@ -220,6 +220,11 @@ class SPHERE_loader():
             ('WFS flux',   'flux_VisLoop[#photons/s]'),
             ('Jitter X',   'Jitter X (avg)'),
             ('Jitter Y',   'Jitter Y (avg)'),
+            ('Focus',      'Focus (avg)'),
+            ('ITTM pos (avg)', 'ITTM position (avg)'),
+            ('ITTM pos (std)', 'ITTM position (std)'),
+            ('DM pos (avg)',   'DM position (avg)'),
+            ('DM pos (std)',   'DM position (std)'),     
             ('rate',       'WFS frequency'),
             ('WFS filter', 'spectral_filter'),
             ('WFS gain',   'WFS gain')]
@@ -344,7 +349,7 @@ class SPHERE_loader():
 
 
     def GetSpectrum(self):
-        def get_filter_transmission(filter_name):
+        def get_filter_transmission(filter_name): #TODO: fix the path
             root_filters = 'C:/Users/akuznets/Projects/TipToy/data/calibrations/VLT_CALIBRATION/IRDIS_filters/'
             filename = root_filters + 'SPHERE_IRDIS_' + filter_name + '.dat'
             # set up an empty array to store the data
@@ -518,14 +523,19 @@ class SPHERE_loader():
             },
 
             'WFS': {
-                'Nph vis': SPARTA_data['n_ph'],
-                'Flux vis': SPARTA_data['WFS flux'],
-                'TT jitter X': SPARTA_data['Jitter X'],
-                'TT jitter Y': SPARTA_data['Jitter Y'],
-                'rate': SPARTA_data['rate'],
-                'filter': SPARTA_data['WFS filter'],
-                'wavelegnth': SPARTA_data['WFS wavelength']*1e-9,
-                'gain': SPARTA_data['WFS gain'] 
+                'Nph vis':        SPARTA_data['n_ph'],
+                'Flux vis':       SPARTA_data['WFS flux'],
+                'TT jitter X':    SPARTA_data['Jitter X'],
+                'TT jitter Y':    SPARTA_data['Jitter Y'],
+                'Focus':          SPARTA_data['Focus'],
+                'ITTM pos (avg)': SPARTA_data['ITTM pos (avg)'],
+                'ITTM pos (std)': SPARTA_data['ITTM pos (std)'],
+                'DM pos (avg)':   SPARTA_data['DM pos (avg)'],
+                'DM pos (std)':   SPARTA_data['DM pos (std)'],
+                'rate':           SPARTA_data['rate'],
+                'filter':         SPARTA_data['WFS filter'],
+                'wavelength':     SPARTA_data['WFS wavelength']*1e-9,
+                'gain':           SPARTA_data['WFS gain'] 
             },
 
             'observation': {
@@ -585,9 +595,6 @@ def plot_sample(id):
     buf = samp['spectra'].copy()
     buf = [buf['central L']*1e-9, buf['central R']*1e-9]
     samp['spectra'] = buf
-
-    print(samp['WFS']['TT jitter X'])
-    print(samp['WFS']['TT jitter Y'])
 
     PSF_L_0 = samp['PSF L'].sum(axis=0)
     PSF_R_0 = samp['PSF R'].sum(axis=0)
@@ -685,6 +692,11 @@ def CreateSPHEREdataframe(save_df_dir=None):
         'Tau0 (MASS)',
         'Jitter X',
         'Jitter Y',
+        'Focus',
+        'ITTM pos (avg)',
+        'ITTM pos (std)',
+        'DM pos (avg)',
+        'DM pos (std)',
         'Pressure',
         'Humidity',
         'Temperature',
@@ -742,10 +754,15 @@ def CreateSPHEREdataframe(save_df_dir=None):
         main_df['Flux WFS'].append(data['WFS']['Flux vis'])
         main_df['Jitter X'].append(data['WFS']['TT jitter X'])
         main_df['Jitter Y'].append(data['WFS']['TT jitter Y'])
+        main_df['Focus'].append(data['WFS']['Focus'])
+        main_df['ITTM pos (avg)'].append(data['WFS']['ITTM pos (avg)'])
+        main_df['ITTM pos (std)'].append(data['WFS']['ITTM pos (std)'])
+        main_df['DM pos (avg)'].append(data['WFS']['DM pos (avg)'])
+        main_df['DM pos (std)'].append(data['WFS']['DM pos (std)'])
         main_df['Rate'].append(data['WFS']['rate'])
         main_df['Filter common'].append(data['spectra']['filter common'])
         main_df['Filter LR'].append(data['spectra']['filter LR'])
-        main_df['Filter WFS'].append(data['WFS']['wavelegnth'])
+        main_df['Filter WFS'].append(data['WFS']['wavelength'])
         main_df['DIT Time'].append(data['Integration']['DIT'])
         main_df['Num. DITs'].append(data['Integration']['Num. DITs'])
         main_df['Sequence time'].append(data['Integration']['sequence time'])

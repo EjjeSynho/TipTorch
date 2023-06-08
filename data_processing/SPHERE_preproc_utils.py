@@ -14,7 +14,7 @@ from copy import deepcopy
 from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER #, device
 
 # delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
-frame_delay = lambda r: r/1e3 * 2.3 # delay of 2.3 frames for 1000 Hz loop rate
+frame_delay = lambda r: r/1e3 * 2.3  if (r/1e3*2.3) > 1.0 else 1.0 # delay of 2.3 frames for 1000 Hz loop rate
 
 
 def LoadSPHEREsynthByID(target_id):
@@ -68,7 +68,7 @@ def OnlyCentralWvl(samples):
         samples['spectra'] = [buf['central L']*1e-9, buf['central R']*1e-9]
 
 
-def GenerateImages(samples, norm_regime, device=torch.device('cpu'), numpy=False):
+def GenerateImages(samples, norm_regime, device=torch.device('cpu'), numpy=False, bg_subtration=True):
     ims = []
     bgs = []
     normas = []
@@ -93,11 +93,16 @@ def GenerateImages(samples, norm_regime, device=torch.device('cpu'), numpy=False
         buf_im    = []
 
         def process_PSF(entry):
-            PSF_  = check_center(samples[i][entry].squeeze())
-            bg_   = np.median(PSF_[mask_noise > 0])
-            PSF_ -= bg_
-            norm_ = PSF_norm(PSF_*(1-mask_noise))
-            return (PSF_+bg_)/norm_, bg_/norm_, norm_
+            if bg_subtration:
+                PSF_  = check_center(samples[i][entry].squeeze())
+                bg_   = np.median(PSF_[mask_noise > 0])
+                PSF_ -= bg_
+                norm_ = PSF_norm(PSF_*(1-mask_noise))
+                return (PSF_+bg_)/norm_, bg_/norm_, norm_
+            else:
+                PSF_  = check_center(samples[i][entry].squeeze())
+                norm_ = PSF_norm(PSF_*(1-mask_noise))
+                return PSF_/norm_, 0, norm_
 
         if 'PSF L' in samples[i].keys() and samples[i]['PSF L'] is not None:
             PSF, bg, norm = process_PSF('PSF L')
@@ -147,7 +152,8 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
         raise ValueError('Unknown regime "{}"'.format(regime))
 
     OnlyCentralWvl(data_samples)
-    PSF_0, bg, norms = GenerateImages(data_samples, norm_regime, device)
+    
+    PSF_0, bg, norms = GenerateImages(data_samples, norm_regime, device, numpy=False, bg_subtration=(not synth))
     PSF_0 = PSF_0[...,1:,1:]
     
     # Manage config files

@@ -60,17 +60,18 @@ def load_and_fit_sample(id):
     sample_ids = [id]
     PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
     
-    Jx = merged_config['sensor_HO']['Jitter X'].abs()
-    Jy = merged_config['sensor_HO']['Jitter Y'].abs()
+    # Jx = merged_config['sensor_HO']['Jitter X'].abs()
+    # Jy = merged_config['sensor_HO']['Jitter Y'].abs()
     
     toy = TipTorch(merged_config, norm_regime, device, TipTop=False, PSFAO=True)
 
     optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
     toy.optimizables = optimizables
     _ = toy({
-        'Jxy': torch.tensor([0.1]*toy.N_src, device=toy.device).flatten(),
-        'Jx':  Jx.flatten(),
-        'Jy':  Jy.flatten(),
+        'F':   torch.tensor([0.89, 0.91]*toy.N_src, device=toy.device).flatten(),
+        'Jx':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
+        'Jy':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
+        'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
         'bg':  bg.to(device)
     })
 
@@ -94,9 +95,11 @@ def load_and_fit_sample(id):
         optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
         optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
         optimizer_lbfgs.Optimize(PSF_0, [toy.b], 3)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.amp, toy.alpha, toy.beta], 3)
+        # optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.amp, toy.alpha, toy.beta], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.amp, toy.alpha, toy.beta], 3)
         optimizer_lbfgs.Optimize(PSF_0, [toy.ratio, toy.theta], 3)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy, toy.Jxy], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy], 3)
+        optimizer_lbfgs.Optimize(PSF_0, [toy.Jxy], 3)
 
     PSF_1 = toy()
 
@@ -105,7 +108,7 @@ def load_and_fit_sample(id):
     # config_manager.process_dictionary(merged_config)
 
     save_data = {
-        'comments':    'No J_msqr is used here, with PSD regularization',
+        'comments':    'No r0 fitted, with PSD regularization',
         'optimized':   optimizables,
         'config':      merged_config,
         'F':           to_store(toy.F),

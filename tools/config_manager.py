@@ -195,7 +195,7 @@ def GetSPHEREonsky():
         (['sensor_science','Azimuth'],     ['telescope','azimuth'],     None),
         (['sensor_science','SigmaRON'],    ['Detector','ron'],          None),
         (['sensor_science','Gain'],        ['Detector','gain'],         None),
-        (['sources_HO', 'Wavelength'],     ['WFS', 'wavelegnth'],       None),
+        (['sources_HO', 'Wavelength'],     ['WFS', 'wavelength'],       None),
         (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis'],           None),
         (['sensor_HO','Jitter X'],         ['WFS','TT jitter X'],       None),
         (['sensor_HO','Jitter Y'],         ['WFS','TT jitter Y'],       None),
