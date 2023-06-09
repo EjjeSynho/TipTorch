@@ -376,7 +376,6 @@ class TipTorch(torch.nn.Module):
             self.normalizer = lambda x, dim, keepdim: self.make_tensor(1.0)
         
         self.oversampling = oversampling
-        self.psdsave = None
     
         # Read data and initialize AO system
         self.config = AO_config

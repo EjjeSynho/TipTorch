@@ -32,14 +32,13 @@ with open(SPHERE_DATA_FOLDER+'synth_df.pickle', 'rb') as handle:
 regime = '1P21I'
 norm_regime = 'sum'
 
-# sample_ids = [132]
-# sample_ids = [1209]
-sample_ids = [1452]
+
+sample_ids = [353]
 
 #% Initialize model
 PSF_2, bg, norms, synth_samples, synth_config = SPHERE_preprocess(sample_ids, regime, norm_regime, synth=True, device=device)
 toy = TipTorch(synth_config, norm_regime, device=device, TipTop=True, PSFAO=False, oversampling=1)
-
+# toy.PSD_include['aliasing'] = False
 
 def GetJitter():
     TT_res = synth_samples[0]['WFS']['tip/tilt residuals']
@@ -53,7 +52,7 @@ def GetJitter():
 
 Jx, Jy = GetJitter()
 
-toy.optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
+toy.optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'dn']
 _ = toy({ 
     'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
     'Jx':  torch.tensor([Jx]*toy.N_src, device=toy.device).flatten(),
@@ -85,6 +84,16 @@ plot_radial_profiles(destack(PSF_2), destack(PSF_3), 'OOPAO', 'TipTorch', title=
 #         window_loss(toy.dn + toy.NoiseVariance(toy.r0), 1.5).sum()
 #     return z
 
+
+# mask_in  = toy.mask_rim_in.unsqueeze(1).float()
+# mask_out = toy.mask_rim_out.unsqueeze(1).float()
+
+# loss = nn.L1Loss(reduction='sum')
+# def loss_fn(a,b):
+#     z = loss(a,b) + \
+#         torch.lt(torch.mean(toy.PSD*mask_in), torch.mean(toy.PSD*mask_out))
+#     return z
+
 loss_fn = nn.L1Loss(reduction='sum')
 
 PSF_3  = toy()
@@ -96,9 +105,11 @@ for i in range(10):
     optimizer_lbfgs.Optimize(PSF_2, [toy.F], 3)
     optimizer_lbfgs.Optimize(PSF_2, [toy.bg], 2)
     optimizer_lbfgs.Optimize(PSF_2, [toy.dx, toy.dy], 3)
-    optimizer_lbfgs.Optimize(PSF_2, [toy.r0, toy.dn], 5)
-    optimizer_lbfgs.Optimize(PSF_2, [toy.wind_dir, toy.wind_speed], 3)
-    optimizer_lbfgs.Optimize(PSF_2, [toy.Jx, toy.Jy, toy.Jxy], 3)
+    # optimizer_lbfgs.Optimize(PSF_2, [toy.r0, toy.dn], 5)
+    optimizer_lbfgs.Optimize(PSF_2, [toy.dn], 5)
+    # optimizer_lbfgs.Optimize(PSF_2, [toy.wind_dir, toy.wind_speed], 3)
+    optimizer_lbfgs.Optimize(PSF_2, [toy.Jx, toy.Jy], 3)
+    optimizer_lbfgs.Optimize(PSF_2, [toy.Jxy], 3)
 
 PSF_3 = toy()
 print('\nStrehl ratio: ', SR(PSF_3, PSF_DL))
@@ -108,3 +119,5 @@ draw_PSF_stack(PSF_2, PSF_3, average=True)
 
 destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
 plot_radial_profiles(destack(PSF_2), destack(PSF_3), 'OOPAO', 'TipTorch', title='IRDIS PSF', dpi=200)
+
+# %%

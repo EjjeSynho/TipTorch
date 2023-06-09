@@ -54,7 +54,7 @@ to_store = lambda x: x.detach().cpu().numpy()
 
 def load_and_fit_sample(id):
     sample_ids = [id]
-    PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device)
+    PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False)
 
     # Jx = merged_config['sensor_HO']['Jitter X'].abs()
     # Jy = merged_config['sensor_HO']['Jitter Y'].abs()

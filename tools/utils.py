@@ -407,7 +407,7 @@ def SPHERE_PSF_spiders_mask(crop, thick=9):
                 draw_line((w, dh),   (w//2+dw, h//2), thick) * \
                 draw_line((0, dh),   (w//2-dw, h//2), thick)
     
-    crop = slice(line_mask.shape[0]//2-crop//2, line_mask.shape[0]//2+crop//2)
+    crop = slice(line_mask.shape[0]//2-crop//2, line_mask.shape[0]//2+crop//2+crop%2)
     return line_mask[crop,crop]
 
 

@@ -219,7 +219,7 @@ def GetSPHEREsynth():
         (['sensor_science','SigmaRON'],    ['Detector','ron'],      None),
         (['sensor_science','Gain'],        ['Detector','gain'],     None),
         (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis'],       None),
-        (['sources_HO','Wavelength'],      ['WFS','wavelegnth'],    None),
+        (['sources_HO','Wavelength'],      ['WFS','wavelength'],    None),
         (['RTC','SensorFrameRate_HO'],     ['RTC','loop rate'],     None),
         (['RTC','LoopGain_HO'],            ['RTC','loop gain'],     None),
         (['RTC','LoopDelaySteps_HO'],      ['RTC','frames delay'],  None),

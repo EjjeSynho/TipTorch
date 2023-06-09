@@ -65,7 +65,7 @@ def load_and_fit_sample(id):
 
     toy = TipTorch(synth_config, norm_regime, device=device, TipTop=True, PSFAO=False, oversampling=1)
 
-    optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
+    optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'dn']
     toy.optimizables = optimizables
     _ = toy({ 
         'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
@@ -106,7 +106,11 @@ def load_and_fit_sample(id):
     optimizer_lbfgs.Optimize(PSF_2, [toy.bg], 5)
     for _ in range(10):
         optimizer_lbfgs.Optimize(PSF_2, [toy.F], 3)
+        optimizer_lbfgs.Optimize(PSF_2, [toy.bg], 2)
         optimizer_lbfgs.Optimize(PSF_2, [toy.dx, toy.dy], 3)
+        # optimizer_lbfgs.Optimize(PSF_2, [toy.r0, toy.dn], 5)
+        optimizer_lbfgs.Optimize(PSF_2, [toy.dn], 5)
+        # optimizer_lbfgs.Optimize(PSF_2, [toy.wind_dir, toy.wind_speed], 3)
         optimizer_lbfgs.Optimize(PSF_2, [toy.Jx, toy.Jy], 3)
         optimizer_lbfgs.Optimize(PSF_2, [toy.Jxy], 3)
 
@@ -117,7 +121,7 @@ def load_and_fit_sample(id):
     # config_manager.process_dictionary(merged_config)
 
     save_data = {
-        'comments':    'Photons are multiplied by rate, no PSD regularization',
+        'comments':    'Photons are NOT multiplied by rate, no PSD regularization',
         'optimized':   optimizables,
         'config':      synth_config,
         'bg':          to_store(bg),
@@ -130,6 +134,8 @@ def load_and_fit_sample(id):
         'Jx':          to_store(toy.Jx),
         'Jy':          to_store(toy.Jy),
         'Jxy':         to_store(toy.Jxy),
+        'Jx init':     to_store(torch.tensor([Jx]*toy.N_src, device=toy.device).flatten()),
+        'Jy init':     to_store(torch.tensor([Jy]*toy.N_src, device=toy.device).flatten()),
         'Nph WFS':     to_store(toy.WFS_Nph),
         'SR data':     SR(PSF_2, PSF_DL).detach().cpu().numpy(),
         'SR fit':      SR(PSF_3, PSF_DL).detach().cpu().numpy(),
@@ -144,6 +150,7 @@ def load_and_fit_sample(id):
     }
     return save_data
 
+# save_data = load_and_fit_sample(321)
 
 #%%
 for id in good_ids:

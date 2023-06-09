@@ -154,7 +154,8 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
     OnlyCentralWvl(data_samples)
     
     PSF_0, bg, norms = GenerateImages(data_samples, norm_regime, device, numpy=False, bg_subtration=(not synth))
-    PSF_0 = PSF_0[...,1:,1:]
+    if not synth:
+        PSF_0 = PSF_0[...,1:,1:]
     
     # Manage config files
     path_ini = '../data/parameter_files/irdis.ini'
@@ -167,7 +168,7 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
     if not synth:
         merged_config['RTC']['LoopDelaySteps_HO'] = frame_delay(merged_config['RTC']['SensorFrameRate_HO'])
    
-    merged_config['sensor_HO']['NumberPhotons'] *= merged_config['RTC']['SensorFrameRate_HO']
+    # merged_config['sensor_HO']['NumberPhotons'] *= merged_config['RTC']['SensorFrameRate_HO']
     merged_config['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
 
     return PSF_0, bg, norms, data_samples, merged_config

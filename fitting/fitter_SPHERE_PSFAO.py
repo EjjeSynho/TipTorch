@@ -18,9 +18,9 @@ from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
 
-actual_folder = SPHERE_FITTING_FOLDER[-1]+'_PAO/'
+actual_folder = SPHERE_FITTING_FOLDER[:-1]+'_PAO/'
 
-# device = torch.device('cuda:0')
+# device = torch.device('cuda:1')
 
 #% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
@@ -58,8 +58,8 @@ to_store = lambda x: x.detach().cpu().numpy()
 
 def load_and_fit_sample(id):
     sample_ids = [id]
-    PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime)
-    
+    PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False)
+
     # Jx = merged_config['sensor_HO']['Jitter X'].abs()
     # Jy = merged_config['sensor_HO']['Jitter Y'].abs()
     
@@ -138,6 +138,7 @@ def load_and_fit_sample(id):
     return save_data
 
 
+#%%
 for id in good_ids:
     filename = actual_folder + str(id) + '.pickle'
     try:
@@ -150,15 +151,3 @@ for id in good_ids:
         print('Failed to fit sample', id)
         continue
 
-#%%
-# from tools.utils import SR, plot_radial_profiles, draw_PSF_stack
-
-# print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
-
-# draw_PSF_stack(PSF_0, PSF_1)
-
-# PSF_refs   = [ x for x in torch.split(PSF_0[:,0,...].squeeze().cpu(), 1, dim=0) ]
-# PSF_estims = [ x for x in torch.split(PSF_1[:,0,...].squeeze().cpu(), 1, dim=0) ]
-
-# plot_radial_profiles(PSF_refs, PSF_estims, 'TipToy', title='IRDIS PSF', dpi=200)
-# # # for i in range(PSF_0.shape[0]): plot_radial_profile(PSF_0[i,0,:,:], PSF_1[i,0,:,:], 'TipToy', title='IRDIS PSF', dpi=200)
