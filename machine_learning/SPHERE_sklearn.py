@@ -25,6 +25,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
 import os
+from tools.utils import seeing
 
 from project_globals import WEIGHTS_FOLDER
 
@@ -63,6 +64,7 @@ psf_df = psf_df[~pd.isnull(psf_df['FWHM'])]
 # psf_df = psf_df[~pd.isnull(psf_df['Temperature'])]
 
 psf_df['Seeing (SPARTA)'] = seeing(psf_df['r0 (SPARTA)'],500e-9)
+synth_df = synth_df[synth_df['invalid'] == False]
 
 #%%
 good_fits_folder = 'E:/ESO/Data/SPHERE/good_fits_TipTorch/'
@@ -75,7 +77,7 @@ fitted_ids = list( set( fitted_df.index.values.tolist() ).intersection( set(psf_
 fitted_df = fitted_df[fitted_df.index.isin(fitted_ids)]
 
 # Absolutize positive-only values
-for entry in ['r0','Jx','Jy','Jxy','F (left)','F (right)']:
+for entry in ['r0','Jx','Jy','Jxy']: #,'F (left)','F (right)']:
     fitted_df[entry] = fitted_df[entry].abs()
 fitted_df.sort_index(inplace=True)
 
@@ -371,20 +373,30 @@ test_df = pd.DataFrame({
 corr_plot(test_df, 'J predicted', 'J test')
 
 #%% ================ Land of synths ===================
-synth_df = synth_df[synth_df['invalid'] == False]
 
+test = {
+    'x': synth_fitted_df['n'] + synth_fitted_df['dn'],
+    'y': synth_df['WFS noise (nm)'],
+    'z': synth_df['Rate'],
+   
+}
+
+sns.scatterplot(test, x='x', y='y', hue='z', cmap='viridis')
+
+
+#%%
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     synth_psf_df = pickle.load(handle)
+    selected_ids = list( set( synth_df.index.values.tolist() ).intersection( set(synth_df.index.values.tolist()) ) )
+    synth_psf_df = synth_psf_df.loc[selected_ids]
 
-valid_ids = list( set( synth_df.index.values.tolist() ).intersection( set(synth_df.index.values.tolist()) ) )
-synth_psf_df = synth_psf_df.loc[valid_ids]
-
-synth_input_df = pd.DataFrame( {a: transforms_input[a].forward(synth_psf_df[a].values) for a in transforms_input.keys()} )
-synth_input_df.index = synth_psf_df.index
+synth_input_df = pd.DataFrame( {a: transforms_input[a].forward(synth_df[a].values) for a in transforms_input.keys()} )
+synth_input_df.index = synth_df.index
 
 synth_output_df = pd.DataFrame( {a: transforms_output[a].forward(synth_fitted_df[a].values) for a in transforms_output.keys()} )
 synth_output_df.index = synth_fitted_df.index
 
+#%%
 rows_with_nan = synth_output_df.index[synth_output_df.isna().any(axis=1)].values.tolist()
 rows_with_nan += synth_fitted_df.index[synth_fitted_df['F (right)'] > 2].values.tolist()
 rows_with_nan += synth_fitted_df.index[synth_fitted_df['Jxy'] > 300].values.tolist()

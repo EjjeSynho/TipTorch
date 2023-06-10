@@ -11,7 +11,7 @@ from torch import nn, optim
 import numpy as np
 from tools.utils import OptimizeLBFGS, ParameterReshaper, plot_radial_profiles, SR, draw_PSF_stack
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
-from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
+from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, GetJitter
 import matplotlib.pyplot as plt
 from tools.utils import rad2mas, rad2arc
 from project_globals import SPHERE_DATA_FOLDER, device
@@ -40,17 +40,7 @@ PSF_2, bg, norms, synth_samples, synth_config = SPHERE_preprocess(sample_ids, re
 toy = TipTorch(synth_config, norm_regime, device=device, TipTop=True, PSFAO=False, oversampling=1)
 # toy.PSD_include['aliasing'] = False
 
-def GetJitter():
-    TT_res = synth_samples[0]['WFS']['tip/tilt residuals']
-    D = synth_config['telescope']['TelescopeDiameter']
-    ang_pix = synth_samples[0]['Detector']['psInMas'] / rad2mas
-    jitter = lambda a: 2*2*a/D/ang_pix
-    TT_jitter = jitter(TT_res)
-    Jx = TT_jitter[:,0].std() * ang_pix * rad2mas * 2.355
-    Jy = TT_jitter[:,1].std() * ang_pix * rad2mas * 2.355
-    return Jx, Jy
-
-Jx, Jy = GetJitter()
+Jx, Jy = GetJitter(synth_samples[0], synth_config)
 
 toy.optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 'dn']
 _ = toy({ 

@@ -64,7 +64,7 @@ psf_df.sort_index(inplace=True)
 #%% Create fitted parameters dataset
 #check if file exists
 if not os.path.isfile('E:/ESO/Data/SPHERE/synth_fitted_df.pickle'):
-    fitted_dict_raw = {key: [] for key in ['F', 'dx', 'dy', 'r0', 'n', 'dn', 'bg', 'Jx', 'Jy', 'Jxy', 'Nph WFS', 'SR data', 'SR fit']}
+    fitted_dict_raw = {key: [] for key in ['F', 'dx', 'dy', 'r0', 'n', 'dn', 'bg', 'Jx', 'Jy', 'Jxy', 'Nph WFS', 'SR data', 'SR fit', 'Jx init', 'Jy init']}
     ids = []
 
     images_data = []

@@ -12,6 +12,7 @@ from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
 from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER #, device
+from tools.utils import rad2mas
 
 # delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
 frame_delay = lambda r: r/1e3 * 2.3  if (r/1e3*2.3) > 1.0 else 1.0 # delay of 2.3 frames for 1000 Hz loop rate
@@ -66,6 +67,17 @@ def OnlyCentralWvl(samples):
     else:
         buf = samples['spectra'].copy()
         samples['spectra'] = [buf['central L']*1e-9, buf['central R']*1e-9]
+
+
+def GetJitter(synth_sample, synth_config):
+    TT_res = synth_sample['WFS']['tip/tilt residuals']
+    D = synth_config['telescope']['TelescopeDiameter']
+    ang_pix = synth_sample['Detector']['psInMas'] / rad2mas
+    jitter = lambda a: 2*2*a/D/ang_pix
+    TT_jitter = jitter(TT_res)
+    Jx = TT_jitter[:,0].std() * ang_pix * rad2mas * 2.355
+    Jy = TT_jitter[:,1].std() * ang_pix * rad2mas * 2.355
+    return Jx, Jy
 
 
 def GenerateImages(samples, norm_regime, device=torch.device('cpu'), numpy=False, bg_subtration=True):

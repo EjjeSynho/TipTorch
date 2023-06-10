@@ -10,7 +10,7 @@ import numpy as np
 import pickle
 import torch
 from torch import nn
-from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
+from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, GetJitter
 from tools.utils import OptimizeLBFGS, SR, pdims, FitGauss2D
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from tools.config_manager import ConfigManager, GetSPHEREsynth
@@ -51,17 +51,7 @@ def load_and_fit_sample(id):
     sample_ids = [id]
     PSF_2, bg, norms, synth_samples, synth_config = SPHERE_preprocess(sample_ids, regime, norm_regime, synth=True, device=device)
 
-    def GetJitter():
-        TT_res = synth_samples[0]['WFS']['tip/tilt residuals']
-        D = synth_config['telescope']['TelescopeDiameter']
-        ang_pix = synth_samples[0]['Detector']['psInMas'] / rad2mas
-        jitter = lambda a: 2*2*a/D/ang_pix
-        TT_jitter = jitter(TT_res)
-        Jx = TT_jitter[:,0].std() * ang_pix * rad2mas * 2.355
-        Jy = TT_jitter[:,1].std() * ang_pix * rad2mas * 2.355
-        return Jx, Jy
-
-    Jx, Jy = GetJitter()
+    Jx, Jy = GetJitter(synth_samples[0], synth_config)
 
     toy = TipTorch(synth_config, norm_regime, device=device, TipTop=True, PSFAO=False, oversampling=1)
 
