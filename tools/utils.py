@@ -10,6 +10,7 @@ from graphviz import Digraph
 from skimage.transform import resize
 import matplotlib.pyplot as plt
 from matplotlib import cm
+from scipy.ndimage import label
 
 
 rad2mas  = 3600 * 180 * 1000 / np.pi
@@ -22,39 +23,40 @@ r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
 
+def BuildPetalBasis(segmented_pupil, pytorch=True):
+    petals = np.stack( separate_islands(segmented_pupil) )
+
+    x, y = np.meshgrid(np.arange(segmented_pupil.shape[-1]), np.arange(segmented_pupil.shape[-2]))
+
+    tilt = (x[None, ...]*petals).astype(np.float64)
+    tip  = (y[None, ...]*petals).astype(np.float64)
+
+    def normalize_TT(x):
+        for i in range(petals.shape[0]):
+            x[i,...] = x[i,...] - x[i,...][np.where(petals[i,...])].mean()
+            x[i,...] = x[i,...] / x[i,...][np.where(petals[i,...])].std()
+            x[i,...] *= petals[i,...]
+        return x
+
+    tilt, tip = normalize_TT(tilt), normalize_TT(tip)
+    coefs = [1.]*petals.shape[0] + [0.]*petals.shape[0] + [0.]*petals.shape[0]
+    if not pytorch:
+        return np.vstack([petals, tilt, tip]), np.array(coefs)
+    else:
+        return torch.from_numpy( np.vstack([petals, tilt, tip]) ), torch.tensor(coefs)
+
+
 def separate_islands(binary_image):
-    from scipy.sparse import csr_matrix
-    from scipy.sparse.csgraph import connected_components
-
-    def find_islands(binary_image):
-        height, width = binary_image.shape
-        # Create a graph representation of the binary image
-        adjacency_matrix = np.zeros((height * width, height * width), dtype=np.uint8)
-        for i in range(height):
-            for j in range(width):
-                if binary_image[i, j] == 1:
-                    node_index = i * width + j
-                    for x, y in ((i-1, j), (i+1, j), (i, j-1), (i, j+1)):
-                        if 0 <= x < height and 0 <= y < width and binary_image[x, y] == 1:
-                            neighbor_index = x * width + y
-                            adjacency_matrix[node_index, neighbor_index] = 1
-
-        sparse_matrix = csr_matrix(adjacency_matrix)
-        n_components, labels = connected_components(csgraph=sparse_matrix, directed=False)
-        return n_components, labels
-
-    n_components, labels = find_islands(binary_image)
-    height, width = binary_image.shape
+    # Label each connected component (each "island") with a unique integer
+    labeled_image, num_features = label(binary_image)
+    # Create an empty list to store the separated images
     separated_images = []
 
-    for i in range(n_components):
-        island_image = np.zeros((height, width), dtype=np.uint8)
-        for label_idx, label in enumerate(labels):
-            if label == i:
-                x, y = divmod(label_idx, width)
-                island_image[x, y] = 1
-        if island_image.sum() > 1:
-            separated_images.append(island_image)
+    # Iterate over each unique label (each island)
+    for i in range(1, num_features + 1):
+        # Create an image with only the current island
+        island_image = (labeled_image == i).astype(int)
+        separated_images.append(island_image)
 
     return separated_images
 
@@ -455,22 +457,22 @@ class OptimizeLBFGS:
         self.model = model
         self.loss_fn = loss_fn
         self.verbous = verbous
+        
 
-
-    def Optimize(self, PSF_ref, to_optimize, steps):
+    def Optimize(self, PSF_ref, to_optimize, steps, args=[None]):
         optimizer = optim.LBFGS(to_optimize, lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
 
         early_stopping = EarlyStopping(patience=2, tolerance=0.01, relative=False)
 
         for i in range(steps):
             optimizer.zero_grad()
-            loss = self.loss_fn( self.model(), PSF_ref )
+            loss = self.loss_fn( self.model(*args), PSF_ref )
 
             if np.isnan(loss.item()): return
             early_stopping(loss)
 
             loss.backward() #retain_graph=True)
-            optimizer.step( lambda: self.loss_fn(self.model(), PSF_ref) )
+            optimizer.step( lambda: self.loss_fn(self.model(*args), PSF_ref) )
 
             if self.verbous:
                 print('Loss:', loss.item(), end="\r", flush=True)

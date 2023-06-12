@@ -3,6 +3,7 @@
 %autoreload 2
 
 import sys
+from typing import Any
 sys.path.insert(0, '..')
 
 import pickle
@@ -45,13 +46,10 @@ def compress(row):
 psf_df['Class'] = psf_df.apply(compress, axis=1)
 
 #%%
-
 import seaborn as sns
 
 # sns.scatterplot(data=psf_df, x='Jitter X', y='Wind speed (header)', type='kde')
-
 # sns.kdeplot(data=psf_df, x="Jitter X", y='r0 (SPARTA)', fill=False, alpha=.5)
-
 sns.displot(psf_df, x='Jitter X', bins=20)
 
 #%%
@@ -150,9 +148,9 @@ toy.optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
 _ = toy({
     # 'Jx':  Jx.flatten(),
     # 'Jy':  Jy.flatten(),
-    'F':   torch.tensor([0.89, 0.91]*toy.N_src, device=toy.device).flatten(),
-    'Jx':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
-    'Jy':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
+    'F':   torch.tensor([1.0, 1.0]*toy.N_src, device=toy.device).flatten(),
+    'Jx':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
+    'Jy':  torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
     'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
     'bg':  bg.to(device)
 })
@@ -308,6 +306,26 @@ result = least_squares(run, x0, method='trf', bounds=(x_l, x_h), ftol=1e-10, xto
 
 
 #%% PSF fitting (no early-stopping)
+from tools.utils import BuildPetalBasis, pdims
+
+class LWE_basis():
+    def __init__(self) -> None:
+        self.modal_basis, self.coefs = BuildPetalBasis(toy.pupil.cpu(), pytorch=True)
+        self.modal_basis = self.modal_basis.to(device)
+        self.coefs = self.coefs.to(device)
+        self.coefs.requires_grad = True
+        
+    def forward(self, wvl):
+        OPD = torch.sum(pdims(self.coefs, 2) * self.modal_basis, dim=0) * 1e-9 
+        return toy.pupil  * toy.apodizer * torch.exp(1j*2*np.pi/wvl*OPD)
+    
+    def __call__(self, *args):
+        return self.forward(*args)
+
+basis = LWE_basis()
+
+
+#%%
 from tools.utils import OptimizeLBFGS, mask_circle
 loss = nn.L1Loss(reduction='sum')
 
@@ -343,17 +361,20 @@ def loss_fn1(a,b):
 loss_fn1 = loss
 
 optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn1)
- 
-    
+
+# test = lambda x : toy.pupil * toy.apodizer
+test = lambda x: basis(x)
+
 optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 3)
 for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [toy.F], 4)
-    optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 4)
-    # optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 3)
-    # optimizer_lbfgs.Optimize(PSF_0, [toy.dn], 3)
-    # optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 4) #, [None, None, test])
+    optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.dn], 3)
+    optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy], 4)
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jxy], 4)
+    # optimizer_lbfgs.Optimize(PSF_0, [basis.coefs], 4, [None, None, test])
 
 PSF_1 = toy()
 PSF_DL = toy.DLPSF()
@@ -491,7 +512,6 @@ for i in range(10):
     optimizer_lbfgs.Optimize(PSF_0, [toy.Jxy], 3)
 
 PSF_1 = toy()
-
 
 #%%
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))

@@ -3,7 +3,6 @@
 %autoreload 2
 
 import sys
-from typing import Any
 sys.path.append('..')
 
 import torch
@@ -67,12 +66,11 @@ psf_df['Seeing (SPARTA)'] = seeing(psf_df['r0 (SPARTA)'],500e-9)
 synth_df = synth_df[synth_df['invalid'] == False]
 
 #%%
-good_fits_folder = 'E:/ESO/Data/SPHERE/good_fits_TipTorch/'
-
-files = os.listdir(good_fits_folder)
-good_ids = [int(file.split('.')[0]) for file in files]
-
+# good_fits_folder = 'E:/ESO/Data/SPHERE/good_fits_TipTorch/'
+# files = os.listdir(good_fits_folder)
+# good_ids = [int(file.split('.')[0]) for file in files]
 # psf_df = psf_df.loc[good_ids]
+
 fitted_ids = list( set( fitted_df.index.values.tolist() ).intersection( set(psf_df.index.values.tolist()) ) )
 fitted_df = fitted_df[fitted_df.index.isin(fitted_ids)]
 
@@ -89,6 +87,7 @@ fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
 synth_fitted_df['SR fit']  = 0.5 * (fitted_df['SR fit (left)'] + fitted_df['SR fit (right)'])
 synth_fitted_df['SR data'] = 0.5 * (fitted_df['SR data (left)'] + fitted_df['SR data (right)'])
 synth_fitted_df['J']       = np.sqrt(fitted_df['Jx'].pow(2) + fitted_df['Jy'].pow(2))
+synth_fitted_df['J init']  = np.sqrt(fitted_df['Jx init'].pow(2) + fitted_df['Jy init'].pow(2))
 synth_fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
 
 #%% Compute data transformations
@@ -373,12 +372,18 @@ test_df = pd.DataFrame({
 corr_plot(test_df, 'J predicted', 'J test')
 
 #%% ================ Land of synths ===================
-
 test = {
     'x': synth_fitted_df['n'] + synth_fitted_df['dn'],
     'y': synth_df['WFS noise (nm)'],
     'z': synth_df['Rate'],
-   
+}
+sns.scatterplot(test, x='x', y='y', hue='z', cmap='viridis')
+#%%
+
+test = {
+    'x': synth_fitted_df['Jx init'],
+    'y': synth_fitted_df['Jx'],
+    'z': synth_df['Rate'],
 }
 
 sns.scatterplot(test, x='x', y='y', hue='z', cmap='viridis')
