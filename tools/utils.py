@@ -23,6 +23,25 @@ r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
 
+def pad_lists(input_list, pad_value):
+    # Find the length of the longest list
+    max_len = max(len(x) if isinstance(x, list) else 1 for x in input_list)
+
+    if max_len == 1:
+        return input_list
+
+    # Function to pad a single element (either a number or a list)
+    def pad_element(element):
+        if isinstance(element, list):
+            return element + [pad_value] * (max_len - len(element))
+        else:
+            return [element] + [pad_value] * (max_len - 1)
+
+    # Apply padding to each element in the input list
+    return [pad_element(x) for x in input_list]
+
+
+
 def BuildPetalBasis(segmented_pupil, pytorch=True):
     petals = np.stack( separate_islands(segmented_pupil) )
 

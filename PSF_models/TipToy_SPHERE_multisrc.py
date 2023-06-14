@@ -395,10 +395,10 @@ class TipTorch(torch.nn.Module):
 
         def TransferFunctions(freq, Ts, delay, loopGain):
             z = torch.exp(-2j*np.pi*freq*Ts)
-            hInt = loopGain/(1.0 - z**(-1.0))
-            rtfInt = 1.0 / (1+hInt*z**(-delay))
-            atfInt = hInt * z**(-delay)*rtfInt
-            ntfInt = atfInt / z
+            hInt = loopGain / self._stabilize(1.0 - z**(-1.0), 1e-12)
+            rtfInt = 1.0 / self._stabilize(1+hInt*z**(-delay), 1e-12)
+            atfInt = self._stabilize(hInt * z**(-delay)*rtfInt)
+            ntfInt = self._stabilize(atfInt / z, 1e-12)
             return hInt, rtfInt, atfInt, ntfInt
 
         #f = torch.logspace(-3, torch.log10(torch.tensor([0.5/Ts])).item(), nF)

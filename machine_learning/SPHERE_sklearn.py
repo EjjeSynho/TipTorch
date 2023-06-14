@@ -35,12 +35,6 @@ with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
 with open('E:/ESO/Data/SPHERE/fitted_df.pickle', 'rb') as handle:
     fitted_df = pickle.load(handle)
 
-with open('E:/ESO/Data/SPHERE/synth_df.pickle', 'rb') as handle:
-    synth_df = pickle.load(handle)
-
-with open('E:/ESO/Data/SPHERE/synth_fitted_df.pickle', 'rb') as handle:
-    synth_fitted_df = pickle.load(handle)
-
 psf_df = psf_df[psf_df['invalid'] == False]
 psf_df = psf_df[psf_df['LWE'] == False]
 psf_df = psf_df[psf_df['doubles'] == False]
@@ -63,7 +57,6 @@ psf_df = psf_df[~pd.isnull(psf_df['FWHM'])]
 # psf_df = psf_df[~pd.isnull(psf_df['Temperature'])]
 
 psf_df['Seeing (SPARTA)'] = seeing(psf_df['r0 (SPARTA)'],500e-9)
-synth_df = synth_df[synth_df['invalid'] == False]
 
 #%%
 # good_fits_folder = 'E:/ESO/Data/SPHERE/good_fits_TipTorch/'
@@ -83,12 +76,6 @@ fitted_df['SR fit']  = 0.5 * (fitted_df['SR fit (left)'] + fitted_df['SR fit (ri
 fitted_df['SR data'] = 0.5 * (fitted_df['SR data (left)'] + fitted_df['SR data (right)'])
 fitted_df['J']       = np.sqrt(fitted_df['Jx'].pow(2) + fitted_df['Jy'].pow(2))
 fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
-
-synth_fitted_df['SR fit']  = 0.5 * (fitted_df['SR fit (left)'] + fitted_df['SR fit (right)'])
-synth_fitted_df['SR data'] = 0.5 * (fitted_df['SR data (left)'] + fitted_df['SR data (right)'])
-synth_fitted_df['J']       = np.sqrt(fitted_df['Jx'].pow(2) + fitted_df['Jy'].pow(2))
-synth_fitted_df['J init']  = np.sqrt(fitted_df['Jx init'].pow(2) + fitted_df['Jy init'].pow(2))
-synth_fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
 
 #%% Compute data transformations
 from data_processing.normalizers import Uniform, TransformSequence
@@ -122,9 +109,9 @@ transforms_input['ITTM pos (avg)']            = TransformSequence( transforms = 
 transforms_input['DM pos (avg)']              = TransformSequence( transforms = [ Uniform(a=-0.025, b=0.025) ])
 transforms_input['Seeing (SPARTA)']           = TransformSequence( transforms = [ Uniform(a=0.2, b=1.1) ])
 
-input_df = pd.DataFrame( {a: transforms_input[a].forward(psf_df[a].values) for a in transforms_input.keys()} )
-input_df.index = psf_df.index
-
+input_df = psf_df.copy()
+for entry in transforms_input:
+    input_df[entry] = transforms_input[entry].forward(input_df[entry])
 
 transforms_output = {}
 transforms_output['r0']              = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
@@ -149,9 +136,9 @@ transforms_output['SR fit (right)']  = TransformSequence( transforms = [ Uniform
 transforms_output['SR data']         = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
 transforms_output['SR fit']          = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
 
-output_df = pd.DataFrame( {a: transforms_output[a].forward(fitted_df[a].values) for a in transforms_output.keys()} )
-output_df.index = fitted_df.index
-
+output_df = fitted_df.copy()
+for entry in transforms_output:
+    output_df[entry] = transforms_output[entry].forward(output_df[entry])
 
 rows_with_nan = output_df.index[output_df.isna().any(axis=1)].values.tolist()
 rows_with_nan += fitted_df.index[fitted_df['F (right)'] > 2].values.tolist()
@@ -183,24 +170,17 @@ def corr_plot(data, entry_x, entry_y, lims=None):
     # plt.grid()
     plt.show()
 
-#%%
-from tools.utils import seeing
-
-# sns.kdeplot(data=fitted_df, x='F', y='J', fill=True, thresh=0.02, palette='viridis')
-# sns.kdeplot(data=psf_df, x='r0 (SPARTA)', y='DM pos (std)', fill=True, thresh=0.02, palette='viridis')
-sns.kdeplot(data=psf_df, x='Strehl', y='DM pos (avg)', fill=True, thresh=0.02, palette='viridis')
-
 
 #%% ================ Telemetry SR from telemetry ===================
 #% Select the entries to be used in training
 selected_entries_X = [
-        'Airmass',
+        # 'Airmass',
         # 'Seeing (MASSDIMM)',
         # 'FWHM',
         # 'Wind direction (MASSDIMM)',
         # 'Wind speed (MASSDIMM)',
         # 'Tau0 (MASSDIMM)',
-        'Seeing (SPARTA)',
+        # 'Seeing (SPARTA)',
         'Wind direction (header)',
         'Wind speed (header)',
         'Tau0 (header)',
@@ -371,22 +351,33 @@ test_df = pd.DataFrame({
 
 corr_plot(test_df, 'J predicted', 'J test')
 
-#%% ================ Land of synths ===================
-test = {
-    'x': synth_fitted_df['n'] + synth_fitted_df['dn'],
-    'y': synth_df['WFS noise (nm)'],
-    'z': synth_df['Rate'],
-}
-sns.scatterplot(test, x='x', y='y', hue='z', cmap='viridis')
 #%%
+# Split the dataset into a training set and a test set
+X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
+#%
+gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
+reg = LinearRegression()
+reg.fit(X_train, y_train)
+gbr.fit(X_train, y_train)
+y_pred = gbr.predict(X_test)
+y_pred_reg = reg.predict(X_test)
 
-test = {
-    'x': synth_fitted_df['Jx init'],
-    'y': synth_fitted_df['Jx'],
-    'z': synth_df['Rate'],
-}
+# y_pred = y_pred_reg
 
-sns.scatterplot(test, x='x', y='y', hue='z', cmap='viridis')
+err = np.abs(y_test-y_pred) * 100
+print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
+print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
+print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
+print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
+print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
+
+
+test_df = pd.DataFrame({
+    'J predicted': transforms_output_synth['Jx'].backward(y_pred),
+    'J test': transforms_output_synth['Jx'].backward(y_test),
+})
+
+corr_plot(test_df, 'J predicted', 'J test')
 
 
 #%%

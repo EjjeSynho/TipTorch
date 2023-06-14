@@ -3,33 +3,45 @@
 %autoreload 2
 
 import sys
-from typing import Any
 sys.path.append('..')
 
-import torch
-import pickle
-
-from project_globals import SPHERE_DATA_FOLDER, DATA_FOLDER, device
-import pandas as pd
-import seaborn as sns
-import matplotlib.pyplot as plt
-import numpy as np
+from project_globals import SPHERE_DATA_FOLDER, WEIGHTS_FOLDER, device
+from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
+from data_processing.normalizers import Uniform, TransformSequence
+from PSF_models.TipToy_SPHERE_multisrc import TipTorch
+from tools.utils import seeing, plot_radial_profiles
+from torch import nn, optim
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import seaborn as sns
+import pandas as pd
+import numpy as np
+import pickle
+import torch
 import os
 
 #%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
+
 psf_df = psf_df[psf_df['invalid'] == False]
+psf_df = psf_df[psf_df['LWE'] == False]
+psf_df = psf_df[psf_df['doubles'] == False]
+psf_df = psf_df[psf_df['No coronograph'] == False]
+psf_df = psf_df[~pd.isnull(psf_df['r0 (SPARTA)'])]
+psf_df = psf_df[~pd.isnull(psf_df['Nph WFS'])]
+psf_df = psf_df[~pd.isnull(psf_df['Strehl'])]
+psf_df = psf_df[~pd.isnull(psf_df['FWHM'])]
+psf_df = psf_df[psf_df['Nph WFS'] < 5000]
+# psf_df = psf_df[psf_df['λ left (nm)'] == 1625]
+psf_df = psf_df[psf_df['λ left (nm)'] < 1626]
+psf_df = psf_df[psf_df['λ left (nm)'] > 1624]
 
-with open(SPHERE_DATA_FOLDER+'synth_df.pickle', 'rb') as handle:
-    synth_df = pickle.load(handle)
-
-synth_df = synth_df[synth_df['invalid'] == False]
-
-valid_ids = list( set( synth_df.index.values.tolist() ).intersection( set(synth_df.index.values.tolist()) ) )
-# psf_df = psf_df.loc[valid_ids]
-
+psf_df['Wind direction (200 mbar)'].fillna(psf_df['Wind direction (header)'], inplace=True)
+psf_df['Wind speed (200 mbar)'].fillna(psf_df['Wind speed (header)'], inplace=True)
+psf_df.rename(columns={'Filter WFS': 'λ WFS (nm)'}, inplace=True)
+psf_df.rename(columns={'Nph WFS': 'Nph WFS (data)'}, inplace=True)
+psf_df.rename(columns={'r0 (SPARTA)': 'r0 (data)'}, inplace=True)
 
 #%%
 # ids_class_C = set(psf_df.index[psf_df['Class C'] == True])
@@ -41,36 +53,36 @@ print(len(good_ids), 'samples are in the dataset')
 
 #% Select the entries to be used in training
 selected_entries = ['Airmass',
-                    'r0 (SPARTA)',
+                    'r0 (data)',
                     'FWHM',
                     'Strehl',
                     'Wind direction (header)',
                     'Wind speed (header)',
+                    'Wind direction (200 mbar)',
+                    'Wind speed (200 mbar)',
                     'Tau0 (header)',
-                    'Nph WFS',
+                    'Flux WFS',
+                    'Nph WFS (data)',
+                    'λ WFS (nm)',
                     'Rate',
                     'Jitter X',
                     'Jitter Y',
                     'λ left (nm)',
                     'λ right (nm)']
 
-# psf_df['Nph WFS'] *= psf_df['Rate']
-psf_df['Jitter X'] = psf_df['Jitter X'].abs()
-psf_df['Jitter Y'] = psf_df['Jitter Y'].abs()
-
 psf_df = psf_df[selected_entries]
 psf_df.sort_index(inplace=True)
 
 #%% Create fitted parameters dataset
 #check if file exists
-if not os.path.isfile('E:/ESO/Data/SPHERE/synth_fitted_df.pickle'):
-    fitted_dict_raw = {key: [] for key in ['F', 'dx', 'dy', 'r0', 'n', 'dn', 'bg', 'Jx', 'Jy', 'Jxy', 'Nph WFS', 'SR data', 'SR fit', 'Jx init', 'Jy init']}
+if not os.path.isfile('E:/ESO/Data/SPHERE/fitted_df.pickle'):
+    fitted_dict_raw = {key: [] for key in ['F', 'dx', 'dy', 'r0', 'n', 'dn', 'bg', 'Jx', 'Jy', 'Jxy', 'Nph WFS', 'SR data', 'SR fit']}
     ids = []
 
     images_data = []
     images_fitted = []
-    
-    fitted_folder = SPHERE_DATA_FOLDER + 'IRDIS_fitted_OOPAO/'
+
+    fitted_folder = 'E:/ESO/Data/SPHERE/IRDIS_fitted_1P21I/'
     fitted_files = os.listdir(fitted_folder)
 
     for file in tqdm(fitted_files):
@@ -78,7 +90,7 @@ if not os.path.isfile('E:/ESO/Data/SPHERE/synth_fitted_df.pickle'):
 
         with open(fitted_folder + file, 'rb') as handle:
             data = pickle.load(handle)
-        
+            
         images_data.append( data['Img. data'] )
         images_fitted.append( data['Img. fit'] )
 
@@ -92,10 +104,6 @@ if not os.path.isfile('E:/ESO/Data/SPHERE/synth_fitted_df.pickle'):
     for key in fitted_dict_raw.keys():
         fitted_dict[key] = np.squeeze(np.array(fitted_dict_raw[key]))
 
-    invalid = False
-    if np.any(np.isnan(data['Img. fit'])):
-        invalid = True
-
     fitted_dict['F (left)'  ] = fitted_dict['F'][:,0]
     fitted_dict['F (right)' ] = fitted_dict['F'][:,1]
     fitted_dict['bg (left)' ] = fitted_dict['bg'][:,0]
@@ -106,353 +114,174 @@ if not os.path.isfile('E:/ESO/Data/SPHERE/synth_fitted_df.pickle'):
     fitted_dict['SR fit (left)']   = fitted_dict['SR fit'][:,0]
     fitted_dict['SR fit (right)']  = fitted_dict['SR fit'][:,1]
     
-    fitted_dict['invalid'] = invalid
-    
     fitted_dict.pop('F')
     fitted_dict.pop('bg')
 
     for key in fitted_dict.keys():
-        if key != 'invalid':
-            fitted_dict[key] = fitted_dict[key].tolist()
-
-    # images_dict = {
-    #     'ID': ids,
-    #     'PSF (data)': images_data,
-    #     'PSF (fit)': images_fitted
-    # }
+        fitted_dict[key] = fitted_dict[key].tolist()
 
     fitted_df = pd.DataFrame(fitted_dict)
     fitted_df.set_index('ID', inplace=True)
 
     # Save dataframe
-    with open('E:/ESO/Data/SPHERE/synth_fitted_df.pickle', 'wb') as handle:
+    with open('E:/ESO/Data/SPHERE/fitted_df.pickle', 'wb') as handle:
         pickle.dump(fitted_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
         
 else:
-    with open('E:/ESO/Data/SPHERE/synth_fitted_df.pickle', 'rb') as handle:
-        print('Loading dataframe "synth_fitted_df.pickle"...')
+    with open('E:/ESO/Data/SPHERE/fitted_df.pickle', 'rb') as handle:
+        print('Loading dataframe "fitted_df.pickle"...')
         fitted_df = pickle.load(handle)
 
-fitted_ids = list( set( fitted_df.index.values.tolist() ).intersection( set(synth_df.index.values.tolist()) ) )
+fitted_ids = list( set( fitted_df.index.values.tolist() ).intersection( set(psf_df.index.values.tolist()) ) )
 fitted_df = fitted_df[fitted_df.index.isin(fitted_ids)]
 
-# Absolutize positive-only values
 for entry in ['r0','Jx','Jy','Jxy','F (left)','F (right)']:
     fitted_df[entry] = fitted_df[entry].abs()
-fitted_df.sort_index(inplace=True)
 
+fitted_df['dn'] = fitted_df['dn'].abs()
+fitted_df['n']  = fitted_df['n'].abs()
+fitted_df['Rec. noise'] = np.sqrt((fitted_df['n']+fitted_df['dn']).abs())*psf_df['λ WFS (nm)']/2/np.pi * 1e9
+fitted_df.rename(columns={'r0': 'r0 (fit)'}, inplace=True)
+fitted_df.rename(columns={'Nph WFS': 'Nph WFS (fit)'}, inplace=True)
+fitted_df['SR fit']  = 0.5 * (fitted_df['SR fit (left)'] + fitted_df['SR fit (right)'])
+fitted_df['SR data'] = 0.5 * (fitted_df['SR data (left)'] + fitted_df['SR data (right)'])
+fitted_df['J']       = np.sqrt(fitted_df['Jx'].pow(2) + fitted_df['Jy'].pow(2))
+fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
+
+ids = fitted_df.index.intersection(psf_df.index)
+fitted_df = fitted_df.loc[ids]
+synth_df = psf_df.loc[ids]
+
+df = pd.concat([synth_df, fitted_df], axis=1).fillna(0)
 
 #%% Compute data transformations
-from data_processing.normalizers import BoxCox, Uniform, TransformSequence, Invert, DataTransformer
 
 transforms_input = {}
-transforms_input['Airmass']                 = TransformSequence( transforms = [ Uniform(a=1.0, b=2.2) ])
-transforms_input['r0 (SPARTA)']             = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
-transforms_input['Wind direction (header)'] = TransformSequence( transforms = [ Uniform(a=0, b=360) ])
-transforms_input['Wind speed (header)']     = TransformSequence( transforms = [ Uniform(a=0.0, b=17.5) ])
-transforms_input['Tau0 (header)']           = TransformSequence( transforms = [ Uniform(a=0.0, b=0.025) ])
-transforms_input['λ left (nm)']             = TransformSequence( transforms = [ Uniform(a=psf_df['λ left (nm)'].min(), b=psf_df['λ left (nm)'].max()) ])
-transforms_input['λ right (nm)']            = TransformSequence( transforms = [ Uniform(a=psf_df['λ right (nm)'].min(), b=psf_df['λ right (nm)'].max()) ])
-transforms_input['Rate']                    = TransformSequence( transforms = [ Uniform(a=psf_df['Rate'].min(), b=psf_df['Rate'].max()) ])
-transforms_input['FWHM']                    = TransformSequence( transforms = [ Uniform(a=0.5, b=3.0) ])
-transforms_input['Nph WFS']                 = TransformSequence( transforms = [ Uniform(a=0, b=2e6) ])
-transforms_input['Strehl']                  = TransformSequence( transforms = [ Uniform(a=0.015, b=1.0) ])
-transforms_input['Jitter X']                = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
-transforms_input['Jitter Y']                = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
-
-# input_df = pd.DataFrame( {a: transforms_input[a].forward(psf_df[a].values) for a in transforms_input.keys()} )
-# input_df.index = psf_df.index
-
-input_df = psf_df.copy()
-for entry in transforms_input:
-    input_df[entry] = transforms_input[entry].forward(input_df[entry])
+transforms_input['Tau0 (header)']             = TransformSequence( transforms = [ Uniform(a=0.0, b=0.025) ])
+transforms_input['λ left (nm)']               = TransformSequence( transforms = [ Uniform(a=psf_df['λ left (nm)'].min(), b=psf_df['λ left (nm)'].max()) ])
+transforms_input['λ right (nm)']              = TransformSequence( transforms = [ Uniform(a=psf_df['λ right (nm)'].min(), b=psf_df['λ right (nm)'].max()) ])
+transforms_input['FWHM']                      = TransformSequence( transforms = [ Uniform(a=0.5, b=3.0) ])
+transforms_input['Jitter X']                  = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
+transforms_input['Jitter Y']                  = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
+transforms_input['Airmass']                   = TransformSequence( transforms = [ Uniform(a=1.0, b=1.5) ])
+transforms_input['Strehl']                    = TransformSequence( transforms = [ Uniform(a=0,   b=1)] )
+transforms_input['r0 (data)']                 = TransformSequence( transforms = [ Uniform(a=0.1, b=0.5)] )
+transforms_input['Rate']                      = TransformSequence( transforms = [ Uniform(a=0,   b=1380)] )
+transforms_input['Nph WFS (data)']            = TransformSequence( transforms = [ Uniform(a=0,   b=200)] )
+transforms_input['Flux WFS']                  = TransformSequence( transforms = [ Uniform(a=0,   b=2000)] )
+transforms_input['Wind speed (header)']       = TransformSequence( transforms = [ Uniform(a=0,   b=20)] )
+transforms_input['Wind direction (header)']   = TransformSequence( transforms = [ Uniform(a=0,   b=360)] )
+transforms_input['Wind direction (200 mbar)'] = TransformSequence( transforms = [ Uniform(a=0,   b=360)] ) 
+transforms_input['Wind speed (200 mbar)'   ]  = TransformSequence( transforms = [ Uniform(a=0,   b=70)] )
 
 transforms_output = {}
-transforms_output['r0']         = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
-transforms_output['bg (left)']  = TransformSequence( transforms = [ Uniform(a=-0.2e-5, b=0.4e-5) ])
-transforms_output['bg (right)'] = TransformSequence( transforms = [ Uniform(a=-0.2e-5, b=0.4e-5) ])
-transforms_output['dx']         = TransformSequence( transforms = [ Uniform(a=-1, b=1) ])
-transforms_output['dy']         = TransformSequence( transforms = [ Uniform(a=-1, b=1) ])
-transforms_output['F (left)']   = TransformSequence( transforms = [ Uniform(a=0.3, b=1.5) ])
-transforms_output['F (right)']  = TransformSequence( transforms = [ Uniform(a=0.3, b=1.5) ])
-transforms_output['Jx']         = TransformSequence( transforms = [ Uniform(a=0, b=60) ])
-transforms_output['Jy']         = TransformSequence( transforms = [ Uniform(a=0, b=60) ])
-transforms_output['Jxy']        = TransformSequence( transforms = [ Uniform(a=0, b=200) ])
-transforms_output['Nph WFS']    = TransformSequence( transforms = [ Uniform(a=0, b=2e6) ])
-transforms_output['n']          = TransformSequence( transforms = [ Uniform(a=0, b=0.005) ])
-transforms_output['dn']         = TransformSequence( transforms = [ Uniform(a=-0.2, b=0.2) ])
+transforms_output['dx']              = TransformSequence( transforms = [ Uniform(a=-0.5, b=0.5) ] )
+transforms_output['dy']              = TransformSequence( transforms = [ Uniform(a=-0.5, b=0.5) ] )
+transforms_output['r0 (fit)']        = TransformSequence( transforms = [ Uniform(a=0.0,  b=1.0) ] )
+transforms_output['n']               = TransformSequence( transforms = [ Uniform(a=0.0,  b=17.0 ) ] )
+transforms_output['dn']              = TransformSequence( transforms = [ Uniform(a=0, b=50) ] )
+transforms_output['Rec. noise']      = TransformSequence( transforms = [ Uniform(a=0, b=1250) ] )
+transforms_output['J']               = TransformSequence( transforms = [ Uniform(a=0, b=40) ] )
+transforms_output['Jx']              = TransformSequence( transforms = [ Uniform(a=0, b=40) ] )
+transforms_output['Jy']              = TransformSequence( transforms = [ Uniform(a=0, b=40) ] )
+transforms_output['Jxy']             = TransformSequence( transforms = [ Uniform(a=0, b=300) ] )
+transforms_output['Nph WFS (fit)']   = TransformSequence( transforms = [ Uniform(a=0, b=300) ] )
+transforms_output['F']               = TransformSequence( transforms = [ Uniform(a=0, b=1.5) ] )
+transforms_output['F (left)']        = TransformSequence( transforms = [ Uniform(a=0, b=1.5) ] )
+transforms_output['F (right)']       = TransformSequence( transforms = [ Uniform(a=0, b=1.5) ] )
+transforms_output['bg (left)']       = TransformSequence( transforms = [ Uniform(a=-1e-5, b=1e-5) ] )
+transforms_output['bg (right)']      = TransformSequence( transforms = [ Uniform(a=-1e-5, b=1e-5) ] )
+transforms_output['SR data']         = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR fit']          = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR data (left)']  = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR data (right)'] = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR fit (left)']   = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR fit (right)']  = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
 
-# output_df = pd.DataFrame( {a: transforms_output[a].forward(fitted_df[a].values) for a in transforms_output.keys()} )
-# output_df.index = fitted_df.index
+transforms = {**transforms_input, **transforms_output}
 
-output_df = fitted_df.copy()
-for entry in transforms_output:
-    output_df[entry] = transforms_output[entry].forward(output_df[entry])
-
-rows_with_nan = output_df.index[output_df.isna().any(axis=1)].values.tolist()
-rows_with_nan += fitted_df.index[fitted_df['Jxy'] > 300].values.tolist()
-rows_with_nan += fitted_df.index[fitted_df['F (right)'] > 2].values.tolist()
-rows_with_nan += fitted_df.index[fitted_df['Jx'] > 70].values.tolist()
-rows_with_nan += fitted_df.index[fitted_df['Jy'] > 70].values.tolist()
-
-fitted_subset = ['F (left)', 'F (right)', 'Jx', 'Jy', 'Jxy']
-
-delta_df = fitted_df.copy()
-delta_df = delta_df[fitted_subset]
-delta_df['F (left)']  = delta_df['F (left)']   - [1.0]*len(delta_df)
-delta_df['F (right)'] = delta_df['F (right)']  - [1.0]*len(delta_df)
-delta_df['Jx']        = delta_df['Jx']         - psf_df['Jitter X']
-delta_df['Jy']        = delta_df['Jy']         - psf_df['Jitter Y']
-delta_df['Jxy']       = delta_df['Jxy']        - 0   
-
-transforms_diff = {}
-transforms_diff['F (left)']   = TransformSequence( transforms = [ Uniform(a=-0.4, b=0.2) ])
-transforms_diff['F (right)']  = TransformSequence( transforms = [ Uniform(a=-0.4, b=0.2) ])
-transforms_diff['Jx']         = TransformSequence( transforms = [ Uniform(a=-20,  b=60) ])
-transforms_diff['Jy']         = TransformSequence( transforms = [ Uniform(a=-20,  b=60) ])
-transforms_diff['Jxy']        = TransformSequence( transforms = [ Uniform(a=0,    b=200) ])
-
-diff_df = pd.DataFrame( {a: transforms_diff[a].forward(delta_df[a].values) for a in transforms_diff.keys()} )
-diff_df.index = delta_df.index
-
-def SaveTransformedResults():
-    save_path = DATA_FOLDER/"temp/SPHERE params TipTorch OOPAO/psf_df"
-    for entry in selected_entries:
-        sns.displot(data=psf_df, x=entry, kde=True, bins=20)
-        plt.savefig(save_path/f"{entry}.png")
-        plt.close()
-
-    save_path = DATA_FOLDER/"temp/SPHERE params TipTorch OOPAO/fitted_df"
-    for entry in fitted_df.columns.values.tolist():
-        sns.displot(data=fitted_df, x=entry, kde=True, bins=20)
-        plt.savefig(save_path/f"{entry}.png")
-        plt.close()
-
-    save_path = DATA_FOLDER/"temp/SPHERE params TipTorch OOPAO/input_df"
-    for entry in transforms_input.keys():
-        sns.displot(data=input_df, x=entry, kde=True, bins=20)
-        plt.savefig(save_path/f"{entry}.png")
-        plt.close()
-
-    save_path = DATA_FOLDER/"temp/SPHERE params TipTorch OOPAO/output_df"
-    for entry in output_df.columns.values.tolist():
-        sns.displot(data=output_df, x=entry, kde=True, bins=20)
-        plt.savefig(save_path/f"{entry}.png")
-        plt.close()
-
-    inp_inv_df = pd.DataFrame( {a: transforms_input[a].backward(input_df[a].values) for a in transforms_input.keys()} )
-    save_path = DATA_FOLDER/"temp/SPHERE params TipTorch OOPAO/inp_inv_df"
-    for entry in transforms_input.keys():
-        sns.displot(data=inp_inv_df, x=entry, kde=True, bins=20)
-        plt.savefig(save_path/f"{entry}.png")
-        plt.close()
-
-    out_inv_df = pd.DataFrame( {a: transforms_output[a].backward(output_df[a].values) for a in transforms_output.keys()} )
-    save_path = DATA_FOLDER/"temp/SPHERE params TipTorch OOPAO/out_inv_df"
-    for entry in output_df.columns.values.tolist():
-        sns.displot(data=out_inv_df, x=entry, kde=True, bins=20)
-        plt.savefig(save_path/f"{entry}.png")
-        plt.close()
-
-# SaveTransformedResults()
-
-# sns.displot(data=psf_df, x='Jitter X', kde=True, bins=20)
-# sns.displot(data=fitted_df, x='Jx', kde=True, bins=20)
-# sns.displot(data=diff_df, x='Jx', kde=True, bins=20)
-
+trans_df = df.copy()
+for entry in transforms:
+    trans_df[entry] = transforms[entry].forward(trans_df[entry])
 
 #%%
-psf_df.drop(rows_with_nan, inplace=True)
-input_df.drop(rows_with_nan, inplace=True)
-fitted_df.drop(rows_with_nan, inplace=True)
-output_df.drop(rows_with_nan, inplace=True)
-delta_df.drop(rows_with_nan, inplace=True)
-diff_df.drop(rows_with_nan, inplace=True)
+selected_X = ['r0 (data)',
+              'Rate',
+              'Nph WFS (data)',
+              'Wind speed (header)',
+              'Wind direction (header)',
+            #   'Flux WFS',
+              'Wind speed (200 mbar)',
+              'Wind direction (200 mbar)']
 
-psf_df.sort_index(inplace=True)
-fitted_df.sort_index(inplace=True)
-delta_df.sort_index(inplace=True)
-diff_df.sort_index(inplace=True)
+selected_Y = [
+    'Rec. noise',
+    'Jx',
+    'Jy',
+    'F (left)',
+    'F (right)']
 
-print('Number of samples after the filtering: {}'.format(len(psf_df)))
+NN2in  = lambda X: { selected: transforms[selected].backward(X[:,i]) for i,selected in enumerate(selected_X) }
+NN2fit = lambda Y: { selected: transforms[selected].backward(Y[:,i]) for i,selected in enumerate(selected_Y) }
+in2NN  = lambda inp: torch.from_numpy(( np.stack([transforms[a].forward(inp[a].values) for a in selected_X]))).T
+fit2NN = lambda out: torch.from_numpy(( np.stack([transforms[a].forward(out[a].values) for a in selected_Y]))).T
 
-assert psf_df.index.equals(fitted_df.index)
+for entry in selected_X:
+    trans_df = trans_df[trans_df[entry].abs() < 3]
+    # print(trans_df[entry].abs() < 3)
 
-#%% Group by wavelengths
-print('Grouping data by wavelengths...')
-
-psf_df['λ group'] = psf_df.groupby(['λ left (nm)', 'λ right (nm)']).ngroup()
-unique_wvls = psf_df[['λ left (nm)', 'λ right (nm)', 'λ group']].drop_duplicates()
-group_counts = psf_df.groupby(['λ group']).size().reset_index(name='counts')
-group_counts = group_counts.set_index('λ group')
-print(group_counts)
-
-# Flag train and validation sets
-def generate_binary_sequence(size, percentage_of_ones):
-    sequence = np.random.choice([0, 1], size=size-1, p=[1-percentage_of_ones, percentage_of_ones])
-    sequence = np.append(sequence, 1)
-    np.random.shuffle(sequence)
-    return sequence
-    
-train_valid_df = { 'ID': [], 'For validation': [] }
-
-for group_id in group_counts.index.values:
-    ids = psf_df[psf_df['λ group'] == group_id].index.values
-    train_valid_ratio = generate_binary_sequence(len(ids), 0.2)
-    train_valid_df['ID'] += ids.tolist()
-    train_valid_df['For validation'] += train_valid_ratio.tolist()
-
-train_valid_df = pd.DataFrame(train_valid_df)
-train_valid_df.set_index('ID', inplace=True)
-train_valid_df.sort_index(inplace=True)
-train_valid_df[train_valid_df['For validation'] == 1] = True
-train_valid_df[train_valid_df['For validation'] == 0] = False
-
-psf_df = pd.concat([psf_df, train_valid_df], axis=1)
-
-# Split into the batches with the same wavelength
-psf_df_batches_train = []
-psf_df_batches_valid = []
-
-fitted_df_batches_train = []
-fitted_df_batches_valid = []
-
-for group_id in group_counts.index.values:
-    batch_ids = psf_df.index[psf_df['λ group'] == group_id]
-    
-    buf_psf_df    = psf_df.loc[batch_ids]
-    buf_fitted_df = fitted_df.loc[batch_ids]
-    
-    buf_train_ids = buf_psf_df.index[buf_psf_df['For validation'] == False]
-    buf_val_ids   = buf_psf_df.index[buf_psf_df['For validation'] == True ]
-    
-    # Split big batches into smaller ones
-    if len(buf_train_ids) > 40:
-        n_parts = np.ceil(len(buf_train_ids) // 32)
-        id_divisions = np.array_split(buf_train_ids, n_parts)
-        psf_df_batches_train += [buf_psf_df.loc[ids] for ids in id_divisions]
-        fitted_df_batches_train += [buf_fitted_df.loc[ids] for ids in id_divisions]
-    else:
-        psf_df_batches_train.append(buf_psf_df.loc[buf_train_ids])
-        fitted_df_batches_train.append(buf_fitted_df.loc[buf_train_ids])
-    
-    # Split big batches into smaller ones
-    if len(buf_val_ids) > 40:
-        n_parts = np.ceil(len(buf_val_ids) // 32)
-        id_divisions = np.array_split(buf_val_ids, n_parts)
-        psf_df_batches_valid += [buf_psf_df.loc[ids] for ids in id_divisions]
-        fitted_df_batches_valid += [buf_fitted_df.loc[ids] for ids in id_divisions]
-    else:
-        psf_df_batches_valid.append(buf_psf_df.loc[buf_val_ids])
-        fitted_df_batches_valid.append(buf_fitted_df.loc[buf_val_ids])
-
-print('Number of batches for training: {}'.format(len(psf_df_batches_train)))
-print('Number of batches for validation: {}'.format(len(psf_df_batches_valid)))
-
-for i in range(len(psf_df_batches_train)):
-    assert len(psf_df_batches_train[i]) == len(fitted_df_batches_train[i])
-    
-for i in range(len(psf_df_batches_valid)):
-    assert len(psf_df_batches_valid[i]) == len(fitted_df_batches_valid[i])
-
-# for i in range(len(psf_df_batches_train)):
-    # print(len(psf_df_batches_train[i]), len(fitted_df_batches_train[i]))
-    
-# for i in range(len(psf_df_batches_valid)):
-#     print(len(psf_df_batches_valid[i]), len(fitted_df_batches_valid[i]))
+for entry in selected_Y:
+    trans_df = trans_df[trans_df[entry].abs() < 3]
 
 #%%
-# df_ultimate = pd.concat([input_df, output_df], axis=1)
-# df_ultimate = pd.concat([psf_df, fitted_df], axis=1)
-df_ultimate = pd.concat([psf_df, fitted_df], axis=1)
+def toy_run(model, data, pred):
+    conv = lambda x: torch.from_numpy(np.array(x)).to(device).float()
+    model.F  = torch.vstack([pred['F (left)'], pred['F (right)' ]]).T
+    model.bg = torch.vstack([conv(data['bg (left)']), conv(data['bg (right)'])]).T
 
-columns_to_drop = ['F (right)', 'bg (right)', 'λ right (nm)', 'Strehl']
+    for attr in ['Jy', 'Jx']:
+        setattr(model, attr, pred[attr])
+    for attr in ['dx', 'dy', 'r0 (data)', 'Jxy']:
+        setattr(model, attr, conv(data[attr]))
+        
+    model.WFS_Nph = conv(data['Nph WFS (data)'])
+    inv_a2 = conv( 1 / (data['λ WFS (nm)']*1e9/2/np.pi)**2 )
+    model.dn = inv_a2 * pred['Rec. noise']**2 - conv(data['n'])
+    
+    return model.forward()
+      
+    
+def prepare_batch_configs(batches):
+    batches_dict = []
+    for i in tqdm(range(len(batches))):
+        sample_ids = batches[i].index.tolist()
+        PSF_0, _, _, _, config_files = SPHERE_preprocess(sample_ids, 'different', 'sum', device)
 
-for column_to_drop in columns_to_drop:
-    if column_to_drop in df_ultimate.columns:
-        df_ultimate = df_ultimate.drop(column_to_drop, axis=1)
+        batch_dict = {
+            'df': batches[i],
+            'ids': sample_ids,
+            'PSF (data)': PSF_0,
+            'configs': config_files,
+            'X': in2NN ( batches[i].loc[sample_ids] ),
+            'Y': fit2NN( batches[i].loc[sample_ids] )
+        }
+        batches_dict.append(batch_dict)
+    return batches_dict
 
-df_ultimate = df_ultimate.sort_index(axis=1)
-
-# corr_method = 'pearson'
-# corr_method = 'spearman'
-corr_method = 'kendall'
-
-spearman_corr = df_ultimate.corr(method=corr_method)
-
-# Generate a mask for the upper triangle
-mask = np.triu(np.ones_like(spearman_corr, dtype=bool))
-
-# Set up the matplotlib figure
-f, ax = plt.subplots(figsize=(11, 9))
-ax.set_title("Correlation matrix ({})".format(corr_method))
-# Generate a custom diverging colormap
-cmap = sns.diverging_palette(230, 20, as_cmap=True)
-# Draw the heatmap with the mask and correct aspect ratio
-sns.heatmap(spearman_corr, mask=mask, cmap=cmap, vmax=.3, center=0,
-            square=True, linewidths=.5, cbar_kws={"shrink": .5})
-plt.xticks(rotation=45, ha='right')
-# plt.yticks(rotation=45)
-plt.show()
-#%%
-# sns.kdeplot(data = input_df,
-#             x='Rate',
-#             y='Nph WFS',
-#             color='r', fill=True, Label='Iris_Setosa',
-#             cmap="Reds", thresh=0.02)
-
-# sns.kdeplot(data = input_df,
-#             x='r0 (SPARTA)',
-#             y='Tau0 (header)',
-#             color='r', fill=True, Label='Iris_Setosa',
-#             cmap="Reds", thresh=0.02)
-
-sns.pairplot(data=psf_df, vars=[
-    'Nph WFS',
-    'r0 (SPARTA)',
-    'Tau0 (header)',
-    'Wind speed (header)',
-    'FWHM'], corner=True, kind='kde')
-    # 'FWHM'], hue='λ left (nm)', kind='kde')
-
+batch_test = prepare_batch_configs([df.iloc[:64]])
 
 #%%
-# psf_df --> in --> gnosis --> out --> PAO --> image
-
-fl_in_keys  = list(transforms_input.keys())
-fl_out_keys = list(transforms_output.keys())
-
-gnosis2in    = lambda X: { fl_in_keys[i]:  transforms_input[fl_in_keys[i]].backward(X[:,i])   for i in range(len(fl_in_keys))  }
-in2gnosis    = lambda inp: torch.from_numpy(( np.stack([transforms_input[a].forward(inp[a].values)  for a in fl_in_keys]) )).T
-gnosis2PAO   = lambda Y: { fl_out_keys[i]:   transforms_output[fl_out_keys[i]  ].backward(Y[:,i]) for i in range(len(fl_out_keys)) }
-gnosis2PAO_1 = lambda Y: { fitted_subset[i]: transforms_output[fitted_subset[i]].backward(Y[:,i]) for i in range(len(fitted_subset)) }
-PAO2gnosis   = lambda out: torch.from_numpy(( np.stack([transforms_output[a].forward(out[a].values) for a in fl_out_keys]))).T
-PAO2gnosis_1 = lambda out: torch.from_numpy(( np.stack([transforms_output[a].forward(out[a].values) for a in fitted_subset]))).T
-
-psf_df_train,    psf_df_valid    = pd.concat(psf_df_batches_train),    pd.concat(psf_df_batches_valid)
-fitted_df_train, fitted_df_valid = pd.concat(fitted_df_batches_train), pd.concat(fitted_df_batches_valid)
-
-X_train,   X_valid   = in2gnosis(psf_df_train),       in2gnosis(psf_df_valid)
-Y_train,   Y_valid   = PAO2gnosis(fitted_df_train),   PAO2gnosis(fitted_df_valid)
-Y_train_1, Y_valid_1 = PAO2gnosis_1(fitted_df_train), PAO2gnosis_1(fitted_df_valid)
-
-
-#%%
-from project_globals import device
-import torch.nn as nn
-import torch.optim as optim
-
-# Define the network architecture
-class Gnosis2(nn.Module):
-    def __init__(self, in_size, out_size, hidden_size=100, dropout_p=0.5):
-        super(Gnosis2, self).__init__()
+# Load the model
+class ParamPredictor(nn.Module):
+    def __init__(self, in_size, out_size, hidden_size=100, dropout_p=0.0):
+        super(ParamPredictor, self).__init__()
         self.fc1 = nn.Linear(in_size, hidden_size)
-        self.dropout1 = nn.Dropout(dropout_p)
         self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, out_size)
+        
+        self.dropout1 = nn.Dropout(dropout_p)
         self.dropout2 = nn.Dropout(dropout_p)
-        self.fc3 = nn.Linear(hidden_size, hidden_size*2)
         self.dropout3 = nn.Dropout(dropout_p)
-        self.fc4 = nn.Linear(hidden_size*2, out_size)
 
     def forward(self, x):
         x = torch.tanh(self.fc1(x))
@@ -460,18 +289,27 @@ class Gnosis2(nn.Module):
         x = torch.tanh(self.fc2(x))
         x = self.dropout2(x)
         x = torch.tanh(self.fc3(x))
-        x = self.dropout3(x)
-        x = torch.tanh(self.fc4(x))
         return x
-    
-# Initialize the network, loss function and optimizer
-net = Gnosis2(X_train.shape[1], Y_train_1.shape[1], 50, 0.15)
-net.to(device)
-net.double()
 
-# loss_fn = nn.MSELoss(reduction='mean')
-loss_fn = nn.MSELoss()
-optimizer = optim.Adam(net.parameters(), lr=0.0001)
+net = torch.load(WEIGHTS_FOLDER/f'param_predictor_{len(selected_X)}x{len(selected_Y)}.pth')
+
+
+
+
+#%%
+toy = TipTorch(batch_test[0]['configs'], 'sum', device, TipTop=True, PSFAO=False)
+toy.optimizables = []
+
+# y_pred = torch.from_numpy(mlp.predict(batch_test[0]['X'])).float()
+y_pred = net(batch_test[0]['X'].float().to(device))
+# y_pred = batch_test[0]['Y']
+
+PSF_0 = batch_test[0]['PSF (data)'].cpu().numpy()
+PSF_2 = toy_run( toy, batch_test[0]['df'], NN2fit(y_pred.to(device)) )
+
+destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
+plot_radial_profiles(destack(PSF_0),  destack(PSF_2),  'Data', 'Predicted', title='Synth prediction accuracy worked', dpi=200, cutoff=32, scale='log')
+
 
 
 #%%
@@ -570,7 +408,7 @@ def prepare_batch_configs(batches_in, batches_out):
         PSF_0 = PSF_0[..., 1:, 1:].cpu()
         config_files['sensor_science']['FieldOfView'] = 255
         
-        # delay = lambda r: (0.0017+81e-6)*r
+        delay = lambda r: (0.0017+81e-6)*r
         config_files['RTC']['LoopDelaySteps_HO'] = delay(config_files['RTC']['SensorFrameRate_HO'])
         config_files['sensor_HO']['NumberPhotons'] *= config_files['RTC']['SensorFrameRate_HO']
         
@@ -919,7 +757,7 @@ for sample in tqdm(psf_df.index.tolist()):
             PSF_0 = PSF_0[...,1:,1:].to(device)
             init_config['sensor_science']['FieldOfView'] = 255
             
-            # delay = lambda r: (0.0017+81e-6)*r
+            delay = lambda r: (0.0017+81e-6)*r
             init_config['RTC']['LoopDelaySteps_HO'] = delay(init_config['RTC']['SensorFrameRate_HO'])
             init_config['sensor_HO']['NumberPhotons'] *= init_config['RTC']['SensorFrameRate_HO']
 

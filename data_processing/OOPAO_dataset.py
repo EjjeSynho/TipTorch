@@ -33,10 +33,10 @@ for file in tqdm(files):
     
 #%% filter good images
 files = os.listdir(save_path)
-good_ids = [ int(file.split('.')[0]) for file in files ]
+# good_ids = [ int(file.split('.')[0]) for file in files ]
 
 entries_df = [
-    'ID', 'Airmass', 'r0', 'Seeing', 'Strehl (IR)',
+    'ID', 'Airmass', 'r0 (SPARTA)', 'Seeing', 'Strehl (IR)',
     'Strehl (vis)', 'Wind direction', 'Wind direction (200 mbar)', 'Jitter X', 'Jitter Y',
     'Wind speed', 'Wind speed (200 mbar)', 'Nph WFS', 'Rate', 'DIT Time', 'Num. DITs', 'WFS noise (nm)',
     'Flux WFS', 'Sequence time', 'λ left (nm)', 'λ right (nm)', 'λ WFS (nm)', 'invalid']
@@ -52,12 +52,12 @@ for file in tqdm(files):
     
     id = int( file.split('_')[0] )
     sample_dict                   = { 'ID': id }
-    sample_dict['invalid']        = not (id in good_ids)
+    sample_dict['invalid']        = False #not (id in good_ids)
     sample_dict['Strehl (IR)']    = sample['Strehl (IRDIS)']
     sample_dict['Strehl (vis)']   = sample['Strehl (SAXO)']
-    sample_dict['Airmass']        = sample['r0']
-    sample_dict['r0']             = sample['seeing']
-    sample_dict['Seeing']         = sample['telescope']['airmass']
+    sample_dict['Airmass']        = sample['telescope']['airmass']
+    sample_dict['r0']             = sample['r0']
+    sample_dict['Seeing']         = sample['seeing']
     sample_dict['Rate']           = sample['RTC']['loop rate']
     sample_dict['Nph WFS']        = sample['WFS']['Nph vis']
     sample_dict['λ WFS (nm)']     = sample['WFS']['wavelength']

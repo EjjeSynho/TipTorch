@@ -140,7 +140,7 @@ def load_and_fit_sample(id):
     }
     return save_data
 
-# save_data = load_and_fit_sample(321)
+save_data = load_and_fit_sample(5555)
 
 #%%
 for id in good_ids:

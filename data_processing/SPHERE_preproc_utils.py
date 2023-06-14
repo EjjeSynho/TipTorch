@@ -12,10 +12,11 @@ from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
 from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER #, device
-from tools.utils import rad2mas
+from tools.utils import rad2mas, pad_lists
 
 # delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
-frame_delay = lambda r: r/1e3 * 2.3  if (r/1e3*2.3) > 1.0 else 1.0 # delay of 2.3 frames for 1000 Hz loop rate
+# frame_delay = lambda r: r/1e3 * 2.3  if (r/1e3*2.3) > 1.0 else 1.0 # delay of 2.3 frames for 1000 Hz loop rate
+frame_delay = lambda r: torch.clamp(r/1e3 * 2.3, min=1.0)
 
 
 def LoadSPHEREsynthByID(target_id):
@@ -143,8 +144,10 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
     if regime == 'different':
         data_samples = SamplesByIds(sample_ids, synth)
         for datasample in data_samples:
-            datasample['PSF L'] = datasample['PSF L'].mean(axis=0)[None,...]
-            datasample['PSF R'] = datasample['PSF R'].mean(axis=0)[None,...]
+            if data_samples[0]['PSF L'] is not None:
+                datasample['PSF L'] = datasample['PSF L'].mean(axis=0)[None,...]
+            if data_samples[0]['PSF R'] is not None:
+                datasample['PSF R'] = datasample['PSF R'].mean(axis=0)[None,...]
             
     elif regime == '1P21I':
         data_samples = SamplesByIds(sample_ids, synth)
@@ -175,6 +178,12 @@ def SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False):
     config_file = ParameterParser(path_ini).params
     config_manager = ConfigManager( GetSPHEREsynth() if synth else GetSPHEREonsky() )
     merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample) for sample in data_samples])
+    
+    merged_config['atmosphere']['Cn2Weights']    = pad_lists(merged_config['atmosphere']['Cn2Weights'], 0)
+    merged_config['atmosphere']['Cn2Heights']    = pad_lists(merged_config['atmosphere']['Cn2Heights'], 1e4)
+    merged_config['atmosphere']['WindDirection'] = pad_lists(merged_config['atmosphere']['WindDirection'], 0)
+    merged_config['atmosphere']['WindSpeed']     = pad_lists(merged_config['atmosphere']['WindSpeed'], 0)
+    
     config_manager.Convert(merged_config, framework='pytorch', device=device)
     
     if not synth:
