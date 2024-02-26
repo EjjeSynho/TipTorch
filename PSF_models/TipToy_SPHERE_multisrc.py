@@ -297,11 +297,12 @@ class TipTorch(torch.nn.Module):
         interp = lambda x: \
             interpolate(x[None,None,...], size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze() * sampling**2
             
-        Re = interp(OTF.real) # PyTorch doesn't support interpolation of complex tensors yet
+        Re = interp(OTF.real) # PyTorch doesn't support interpolation of complex tensors yet TODO: or is it?
         Im = interp(OTF.imag)
         return Re + Im*1j
     
-
+    
+    # TODO: maybe, gradleaf breaking happens here?
     def ComputeStaticOTF(self, pupil_function):
         ''' Compute static OTF for each wavelength'''
         wvl_cpu = self.wvl.cpu().numpy()
@@ -376,7 +377,6 @@ class TipTorch(torch.nn.Module):
         self.oversampling = oversampling
     
         # Read data and initialize AO system
-        
         self.piston_filter = None
         self.PR = None
         
@@ -654,7 +654,6 @@ class TipTorch(torch.nn.Module):
         # Compute the residual tip/tilt kernel
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         # Resulting OTF
-        # OTF = OTF_turb * self.OTF_static * fftPhasor * OTF_jitter
         OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
 
         self.OTF = OTF
@@ -675,14 +674,18 @@ class TipTorch(torch.nn.Module):
                         obj.grad = obj.grad.to(device)
                 else:
                     obj = obj.to(device)
+                    
         elif isinstance(obj, nn.Module):
             obj.to(device)
+            
         elif isinstance(obj, (list, tuple)):
             for item in obj:
                 self._to_device_recursive(item, device)
+                
         elif isinstance(obj, dict):
             for item in obj.values():
                 self._to_device_recursive(item, device)
+                
         return obj
 
 

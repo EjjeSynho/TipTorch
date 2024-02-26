@@ -1,5 +1,6 @@
 #%%
-%matplotlib qt
+%reload_ext autoreload
+%autoreload 2
 
 import sys
 sys.path.insert(0, '..')
@@ -10,21 +11,16 @@ from torch import nn, fft
 import matplotlib.pyplot as plt
 import scipy.special as spc
 import time
-from scipy.optimize import least_squares
-from scipy.ndimage import center_of_mass
 from torch.nn.functional import interpolate
 from astropy.io import fits
 from skimage.transform import resize
 from graphviz import Digraph
-import pickle5 as pickle
 import os
 from os import path
 
 from tools.parameter_parser import ParameterParser
 from data_processing.MUSE_read_preproc import MUSEcube
-from tools.utils import plot_radial_profile, rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
-from tools.utils import Center, BackgroundEstimate, CircularMask
-from tools.utils import register_hooks, iter_graph
+from tools.utils import plot_radial_profiles, rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from tools.utils import OptimizeTRF, OptimizeLBFGS
 from tools.utils import radial_profile
 
@@ -33,7 +29,8 @@ device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu'
 path_ini = '../data/parameter_files/muse_ltao.ini'
 
 # Load image
-data_dir = path.normpath('C:/Users/akuznets/Data/MUSE/DATA/')
+data_dir = path.normpath('C:/Users/akuznets/Data/MUSE/DATA_Fernando/')
+
 listData = os.listdir(data_dir)
 sample_id = 5
 sample_name = listData[sample_id]
@@ -527,7 +524,7 @@ class TipToyMUSE(torch.nn.Module):
         PSD = self.PSDs['fitting'] + \
                 self.PSD_padder(
                     self.PSDs['WFS noise'] + \
-                    self.PSDs['spatio-temporal'] + \
+                    # self.PSDs['spatio-temporal'] + \
                     self.PSDs['aliasing'] + \
                     self.PSDs['chromatism'])
 
@@ -579,6 +576,8 @@ class TipToyMUSE(torch.nn.Module):
 #%%
 # config_file['sensor_science']['FieldOfView'] = 201
 toy = TipToyMUSE(config_file, obs_info, device=device)
+if device == torch.device('cpu'): toy.is_gpu = False
+else: toy.is_gpu = True
 
 r0  = torch.tensor(obs_info['SPTR0'], requires_grad=True,  device=toy.device)
 L0  = torch.tensor(obs_info['SPTL0'], requires_grad=False, device=toy.device)
@@ -595,8 +594,12 @@ Jxy = torch.tensor(2.0,   requires_grad=True,  device=toy.device)
 
 parameters = [r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy]
 
+toy.StartTimer()
 PSF_1 = toy.PSD2PSF(*parameters)
-# PSF_0 = torch.tensor(im/im.sum(), device=toy.device) #* 1e2
+print( toy.EndTimer() )
+
+PSF_0 = torch.tensor(im/im.sum(), device=toy.device) #* 1e2
+
 # plt.imshow(torch.log(PSF_0).detach().cpu())
 
 # el_croppo = slice(PSF_1.shape[0]//2-32, PSF_1.shape[1]//2+32)
@@ -668,7 +671,7 @@ for rid in range(4):
         for wvl in data_cube.wavelengths:
             config_file_1['sources_science']['Wavelength'] = wvl
             toy = TipToyMUSE(config_file_1, obs_info_1, norm_regime=None, device=device)
-
+            toy.is_gpu = True
             r0  = torch.tensor(np.random.uniform(low=r0s[rid].item(), high=r0s[rid+1].item())).to(device)
             L0  = torch.tensor(47.93).to(device)
             F   = torch.tensor(np.random.uniform(low=0.9, high=1.0)).to(device)
@@ -681,8 +684,9 @@ for rid in range(4):
             Jxy = torch.tensor(0.0).to(device)
             V_rand = np.random.uniform(low=V[rid].item(), high=V[rid+1].item())
             toy.wind_speed = torch.tensor([V_rand, V_rand]).to(device)
-
+            toy.StartTimer()
             PSF_1 = toy.PSD2PSF(*[r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy])
+            print( toy.EndTimer() )
             PSF_DL = toy.DLPSF()
 
             PSFs_chromatic.append( PSF_1.detach().cpu().numpy() )
@@ -707,6 +711,12 @@ PSF_in = PSFs[0,0,9,:,:]
 el_croppo = slice(PSF_in.shape[0]//2-32, PSF_in.shape[1]//2+32)
 
 plt.imshow(PSF_in[(el_croppo,el_croppo)])
+
+#%%
+
+
+PSF_1 = toy.PSD2PSF(*[r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy])
+
 
 
 #%%
@@ -752,6 +762,7 @@ plt.xlim([0, 10])
 plt.ylim([0, profiles1[0].mean(axis=0).max()*1.5])
 plt.legend()
 plt.ylabel('SR')
+plt.yscale('log')
 plt.xlabel('Pixels from on-axis')
 #plt.show()
 plt.savefig('avgPSFs.pdf')
@@ -759,7 +770,7 @@ plt.savefig('avgPSFs.pdf')
 #%%
 PSF_1 = toy.PSD2PSF(*parameters)
 
-plot_radial_profile(PSF_0, PSF_1, 'TipToy', title='MUSE NFM PSF')
+plot_radial_profiles(PSF_0, PSF_1, 'TipToy', title='MUSE NFM PSF')
 
 plt.show()
 

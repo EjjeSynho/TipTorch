@@ -23,6 +23,29 @@ r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
 
+def compare_dicts(d1, d2, path=''):
+    for k in d1.keys():
+        new_path = f"{path}.{k}" if path else k
+        if k in d2.keys():
+            if isinstance(d1[k], dict) and isinstance(d2[k], dict):
+                # If both values are dictionaries, compare recursively
+                compare_dicts(d1[k], d2[k], new_path)
+            elif isinstance(d1[k], torch.Tensor) and isinstance(d2[k], torch.Tensor):
+                if not torch.allclose(d1[k], d2[k]):
+                    print(f"{new_path} not equal")
+            else:
+                # Handle non-dict, non-tensor comparisons or mismatched types
+                if d1[k] != d2[k]:
+                    print(f"{new_path} not equal")
+        else:
+            print(f"{new_path} not in d2")
+
+    for k in d2.keys():
+        new_path = f"{path}.{k}" if path else k
+        if k not in d1.keys():
+            print(f"{new_path} not in d1")
+
+
 def pad_lists(input_list, pad_value):
     # Find the length of the longest list
     max_len = max(len(x) if isinstance(x, list) else 1 for x in input_list)
@@ -40,6 +63,11 @@ def pad_lists(input_list, pad_value):
     # Apply padding to each element in the input list
     return [pad_element(x) for x in input_list]
 
+
+def cropper(x, win):
+    return np.s_[...,
+                 x.shape[-2]//2-win//2 : x.shape[-2]//2 + win//2 + win%2,
+                 x.shape[-1]//2-win//2 : x.shape[-1]//2 + win//2 + win%2]
 
 
 def BuildPetalBasis(segmented_pupil, pytorch=True):
@@ -490,7 +518,7 @@ class OptimizeLBFGS:
             if np.isnan(loss.item()): return
             early_stopping(loss)
 
-            loss.backward() #retain_graph=True)
+            loss.backward(retain_graph=True)
             optimizer.step( lambda: self.loss_fn(self.model(*args), PSF_ref) )
 
             if self.verbous:
@@ -537,14 +565,20 @@ class OptimizeTRF():
         return self.parameters
 
 
-def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, max_val=1e16, crop=128):
+def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, max_val=1e16, crop=None):
     from matplotlib.colors import LogNorm
     
-
-    ROI = slice(PSF_in.shape[-2]//2-crop//2, PSF_in.shape[-1]//2+crop//2)
+    if crop is not None:
+        if PSF_in.shape[-2] < crop or PSF_in.shape[-1] < crop:
+            raise ValueError('Crop size is larger than the PSF size!')
+        ROI_x = slice(PSF_in.shape[-2]//2-crop//2, PSF_in.shape[-2]//2+crop//2)
+        ROI_y = slice(PSF_in.shape[-1]//2-crop//2, PSF_in.shape[-1]//2+crop//2)
+    else:
+        ROI_x, ROI_y = slice(None), slice(None)
+        
     dPSF = (PSF_out - PSF_in).abs()
 
-    cut = lambda x: x.abs().detach().cpu().numpy()[..., ROI, ROI] if crop is not None else x.abs().detach().cpu().numpy()
+    cut = lambda x: x.abs().detach().cpu().numpy()[..., ROI_x, ROI_y] if crop is not None else x.abs().detach().cpu().numpy()
 
     if average:
         row = []
@@ -700,6 +734,90 @@ def plot_std(x,y, label, color, style): #TODO: deprecated
     plt.fill_between(x, lower_bound, upper_bound, color=color, alpha=0.3)
     plt.plot(x, y_m, label=label, color=color, linestyle=style)
     plt.show()
+
+
+def plot_radial_profiles_new(PSF_0,
+                             PSF_1,
+                             label_0 = 'Data',
+                             label_1 = 'Simulated',
+                             title   = '',
+                             dpi     = 300,
+                             scale   = 'log',
+                             colors  = ['tab:blue', 'tab:orange', 'tab:green'], cutoff=20, center=None):
+    
+    from photutils.centroids import centroid_quadratic
+    from photutils.profiles import RadialProfile
+
+    def _radial_profiles(PSFs, center=None):
+        if PSFs.ndim == 2: PSFs = PSFs[np.newaxis, ...]
+
+        listify = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
+        # listify = lambda PSF_stack: [ x for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
+        PSFs = listify(PSFs)
+
+        def calc_profile(data, xycen=None):
+            if xycen is None:
+                xycen = centroid_quadratic(np.abs(data))
+    
+            edge_radii = np.arange(data.shape[-1]//2)
+            rp = RadialProfile(data, xycen, edge_radii)
+            return rp.profile
+
+        profiles = np.vstack( [calc_profile(PSF,center) for PSF in PSFs if not np.all(np.isnan(PSF))] )
+        return profiles
+
+    profis_0   = _radial_profiles( PSF_0[:,...], center )
+    profis_1   = _radial_profiles( PSF_1[:,...], center )
+    profis_err = _radial_profiles( PSF_0[:,...] - PSF_1[:,...], center )
+
+    def _render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambda x: x):
+        x = np.arange(0, profile.shape[-1])
+        profile_m = np.median(profile, axis=0)
+        
+        p_cutoff = 68.2/2
+        n_quantiles = 1
+        percentiles = np.linspace(p_cutoff/2, 100-p_cutoff, n_quantiles)
+        
+        alpha_func = lambda x: 0.21436045 * np.exp(-0.11711102 * x)
+
+        for p in percentiles:
+            upper_bound = np.percentile(profile-profile_m, 100-p, axis=0)
+            lower_bound = np.percentile(profile-profile_m, p,  axis=0) 
+            plt.fill_between(x, func(profile_m)+lower_bound, func(profile_m)+upper_bound, alpha=alpha_func(n_quantiles), color=color)
+        
+        plt.plot(x, func(profile_m), color=color, label=label, linestyle=linestyle, linewidth=linewidth)
+
+    fig = plt.figure(figsize=(6, 4), dpi=dpi)
+
+    y_max = np.median(profis_0, axis=0).max()
+
+    p_0 = profis_0 / y_max * 100.0
+    p_1 = profis_1 / y_max * 100.0
+    p_err = np.abs(profis_err / y_max * 100.0)
+
+    _render_profile(p_0,   color=colors[0], label=label_0, linewidth=2)
+    _render_profile(p_1,   color=colors[1], label=label_1, linewidth=2)
+    _render_profile(p_err, color=colors[2], label='Abs. error', linestyle='--')
+    
+    max_err = np.median(p_err, axis=0).max()
+    plt.axhline(max_err, color='green', linestyle='-', alpha=0.5)
+
+    y_lim = max([p_0.max(), p_1.max(), p_err.max()])
+    if scale == 'log':
+        x_max = cutoff
+        plt.yscale('symlog', linthresh=5e-1)
+        plt.ylim(1e-2, y_lim)
+    else:
+        x_max = cutoff*0.7
+        plt.ylim(0, y_lim)
+
+    plt.title(title)
+    plt.legend()
+    plt.xlim(0, x_max)
+    plt.text(x_max-8., max_err+2.5, "Max. abs. err.: {:.1f}%".format(max_err), fontsize=12)
+    plt.xlabel('Pixels from on-axis, [pix]')
+    plt.ylabel('Normalized intensity, [%]')
+    plt.grid()
 
 
 def DisplayDataset(samples_list, tiles_in_row, show_labels=True, dpi=300):

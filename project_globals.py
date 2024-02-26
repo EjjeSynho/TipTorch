@@ -11,6 +11,7 @@ with open(path / Path("data/global_config.json"), "r") as f:
 SPHERE_OOPAO_FITTING_FOLDER = folder_data["SPHERE_OOPAO_fitting_folder"]
 SPHERE_FITTING_FOLDER = folder_data["SPHERE_fitting_folder"]
 SPHERE_DATA_FOLDER = folder_data["SPHERE_data_folder"]
+MUSE_CUBES_FOLDER = folder_data["MUSE_cubes_folder"]
 WEIGHTS_FOLDER = path / Path("data/weights")
 DATA_FOLDER = path / Path("data/")
 MAX_NDIT = folder_data["Max NDITs"]

@@ -1,9 +1,8 @@
 #%%
 import sys
 sys.path.insert(0, '..')
-# sys.path.insert(0, 'C:/Users/akuznets/Projects/Datalab/libraries/dlab_config/dlab_config/')
-# sys.path.insert(0, 'C:/Users/akuznets/Projects/Datalab/libraries/dlab_config/dlt/dlt')
 
+import re
 import os
 from os import path
 from astropy.io import fits
@@ -12,192 +11,212 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 # import pickle5 as pickle
 from skimage.restoration import inpaint
-# from tools.utils import GetROIaroundMax, wavelength_to_rgb
-
+from tools.utils import GetROIaroundMax, wavelength_to_rgb
+from project_globals import MUSE_CUBES_FOLDER
 from datetime import datetime
-
-initial_time = dlt.get_datetime('2022-12-01T00:00:00')
-final_time = dlt.get_datetime('2022-12-31T00:00:00')
-
 import dlt
 
-lgs1seeing = dlt.query_ts('wmfsgw', 'AOS.LGS1.SEEING', initial_time, final_time)
-lgs2seeing = dlt.query_ts('wmfsgw', 'AOS.LGS2.SEEING', initial_time, final_time)
-lgs3seeing = dlt.query_ts('wmfsgw', 'AOS.LGS3.SEEING', initial_time, final_time)
-lgs4seeing = dlt.query_ts('wmfsgw', 'AOS.LGS4.SEEING', initial_time, final_time)
+# initial_time = dlt.get_datetime('2022-12-01T00:00:00')
+# final_time = dlt.get_datetime('2022-12-02T00:00:00')
+# lgs1seeing = dlt.query_ts('wmfsgw', 'AOS.LGS1.SEEING', initial_time, final_time)
+# lgs2seeing = dlt.query_ts('wmfsgw', 'AOS.LGS2.SEEING', initial_time, final_time)
+# lgs3seeing = dlt.query_ts('wmfsgw', 'AOS.LGS3.SEEING', initial_time, final_time)
+# HIERARCH ESO AOS LGS4 ENABLED = 'TRUE  # lgs4seeing = dlt.query_ts('wmfsgw', 'AOS.LGS4.SEEING', initial_time, final_time)
+# HIERARCH ESO LGS2 LASR2 SHUT STATE
 
 #%%
-def ReduceMUSEcube(hdul):
-    def GetSpectrum(white, radius=5):
-        _, ids = GetROIaroundMax(white, radius*2)
-        return np.nansum(hdul[1].data[:, ids[0], ids[1]], axis=(1,2))
+from astropy.io import fits
 
-    find_closest = lambda λ, λs: np.argmin(np.abs(λs-λ)).astype('int')
+folda = 'F:/ESO/Data/MUSE/DATA_raw/MUSE.2024-01-13T00 43 55.650.fits.fz'
 
-    # Extract spectral range information
-    start_spaxel = hdul[1].header['CRPIX3']
-    num_λs = int(hdul[1].header['NAXIS3']-start_spaxel+1)
-    Δλ = hdul[1].header['CD3_3' ] / 10.0
-    λ_min = hdul[1].header['CRVAL3'] / 10.0
-    λs = np.arange(num_λs)*Δλ + λ_min
-    λ_max = λs.max()
+hdul = fits.open(folda)
 
-    # 1 [erg] = 10^−7 [J];  1 [Angstrom] = 10 [nm];  1 [cm^2] = 0.0001 [m^2]
-    # [10^-20 * erg / s / cm^2 / Angstrom] = [10^-22 * W/m^2 / nm] = [10^-22 * J/s / m^2 / nm]
-    units = hdul[1].header['BUNIT'] # flux units
+TT_cube = hdul[25].data
 
-    # polychromatic image
-    white = np.nan_to_num(hdul[1].data).sum(axis=0)
-    spectrum = GetSpectrum(white)
+#%%
+hdul = fits.open(os.path.join(MUSE_CUBES_FOLDER, 'M.MUSE.2024-01-03T14-41-09.816.fits'))
 
-    # Pre-defined bad wavelengths ranges
-    bad_wvls = np.array([[450, 478], [577, 606]])
-    bad_ids = np.array([find_closest(wvl, λs) for wvl in bad_wvls.flatten()], dtype='int').reshape(bad_wvls.shape)
+def GetSpectrum(white, radius=5):
+    _, ids, _ = GetROIaroundMax(white, radius*2)
+    return np.nansum(hdul[1].data[:, ids[0], ids[1]], axis=(1,2))
 
-    valid_λs = np.ones_like(λs)
-    for i in range(len(bad_ids)):
-        valid_λs[bad_ids[i,0]:bad_ids[i,1]+1] = 0
-        bad_wvls[i,:] = np.array([λs[bad_ids[i,0]], λs[bad_ids[i,1]+1]])
-    #λs_new = λs[np.where(valid_λs==1)]
+find_closest = lambda λ, λs: np.argmin(np.abs(λs-λ)).astype('int')
 
+# Extract spectral range information
+start_spaxel = hdul[1].header['CRPIX3']
+num_λs = int(hdul[1].header['NAXIS3']-start_spaxel+1)
+Δλ = hdul[1].header['CD3_3' ] / 10.0
+λ_min = hdul[1].header['CRVAL3'] / 10.0
+λs = np.arange(num_λs)*Δλ + λ_min
+λ_max = λs.max()
+
+# 1 [erg] = 10^−7 [J];  1 [Angstrom] = 10 [nm];  1 [cm^2] = 0.0001 [m^2]
+# [10^-20 * erg / s / cm^2 / Angstrom] = [10^-22 * W/m^2 / nm] = [10^-22 * J/s / m^2 / nm]
+units = hdul[1].header['BUNIT'] # flux units
+#%
+# Polychromatic image
+white = np.nan_to_num(hdul[1].data).sum(axis=0)
+spectrum = GetSpectrum(white)
+
+wvl_bins = None #np.array([478, 511, 544, 577, 606, 639, 672, 705, 738, 771, 804, 837, 870, 903, 935], dtype='float32')
+
+# Pre-defined bad wavelengths ranges
+bad_wvls = np.array([[450, 478], [577, 606]])
+bad_ids  = np.array([find_closest(wvl, λs) for wvl in bad_wvls.flatten()], dtype='int').reshape(bad_wvls.shape)
+valid_λs = np.ones_like(λs)
+
+for i in range(len(bad_ids)):
+    valid_λs[bad_ids[i,0]:bad_ids[i,1]+1] = 0
+    bad_wvls[i,:] = np.array([λs[bad_ids[i,0]], λs[bad_ids[i,1]+1]])
+    
+if wvl_bins is not None:
+    λ_bins_smart = wvl_bins
+else:
     # Bin data cubes
     # Before the sodium filter
     λ_bin = (bad_wvls[1][0]-bad_wvls[0][1])/3.0
     λ_bins_before = bad_wvls[0][1] + np.arange(4)*λ_bin
     bin_ids_before = [find_closest(wvl, λs) for wvl in λ_bins_before]
 
-    #After the sodium filter
+    # After the sodium filter
     λ_bins_num = (λ_max-bad_wvls[1][1]) / np.diff(λ_bins_before).mean()
     λ_bins_after = bad_wvls[1][1] + np.arange(λ_bins_num+1)*λ_bin
     bin_ids_after = [find_closest(wvl, λs) for wvl in λ_bins_after]
     bins_smart = bin_ids_before + bin_ids_after
     λ_bins_smart = λs[bins_smart]
 
-    Rs = np.zeros_like(λs)
-    Gs = np.zeros_like(λs)
-    Bs = np.zeros_like(λs)
+Rs, Gs, Bs = np.zeros_like(λs), np.zeros_like(λs), np.zeros_like(λs)
 
-    for i,λ in enumerate(λs): Rs[i], Gs[i], Bs[i] = wavelength_to_rgb(λ, show_invisible=True)
+for i,λ in enumerate(λs):
+    Rs[i], Gs[i], Bs[i] = wavelength_to_rgb(λ, show_invisible=True)
 
-    Rs = Rs * valid_λs * spectrum / np.median(spectrum)
-    Gs = Gs * valid_λs * spectrum / np.median(spectrum)
-    Bs = Bs * valid_λs * spectrum / np.median(spectrum)
-    colors = np.dstack([np.vstack([Rs, Gs, Bs])]*600).transpose(2,1,0)
+Rs = Rs * valid_λs * spectrum / np.median(spectrum)
+Gs = Gs * valid_λs * spectrum / np.median(spectrum)
+Bs = Bs * valid_λs * spectrum / np.median(spectrum)
+colors = np.dstack([np.vstack([Rs, Gs, Bs])]*600).transpose(2,1,0)
 
-    show_plots = True
+show_plots = True
 
-    if show_plots:
-        fig_handler = plt.figure(dpi=200)
-        plt.imshow(colors, extent=[λs.min(), λs.max(), 0, 120])
-        plt.vlines(λ_bins_smart, 0, 120, color='white') #draw bins borders
-        plt.plot(λs, spectrum/spectrum.max()*120, linewidth=2.0, color='white')
-        plt.plot(λs, spectrum/spectrum.max()*120, linewidth=0.5, color='blue')
-        plt.xlabel(r"$\lambda$, [nm]")
-        plt.ylabel(r"$\left[ 10^{-20} \frac{erg}{s \cdot cm^2 \cdot \AA} \right]$")
-        ax = plt.gca()
-        # ax.get_yaxis().set_visible(False)
-        # plt.show()
+if show_plots:
+    fig_handler = plt.figure(dpi=200)
+    plt.imshow(colors, extent=[λs.min(), λs.max(), 0, 120])
+    plt.vlines(λ_bins_smart, 0, 120, color='white') #draw bins borders
+    plt.plot(λs, spectrum/spectrum.max()*120, linewidth=2.0, color='white')
+    plt.plot(λs, spectrum/spectrum.max()*120, linewidth=0.5, color='blue')
+    plt.xlabel(r"$\lambda$, [nm]")
+    plt.ylabel(r"$\left[ 10^{-20} \frac{erg}{s \cdot cm^2 \cdot \AA} \right]$")
+    ax = plt.gca()
+    # ax.get_yaxis().set_visible(False)
+    # plt.show()
 
-    _, ROI = GetROIaroundMax(white, win=100)
 
-    # Generate reduced cubes
-    data_reduced = np.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
-    std_reduced  = np.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
-    wavelengths  = np.zeros(len(λ_bins_smart)-1)
-    flux         = np.zeros(len(λ_bins_smart)-1)
+_, ROI, _ = GetROIaroundMax(white, win=100)
 
-    bad_layers = []
+# Generate reduced cubes
+data_reduced = np.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
+std_reduced  = np.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
+wavelengths  = np.zeros(len(λ_bins_smart)-1)
+flux         = np.zeros(len(λ_bins_smart)-1)
 
-    for bin in tqdm( range(len(bins_smart)-1) ):
-        chunk = hdul[1].data[ bins_smart[bin]:bins_smart[bin+1], ROI[0], ROI[1] ]
-        wvl_chunck = λs[bins_smart[bin]:bins_smart[bin+1]]
-        flux_chunck = spectrum[bins_smart[bin]:bins_smart[bin+1]]
+bad_layers = []
 
-        for i in range(chunk.shape[0]):
-            layer = chunk[i,:,:]
-            if np.isnan(layer).sum() > layer.size//2: # if more than 50% of the pixela on image are NaN
-                bad_layers.append((bin, i))
-                wvl_chunck[i] = np.nan
-                flux_chunck[i] = np.nan
-                continue
-            else:
-                mask_inpaint = np.zeros_like(layer, dtype=np.int8)
-                mask_inpaint[np.where(np.isnan(layer))] = 1
-                chunk[i,:,:] = inpaint.inpaint_biharmonic(layer, mask_inpaint)  # Fix bad pixels per spectral slice
+for bin in tqdm( range(len(bins_smart)-1) ):
+    chunk = hdul[1].data[ bins_smart[bin]:bins_smart[bin+1], ROI[0], ROI[1] ]
+    wvl_chunck = λs[bins_smart[bin]:bins_smart[bin+1]]
+    flux_chunck = spectrum[bins_smart[bin]:bins_smart[bin+1]]
 
-        data_reduced[bin,:,:] = np.nansum(chunk, axis=0)
-        std_reduced [bin,:,:] = np.nanstd(chunk, axis=0)
-        wavelengths[bin] = np.nanmean(np.array(wvl_chunck)) # central wavelength for this bin
-        flux[bin] = np.nanmean(np.array(flux_chunck))
+    for i in range(chunk.shape[0]):
+        layer = chunk[i,:,:]
+        if np.isnan(layer).sum() > layer.size//2: # if more than 50% of the pixela on image are NaN
+            bad_layers.append((bin, i))
+            wvl_chunck[i]  = np.nan
+            flux_chunck[i] = np.nan
+            continue
+        else:
+            mask_inpaint = np.zeros_like(layer, dtype=np.int8)
+            mask_inpaint[np.where(np.isnan(layer))] = 1
+            chunk[i,:,:] = inpaint.inpaint_biharmonic(layer, mask_inpaint)  # Fix bad pixels per spectral slice
 
-    print(str(len(bad_layers))+'/'+str(hdul[1].data.shape[0]), '('+str(np.round(len(bad_layers)/hdul[1].data.shape[0],2))+'%)', 'slices are corrupted')
+    data_reduced[bin,:,:] = np.nansum(chunk, axis=0)
+    std_reduced [bin,:,:] = np.nanstd(chunk, axis=0)
+    wavelengths[bin] = np.nanmean(np.array(wvl_chunck)) # central wavelength for this bin
+    flux[bin] = np.nanmean(np.array(flux_chunck))
 
-    # Collect the telemetry from the header
-    misc_info = {
-        'spectrum': spectrum,
-        'wvl range': [λ_min, λ_max, Δλ], # num = int((λ_max-λ_min)/Δλ)+1
-        'filtered wvls': bad_wvls,
-        'wvl bins': λ_bins_smart,
-        'flux units': units,
-        'spectrum fig': fig_handler
-    }
-
-    h = 'HIERARCH ESO '
-
-    telemetry = {
-        'pixel scale': hdul[0].header[h+'OCS IPS PIXSCALE']*1000, #[mas/pixel]
-        'target':      hdul[0].header[h+'OBS TARG NAME'],
-        'date':        hdul[0].header['DATE'],
-        'date-obs':    hdul[0].header['DATE-OBS'],
-        'RA':          hdul[0].header['RA'],
-        'DEC':         hdul[0].header['DEC'],
-        'exp time':    hdul[0].header['EXPTIME'],
-        'target':      hdul[0].header[h+'OBS TARG NAME'],
-        'airmass':     (hdul[0].header[h+'TEL AIRM START'] + hdul[0].header[h+'TEL AIRM END']) / 2.0,
-        'altitude':    hdul[0].header[h+'TEL ALT'],
-        'azimuth':     hdul[0].header[h+'TEL AZ'],
-        'seeing':      (hdul[0].header[h+'TEL AMBI FWHM START'] + hdul[0].header[h+'TEL AMBI FWHM END']) / 2.0,
-        'tau0':        hdul[0].header[h+'TEL AMBI TAU0'],
-        'temperature': hdul[0].header[h+'TEL AMBI TEMP'],
-        'wind dir':    hdul[0].header[h+'TEL AMBI WINDDIR'],
-        'wind speed':  hdul[0].header[h+'TEL AMBI WINDSP']
-    }
-
-    try:
-        telemetry['Strehl'] = hdul[0].header[h+'OBS STREHLRATIO']
-    except KeyError:
-        telemetry['Strehl'] = hdul[0].header[h+'DRS MUSE RTC STREHL']
-
-    data = {
-        'cube':        data_reduced,
-        'std':         std_reduced,
-        'white':       white[ROI],
-        'flux':        flux,
-        'telemetry':   telemetry,
-        'wavelengths': wavelengths,
-        'misc info':   misc_info
-    }
-    return data
-
+print(str(len(bad_layers))+'/'+str(hdul[1].data.shape[0]), '('+str(np.round(len(bad_layers)/hdul[1].data.shape[0],2))+'%)', 'slices are corrupted')
 #%%
-hdul = fits.open('E:/ESO/Data/MUSE/NFM-AO-Jan29/MUSE.2023-01-30T07%3A49%3A55.721/DATACUBE_FINAL.fits')
-data1 = ReduceMUSEcube(hdul)
+# Collect the telemetry from the header
+h = 'HIERARCH ESO '
+
+misc_info = {
+    'spectrum (full)': (λs, spectrum),
+    'wvl range':     [λ_min, λ_max, Δλ], # From header
+    'filtered wvls': bad_wvls,
+    'flux units':    units,
+    'wvl bins':      λ_bins_smart, # Wavelength bins
+    'wvls binned':   wavelengths,
+    'flux binned':   flux,
+    'spectrum fig':  fig_handler
+}
+
+# NGS ALPHA =  21822.897 / [hms]  
+# NGS DELTA = -44315.057 / [dms] 
+
+NGS_target = {
+    'RA':      hdul[0].header[h+'AOS NGS ALPHA'], # [hms] Alpha coordinate for the NGS     
+    'DEC':     hdul[0].header[h+'AOS NGS DELTA'], # [dms] Delta coordinate for the NGS 
+    'NGS mag': hdul[0].header[h+'SEQ NGS MAG'],
+}
+
+science_target = {
+    'target':      hdul[0].header[h+'OBS TARG NAME'],
+    'RA':          hdul[0].header['RA'],
+    'DEC':         hdul[0].header['DEC'],
+}
+
+observation = {
+    'date-obs':    hdul[0].header['DATE-OBS'], # UTC
+    'exp time':    hdul[0].header['EXPTIME'],
+    'altitude':    hdul[0].header[h+'TEL ALT'],
+    'azimuth':     hdul[0].header[h+'TEL AZ'],
+}
+
+telemetry = {
+    'pixel scale': hdul[0].header[h+'OCS IPS PIXSCALE']*1000, #[mas/pixel]
+    'airmass':     (hdul[0].header[h+'TEL AIRM START'] + hdul[0].header[h+'TEL AIRM END']) / 2.0,
+    'seeing':      (hdul[0].header[h+'TEL AMBI FWHM START'] + hdul[0].header[h+'TEL AMBI FWHM END']) / 2.0,
+    'tau0':        hdul[0].header[h+'TEL AMBI TAU0'],
+    'temperature': hdul[0].header[h+'TEL AMBI TEMP'],
+    'wind dir':    hdul[0].header[h+'TEL AMBI WINDDIR'],
+    'wind speed':  hdul[0].header[h+'TEL AMBI WINDSP']
+}
+
+try:
+    telemetry['Strehl'] = hdul[0].header[h+'OBS STREHLRATIO']
+except KeyError:
+    telemetry['Strehl'] = hdul[0].header[h+'DRS MUSE RTC STREHL']
+
+images = {
+    'cube':  data_reduced,
+    'std':   std_reduced,
+    'white': white[ROI],
+}
+
+
 hdul.close()
 
 # with open('C:/Users/akuznets/Data/MUSE/DATA_raw_binned/'+files[file_id].split('.fits')[0]+'.pickle', 'wb') as handle:
 #     pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
+
 #%%
 %matplotlib qt
-
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-data = np.log(data1['cube'].mean(axis=0))
+data = np.log(data['cube'].mean(axis=0))
 # Get the extent of the data
-extent = np.array([-data.shape[0]/2, data.shape[0]/2, -data.shape[1]/2, data.shape[1]/2]) * data1['telemetry']['pixel scale']
-
+extent = np.array([-data.shape[0]/2, data.shape[0]/2, -data.shape[1]/2, data.shape[1]/2]) * data['telemetry']['pixel scale']
 
 # Display the data with the extent centered at zero
 plt.imshow(data, extent=extent.tolist(), origin='lower')
@@ -205,8 +224,15 @@ plt.colorbar()
 plt.show()
 
 #%%
+from datetime import datetime, timedelta
 
-#AOS LGSi FLUX: [ADU] Median flux in subapertures / Median of the LGSi flux in all subapertures with 0.17 photons/ADU when the camera gain is 100.
+import re
+
+initial_time = observation['date-obs']
+final_time = datetime.strptime(initial_time, '%Y-%m-%dT%H:%M:%S.fff') + timedelta(seconds=observation['exp time'])
+
+# AOS LGSi FLUX: [ADU] Median flux in subapertures / 
+# Median of the LGSi flux in all subapertures with 0.17 photons/ADU when the camera gain is 100.
 
 # [pix] slopes RMS / Median of the Y slopes std dev measured in LGS WFSi subap (0.83 arcsec/pixel).
 HO_slopes_RMS_keywords = ['AOS.LGS'+str(i)+'.SLOPERMS'+coord for i,coord in zip([1,1,2,2,3,3,4,4], ['X', 'Y']*4)]
@@ -214,14 +240,14 @@ HO_slopes_RMS_keywords = ['AOS.LGS'+str(i)+'.SLOPERMS'+coord for i,coord in zip(
 # [ADU / frame / subaperture] Median flux per subaperture with 0.17 photons/ADU when the camera gain is 100.
 HO_flux_keywords = ['AOS.LGS'+str(i+1)+'.FLUX' for i in range(4)] 
 
-#%%
+#%
 def GetLGSphotons(flux_LGS, HO_gain):
     conversion_factor = 18 #[e-/ADU]
     GALACSI_transmission = 0.31 #(with VLT) / 0.46 (without VLT)
     detector_DIT = 1-0.01982 # [ms] 0.01982 [ms] are for transfer
     HO_rate = 1000 #[Hz] 
     QE = 0.9 # [e-/photons]
-    # gain = 100
+    # gain = 100 # Laser WFS gain
 
     num_subapertures = 1240
     M1_area = (8-1.12)**2 * np.pi / 4 # [m^2]
@@ -231,86 +257,66 @@ def GetLGSphotons(flux_LGS, HO_gain):
            * HO_rate / M1_area # [photons/m^2/s]
 
 #%%
-h = 'HIERARCH ESO '
-
-# J+H magnitude was 7.1
-
 HO_gains  = np.array([hdul[0].header[h+'AOS LGS'+str(i+1)+' DET GAIN'] for i in range(4)]).mean().item()
 LO_regime = hdul[0].header[h+'AOS MAIN MODES IRLOS'] #'64x64_FullPupil_200Hz_HighGain'
 
-if LO_regime == '64x64_FullPupil_200Hz_HighGain':
-    LO_rate = 200 # [Hz]
-    LO_gain = 98
+pattern = r"(\d+x\d+)_(\w+)_(\d+Hz)_(\w+)"
+match   = re.match(pattern, LO_regime)
+
+if match:
+    read_window, regime, LO_freq, LO_gain = match.groups()
+    read_window = tuple(map(int, read_window.split('x')))[0]
+    
+    if   LO_gain == 'HighGain': LO_gain = 68
+    elif LO_gain == 'LowGain':  LO_gain = 1
+        
+    LO_freq = int(LO_freq.replace('Hz', ''))
+    
+    print(f"Read-out window: {read_window}x{read_window}")
+    print(f"Regime: {regime}")
+    print(f"LO loop rate:  {LO_freq}")
+    print(f"SAPHIRA APD gain:  {LO_gain}")
 else:
-    raise ValueError('Unknown LO regime')
-
-#[ADU/frame/sub aperture] * 4 sub apertures
+    print("No match found")
+    
+#[ADU/frame/sub aperture] * 4 sub apertures if 2x2 mode
 IRLOS_flux_ADU = sum([hdul[0].header[h+'AOS NGS'+str(i+1)+' FLUX'] for i in range(4)]) # [ADU/frame]
-
-def GetIRLOSphotons(flux_ADU, LO_gain, LO_rate):
+# TODO: should I sum incase of FUll Pupil or not?
+def GetIRLOSphotons(flux_ADU, LO_gain, LO_freq):
+    # Computes IRLOS photons at M1 level
     QE = 1.0 # [photons/e-]
     convert_factor = 9.8 # [e-/ADU]
     M1_area = (8-1.12)**2 * np.pi / 4 # [m^2]
-    return flux_ADU / QE * convert_factor / LO_gain * LO_rate / M1_area # [photons/s/m^2]
+    return flux_ADU / QE * convert_factor / LO_gain * LO_freq / M1_area # [photons/s/m^2]
 
-IRLOS_flux = GetIRLOSphotons(IRLOS_flux_ADU, LO_gain, LO_rate) # [photons/s/m^2]
-
-#%%
-
-import dlt
-
-layers_altitude_keywords = ['AOS.CNSQ.H'+str(i+1) for i in range(10)]
-layers_CN2_keywords      = ['AOS.CNSQ.CNSQ_'+str(i+1) for i in range(10)]
-layers_faction_keywords  = ['AOS.CNSQ.FRACCNSQ_'+str(i+1) for i in range(10)]
-
-def GetValueByKeyword(keyword, initial_time, final_time):
-    inquiry = dlt.query_ts('wmfsgw', keyword, initial_time, final_time)
-
-    return inquiry
+IRLOS_flux = GetIRLOSphotons(IRLOS_flux_ADU, LO_gain, LO_freq) # [photons/s/m^2]
 
 
 #%%
+Cn2_requests = [('wmfsgw', f'AOS.CNSQ.CNSQ_{i}') for i in range(1,11)]
+H_requests   = [('wmfsgw', f'AOS.CNSQ.H{i}')     for i in range(1,11)]
+L0_requests  = [('wmfsgw', f'AOS.CNSQ.L0_{i}')   for i in range(1,11)]
 
+wspeed_request = ('wt4tcs', 'TEL.AMBI.WINDSP')
+wdir_request   = ('wt4tcs', 'TEL.AMBI.WINDDIR')
+fwhm_request   = ('wt4tcs', 'TEL.AMBI.FWHM')
+alt_request    = ('wt4tcs', 'TEL.ALT.POS')
+az_request     = ('wt4tcs', 'TEL.AZ.POS')
+seeing_request = ('wmfsgw', 'AOS.CNSQ.SEEINGTOT')
+L0_request     = ('wmfsgw', 'AOS.CNSQ.L0TOT')
+R0_request     = ('wmfsgw', 'AOS.CNSQ.R0TOT')
 
-
-wspeed = dlt.query_ts('wt4tcs', 'TEL.AMBI.WINDSP', initial_time, final_time)
-wdir = dlt.query_ts('wt4tcs', 'TEL.AMBI.WINDDIR', initial_time, final_time)
-
-aofpseeing = dlt.query_ts('wmfsgw', 'AOS.CNSQ.SEEINGTOT', initial_time, final_time)
-aofpL0    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0TOT', initial_time, final_time)
-aofpR0    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.R0TOT', initial_time, final_time)
-aofpH1    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H1', initial_time, final_time)
-aofpH2    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H2', initial_time, final_time)
-aofpH3    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H3', initial_time, final_time)
-aofpH4    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H4', initial_time, final_time)
-aofpH5    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H5', initial_time, final_time)
-aofpH6    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H6', initial_time, final_time)
-aofpH7    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H7', initial_time, final_time)
-aofpH8    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H8', initial_time, final_time)
-aofpH9    = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H9', initial_time, final_time)
-aofpH10   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.H10', initial_time, final_time)
-aofpCn21  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_1', initial_time, final_time)
-aofpCn22  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_2', initial_time, final_time)
-aofpCn23  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_3', initial_time, final_time)
-aofpCn24  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_4', initial_time, final_time)
-aofpCn25  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_5', initial_time, final_time)
-aofpCn26  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_6', initial_time, final_time)
-aofpCn27  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_7', initial_time, final_time)
-aofpCn28  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_8', initial_time, final_time)
-aofpCn29  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_9', initial_time, final_time)
-aofpCn210 = dlt.query_ts('wmfsgw', 'AOS.CNSQ.CNSQ_10', initial_time, final_time)
-aofpL01   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_1', initial_time, final_time)
-aofpL02   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_2', initial_time, final_time)
-aofpL03   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_3', initial_time, final_time)
-aofpL04   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_4', initial_time, final_time)
-aofpL05   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_5', initial_time, final_time)
-aofpL06   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_6', initial_time, final_time)
-aofpL07   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_7', initial_time, final_time)
-aofpL08   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_8', initial_time, final_time)
-aofpL09   = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_9', initial_time, final_time)
-aofpL010  = dlt.query_ts('wmfsgw', 'AOS.CNSQ.L0_10', initial_time, final_time)ut4alt = dlt.query_ts('wt4tcs', 'TEL.ALT.POS', initial_time, final_time)
-ut4az     = dlt.query_ts('wt4tcs', 'TEL.AZ.POS', initial_time, final_time)
-ut4fwhm   = dlt.query_ts('wt4tcs', 'TEL.AMBI.FWHM', initial_time, final_time)
+Cn2s   = [dlt.query_ts(*request, initial_time, final_time) for request in Cn2_requests]
+Hs     = [dlt.query_ts(*request, initial_time, final_time) for request in H_requests]
+L0s    = [dlt.query_ts(*request, initial_time, final_time) for request in L0_requests]
+wspeed = dlt.query_ts(*wspeed_request, initial_time, final_time)
+wdir   = dlt.query_ts(*wdir_request, initial_time, final_time)
+fwhm   = dlt.query_ts(*fwhm_request, initial_time, final_time)
+alt    = dlt.query_ts(*alt_request, initial_time, final_time)
+az     = dlt.query_ts(*az_request, initial_time, final_time)
+seeing = dlt.query_ts(*seeing_request, initial_time, final_time)
+L0     = dlt.query_ts(*L0_request, initial_time, final_time)
+R0     = dlt.query_ts(*R0_request, initial_time, final_time)
 
 
 

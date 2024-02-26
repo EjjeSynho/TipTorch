@@ -1,4 +1,7 @@
 #%%
+import sys
+sys.path.insert(0, '..')
+
 import os
 from os import path
 from astropy.io import fits
@@ -7,6 +10,8 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from os import path
 import pickle
+from tools.utils import wavelength_to_rgb
+import json
 
 
 def CroppedROI(im, point, win):

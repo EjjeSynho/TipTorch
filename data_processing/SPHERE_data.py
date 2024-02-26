@@ -3,20 +3,20 @@ import sys
 sys.path.insert(0, '..')
 
 import os
+import re
 from os import path
 import torch
-import json
+import pickle
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+import seaborn as sns
 from astropy.io import fits
 from astropy.time import Time
 from astropy.coordinates import SkyCoord
 from astropy import units as u
 from tqdm import tqdm
 from query_eso_archive import query_simbad
-import pickle
-import re
 from copy import deepcopy, copy
 from pathlib import Path
 from tools.utils import GetROIaroundMax, mask_circle
@@ -189,7 +189,7 @@ class SPHERE_loader():
 
         def find_closest(df, timestamp, T_exp):
             df["date"] = pd.to_datetime(df["date"])
-            timestamp_start = timestamp - pd.DateOffset(seconds=0.1)
+            timestamp_start = timestamp - pd.DateOffset(seconds=1)
             timestamp_end   = timestamp + pd.DateOffset(seconds=T_exp)
             selection = df.loc[(df['date'] >= timestamp_start) & (df['date'] <= timestamp_end)]
 
@@ -218,8 +218,10 @@ class SPHERE_loader():
         entries_spart_vis = [
             ('n_ph',       'flux_VisLoop[#photons/subaperture/frame]'),
             ('WFS flux',   'flux_VisLoop[#photons/s]'),
-            ('Jitter X',   'Jitter X (avg)'),
-            ('Jitter Y',   'Jitter Y (avg)'),
+            # ('Jitter X',   'Jitter X (avg)'),
+            # ('Jitter Y',   'Jitter Y (avg)'),
+            ('Jitter X',   'Jitter X (std)'),
+            ('Jitter Y',   'Jitter Y (std)'),
             ('Focus',      'Focus (avg)'),
             ('ITTM pos (avg)', 'ITTM position (avg)'),
             ('ITTM pos (std)', 'ITTM position (std)'),
@@ -266,15 +268,18 @@ class SPHERE_loader():
 
         def get_entry_value(df, entry, id_start, id_end):
             if entry in df and id_start is not None and id_end is not None:
+                # In case the entry has a text format
                 if isinstance(df[entry][id_start:id_end+1].values[0], str):
                     id = int(np.round(id_start/2+id_end/2))
                     return df[entry][id:id+1].values[0]
                 else:
+                    # If it's a number, it's possible to read 
                     value = np.nanmedian(df[entry][id_start:id_end+1])
+                    std_dev = np.nanstd(df[entry][id_start:id_end+1])
                     if not np.isreal(value) or np.isinf(value):
                         return np.nan
                     else:
-                        return value
+                        return value + 1j*std_dev if std_dev > 1e-12 else value
             else:
                 return np.nan
             
@@ -350,7 +355,7 @@ class SPHERE_loader():
 
     def GetSpectrum(self):
         def get_filter_transmission(filter_name): #TODO: fix the path
-            root_filters = 'C:/Users/akuznets/Projects/TipToy/data/calibrations/VLT_CALIBRATION/IRDIS_filters/'
+            root_filters = '../data/calibrations/VLT_CALIBRATION/IRDIS_filters/'
             filename = root_filters + 'SPHERE_IRDIS_' + filter_name + '.dat'
             # set up an empty array to store the data
             data = []
@@ -610,8 +615,11 @@ def plot_sample(id):
     fig.suptitle(id)
     fig.tight_layout()
     plt.show()
+    
+    return samp
 
-# plot_sample(1000)
+# sample = plot_sample(2000)
+
 
 #%%
 def ReduceIRDISData():
@@ -641,7 +649,7 @@ def SaveReducedAsImages():
     import matplotlib
 
     folder = SPHERE_DATA_FOLDER+'IRDIS_reduced/'
-    dir_save_imgs = SPHERE_DATA_FOLDER+'reduced_imgs/'
+    dir_save_imgs = SPHERE_DATA_FOLDER+'IRDIS_images/'
 
     files = os.listdir(folder)
     crop = slice(128-32, 128+32)
@@ -661,6 +669,40 @@ def SaveReducedAsImages():
             # plt.show()
             plt.savefig(dir_save_imgs + file.replace('.pickle','.png'), bbox_inches='tight', pad_inches=0)
 
+# SaveReducedAsImages()
+
+
+#%%
+'''
+folda_init = 'F:/ESO/Data/SPHERE/images_sortedmore/'
+
+# Scan all files in the folder and subfolders
+def list_files(folder):
+    file_list = []
+    for _, _, files in os.walk(folder):
+        for file in files:
+            # file_list.append(os.path.join(root, file))
+            if file.endswith('.png'):
+                file_list.append(file)
+    return file_list
+
+file_list_old = list_files(folda_init)
+
+#%
+import shutil
+
+file_list_new = os.listdir(SPHERE_DATA_FOLDER+'IRDIS_images/')
+set_old  = set(file_list_old)
+set_new  = set(file_list_new)
+set_diff = list(set_new.intersection(set_old))
+
+folda_new = SPHERE_DATA_FOLDER+'images_new/'
+
+# Move the files
+for file in set_diff:
+    shutil.move(SPHERE_DATA_FOLDER+'IRDIS_images/'+file, folda_new+file)
+
+'''
 #%%
 def CreateSPHEREdataframe(save_df_dir=None):
 
@@ -794,16 +836,8 @@ def CreateSPHEREdataframe(save_df_dir=None):
     for mag_ in mag_list: mags += [mag for mag in mag_ if mag not in mags]
     mag_cols_names = ['mag '+mag for mag in mags]
 
-    spectrum_df = {
-        'ID': [],
-        'Filename': [],
-        'λ left (nm)': [],
-        'λ right (nm)': [],
-        'Δλ left (nm)': [],
-        'Δλ right (nm)': []
-    }
+    spectrum_df = { i: [] for i in ['ID', 'Filename', 'λ left (nm)', 'λ right (nm)', 'Δλ left (nm)', 'Δλ right (nm)'] }
     for col in mag_cols_names: spectrum_df[col] = []
-
 
     for record in tqdm(files):
         id = int(record.split('_')[0])
@@ -831,15 +865,11 @@ def CreateSPHEREdataframe(save_df_dir=None):
 
     spectrum_df = pd.DataFrame(spectrum_df)
 
-
-    # import seaborn as sns
-
     # sns.set_theme()  # <-- This actually changes the look of plots.
     # plt.hist([df['λ left (nm)'], df['λ right (nm)']], bins=30, color=['r','b'], alpha=0.5)
     # plt.xlabel('λ [nm]')
     # plt.ylabel('Count')
     # plt.legend(['λ left', 'λ right'])
-
 
     # sns.set_theme()  # <-- This actually changes the look of plots.
     # plt.hist([df['Δλ left (nm)'], df['Δλ right (nm)']], bins=30, color=['r','b'], alpha=0.5)
@@ -847,49 +877,34 @@ def CreateSPHEREdataframe(save_df_dir=None):
     # plt.xlabel('λ [nm]')
     # plt.ylabel('Count')
 
-
     # Load labels information
-    with open(SPHERE_DATA_FOLDER+'labels.json', 'r') as f:
-        labels = json.load(f)
+    all_labels = []
+    labels_df  = { 'ID': [], 'Filename': [] }
 
-    for key in ['Blurry', 'Noisy', 'Clipped', 'Crossed', 'Streched', 'Wingsgone']:
-        labels.pop(key)
+    if os.path.exists(SPHERE_DATA_FOLDER+'labels.txt'):
+        with open(SPHERE_DATA_FOLDER+'labels.txt', 'r') as f:
+            for line in f:
+                filename, labels = line.strip().split(': ')
 
-    labels_df = {
-        'ID': [],
-        'Filename': []
-    }
-    for key in [i for i in labels.keys()]: labels_df[key] = []
+                ID = filename.split('_')[0]
+                pure_filename = filename.replace(ID+'_', '').replace('.png', '')
 
-    def search_keys_by_filename(filename):
-        labels_return = {}
-        for key in labels.keys():
-            labels_return[key] = False
-            for file_from_dict in labels[key]:
-                id = int(file_from_dict.split('_')[0])
-                pure_filename = file_from_dict.replace(str(id)+'_','')
-                if pure_filename == filename:
-                    labels_return[key] = True
-                    break
-        return labels_return
+                labels_df['ID'].append(int(ID))
+                labels_df['Filename'].append(pure_filename)
+                all_labels.append(labels.split(', '))
+    else:
+        raise ValueError('Labels file does not exist!')
 
-    for record in tqdm(files):
-        id = int(record.split('_')[0])
-        pure_filename = record.replace('.pickle','').replace(str(id)+'_','')
-        
-        labels_df['ID'].append(id)
-        labels_df['Filename'].append(pure_filename)
+    labels_list = list(set( [x for xs in all_labels for x in xs] ))
+    labels_list.sort()
 
-        labels_current = search_keys_by_filename(pure_filename)
+    for i in range(len(labels_list)): labels_df[labels_list[i]] = []
 
-        for key in labels.keys():
-            labels_df[key].append(labels_current[key])
+    for i in range(len(all_labels)):
+        for label in labels_list:
+            labels_df[label].append(label in all_labels[i])
 
     labels_df = pd.DataFrame(labels_df)
-    labels_df.rename(columns={"doubles": "Doubles", "invalid": "Invalid"})
-
-    reindexed = ['ID', 'Filename', 'Class A', 'Class B', 'Class C', 'LWE', 'doubles', 'No coronograph', 'invalid']
-    labels_df = labels_df.reindex(columns=reindexed)
 
     # Merge all dataframes
     df = pd.merge(main_df, spectrum_df, on=['ID','Filename'])

@@ -11,11 +11,10 @@ from pprint import pprint
 
 
 class ConfigManager():
-    def __init__(self, match_table=[], uniqualized=[]):
-        self.match_table = match_table
-
-        if len(uniqualized) == 0:
-            self.uniqualized = [
+    def __init__(self, uniqualized_values=None):
+        #'uniqualized' paremeters are those are defined only one in a config file for all targets
+        if uniqualized_values is None:
+            self.uniqualized_values = [
                 ['atmosphere', 'Wavelength'],
                 ['DM', 'AoArea'],
                 ['DM', 'DmHeights'],
@@ -95,7 +94,7 @@ class ConfigManager():
 
 
     def process_dictionary(self, d):
-        """Collapse all singleton dimensions to ensure that later multiplification of dimensions will go fine"""
+        """Collapse all singleton dimensions of stored values to ensure that later addition of dimensions by TipTorch will go fine"""
         for key, value in d.items():
             if isinstance(value, dict):
                 d[key] = self.process_dictionary(value)
@@ -114,25 +113,26 @@ class ConfigManager():
             return not_None(value)
 
 
-    def Modify(self, config, modifier):
-        buf_config = deepcopy(config)
-        buf_modifier = deepcopy(modifier)
+    def Modify(self, config, modifier, conversion_table, processor_func=None):
+        """
+        Modifies a config file with an extrenal dictionary of values.
+        Requires the mathing table to math values from extrenal source to config.
+        Optionally, requires a processor function to tranform the values inside the config.
+        """	
+        self.process_dictionary(buf_config   := deepcopy(config))
+        self.process_dictionary(buf_modifier := deepcopy(modifier))
 
-        # self.squeeze_values(buf_config)
-        # self.squeeze_values(buf_modifier)
-        self.process_dictionary(buf_config)
-        self.process_dictionary(buf_modifier)
-
-
-        for config_entry, modifier_entry, modifier_func in self.match_table:
-            if modifier_func is None:
-                modifier_func = lambda x: x
-            self.set_value(buf_config, config_entry, modifier_func(self.get_value(buf_modifier, modifier_entry)))
+        for config_entry, modifier_entry in conversion_table:
+            self.set_value(buf_config, config_entry, self.get_value(buf_modifier, modifier_entry))
+        
+        if processor_func is not None:
+            buf_config = processor_func(buf_config, buf_modifier)
+        
         return buf_config
 
 
     def Merge(self, configs):
-        """Merges config files for multiple targets"""
+        """Merges config files for multiple targets into one config dictionary"""
         if not isinstance(configs, list):
             return configs
         new_config = deepcopy(configs[0]) # creating a buffer configuration
@@ -151,7 +151,7 @@ class ConfigManager():
 
         all_entries = get_all_entries(new_config)
         for entry in all_entries:
-            if entry in self.uniqualized:
+            if entry in self.uniqualized_values:
                 value_to_set = self.get_value(configs[0], entry)
             else:
                 value_to_set = [self.get_value(config, entry) for config in configs]
@@ -162,15 +162,16 @@ class ConfigManager():
 
 
     def Convert(self, config, framework='pytorch', device=None):
-        if framework == 'pytorch':
+        """Converts all values in a config file to a specified framework"""
+        if framework.lower() == 'pytorch':
             if device is None: device = torch.device('cpu')
             convert_value = lambda x: torch.tensor(x, device=device).float()
-        elif framework == 'numpy':
+        elif framework.lower() == 'numpy':
             convert_value = lambda x: np.array(x.cpu()) if isinstance(x, torch.Tensor) else np.array(x)
-        elif framework == 'cupy':
+        elif framework.lower() == 'cupy':
             convert_value = lambda x: cp.array(x.cpu()) if isinstance(x, torch.Tensor) else cp.array(x)
         else:
-            raise NotImplementedError('Unknown framework name \"'+framework+'\"!')
+            raise NotImplementedError('Unsupported framework \"'+framework+'\"!')
 
         zero_d = lambda x: x if type(x) == float else convert_value(x)
         for entry in config:
@@ -185,46 +186,59 @@ class ConfigManager():
 
 
 def GetSPHEREonsky():
-    func = lambda x: 90.0 - x
-    match_table = [
-        (['atmosphere','Seeing'],          ['seeing','SPARTA'],         None),
-        (['atmosphere','WindSpeed'],       ['Wind speed','header'],     None),
-        (['atmosphere','WindDirection'],   ['Wind direction','header'], None),
-        (['sensor_science','Zenith'],      ['telescope','altitude'],    func),
-        (['telescope','ZenithAngle'],      ['telescope','altitude'],    func), #TODO: difference between zenith and zenithAngle?
-        (['sensor_science','Azimuth'],     ['telescope','azimuth'],     None),
-        (['sensor_science','SigmaRON'],    ['Detector','ron'],          None),
-        (['sensor_science','Gain'],        ['Detector','gain'],         None),
-        (['sources_HO', 'Wavelength'],     ['WFS', 'wavelength'],       None),
-        (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis'],           None),
-        (['sensor_HO','Jitter X'],         ['WFS','TT jitter X'],       None),
-        (['sensor_HO','Jitter Y'],         ['WFS','TT jitter Y'],       None),
-        (['RTC','SensorFrameRate_HO'],     ['WFS','rate'],              None),
-        (['sensor_science','PixelScale'],  ['Detector', 'psInMas'],     None),
-        (['sensor_science','SigmaRON'],    ['Detector', 'ron'],         None),
-        (['sources_science','Wavelength'], ['spectra'],                 None)
+    conversion_table = [
+        (['atmosphere','Seeing'],          ['seeing','SPARTA']        ),
+        (['atmosphere','WindSpeed'],       ['Wind speed','header']    ),
+        (['atmosphere','WindDirection'],   ['Wind direction','header']),
+        (['sensor_science','Zenith'],      ['telescope','altitude']   ),
+        (['telescope','ZenithAngle'],      ['telescope','altitude']   ), #TODO: difference between zenith and zenithAngle?
+        (['sensor_science','Azimuth'],     ['telescope','azimuth']    ),
+        (['sensor_science','SigmaRON'],    ['Detector','ron']         ),
+        (['sensor_science','Gain'],        ['Detector','gain']        ),
+        (['sources_HO', 'Wavelength'],     ['WFS', 'wavelength']      ),
+        (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis']          ),
+        (['sensor_HO','Jitter X'],         ['WFS','TT jitter X']      ),
+        (['sensor_HO','Jitter Y'],         ['WFS','TT jitter Y']      ),
+        (['RTC','SensorFrameRate_HO'],     ['WFS','rate']             ),
+        (['sensor_science','PixelScale'],  ['Detector', 'psInMas']    ),
+        (['sensor_science','SigmaRON'],    ['Detector', 'ron']        ),
+        (['sources_science','Wavelength'], ['spectra']                )
     ]
-    return match_table
+    
+    def processor_func(config, modifier):
+        config['sources_science']['Zenith'] = 90.0 - modifier['telescope']['altitude']
+        config['telescope']['ZenithAngle']  = 90.0 - modifier['telescope']['altitude']
+        
+        def frame_delay(loop_freq):
+            if not isinstance(loop_freq, torch.Tensor):
+                loop_freq_ = torch.tensor(loop_freq)
+            return torch.clamp(loop_freq_/1e3 * 2.3, min=1.0)
+        
+        config['RTC']['LoopDelaySteps_HO'] = frame_delay(config['RTC']['SensorFrameRate_HO'])
+
+        return config
+    
+    return conversion_table, processor_func
 
 
 def GetSPHEREsynth():
-    match_table = [
-        (['atmosphere','Cn2Weights'],      ['Cn2','profile'],       None),
-        (['atmosphere','Cn2Heights'],      ['Cn2','heights'],       None),
-        (['atmosphere','Seeing'],          ['seeing'],              None),
-        (['atmosphere','WindSpeed'],       ['Wind speed'],          None),
-        (['atmosphere','WindDirection'],   ['Wind direction'],      None),
-        (['telescope','Zenith'],           ['telescope','zenith'],  None),
-        (['telescope','ZenithAngle'],      ['telescope','zenith'],  None),
-        (['sensor_science','SigmaRON'],    ['Detector','ron'],      None),
-        (['sensor_science','Gain'],        ['Detector','gain'],     None),
-        (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis'],       None),
-        (['sources_HO','Wavelength'],      ['WFS','wavelength'],    None),
-        (['RTC','SensorFrameRate_HO'],     ['RTC','loop rate'],     None),
-        (['RTC','LoopGain_HO'],            ['RTC','loop gain'],     None),
-        (['RTC','LoopDelaySteps_HO'],      ['RTC','frames delay'],  None),
-        (['sensor_science','PixelScale'],  ['Detector', 'psInMas'], None),
-        (['sensor_science','SigmaRON'],    ['Detector','ron'],      None),
-        (['sources_science','Wavelength'], ['spectra'],             None),
+    conversion_table = [
+        (['atmosphere','Cn2Weights'],      ['Cn2','profile']     ),
+        (['atmosphere','Cn2Heights'],      ['Cn2','heights']      ),
+        (['atmosphere','Seeing'],          ['seeing']             ),
+        (['atmosphere','WindSpeed'],       ['Wind speed']         ),
+        (['atmosphere','WindDirection'],   ['Wind direction']     ),
+        (['telescope','Zenith'],           ['telescope','zenith'] ),
+        (['telescope','ZenithAngle'],      ['telescope','zenith'] ),
+        (['sensor_science','SigmaRON'],    ['Detector','ron']     ),
+        (['sensor_science','Gain'],        ['Detector','gain']    ),
+        (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis']      ),
+        (['sources_HO','Wavelength'],      ['WFS','wavelength']   ),
+        (['RTC','SensorFrameRate_HO'],     ['RTC','loop rate']    ),
+        (['RTC','LoopGain_HO'],            ['RTC','loop gain']    ),
+        (['RTC','LoopDelaySteps_HO'],      ['RTC','frames delay'] ),
+        (['sensor_science','PixelScale'],  ['Detector', 'psInMas']),
+        (['sensor_science','SigmaRON'],    ['Detector','ron']     ),
+        (['sources_science','Wavelength'], ['spectra']            ),
     ]
-    return match_table
+    return conversion_table, None

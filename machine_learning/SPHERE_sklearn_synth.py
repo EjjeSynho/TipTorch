@@ -27,7 +27,7 @@ from sklearn.metrics import mean_squared_error
 from project_globals import SPHERE_DATA_FOLDER, DATA_FOLDER, device
 
 from tqdm import tqdm
-from tools.utils import seeing, plot_radial_profiles
+from tools.utils import seeing, plot_radial_profiles, plot_radial_profiles_new
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 
@@ -283,18 +283,23 @@ Y_val   = torch.from_numpy(y_df_test.to_numpy()).to(device).float()
 
 loss_fn = nn.MSELoss()
 
-num_iters = 30000
-for iter in range(num_iters):
-    optimizer.zero_grad()
-    loss_train = loss_fn(net(X_train), Y_train)
-    loss_train.backward()
-    optimizer.step()
-    
-    with torch.no_grad():
-        loss_val = loss_fn(net(X_val), Y_val)
-    print('({:d}/{:d}) train, valid: {:.2f}, {:.2f}'.format(iter+1, num_iters, loss_train.item()*100, loss_val.item()*100), end='\r')
+weights_name = WEIGHTS_FOLDER/f'param_predictor_{len(selected_X)}x{len(selected_Y)}.pth'
 
-torch.save(net, WEIGHTS_FOLDER/f'param_predictor_{len(selected_X)}x{len(selected_Y)}.pth')
+if not os.path.exists(weights_name):
+    num_iters = 30000
+    for iter in range(num_iters):
+        optimizer.zero_grad()
+        loss_train = loss_fn(net(X_train), Y_train)
+        loss_train.backward()
+        optimizer.step()
+        
+        with torch.no_grad():
+            loss_val = loss_fn(net(X_val), Y_val)
+        print('({:d}/{:d}) train, valid: {:.2f}, {:.2f}'.format(iter+1, num_iters, loss_train.item()*100, loss_val.item()*100), end='\r')
+
+    torch.save(net, weights_name)
+else:
+    net = torch.load(weights_name)
 
 y_pred = net(X_val).cpu().detach().numpy()
 
@@ -357,8 +362,25 @@ def toy_run(model, data, pred):
     model.dn = inv_a2 * pred['Rec. noise']**2 - conv(data['n'])
     
     return model.forward()
+
+
+def toy_run_direct(model, data):
+    conv = lambda x: torch.from_numpy(np.array(x)).to(device).float()
+    model.F  = torch.tensor([1.0, 1.0]).to(device).float()
+    model.bg = torch.tensor([0.0, 0.0]).to(device).float()
+
+    model.Jx = conv(data['Jx init'])
+    model.Jy = conv(data['Jy init'])
     
+    for attr in ['dx', 'dy', 'r0 (data)', 'Jxy']:
+        setattr(model, attr, conv(data[attr]))
+        
+    model.WFS_Nph = conv(data['Nph WFS (data)'])
+    model.dn = torch.tensor([0.0]).to(device).float()
     
+    return model.forward()
+    
+
 def prepare_batch_configs(batches):
     batches_dict = []
     for i in tqdm(range(len(batches))):
@@ -386,12 +408,27 @@ toy.optimizables = []
 y_pred = net(batch_test[0]['X'].float().to(device))
 
 PSF_0 = batch_test[0]['PSF (data)'].cpu().numpy()
-PSF_2 = toy_run( toy, batch_test[0]['df'], NN2fit(y_pred.to(device)) )
+PSF_2 = toy_run( toy, batch_test[0]['df'], NN2fit(y_pred.to(device)) ).cpu().detach().numpy()
 
 destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
-plot_radial_profiles(destack(PSF_0),  destack(PSF_2),  'Data', 'Predicted', title='Synth prediction accuracy worked', dpi=200, cutoff=32, scale='log')
+# plot_radial_profiles(destack(PSF_0),  destack(PSF_2), 'Data', 'Predicted', title='Synth prediction accuracy worked', dpi=200, cutoff=32, scale='log')
+plot_radial_profiles_new(PSF_0[:,0,...],  PSF_2[:,0,...], 'Data', 'Predicted', title='Synth prediction accuracy worked', dpi=200, cutoff=32, scale='lin')
+# plt.savefig('C:/Users/akuznets/Desktop/AO4ELT/OOPAOfitted_lin.pdf')
 
+#%%
+toy = TipTorch(batch_test[0]['configs'], 'sum', device, TipTop=True, PSFAO=False)
+toy.optimizables = []
 
+# y_pred = torch.from_numpy(mlp.predict(batch_test[0]['X'])).float()
+y_pred = net(batch_test[0]['X'].float().to(device))
+
+PSF_0 = batch_test[0]['PSF (data)'].cpu().numpy()
+PSF_2 = toy_run_direct( toy, batch_test[0]['df'] ).cpu().detach().numpy()
+
+destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
+plot_radial_profiles_new(PSF_0[:,0,...],  PSF_2[:,0,...], 'Data', 'Predicted', title='Synth prediction accuracy worked', dpi=200, cutoff=32)
+
+# plt.savefig('C:/Users/akuznets/Desktop/AO4ELT/OOPAOdirect_log.pdf')
 '''
 configs_path = 'C:/Users/akuznets/Data/SPHERE/simulated/configs_onsky/'
 configs = [int(f.split('.')[0]) for f in os.listdir(configs_path)]

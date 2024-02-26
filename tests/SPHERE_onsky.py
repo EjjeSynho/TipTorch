@@ -3,7 +3,6 @@
 %autoreload 2
 
 import sys
-from typing import Any
 sys.path.insert(0, '..')
 
 import pickle
@@ -26,7 +25,9 @@ from project_globals import SPHERE_DATA_FOLDER, device
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
-psf_df = psf_df[psf_df['invalid'] == False]
+psf_df = psf_df[psf_df['Corrupted'] == False]
+psf_df = psf_df[psf_df['Low quality'] == False]
+psf_df = psf_df[psf_df['LWE'] == False]
 # psf_df = psf_df[psf_df['mag R'] < 7]
 # psf_df = psf_df[psf_df['Num. DITs'] < 50]
 # psf_df = psf_df[psf_df['Class A'] == True]
@@ -37,13 +38,13 @@ good_ids = psf_df.index.values.tolist()
 # psf_df['Jitter X'] = psf_df['Jitter X'].abs()
 # psf_df['Jitter Y'] = psf_df['Jitter Y'].abs()
 
-def compress(row):
-    if row['Class A']: return 'A'
-    elif row['Class B']: return 'B'
-    elif row['Class C']: return 'C'
-    else: return 'misc'
+# def compress(row):
+#     if row['Class A']: return 'A'
+#     elif row['Class B']: return 'B'
+#     elif row['Class C']: return 'C'
+#     else: return 'misc'
 
-psf_df['Class'] = psf_df.apply(compress, axis=1)
+# psf_df['Class'] = psf_df.apply(compress, axis=1)
 
 #%%
 import seaborn as sns

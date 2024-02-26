@@ -6,6 +6,8 @@ import sys
 sys.path.append('..')
 
 import torch
+import torch.nn as nn
+import torch.optim as optim
 import pickle
 from sklearn.datasets import load_wine
 from sklearn.model_selection import train_test_split
@@ -32,31 +34,32 @@ from project_globals import WEIGHTS_FOLDER
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
-with open('E:/ESO/Data/SPHERE/fitted_df.pickle', 'rb') as handle:
-    fitted_df = pickle.load(handle)
+try:
+    with open(SPHERE_DATA_FOLDER+'fitted_df.pickle', 'rb') as handle:
+        fitted_df = pickle.load(handle)
+except:
+    print('No fitted data found')
 
-psf_df = psf_df[psf_df['invalid'] == False]
+psf_df = psf_df[psf_df['Low quality'] == False]
 psf_df = psf_df[psf_df['LWE'] == False]
-psf_df = psf_df[psf_df['doubles'] == False]
-psf_df = psf_df[psf_df['No coronograph'] == False]
+psf_df = psf_df[psf_df['Multiples'] == False]
+psf_df = psf_df[psf_df['Corrupted'] == False]
 psf_df = psf_df[~pd.isnull(psf_df['r0 (SPARTA)'])]
 psf_df = psf_df[~pd.isnull(psf_df['Nph WFS'])]
 psf_df = psf_df[~pd.isnull(psf_df['Strehl'])]
 psf_df = psf_df[~pd.isnull(psf_df['FWHM'])]
-# psf_df = psf_df[~pd.isnull(psf_df['Wind direction (MASSDIMM)'])]
-# psf_df = psf_df[~pd.isnull(psf_df['Wind speed (MASSDIMM)'])]
-# psf_df = psf_df[~pd.isnull(psf_df['Tau0 (MASSDIMM)'])]
-# psf_df = psf_df[~pd.isnull(psf_df['Seeing (MASSDIMM)'])]
+psf_df = psf_df[psf_df['Nph WFS'] < 5000]
+# psf_df = psf_df[psf_df['λ left (nm)'] == 1625]
+psf_df = psf_df[psf_df['λ left (nm)'] < 1626]
+psf_df = psf_df[psf_df['λ left (nm)'] > 1624]
+psf_df['Seeing (SPARTA)'] = seeing(psf_df['r0 (SPARTA)'], 500e-9)
 
-# psf_df = psf_df[psf_df['Nph WFS'] < 5000]
-# psf_df = psf_df[psf_df['λ left (nm)'] > 1600]
-# psf_df = psf_df[psf_df['λ left (nm)'] < 1700]
-# psf_df = psf_df[~pd.isnull(psf_df['Turb. speed'])]
-# psf_df = psf_df[~pd.isnull(psf_df['Pressure'])]
-# psf_df = psf_df[~pd.isnull(psf_df['Humidity'])]
-# psf_df = psf_df[~pd.isnull(psf_df['Temperature'])]
+psf_df['Wind direction (200 mbar)'].fillna(psf_df['Wind direction (header)'], inplace=True)
+psf_df['Wind speed (200 mbar)'].fillna(psf_df['Wind speed (header)'], inplace=True)
+psf_df.rename(columns={'Filter WFS': 'λ WFS (nm)'}, inplace=True)
+psf_df.rename(columns={'Nph WFS': 'Nph WFS (data)'}, inplace=True)
+psf_df.rename(columns={'r0 (SPARTA)': 'r0 (data)'}, inplace=True)
 
-psf_df['Seeing (SPARTA)'] = seeing(psf_df['r0 (SPARTA)'],500e-9)
 
 #%%
 # good_fits_folder = 'E:/ESO/Data/SPHERE/good_fits_TipTorch/'
@@ -72,17 +75,28 @@ for entry in ['r0','Jx','Jy','Jxy']: #,'F (left)','F (right)']:
     fitted_df[entry] = fitted_df[entry].abs()
 fitted_df.sort_index(inplace=True)
 
+fitted_df['dn'] = fitted_df['dn'].abs()
+fitted_df['n']  = fitted_df['n'].abs()
+fitted_df['Rec. noise'] = np.sqrt((fitted_df['n']+fitted_df['dn']).abs())*psf_df['λ WFS (nm)']/2/np.pi * 1e9
+fitted_df.rename(columns={'r0': 'r0 (fit)'}, inplace=True)
+fitted_df.rename(columns={'Nph WFS': 'Nph WFS (fit)'}, inplace=True)
 fitted_df['SR fit']  = 0.5 * (fitted_df['SR fit (left)'] + fitted_df['SR fit (right)'])
 fitted_df['SR data'] = 0.5 * (fitted_df['SR data (left)'] + fitted_df['SR data (right)'])
 fitted_df['J']       = np.sqrt(fitted_df['Jx'].pow(2) + fitted_df['Jy'].pow(2))
 fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
+
+ids = fitted_df.index.intersection(psf_df.index)
+fitted_df = fitted_df.loc[ids]
+synth_df = psf_df.loc[ids]
+
+df = pd.concat([synth_df, fitted_df], axis=1).fillna(0)
 
 #%% Compute data transformations
 from data_processing.normalizers import Uniform, TransformSequence
 
 transforms_input = {}
 transforms_input['Airmass']                   = TransformSequence( transforms = [ Uniform(a=1.0, b=2.2) ])
-transforms_input['r0 (SPARTA)']               = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
+transforms_input['r0 (data)']                 = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
 transforms_input['Seeing (MASSDIMM)']         = TransformSequence( transforms = [ Uniform(a=0.3, b=1.5) ])
 transforms_input['Wind direction (header)']   = TransformSequence( transforms = [ Uniform(a=0, b=360) ])
 transforms_input['Wind speed (header)']       = TransformSequence( transforms = [ Uniform(a=0.0, b=17.5) ])
@@ -94,7 +108,8 @@ transforms_input['λ left (nm)']               = TransformSequence( transforms =
 transforms_input['λ right (nm)']              = TransformSequence( transforms = [ Uniform(a=psf_df['λ right (nm)'].min(), b=psf_df['λ right (nm)'].max()) ])
 transforms_input['Rate']                      = TransformSequence( transforms = [ Uniform(a=psf_df['Rate'].min(), b=psf_df['Rate'].max()) ])
 transforms_input['FWHM']                      = TransformSequence( transforms = [ Uniform(a=0.5, b=3.0) ])
-transforms_input['Nph WFS']                   = TransformSequence( transforms = [ Uniform(a=0, b=2e6) ])
+transforms_input['Nph WFS (data)']            = TransformSequence( transforms = [ Uniform(a=0, b=200) ])
+transforms_input['Flux WFS']                  = TransformSequence( transforms = [ Uniform(a=0,   b=2000)] )
 transforms_input['Strehl']                    = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
 transforms_input['Jitter X']                  = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
 transforms_input['Jitter Y']                  = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
@@ -114,45 +129,48 @@ for entry in transforms_input:
     input_df[entry] = transforms_input[entry].forward(input_df[entry])
 
 transforms_output = {}
-transforms_output['r0']              = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
-transforms_output['bg (left)']       = TransformSequence( transforms = [ Uniform(a=-0.2e-5, b=0.4e-5) ])
-transforms_output['bg (right)']      = TransformSequence( transforms = [ Uniform(a=-0.2e-5, b=0.4e-5) ])
-transforms_output['dx']              = TransformSequence( transforms = [ Uniform(a=-1, b=1) ])
-transforms_output['dy']              = TransformSequence( transforms = [ Uniform(a=-1, b=1) ])
-transforms_output['F (left)']        = TransformSequence( transforms = [ Uniform(a=0.3, b=1.5) ])
-transforms_output['F (right)']       = TransformSequence( transforms = [ Uniform(a=0.3, b=1.5) ])
-transforms_output['F']               = TransformSequence( transforms = [ Uniform(a=0.3, b=1.5) ])
-transforms_output['Jx']              = TransformSequence( transforms = [ Uniform(a=0, b=60) ])
-transforms_output['Jy']              = TransformSequence( transforms = [ Uniform(a=0, b=60) ])
-transforms_output['J']               = TransformSequence( transforms = [ Uniform(a=0, b=60) ])
-transforms_output['Jxy']             = TransformSequence( transforms = [ Uniform(a=0, b=200) ])
-transforms_output['Nph WFS']         = TransformSequence( transforms = [ Uniform(a=0, b=2e6) ])
-transforms_output['n']               = TransformSequence( transforms = [ Uniform(a=0, b=0.005) ])
-transforms_output['dn']              = TransformSequence( transforms = [ Uniform(a=-0.2, b=0.2) ])
-transforms_output['SR data (left)']  = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
-transforms_output['SR data (right)'] = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
-transforms_output['SR fit (left)']   = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
-transforms_output['SR fit (right)']  = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
-transforms_output['SR data']         = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
-transforms_output['SR fit']          = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
+transforms_output['dx']              = TransformSequence( transforms = [ Uniform(a=-0.5, b=0.5) ] )
+transforms_output['dy']              = TransformSequence( transforms = [ Uniform(a=-0.5, b=0.5) ] )
+transforms_output['r0 (fit)']        = TransformSequence( transforms = [ Uniform(a=0.0,  b=1.0) ] )
+transforms_output['n']               = TransformSequence( transforms = [ Uniform(a=0.0,  b=17.0 ) ] )
+transforms_output['dn']              = TransformSequence( transforms = [ Uniform(a=0, b=50) ] )
+transforms_output['Rec. noise']      = TransformSequence( transforms = [ Uniform(a=0, b=1250) ] )
+transforms_output['J']               = TransformSequence( transforms = [ Uniform(a=0, b=40) ] )
+transforms_output['Jx']              = TransformSequence( transforms = [ Uniform(a=0, b=40) ] )
+transforms_output['Jy']              = TransformSequence( transforms = [ Uniform(a=0, b=40) ] )
+transforms_output['Jxy']             = TransformSequence( transforms = [ Uniform(a=0, b=300) ] )
+transforms_output['Nph WFS (fit)']   = TransformSequence( transforms = [ Uniform(a=0, b=300) ] )
+transforms_output['F']               = TransformSequence( transforms = [ Uniform(a=0, b=1.5) ] )
+transforms_output['F (left)']        = TransformSequence( transforms = [ Uniform(a=0, b=1.5) ] )
+transforms_output['F (right)']       = TransformSequence( transforms = [ Uniform(a=0, b=1.5) ] )
+transforms_output['bg (left)']       = TransformSequence( transforms = [ Uniform(a=-1e-5, b=1e-5) ] )
+transforms_output['bg (right)']      = TransformSequence( transforms = [ Uniform(a=-1e-5, b=1e-5) ] )
+transforms_output['SR data']         = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR fit']          = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR data (left)']  = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR data (right)'] = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR fit (left)']   = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
+transforms_output['SR fit (right)']  = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
 
-output_df = fitted_df.copy()
-for entry in transforms_output:
-    output_df[entry] = transforms_output[entry].forward(output_df[entry])
+try:
+    output_df = fitted_df.copy()
+    for entry in transforms_output:
+        output_df[entry] = transforms_output[entry].forward(output_df[entry])
+except:
+    print('No fitted data found')
 
-rows_with_nan = output_df.index[output_df.isna().any(axis=1)].values.tolist()
-rows_with_nan += fitted_df.index[fitted_df['F (right)'] > 2].values.tolist()
-rows_with_nan += fitted_df.index[fitted_df['Jxy'] > 300].values.tolist()
-rows_with_nan += fitted_df.index[fitted_df['Jx'] > 70].values.tolist()
-rows_with_nan += fitted_df.index[fitted_df['Jy'] > 70].values.tolist()
+# rows_with_nan = output_df.index[output_df.isna().any(axis=1)].values.tolist()
+# rows_with_nan += fitted_df.index[fitted_df['F (right)'] > 2].values.tolist()
+# rows_with_nan += fitted_df.index[fitted_df['Jxy'] > 300].values.tolist()
+# rows_with_nan += fitted_df.index[fitted_df['Jx'] > 70].values.tolist()
+# rows_with_nan += fitted_df.index[fitted_df['Jy'] > 70].values.tolist()
+# psf_df.drop(rows_with_nan, inplace=True)
+# input_df.drop(rows_with_nan, inplace=True)
+# fitted_df.drop(rows_with_nan, inplace=True)
+# output_df.drop(rows_with_nan, inplace=True)
 
-psf_df.drop(rows_with_nan, inplace=True)
-input_df.drop(rows_with_nan, inplace=True)
-fitted_df.drop(rows_with_nan, inplace=True)
-output_df.drop(rows_with_nan, inplace=True)
-
-good_ids = psf_df.index.values.tolist()
-print(len(good_ids), 'samples are in the dataset')
+# good_ids = psf_df.index.values.tolist()
+# print(len(good_ids), 'samples are in the dataset')
 
 def corr_plot(data, entry_x, entry_y, lims=None):
     j = sns.jointplot(data=data, x=entry_x, y=entry_y, kind="kde", space=0, alpha = 0.8, fill=True, colormap='royalblue' )
@@ -170,6 +188,108 @@ def corr_plot(data, entry_x, entry_y, lims=None):
     # plt.grid()
     plt.show()
 
+
+#%%
+
+transforms = {**transforms_input, **transforms_output}
+
+trans_df = df.copy()
+for entry in transforms:
+    trans_df[entry] = transforms[entry].forward(trans_df[entry])
+
+selected_X = ['r0 (data)',
+              'Rate',
+              'Nph WFS (data)',
+              'Wind speed (header)',
+              'Wind direction (header)',
+            #   'Flux WFS',
+              'Wind speed (200 mbar)',
+              'Wind direction (200 mbar)']
+
+selected_Y = [
+    'Rec. noise',
+    'Jx',
+    'Jy',
+    'F (left)',
+    'F (right)']
+
+
+X_df = trans_df[selected_X].fillna(0)
+Y_df = trans_df[selected_Y].fillna(0)
+
+NN2in  = lambda X: { selected: transforms[selected].backward(X[:,i]) for i,selected in enumerate(selected_X) }
+NN2fit = lambda Y: { selected: transforms[selected].backward(Y[:,i]) for i,selected in enumerate(selected_Y) }
+in2NN  = lambda inp: torch.from_numpy(( np.stack([transforms[a].forward(inp[a].values) for a in selected_X]))).T
+fit2NN = lambda out: torch.from_numpy(( np.stack([transforms[a].forward(out[a].values) for a in selected_Y]))).T
+
+for entry in selected_X:
+    trans_df = trans_df[trans_df[entry].abs() < 3]
+    # print(trans_df[entry].abs() < 3)
+
+for entry in selected_Y:
+    trans_df = trans_df[trans_df[entry].abs() < 3]
+
+ids = X_df.index.intersection(Y_df.index)
+X_df = X_df.loc[ids]
+Y_df = Y_df.loc[ids]
+
+X_df_train, X_df_test, y_df_train, y_df_test = train_test_split(X_df, Y_df, test_size=0.2, random_state=42)
+
+class ParamPredictor(nn.Module):
+    def __init__(self, in_size, out_size, hidden_size=100, dropout_p=0.0):
+        super(ParamPredictor, self).__init__()
+        self.fc1 = nn.Linear(in_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, hidden_size)
+        self.fc3 = nn.Linear(hidden_size, out_size)
+        
+        self.dropout1 = nn.Dropout(dropout_p)
+        self.dropout2 = nn.Dropout(dropout_p)
+        self.dropout3 = nn.Dropout(dropout_p)
+
+    def forward(self, x):
+        x = torch.tanh(self.fc1(x))
+        x = self.dropout1(x)
+        x = torch.tanh(self.fc2(x))
+        x = self.dropout2(x)
+        x = torch.tanh(self.fc3(x))
+        return x
+
+net = ParamPredictor(len(selected_X), len(selected_Y), 100, 0.05)
+net = net.to(device)
+
+optimizer = optim.Adam(net.parameters(), lr=0.0001)
+
+X_train = torch.from_numpy(X_df_train.to_numpy()).to(device).float()
+Y_train = torch.from_numpy(y_df_train.to_numpy()).to(device).float()
+X_val   = torch.from_numpy(X_df_test.to_numpy()).to(device).float()
+Y_val   = torch.from_numpy(y_df_test.to_numpy()).to(device).float()
+
+loss_fn = nn.MSELoss()
+
+weights_name = WEIGHTS_FOLDER/f'param_predictor_{len(selected_X)}x{len(selected_Y)}_real.pth'
+
+if not os.path.exists(weights_name):
+    num_iters = 30000
+    for iter in range(num_iters):
+        optimizer.zero_grad()
+        loss_train = loss_fn(net(X_train), Y_train)
+        loss_train.backward()
+        optimizer.step()
+        
+        with torch.no_grad():
+            loss_val = loss_fn(net(X_val), Y_val)
+        print('({:d}/{:d}) train, valid: {:.2f}, {:.2f}'.format(iter+1, num_iters, loss_train.item()*100, loss_val.item()*100), end='\r')
+
+    torch.save(net, weights_name)
+else:
+    net = torch.load(weights_name)
+
+y_pred = net(X_val).cpu().detach().numpy()
+
+del X_train, Y_train, X_val, Y_val
+torch.cuda.empty_cache()
+
+y_pred_df = pd.DataFrame(y_pred, index=X_df_test.index, columns=y_df_test.columns)
 
 #%% ================ Telemetry SR from telemetry ===================
 #% Select the entries to be used in training

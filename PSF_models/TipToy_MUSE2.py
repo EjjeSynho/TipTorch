@@ -14,7 +14,6 @@ from torch.nn.functional import interpolate
 from astropy.io import fits
 from skimage.transform import resize
 from graphviz import Digraph
-import pickle5 as pickle
 import os
 from os import path
 

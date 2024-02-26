@@ -34,7 +34,7 @@ psf_df = psf_df[psf_df['Nph WFS'] < 5000]
 # psf_df = psf_df[psf_df['λ left (nm)'] < 1700]
 
 
-good_fits_folder = 'E:/ESO/Data/SPHERE/good_fits_TipTorch/'
+good_fits_folder = 'F:/ESO/Data/SPHERE/good_fits_TipTorch/'
 
 files = os.listdir(good_fits_folder)
 good_ids = [int(file.split('.')[0]) for file in files]
@@ -73,14 +73,14 @@ psf_df.sort_index(inplace=True)
 
 #%% Create fitted parameters dataset
 #check if file exists
-if not os.path.isfile('E:/ESO/Data/SPHERE/fitted_df.pickle'):
+if not os.path.isfile('F:/ESO/Data/SPHERE/fitted_df.pickle'):
     fitted_dict_raw = {key: [] for key in ['F', 'dx', 'dy', 'r0', 'n', 'dn', 'bg', 'Jx', 'Jy', 'Jxy', 'Nph WFS', 'SR data', 'SR fit']}
     ids = []
 
     images_data = []
     images_fitted = []
 
-    fitted_folder = 'E:/ESO/Data/SPHERE/IRDIS_fitted_1P21I/'
+    fitted_folder = 'F:/ESO/Data/SPHERE/IRDIS_fitted_1P21I/'
     fitted_files = os.listdir(fitted_folder)
 
     for file in tqdm(fitted_files):
@@ -128,11 +128,11 @@ if not os.path.isfile('E:/ESO/Data/SPHERE/fitted_df.pickle'):
     fitted_df.set_index('ID', inplace=True)
 
     # Save dataframe
-    with open('E:/ESO/Data/SPHERE/fitted_df.pickle', 'wb') as handle:
+    with open('F:/ESO/Data/SPHERE/fitted_df.pickle', 'wb') as handle:
         pickle.dump(fitted_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
         
 else:
-    with open('E:/ESO/Data/SPHERE/fitted_df.pickle', 'rb') as handle:
+    with open('F:/ESO/Data/SPHERE/fitted_df.pickle', 'rb') as handle:
         print('Loading dataframe "fitted_df.pickle"...')
         fitted_df = pickle.load(handle)
 
@@ -635,7 +635,7 @@ def loss_fn(output, target):
 epochs = 26
 torch.cuda.empty_cache()
 
-toy = TipTorch(batches_dict_train[0]['configs'], None, device, TipTop=False, PSFAO=True)
+toy = TipTorch(batches_dict_train[0]['configs'], None, device, TipTop=True, PSFAO=False)
 toy.optimizables = []
 
 # optimizer = optim.Adam(net.parameters(), lr=0.000005)
@@ -692,6 +692,7 @@ for epoch in range(epochs):
     torch.cuda.empty_cache()
     
 # torch.save(net.state_dict(), WEIGHTS_FOLDER/'gnosis2_weights_tuned.dict')
+
 
 #%%
 PSFs_1 = []
@@ -872,7 +873,7 @@ with torch.no_grad():
 epochs = 26
 torch.cuda.empty_cache()
 
-toy = TipTorch(batches_dict_train[0]['configs'], norm_regime, device, TipTop=False, PSFAO=True)
+toy = TipTorch(batches_dict_train[0]['configs'], norm_regime, device, TipTop=True, PSFAO=False)
 toy.optimizables = []
 
 optimizer = optim.Adam(net.parameters(), lr=0.0005)
@@ -988,7 +989,9 @@ def UnitTest_PredictedAccuracy():
 
 
 def UnitTest_FittedAccuracy():
-    for i, batch in tqdm(enumerate(batches_dict_valid)):
+    # for i, batch in tqdm(enumerate(batches_dict_valid)):
+    for i in ids_same_valid:
+        batch = batches_dict_valid[i]
         # toy = TipTorch(batches_dict_valid[0]['configs'], norm_regime, device, TipTop=False, PSFAO=True)
         toy1 = TipTorch(batches_dict_valid[0]['configs'], None, device, TipTop=True, PSFAO=False)
         toy1.optimizables = []
@@ -1014,7 +1017,7 @@ def UnitTest_FittedAccuracy():
         
         destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
         plot_radial_profiles(destack(PSF_0),  destack(PSF_1),  'Data', 'Fitted', title=titla, dpi=200, cutoff=32, scale='log')
-        plt.show()    
+        plt.show()
 
 
 def UnitTest_DirectPredictions():
