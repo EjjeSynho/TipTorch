@@ -23,7 +23,7 @@ import os
 #%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
-
+#%%
 psf_df = psf_df[psf_df['invalid'] == False]
 psf_df = psf_df[psf_df['LWE'] == False]
 psf_df = psf_df[psf_df['doubles'] == False]

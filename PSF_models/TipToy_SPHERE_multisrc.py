@@ -89,8 +89,8 @@ class TipTorch(torch.nn.Module):
         self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
         self.dx  = torch.zeros(self.N_src, device=self.device)
         self.dy  = torch.zeros(self.N_src, device=self.device)
-        self.Jx  = torch.ones (self.N_src, device=self.device)*0.1
-        self.Jy  = torch.ones (self.N_src, device=self.device)*0.1
+        self.Jx  = torch.ones (self.N_src, device=self.device)#*0.1
+        self.Jy  = torch.ones (self.N_src, device=self.device)#*0.1
         self.Jxy = torch.ones (self.N_src, device=self.device)*0.1
         self._optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
 
@@ -267,7 +267,8 @@ class TipTorch(torch.nn.Module):
         self.center_aligner = torch.exp( 1j*np.pi*(self.U+self.V) * (1-self.nPix%2))
 
         # Compute pupil OTFs
-        self.OTF_static = self.ComputeStaticOTF(lambda x: self.pupil*self.apodizer).real
+        self.OTF_static_standart = self.StandartStaticOTF().real # Includes only apodizer and pupil
+        self.OTF_static = self.OTF_static_standart.clone()
         
         # PSD kingdome
         self.PSD_padder = torch.nn.ZeroPad2d((self.nOtf-self.nOtf_AO)//2)
@@ -279,13 +280,13 @@ class TipTorch(torch.nn.Module):
             self.PR = self.PistonFilter(torch.hypot(self.km, self.kn))
 
         # Diffraction-limited PSF
-        self.PSF_DL = self.OTF2PSF(self.OTF_static)
+        self.PSF_DL = self.OTF2PSF(self.OTF_static_standart)
         torch.cuda.empty_cache()
     
-        
+       
     def Phase2OTF(self, phase, sampling):    
         ''' Compute OTF from a phase screen''' 
-        pupil_size = self.pupil.shape[-1]
+        pupil_size   = phase.shape[-1]
         pupil_padder = torch.nn.ZeroPad2d( int(pupil_size*sampling/2-pupil_size/2) )
         phase_padded = pupil_padder(phase)
             
@@ -297,44 +298,64 @@ class TipTorch(torch.nn.Module):
         interp = lambda x: \
             interpolate(x[None,None,...], size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze() * sampling**2
             
-        Re = interp(OTF.real) # PyTorch doesn't support interpolation of complex tensors yet TODO: or is it?
-        Im = interp(OTF.imag)
-        return Re + Im*1j
+        # PyTorch doesn't support interpolation of complex tensors yet TODO: or is it?
+        OTF_ = interp(OTF.real) + interp(OTF.imag)*1j
+        
+        return OTF_ / OTF_.abs().max()
     
     
-    # TODO: maybe, gradleaf breaking happens here?
-    def ComputeStaticOTF(self, pupil_function):
+    def StandartStaticOTF(self):
         ''' Compute static OTF for each wavelength'''
         wvl_cpu = self.wvl.cpu().numpy()
         ids = np.unravel_index(np.unique(wvl_cpu, return_index=True)[1], self.wvl.shape)
-        
-        # if wavelengths are repeated, this saves computation time
+                
+        pupil = self.pupil * self.apodizer #* torch.exp(1j*2*np.pi/wvl)
+    
+        # Iterates over wavelengths only if some wavelengths are repeated, this saves computation time
         OTF_static_dict = {}
         for i, wvl in enumerate(wvl_cpu[ids].tolist()):
-            OTF_static_ = self.Phase2OTF(pupil_function(wvl), self.sampling[ids][i])
-            OTF_static_dict.setdefault(wvl, OTF_static_ / OTF_static_.abs().max())
+            OTF_static_dict.setdefault(wvl, self.Phase2OTF(pupil, self.sampling[ids][i]))
         
         OTF_static_ = torch.stack(
-            [torch.stack([OTF_static_dict[wvl_cpu[obj_id,wvl_id].item()] 
+            [torch.stack([OTF_static_dict[wvl_cpu[obj_id, wvl_id].item()] 
                 for wvl_id in range(self.wvl.shape[1])])
                 for obj_id in range(self.N_src)]
             )
-        del OTF_static_dict #TODO: is it necessary?
-
-        self.OTF_static = OTF_static_
+        del OTF_static_dict
         
         return OTF_static_
-            
+    
+
+    def ComputeStaticOTF(self, phase_generator):
+        if phase_generator is not None:
+        
+            OTF_static = torch.zeros([self.N_src, self.wvl.shape[1], self.nOtf, self.nOtf], device=self.device, dtype=torch.complex64)
+            phase = phase_generator()
+
+            for i in range(self.N_src):
+                for j in range(len(self.wvl[i])):
+                    OTF_static[i,j,...] = self.Phase2OTF(phase[i,j,...], self.sampling[i][j])
+
+            self.OTF_static = OTF_static
+
+        return self.OTF_static
+
 
     def Update(self, reinit_grids=True, reinit_pupils=False):
+        
         optimizables_copy = [i for i in self.optimizables]
         self.optimizables = []
         self.InitValues()
         self.optimizables = optimizables_copy
-        if reinit_pupils: self.InitPupils()
-        if reinit_grids: self.InitGrids()
-        # TODO: phase update
 
+        if reinit_grids:
+            self.InitGrids()
+            
+        if reinit_pupils:
+            self.InitPupils()            
+            self.OTF_static_standart = self.StandartStaticOTF().real # Includes only apodizer and pupil
+            self.PSF_DL = self.OTF2PSF(self.OTF_static_standart)
+            
 
     def _initialize_PSDs_settings(self, TipTop_flag, PSFAO_flag):
         # The full list of the supported PSD components
@@ -364,15 +385,12 @@ class TipTorch(torch.nn.Module):
             self.start = torch.cuda.Event(enable_timing=True)
             self.end   = torch.cuda.Event(enable_timing=True)
 
-        self.norm_regime  = norm_regime
-        self.norm_scale   = self.make_tensor(1.0) # TODO: num obj x num wvl
+        self.norm_regime = norm_regime
+        self.norm_scale  = self.make_tensor(1.0) # TODO: num obj x num wvl
         
-        if self.norm_regime == 'sum':
-            self.normalizer = torch.sum
-        elif self.norm_regime == 'max':
-            self.normalizer = torch.amax
-        else:
-            self.normalizer = lambda x, dim, keepdim: self.make_tensor(1.0)
+        if    self.norm_regime == 'sum': self.normalizer = torch.sum
+        elif  self.norm_regime == 'max': self.normalizer = torch.amax
+        else: self.normalizer = lambda x, dim, keepdim: self.make_tensor(1.0)
         
         self.oversampling = oversampling
     
@@ -653,12 +671,10 @@ class TipTorch(torch.nn.Module):
         OTF_turb  = torch.exp( -0.5 * SF * pdims(2*np.pi*1e-9/self.wvl,2)**2 )
         # Compute the residual tip/tilt kernel
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
-        # Resulting OTF
-        OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
+        # Resulting combined OTF
+        self.OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
 
-        self.OTF = OTF
-
-        PSF_out = self.OTF2PSF(OTF)
+        PSF_out = self.OTF2PSF(self.OTF)
 
         self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)
 
@@ -704,17 +720,19 @@ class TipTorch(torch.nn.Module):
         return self
 
 
-    def forward(self, x=None, PSD=None, pupil_function=None):
+    def forward(self, x=None, PSD=None, phase_generator=None):
         if x is not None:
             for name, value in x.items():
-                if isinstance(getattr(self, name), nn.Parameter):
-                    setattr(self, name, nn.Parameter(value))
-                else:
-                    setattr(self, name, value)
+                if hasattr(self, name):
+                    if isinstance(getattr(self, name), nn.Parameter):
+                        setattr(self, name, nn.Parameter(value))
+                    else:
+                        setattr(self, name, value)
             
         return self.PSD2PSF(\
             self.ComputePSD() if PSD is None else PSD, \
-            self.ComputeStaticOTF(pupil_function) if pupil_function is not None else self.OTF_static )
+            self.ComputeStaticOTF(phase_generator)
+            )
 
 
     def StartTimer(self):

@@ -7,7 +7,53 @@ from scipy import stats
 from scipy.stats import boxcox, yeojohnson, norm
 
 
-class DataTransformer:
+class InputsTransformer:
+    def __init__(self, transforms):
+        # Store the transforms provided as a dictionary
+        self.transforms = transforms
+
+    def stack(self, args_dict):
+        """
+        Constructs a joint tensor from provided keyword arguments,
+        applying the corresponding transforms to each.
+        Keeps track of each tensor's size for later decomposition.
+        """
+        self._slices = {}
+        tensors = []
+        current_index = 0
+
+        for key, value in args_dict.items():
+            if key not in self.transforms:
+                raise ValueError(f"Transform for {key} not found.")
+
+            transformed_value = self.transforms[key](value.unsqueeze(-1) if value.dim() == 1 else value)
+            next_index = current_index + transformed_value.shape[1]
+            self._slices[key] = slice(current_index, next_index)
+            current_index = next_index
+            tensors.append(transformed_value)
+        
+        # Concatenate all transformed tensors
+        joint_tensor = torch.hstack(tensors)
+        return joint_tensor
+
+
+    def destack(self, joint_tensor):
+        """
+        Decomposes the joint tensor back into a dictionary of variables,
+        inversely transforming each back to its original space.
+        Uses the slices tracked during the stack operation.
+        """
+        decomposed = {}
+        for key, sl in self._slices.items():
+            val = self.transforms[key].backward(joint_tensor[:, sl])
+            
+            decomposed[key] = val.squeeze(-1) if sl.stop-sl.start<2 else val # espect the TipTorch's conventions about the tensors dimensions
+        
+        return decomposed
+
+
+
+"""class DataTransformer:
     def __init__(self, data, boxcox=True, gaussian=True, uniform=False, invert=False) -> None:
         self.boxcox_flag   = boxcox
         self.gaussian_flag = gaussian
@@ -87,6 +133,7 @@ class DataTransformer:
         
         elif not self.boxcox_flag and not self.gaussian_flag and self.uniform_flag:
             return (self.inv_one_minus(self.inv_uniform_scaler((x+1)/2, self.a, self.b)) )
+"""
 
 
 class YeoJohnson:
@@ -188,6 +235,30 @@ class Uniform:
         
         self.uniform_scaler     = lambda x, a, b: 2*((x-a)/(b-a)-0.5)
         self.inv_uniform_scaler = lambda x, a, b: (x/2 + 0.5)*(b-a)+a
+        
+        if data is not None and a is None and b is None:
+            self.fit(data)
+    
+    def fit(self, data):
+        self.a = data.min()
+        self.b = data.max()
+        
+    def forward(self, x):
+        return self.uniform_scaler(x, self.a, self.b)
+    
+    def backward(self, y):
+        return self.inv_uniform_scaler(y, self.a, self.b)
+    
+    def __call__(self, x):
+        return self.forward(x)
+
+class Uniform0_1:
+    def __init__(self, data=None, a=None, b=None):
+        self.a = a
+        self.b = b
+        
+        self.uniform_scaler     = lambda x, a, b: (x-a)/(b-a)
+        self.inv_uniform_scaler = lambda x, a, b: x*(b-a)+a
         
         if data is not None and a is None and b is None:
             self.fit(data)
