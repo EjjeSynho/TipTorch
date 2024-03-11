@@ -108,6 +108,27 @@ def separate_islands(binary_image):
     return separated_images
 
 
+class LWE_basis():
+    def __init__(self, model, optimizable=True) -> None:
+        from tools.utils import BuildPetalBasis
+        self.model = model
+        self.modal_basis, self.coefs = BuildPetalBasis(self.model.pupil.cpu(), pytorch=True)
+        self.modal_basis = self.modal_basis[1:,...].float().to(model.device)
+        self.coefs = self.coefs[1:].to(model.device).repeat(model.N_src, 1)
+        if optimizable:
+            self.coefs = nn.Parameter(self.coefs)
+
+    def forward(self, x=None):
+        if x is not None:
+            self.coefs = x
+            
+        OPD = torch.einsum('mn,nwh->mwh', self.coefs, self.modal_basis) * 1e-9  
+        return pdims(self.model.pupil * self.model.apodizer, -2) * torch.exp(1j*2*np.pi / pdims(self.model.wvl,2)*OPD.unsqueeze(1))
+    
+    def __call__(self, *args):
+        return self.forward(*args)
+
+
 def save_GIF(array, duration=1e3, scale=1, path='test.gif', colormap=cm.viridis):
     from PIL import Image
     from skimage.transform import rescale
