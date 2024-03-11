@@ -8,10 +8,9 @@ sys.path.insert(0, '..')
 import pickle
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 from torch import nn, optim
-from tools.utils import plot_radial_profiles, SR, draw_PSF_stack, rad2mas, pdims
-from tools.utils import mask_circle, cropper, FitGauss2D, LWE_basis, EarlyStopping
+from tools.utils import SR, pdims
+from tools.utils import cropper, FitGauss2D, LWE_basis, EarlyStopping
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
@@ -45,6 +44,7 @@ norm_J   = TransformSequence(transforms=[ Uniform(a=0,     b=30)  ])
 norm_Jxy = TransformSequence(transforms=[ Uniform(a=0,     b=50)  ])
 norm_LWE = TransformSequence(transforms=[ Uniform(a=-200,  b=200) ])
 
+
 def to_store(x):
     if x is not None:
         if isinstance(x, torch.Tensor):
@@ -54,6 +54,7 @@ def to_store(x):
     else:
         return None
 
+
 def gauss_fitter(PSF_stack):
     FWHMs = np.zeros([PSF_stack.shape[0], PSF_stack.shape[1], 2])
     for i in range(PSF_stack.shape[0]):
@@ -62,6 +63,7 @@ def gauss_fitter(PSF_stack):
             FWHMs[i,l,0] = f_x.item()
             FWHMs[i,l,1] = f_y.item()
     return FWHMs
+
 
 #%%
 def load_and_fit_sample(id):
