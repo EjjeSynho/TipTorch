@@ -72,8 +72,8 @@ class TipTorch(torch.nn.Module):
         self.WFS_det_clock_rate = self.config['sensor_HO']['ClockRate'].flatten() # [(?)]
         self.WFS_FOV = self.config['sensor_HO']['FieldOfView']
         self.WFS_RON = self.config['sensor_HO']['SigmaRON']
-        self.WFS_psInMas = self.config['sensor_HO']['PixelScale']
         self.WFS_wvl = self.make_tensor(self.GS_wvl) #TODO: clarify this
+        self.WFS_psInMas   = self.config['sensor_HO']['PixelScale']
         self.WFS_spot_FWHM = self.make_tensor(self.config['sensor_HO']['SpotFWHM'][0])
         self.WFS_excessive_factor = self.config['sensor_HO']['ExcessNoiseFactor']
         self.WFS_Nph = self.config['sensor_HO']['NumberPhotons']
@@ -92,7 +92,7 @@ class TipTorch(torch.nn.Module):
         self.Jx  = torch.ones (self.N_src, device=self.device)#*0.1
         self.Jy  = torch.ones (self.N_src, device=self.device)#*0.1
         self.Jxy = torch.ones (self.N_src, device=self.device)*0.1
-        self._optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
+        # self._optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
 
         if self.PSD_include['Moffat']:
             self.amp   = torch.ones (self.N_src, device=self.device)*4.0  # Phase PSD Moffat amplitude [rad²]
@@ -101,36 +101,36 @@ class TipTorch(torch.nn.Module):
             self.beta  = torch.ones (self.N_src, device=self.device)*2  # Phase PSD Moffat beta power law
             self.ratio = torch.ones (self.N_src, device=self.device)      # Phase PSD Moffat ellipticity
             self.theta = torch.zeros(self.N_src, device=self.device)      # Phase PSD Moffat angle
-            self._optimizables += ['amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
+            # self._optimizables += ['amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
 
         if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
             self.dn  = torch.zeros(self.N_src, device=self.device)
-            self._optimizables += ['dn']
+            # self._optimizables += ['dn']
 
-        for name in self._optimizables:
-            setattr(self, name, nn.Parameter(getattr(self, name)))
+        # for name in self._optimizables:
+            # setattr(self, name, nn.Parameter(getattr(self, name)))
 
 
-    @property
-    def optimizables(self):
-        return self._optimizables
+    # @property
+    # def optimizables(self):
+        # return self._optimizables
     
 
-    @optimizables.setter
-    def optimizables(self, new_optimizables):
-        self._make_optimizable(new_optimizables)
-        self._optimizables = new_optimizables
+    # @optimizables.setter
+    # def optimizables(self, new_optimizables):
+        # self._make_optimizable(new_optimizables)
+        # self._optimizables = new_optimizables
     
 
-    def _make_optimizable(self, args):
-        for name in args:
-            if name not in self._optimizables and not isinstance(getattr(self, name), nn.Parameter):
-                setattr(self, name, nn.Parameter(getattr(self, name)))
-        for name in self.optimizables:
-            if name not in args and isinstance(getattr(self, name), nn.Parameter):
-                buffer = getattr(self, name).detach().clone()
-                delattr(self, name)
-                setattr(self, name, buffer)
+    # def _make_optimizable(self, args):
+    #     for name in args:
+    #         if name not in self._optimizables and not isinstance(getattr(self, name), nn.Parameter):
+    #             setattr(self, name, nn.Parameter(getattr(self, name)))
+    #     for name in self.optimizables:
+    #         if name not in args and isinstance(getattr(self, name), nn.Parameter):
+    #             buffer = getattr(self, name).detach().clone()
+    #             delattr(self, name)
+    #             setattr(self, name, buffer)
 
 
     def _fftAutoCorr(self, x):
@@ -273,8 +273,8 @@ class TipTorch(torch.nn.Module):
         # PSD kingdome
         self.PSD_padder = torch.nn.ZeroPad2d((self.nOtf-self.nOtf_AO)//2)
 
-        if self.piston_filter is None:
-            self.piston_filter = self.PistonFilter(self.k_AO)
+        # if self.piston_filter is None:
+        self.piston_filter = self.PistonFilter(self.k_AO)
         
         if self.PSD_include['aliasing'] and self.PR is None:
             self.PR = self.PistonFilter(torch.hypot(self.km, self.kn))
@@ -343,10 +343,10 @@ class TipTorch(torch.nn.Module):
 
     def Update(self, reinit_grids=True, reinit_pupils=False):
         
-        optimizables_copy = [i for i in self.optimizables]
-        self.optimizables = []
+        # optimizables_copy = [i for i in self.optimizables]
+        # self.optimizables = []
         self.InitValues()
-        self.optimizables = optimizables_copy
+        # self.optimizables = optimizables_copy
 
         if reinit_grids:
             self.InitGrids()
@@ -540,7 +540,7 @@ class TipTorch(torch.nn.Module):
         nT = torch.maximum( torch.hypot(self.WFS_spot_FWHM.max()/1e3, rad2arc*self.WFS_wvl/r0_WFS) / WFS_pixelScale, self.make_tensor(1.0) )
 
         varRON  = np.pi**2/3 * (self.WFS_RON**2/self.WFS_Nph**2) * (WFS_nPix**2/nD)**2
-        varShot = np.pi**2/(2*self.WFS_Nph) * (nT/nD)**2
+        varShot = np.pi**2 / (2*self.WFS_Nph) * (nT/nD)**2
         
         # Noise variance calculation
         varNoise = self.WFS_excessive_factor * (varRON+varShot) # TODO: clarify with Benoit and Thierry

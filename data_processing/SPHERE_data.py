@@ -5,7 +5,6 @@ sys.path.insert(0, '..')
 import os
 import re
 from os import path
-import torch
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
@@ -16,11 +15,14 @@ from astropy.time import Time
 from astropy.coordinates import SkyCoord
 from astropy import units as u
 from tqdm import tqdm
-from query_eso_archive import query_simbad
-from copy import deepcopy, copy
+from copy import deepcopy
 from pathlib import Path
 from tools.utils import GetROIaroundMax, mask_circle
 from scipy.ndimage.measurements import center_of_mass
+try:
+    from query_eso_archive import query_simbad
+except:
+    pass
 
 from project_globals import SPHERE_DATA_FOLDER
 
@@ -74,7 +76,7 @@ files_L, files_R = GetFilesList()
 
 #%%
 class SPHERE_loader():
-
+    
     def ReadImageCube(self, hdr, crop_size=256):
         cube = hdr[0].data
         mask_center = mask_circle(cube.shape[1], 128, center=(0,0), centered=True)
@@ -182,6 +184,7 @@ class SPHERE_loader():
             if not df.empty:
                 df.sort_values(by='date', inplace=True)
                 df.drop_duplicates(subset=['date'], inplace=True)
+                df.reset_index(inplace=True, drop=True)
                 return df
             else:
                 return None
@@ -265,7 +268,6 @@ class SPHERE_loader():
             ('winddir (200 mbar)',     'ecmwf_200mbar_winddir[deg]'),
             ('windspeed (200 mbar)',   'ecmwf_200mbar_windspeed[m/s]')]
 
-
         def get_entry_value(df, entry, id_start, id_end):
             if entry in df and id_start is not None and id_end is not None:
                 # In case the entry has a text format
@@ -274,8 +276,8 @@ class SPHERE_loader():
                     return df[entry][id:id+1].values[0]
                 else:
                     # If it's a number, it's possible to read 
-                    value = np.nanmedian(df[entry][id_start:id_end+1])
-                    std_dev = np.nanstd(df[entry][id_start:id_end+1])
+                    value   = np.nanmedian(df[entry][id_start:id_end+1])
+                    std_dev = np.nanstd   (df[entry][id_start:id_end+1])
                     if not np.isreal(value) or np.isinf(value):
                         return np.nan
                     else:
@@ -591,7 +593,6 @@ class SPHERE_loader():
         self.path_dtts = path_dtts
 
 #%%
-
 # Load the data
 def plot_sample(id):
     loader = SPHERE_loader(path_dtts)
@@ -618,7 +619,7 @@ def plot_sample(id):
     
     return samp
 
-# sample = plot_sample(2000)
+# sample = plot_sample(5)
 
 
 #%%
@@ -703,6 +704,7 @@ for file in set_diff:
     shutil.move(SPHERE_DATA_FOLDER+'IRDIS_images/'+file, folda_new+file)
 
 '''
+
 #%%
 def CreateSPHEREdataframe(save_df_dir=None):
 
@@ -713,7 +715,11 @@ def CreateSPHEREdataframe(save_df_dir=None):
         'Filename',
         'Date',
         'Observation',
+        'RA',
+        'DEC',
         'Airmass',
+        'Azimuth',
+        'Altitude',
         'r0 (SPARTA)',
         'Seeing (SPARTA)',
         'Seeing (MASSDIMM)',
@@ -758,6 +764,8 @@ def CreateSPHEREdataframe(save_df_dir=None):
     for col in columns_main:
         main_df[col] = []
 
+    mag_list, files, spectra = [], [], []
+
     for file in tqdm(reduced_files):
         with open(os.path.join(path_output, file), 'rb') as handle:
             data = pickle.load(handle)
@@ -769,7 +777,11 @@ def CreateSPHEREdataframe(save_df_dir=None):
         main_df['Filename'].append(pure_filename)
         main_df['Date'].append(data['observation']['date'])
         main_df['Observation'].append(data['observation']['name'])
+        main_df['RA'].append(data['observation']['RA'])
+        main_df['DEC'].append(data['observation']['DEC'])
         main_df['Airmass'].append(data['telescope']['airmass'])
+        main_df['Azimuth'].append(data['telescope']['azimuth'])
+        main_df['Altitude'].append(data['telescope']['altitude'])
         main_df['r0 (SPARTA)'].append(data['r0'])
         main_df['Seeing (SPARTA)'].append(data['seeing']['SPARTA'])
         main_df['Seeing (MASSDIMM)'].append(data['seeing']['MASSDIMM'])
@@ -809,20 +821,12 @@ def CreateSPHEREdataframe(save_df_dir=None):
         main_df['Num. DITs'].append(data['Integration']['Num. DITs'])
         main_df['Sequence time'].append(data['Integration']['sequence time'])
 
-    main_df = pd.DataFrame(main_df)
-
-    # Get spectrum information
-    mag_list = []
-    files = []
-    spectra = []
-
-    for file in tqdm(reduced_files):
-        with open(os.path.join(path_output, file), 'rb') as handle:
-            data = pickle.load(handle)
+        # Get spectrum information
         files.append(file)
         mag_list.append(data['observation']['magnitudes'])
         spectra.append(data['spectra'])
 
+    main_df = pd.DataFrame(main_df)
 
     # To find the closest filter to the wavelength of the observation
     wvl = np.array([1043, 1245, 1625, 2182, 1085, 1213, 1283, 1573, 1642, 2091, 2124, 2170, 2266,
@@ -833,7 +837,10 @@ def CreateSPHEREdataframe(save_df_dir=None):
 
     # Get all possible magnitudes
     mags = []
-    for mag_ in mag_list: mags += [mag for mag in mag_ if mag not in mags]
+    for mag_ in mag_list:
+        if isinstance(mag_, dict):
+            mags += [mag for mag in mag_ if mag not in mags]
+
     mag_cols_names = ['mag '+mag for mag in mags]
 
     spectrum_df = { i: [] for i in ['ID', 'Filename', 'λ left (nm)', 'λ right (nm)', 'Δλ left (nm)', 'Δλ right (nm)'] }
@@ -847,14 +854,18 @@ def CreateSPHEREdataframe(save_df_dir=None):
         spectrum_df['Filename'].append(pure_filename)
 
         # Get source magnitude information
+        current_mag_list = mag_list[files.index(record)]
         for mag in mags:
-            if mag in mag_list[files.index(record)]:
-                x = mag_list[files.index(record)][mag]
-                if isinstance(x, list) or isinstance(x, tuple):
-                    x = x[0]
-                spectrum_df['mag '+mag].append(x)
-            else:
+            if pd.isnull(current_mag_list):
                 spectrum_df['mag '+mag].append(np.nan)
+            else:
+                if mag in current_mag_list:
+                    x = current_mag_list[mag]
+                    if isinstance(x, list) or isinstance(x, tuple):
+                        x = x[0]
+                    spectrum_df['mag '+mag].append(x)
+                else:
+                    spectrum_df['mag '+mag].append(np.nan)
 
         # Get spectrum information
         sp = deepcopy(spectra[files.index(record)])
@@ -933,35 +944,6 @@ def LoadSPHEREsampleByID(id): # searches for the sample with the specified ID in
         data_sample = pickle.load(handle)
     return data_sample
 
-'''
-'Filename', 'Date', 'Observation', 'Airmass', 'r0 (SPARTA)',
-'Seeing (SPARTA)', 'Seeing (MASSDIMM)', 'Seeing (DIMM)', 'FWHM',
-'Strehl', 'Turb. speed', 'Wind direction (header)',
-'Wind direction (MASSDIMM)', 'Wind speed (header)',
-'Wind speed (SPARTA)', 'Wind speed (MASSDIMM)', 'Tau0 (header)',
-'Tau0 (SPARTA)', 'Tau0 (MASSDIMM)', 'Tau0 (MASS)', 'Pressure',
-'Humidity', 'Temperature', 'Nph WFS', 'Rate', 'λ left (nm)',
-'λ right (nm)', 'Δλ left (nm)', 'Δλ right (nm)', 'mag V', 'mag R',
-'mag G', 'mag J', 'mag H', 'mag K', 'Class A', 'Class B', 'Class C',
-'LWE', 'doubles', 'No coronograph', 'invalid'
-
-df2 = df.copy()
-# df2 = df2[df2['Invalid'] == True]
-
-import seaborn as sns
-
-xx = 'Nph WFS'
-yy = 'FWHM'
-hh = 'λ left (nm)'
-
-val_max = max([df2[xx].max(), df2[yy].max()])
-
-sns.set_theme()  # <-- This actually changes the look of plots.
-sns.scatterplot(data=df2, x=xx, y=yy, hue=hh, alpha=0.5)
-plt.xlabel(xx)
-plt.ylabel(yy)
-plt.xscale('log')
-'''
 
 def plot_sample(id):
     samp = LoadSPHEREsampleByID(id)
@@ -986,294 +968,5 @@ def plot_sample(id):
     fig.tight_layout()
     plt.show()
     # plt.savefig(save_folder / f'{id}.png', dpi=300)
-
-
-#%%
-class SPHERE_database:
-    def __init__(self, path_input, path_fitted):
-        files_input  = os.listdir(path_input)
-        files_fitted = os.listdir(path_fitted)
-
-        # Some samples were skipped during fittin. Check which ones were not by their id
-        ids_fitted = set( [int(re.findall('[0-9]+', file)[0]) for file in files_fitted] )
-        self.file_ids = []
-        self.data = []
-
-        print('Loading input data from '+path_input+'...\nLoading fitted data from '+path_fitted+'...')
-        for file in tqdm(files_input):
-            file_id = int(re.findall('[0-9]+', file)[0])
-            if file_id in ids_fitted:
-                try:
-                    with open(os.path.join(path_input, file), 'rb') as handle:
-                        data_input = pickle.load(handle)
-                    with open(os.path.join(path_fitted, str(file_id)+'.pickle'), 'rb') as handle:
-                        data_fitted = pickle.load(handle)
-                    self.data.append((data_input, data_fitted, file_id))
-                    self.file_ids.append(file_id)
-
-                except OSError:
-                    print('Cannot read a file with such name! Skipping...')
-
-    def find(self,sample_id):
-        try: #file_id is the identifier of a sample in the database, id is just an index in array
-            id = self.file_ids.index(sample_id)
-        except ValueError:
-            print('Cannot find sample with index', sample_id)
-            return None
-        return {'input': self.data[id][0], 'fitted': self.data[id][1], 'index': id}
-
-    def __getitem__(self, key):
-        return {'input': self.data[key][0], 'fitted': self.data[key][1], 'file_id': self.data[key][2] }
-
-    def pop(self, id): #removes by file index
-        if hasattr(id, '__iter__'):
-            for i in id:
-                self.data.pop(i)
-                self.file_ids.pop(i)
-        else:
-            self.data.pop(id)
-            self.file_ids.pop(id)
-    
-    def remove(self, file_id): #removes by file id
-        if hasattr(id, '__iter__'):
-            for i in file_id:
-                buf = self.find(i)
-                self.data.pop(buf['index'])
-                self.file_ids.pop(buf['index'])
-        else:
-            buf = self.find(file_id)
-            self.data.pop(buf['index'])
-            self.file_ids.pop(buf['index'])
-
-    def __len__(self):
-        return len(self.data)
-
-    def __iter__(self):
-        for sample in self.data:
-            yield {'input': sample[0], 'fitted': sample[1], 'file_id': sample[2]}
-
-    def __add__(self, o):
-        for sample, file_id in zip(o.data, o.file_ids):
-            self.data.append(sample)
-            self.file_ids.append(file_id)
-
-    def __sub__(self, o):
-        self.remove(o.file_ids)
-
-    def subset(self, ids):
-        buf = copy(self)
-        if hasattr(ids, '__iter__') or hasattr(ids, '__len__'):
-            buf.data = [self.data[i] for i in ids]
-            buf.file_ids = [self.file_ids[i] for i in ids]
-        else:
-            buf.data = [self.data[ids]]
-            buf.file_ids = [self.file_ids[ids]]
-        return buf
-
-    def split(self, ids):
-        exclude_ids = set(ids)
-        inlude_ids  = set(range(len(self.data))) - exclude_ids
-        return self.subset(inlude_ids), self.subset(exclude_ids)
-
-#%%
-class SPHERE_dataset:
-
-    def GetLabeledIDs(self, labels_file='C:/Users/akuznets/Data/SPHERE/labels.txt'):
-        with open(labels_file) as f: lines = f.readlines()
-        tags = []
-        data = []
-        for line in lines:
-            buf = line.replace(' \n', '').replace('\n', '').split(' ')
-            buf_dict = {'id': int(buf[0]), 'properties': buf[1:]}
-            for i in buf[1:]: tags.append(i)
-            data.append(buf_dict)
-
-        def unique_list(inp):
-            buf = []
-            for x in inp:
-                if x not in buf: buf.append(x)
-            return buf
-
-        tags = unique_list(tags) # get the list of all PSF labels
-
-        # Generate set of ids
-        sets_raw = {}
-        all_ids = []
-        for tag in tags:
-            ids = []
-            for record in data:
-                if tag in record['properties']:
-                    ids.append(record['id'])
-                all_ids.append(record['id'])
-            sets_raw[tag] = set(ids)
-
-        all_ids = set(unique_list(all_ids))
-        double_ids = sets_raw['Double']
-        LWE_ids    = sets_raw['LWE']
-        good_ids   = sets_raw['Good'] - double_ids
-        wasted_ids = sets_raw['Corrupted'].union(sets_raw['Empty']).union(sets_raw['Blurry']).union(sets_raw['Clipped'])-good_ids
-
-        golden_ids = deepcopy(good_ids)
-        for tag in sets_raw:
-            if tag not in 'Good': golden_ids -= sets_raw[tag]
-
-        soso_ids  = all_ids - good_ids - wasted_ids
-        valid_ids = all_ids - wasted_ids
-
-        sets = {
-            'Total':      all_ids,
-            'Valid':      valid_ids,
-            'Invalid':    wasted_ids,
-            'Golden':     golden_ids,
-            'Good':       good_ids,
-            'Category B': soso_ids,
-            'LWE':        LWE_ids,
-            'Doubles':    double_ids
-        }
-
-        print('=== Dataset stats ===')
-        print('Total:      ', len(all_ids))
-        print('Valid:      ', len(valid_ids))
-        print('Invalid:    ', len(wasted_ids))
-        print('----------------------')
-        print('Good:       ', len(good_ids))
-        print('Golden:     ', len(golden_ids))
-        print('Category B: ', len(soso_ids))
-        print('LWE:        ', len(LWE_ids))
-        print('Doubles:    ', len(double_ids))
-
-        return sets_raw, sets
-
-
-    # Filter samples with the same (the most adundant) wavelength
-    def FilterWavelength(self):
-        wvls = []
-        for data_sample in self.database:
-            wvl = data_sample['input']['spectrum']['lambda']
-            wvls.append(wvl)
-        wvls = np.array(wvls)
-
-        sample_ids = np.arange(len(self.database))
-        wvl_unique, _, unique_indices, counts = np.unique(wvls, return_index=True, return_inverse=True, return_counts=True)
-        return self.database.subset(sample_ids[unique_indices==np.argmax(counts)])
-
-
-    def __init__(self):
-        self.sets_raw, self.sets = self.GetLabeledIDs()
-
-        self.normalizer = {
-            'wavelength':     [1e6,    0],
-            'r0':             [5,     -1],
-            'F':              [1,      0],
-            'tau0':           [50,     0],
-            'wind speed':     [1/10,  -0.75],
-            'wind direction': [1/180,  0],
-            'airmass':        [1,     -1],
-            'WFS photons':    [0.625, -4.5],
-            'dx':             [2,      0],
-            'dy':             [2,      0],
-            'background':     [0.5e6,  0],
-            'dn':             [1,      0],
-            'Jx':             [0.1,    0],
-            'Jy':             [0.1,    0],
-            'Jxy':            [0.05,   0] }
-
-        self.f     = lambda x,n: x * n[0] + n[1]
-        self.f_inv = lambda y,n: (y - n[1]) / n[0]
-
-        # Load the SPHERE PSF database
-        root = 'C:/Users/akuznets/Data/SPHERE/'
-
-        #path_fitted = root + 'fitted_TipToy_sumnorm/'
-        path_fitted = root + 'fitted_TipToy_maxnorm/'
-        path_input  = root + 'test/'
-
-        self.database = SPHERE_database(path_input, path_fitted)
-
-        bad_samples = []
-        for data_sample in self.database:
-            entries = ['r0', 'F', 'n', 'dn', 'Nph WFS', 'Jx', 'Jy', 'Jxy', 'dx', 'dy', 'bg']
-            buf = np.array([data_sample['fitted'][entry] for entry in entries])
-            if np.any(np.isnan(buf)):
-                bad_samples.append(data_sample['file_id'])
-                
-        for bad_sample in bad_samples:
-            self.database.remove(bad_sample)
-        print(str(len(bad_samples))+' samples were filtered, '+str(len(self.database.data))+' samples remained')
-
-
-    def GetInputs(self, data_sample):
-        wvl     = data_sample['input']['spectrum']['lambda']
-        r_0     = 3600*180/np.pi*0.976*0.5e-6 / data_sample['input']['seeing']['SPARTA'] # [m]
-        tau0    = data_sample['input']['tau0']['SPARTA']
-        wspeed  = data_sample['input']['Wind speed']['MASSDIMM']
-        wdir    = data_sample['input']['Wind direction']['MASSDIMM']
-        airmass = data_sample['input']['telescope']['airmass']
-        N_ph    = np.log10(data_sample['input']['WFS']['Nph vis'] * data_sample['input']['WFS']['rate']*1240)
-        
-        if wdir >= 180: wdir -= 360.0
-
-        vals = {
-            'wavelength':     wvl,
-            'r0':             r_0,
-            'tau0':           tau0,
-            'wind speed':     wspeed,
-            'wind direction': wdir,
-            'airmass':        airmass,
-            'WFS photons':    N_ph,
-            'dx':             data_sample['fitted']['dx'],
-            'dy':             data_sample['fitted']['dy'],
-            'background':     data_sample['fitted']['bg']
-        }
-        return torch.tensor([self.f(vals[entry], self.normalizer[entry]) for entry in vals]).flatten()
-
-
-    def GetOutputs(self, data_sample):
-        vals = {
-            'r0':          np.abs(data_sample['fitted']['r0']),
-            'F':           data_sample['fitted']['F'],
-            'dx':          data_sample['fitted']['dx'],
-            'dy':          data_sample['fitted']['dy'],
-            'background':  data_sample['fitted']['bg'],
-            'dn':          data_sample['fitted']['dn'],
-            'Jx':          data_sample['fitted']['Jx'],
-            'Jy':          data_sample['fitted']['Jy'],
-            'Jxy':         data_sample['fitted']['Jxy'],
-            'WFS photons': data_sample['fitted']['Nph WFS']
-        }
-        return torch.tensor([self.f(vals[entry], self.normalizer[entry]) for entry in vals]).flatten()
-
-
-    def GetPSFs(self, data_sample, norm_regime):
-        img_data   = data_sample['fitted']['Img. data'].squeeze(0)
-        img_fitted = data_sample['fitted']['Img. fit'].squeeze(0)
-
-        if norm_regime == 'sum':
-            img_data   /= img_data.sum()
-            img_fitted /= img_fitted.sum()
-
-        if norm_regime == 'max':
-            img_data   /= img_data.max()
-            img_fitted /= img_fitted.max()
-
-        return torch.tensor(img_data).float(), torch.tensor(img_fitted).float()
-
-
-    def GenerateDataset(self, dataset):
-        x  = [] # inputs
-        y  = [] # labels
-        i0 = [] # data images
-        i1 = [] # fitted images
-
-        for sample in dataset:
-            input = self.GetInputs(sample)
-            pred  = self.GetOutputs(sample)
-            i_dat, i_fit = self.GetPSFs(sample, 'sum')
-            x.append(input)
-            y.append(pred)
-            i0.append(i_dat)
-            i1.append(i_fit)
-
-        return torch.vstack(x), torch.vstack(y), torch.dstack(i0).permute([2,0,1]), torch.dstack(i1).permute([2,0,1])
 
 

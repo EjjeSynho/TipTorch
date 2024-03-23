@@ -82,15 +82,15 @@ class ConfigManager():
             
         elif isinstance(x, (torch.Tensor, np.ndarray)):
             if x.ndim == 0:
-                return float(x.item())
+                return float(x.real.item())
             else:
                 x = x.squeeze()
                 if x.ndim == 0:
                     return float(x.item())
                 else:
-                    return x
+                    return x.real
         else:
-            return float(x)
+            return float(x.real)
 
 
     def process_dictionary(self, d):
@@ -159,6 +159,61 @@ class ConfigManager():
 
         new_config['NumberSources'] = int(len(configs))
         return new_config
+
+
+    def Split(self, config, indexes):
+        """Splits a config file based on a list of indexes into separate config parts."""
+        # Deep copy the original config to avoid modifying it
+        original_config = deepcopy(config)
+
+        # Function to get all paths (entries) in the config dictionary
+        def get_all_entries(d):
+            entries = []
+            def dict_path(path, my_dict):
+                for k, v in my_dict.items():
+                    new_path = f"{path}|{k}" if path else k
+                    if isinstance(v, dict):
+                        dict_path(new_path, v)
+                    else:
+                        entries.append(new_path)
+            dict_path('', d)
+            return entries
+
+        all_entries = get_all_entries(original_config)
+
+        # Function to create a blank config structure
+        def create_blank_config_from_original(original):
+            if isinstance(original, dict):
+                return {k: create_blank_config_from_original(v) for k, v in original.items()}
+            else:
+                return None  # Placeholder for non-dict values
+
+        # Initialize split configs based on indexes
+        split_configs = [create_blank_config_from_original(original_config) for _ in indexes]
+
+        # Function to set values in split configs based on indexes
+        def set_values_based_on_indexes(split_configs, original_config, all_entries, indexes):
+            for entry in all_entries:
+                path = entry.split('|')
+                value = reduce(operator.getitem, path, original_config)
+
+                # Decide how to split the value based on its type and whether it's uniqualized
+                if path in self.uniqualized_values or not isinstance(value, (list, tuple)):
+                    # Set the same value for all configs if it's uniqualized or not a list/tuple
+                    for split_config in split_configs:
+                        self.set_value(split_config, path, deepcopy(value))
+                else:
+                    # For list/tuple values, distribute them according to indexes
+                    for i, index in enumerate(indexes):
+                        if 0 <= index < len(value):
+                            self.set_value(split_configs[i], path, deepcopy(value[index]))
+                        else:
+                            # Handle the case where the index is out of range
+                            self.set_value(split_configs[i], path, None)
+
+        set_values_based_on_indexes(split_configs, original_config, all_entries, indexes)
+
+        return split_configs
 
 
     def Convert(self, config, framework='pytorch', device=None):

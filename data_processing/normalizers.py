@@ -1,3 +1,4 @@
+import pickle
 import torch
 from torch.distributions.normal import Normal
 from project_globals import device
@@ -19,6 +20,7 @@ class InputsTransformer:
         Keeps track of each tensor's size for later decomposition.
         """
         self._slices = {}
+        self._packed_size = None
         tensors = []
         current_index = 0
 
@@ -34,8 +36,12 @@ class InputsTransformer:
         
         # Concatenate all transformed tensors
         joint_tensor = torch.hstack(tensors)
+        self._packed_size = joint_tensor.shape[1]
         return joint_tensor
 
+    # Getter
+    def get_packed_size(self):
+        return self._packed_size
 
     def destack(self, joint_tensor):
         """
@@ -46,163 +52,143 @@ class InputsTransformer:
         decomposed = {}
         for key, sl in self._slices.items():
             val = self.transforms[key].backward(joint_tensor[:, sl])
-            
-            decomposed[key] = val.squeeze(-1) if sl.stop-sl.start<2 else val # espect the TipTorch's conventions about the tensors dimensions
+            decomposed[key] = val.squeeze(-1) if sl.stop-sl.start<2 else val # expects the TipTorch's conventions about the tensors dimensions
         
         return decomposed
 
 
-
-"""class DataTransformer:
-    def __init__(self, data, boxcox=True, gaussian=True, uniform=False, invert=False) -> None:
-        self.boxcox_flag   = boxcox
-        self.gaussian_flag = gaussian
-        self.uniform_flag  = uniform
-        self.invert_flag   = invert
-        
-        self.std_scaler     = lambda x, m, s: (x-m)/s
-        self.inv_std_scaler = lambda x, m, s: x*s+m
-
-        self.uniform_scaler     = lambda x, a, b: (x-a)/(b-a)
-        self.inv_uniform_scaler = lambda x, a, b: x*(b-a)+a
-                        
-        self.one_minus     = lambda x: 1-x if self.invert_flag else x
-        self.inv_one_minus = lambda x: 1-x if self.invert_flag else x
-        
-        self.normal_distribution = Normal(torch.tensor([0.0]).to(device), torch.tensor([1.0]).to(device))
-
-        if data is not None: self.fit(data)
-    
-    def boxcox(self, x, λ):
-        if isinstance(x, torch.Tensor):
-            return torch.log(x+1e-6) if abs(λ)<1e-6 else ((x+1e-6)**λ-1)/λ
-        else:
-            return np.log(x+1e-6) if abs(λ)<1e-6 else ((x+1e-6)**λ-1)/λ
-    
-    def inv_boxcox(self, y, λ):
-        if isinstance(y, torch.Tensor) :
-            return torch.exp(y) if abs(λ)<1e-6 else (λ*(y+1e-6)+1)**(1/λ)
-        else:
-            return np.exp(y) if abs(λ)<1e-6 else (λ*(y+1e-6)+1)**(1/λ)
-
-    def cdf(self, x):
-        return self.normal_distribution.cdf(x) if isinstance(x, torch.Tensor) else  stats.norm.cdf(x)
-        
-    def ppf(self, q):
-        return torch.sqrt(torch.tensor([2.]).to(device)) * torch.erfinv(2*q-1) if isinstance(q, torch.Tensor) else stats.norm.ppf(q)
-    
-    def fit(self, data):
-        if self.boxcox_flag and self.gaussian_flag and not self.uniform_flag:
-            data_standartized, self.lmbd = stats.boxcox(self.one_minus(data))
-            self.mu, self.std = stats.norm.fit(data_standartized)
-            
-        elif self.boxcox_flag and not self.gaussian_flag and self.uniform_flag:
-            data_standartized, self.lmbd = stats.boxcox(self.one_minus(data))
-            self.a = data_standartized.min()*0.99
-            self.b = data_standartized.max()*1.01
-        
-        elif not self.boxcox_flag and self.gaussian_flag and not self.uniform_flag:
-            self.mu, self.std = stats.norm.fit(self.one_minus(data))
-
-        elif not self.boxcox_flag and not self.gaussian_flag and self.uniform_flag:
-            self.a = data.min()
-            self.b = data.max()
-
-    def forward(self, x):
-        if self.boxcox_flag and self.gaussian_flag and not self.uniform_flag:
-            return self.std_scaler(self.boxcox(self.one_minus(x), self.lmbd), self.mu, self.std)
-        
-        elif self.boxcox_flag and not self.gaussian_flag and self.uniform_flag:
-            return self.ppf( self.uniform_scaler(self.boxcox(self.one_minus(x), self.lmbd), self.a, self.b) )
-        
-        elif not self.boxcox_flag and self.gaussian_flag and not self.uniform_flag:
-            return self.std_scaler(self.one_minus(x), self.mu, self.std)
-        
-        elif not self.boxcox_flag and not self.gaussian_flag and self.uniform_flag:
-            return self.uniform_scaler(self.one_minus(x), self.a, self.b)*2-1
-
-    def backward(self, x):
-        if self.boxcox_flag and self.gaussian_flag and not self.uniform_flag:
-            return self.inv_one_minus(self.inv_boxcox(self.inv_std_scaler(x, self.mu, self.std), self.lmbd))
-        
-        elif self.boxcox_flag and not self.gaussian_flag and self.uniform_flag:
-            return self.inv_one_minus(self.inv_boxcox(self.inv_uniform_scaler(self.cdf(x), self.a, self.b), self.lmbd))
-        
-        elif not self.boxcox_flag and self.gaussian_flag and not self.uniform_flag:
-            return self.inv_one_minus(self.inv_std_scaler(x, self.mu, self.std))
-        
-        elif not self.boxcox_flag and not self.gaussian_flag and self.uniform_flag:
-            return (self.inv_one_minus(self.inv_uniform_scaler((x+1)/2, self.a, self.b)) )
-"""
-
-
 class YeoJohnson:
-    def __init__(self, data=None) -> None:
-        if data is None:
-            self.lmbda = None
-        else:
+    def __init__(self, data=None, lmbda=None) -> None:
+        self.lmbda = lmbda
+        # self.__numerical_stability = 1e-12
+        
+        if data is not None and self.lmbda is None:
             self.fit(data)
 
     def fit(self, data):
+        if not isinstance(data, np.ndarray):
+            data = np.array(data)
         self.lmbda = stats.yeojohnson_normmax(data)
-
-    def forward(self, x):
-        x += 1e-9
-        xp = torch if isinstance(x, torch.Tensor) else np
-        pos = x >= 0
-        neg = x < 0
-        lmbda_zero = self.lmbda == 0
-        lmbda_not_zero = self.lmbda != 0
-        lmbda_two = self.lmbda == 2
-        lmbda_not_two = self.lmbda != 2
-
-        y = xp.where(pos * lmbda_not_zero, ((x + 1)**self.lmbda - 1) / self.lmbda, 0) + \
-            xp.where(pos * lmbda_zero, xp.log(x + 1), 0) + \
-            xp.where(neg * lmbda_not_two, -((-x + 1)**(2 - self.lmbda) - 1) / (2 - self.lmbda), 0) + \
-            xp.where(neg * lmbda_two, -xp.log(-x + 1), 0)    
-        return y
-
+        
     def __call__(self, x):
         return self.forward(x)
+    
+    def forward(self, x):
+        if self.lmbda is None:
+            raise ValueError("Lambda is not initialized. Call 'fit' with valid data first.")
+
+        xp = torch if isinstance(x, torch.Tensor) else np
+        # Apply transformations carefully to avoid domain issues.
+        pos = x >= 0
+        neg = x < 0
+        
+        # Compute only for valid parts of the domain.
+        y = xp.zeros_like(x)  # Initialize y with the same shape and type as x.
+        if self.lmbda != 0:
+            y[pos] = ((x[pos] + 1) ** self.lmbda - 1) / self.lmbda
+            y[neg] = -((-x[neg] + 1) ** (2 - self.lmbda) - 1) / (2 - self.lmbda)
+        else:  # Handle the lambda = 0 case separately to avoid division by zero.
+            y[pos] = xp.log(x[pos] + 1)
+            y[neg] = -xp.log(-x[neg] + 1)
+        return y
 
     def backward(self, y):
-        y += 1e-9
+        if self.lmbda is None:
+            raise ValueError("Lambda is not initialized. Call 'fit' with valid data first.")
+        
         xp = torch if isinstance(y, torch.Tensor) else np
+        x = xp.zeros_like(y)
+        
         pos = y >= 0
         neg = y < 0
-        lmbda_zero = self.lmbda == 0
-        lmbda_not_zero = self.lmbda != 0
-        lmbda_two = self.lmbda == 2
-        lmbda_not_two = self.lmbda != 2
-
-        x = xp.where(pos * lmbda_not_zero, (self.lmbda * y + 1)**(1 / self.lmbda) - 1, 0) + \
-            xp.where(pos * lmbda_zero, xp.exp(y) - 1, 0) + \
-            xp.where(neg * lmbda_not_two, -((2 - self.lmbda) * -y + 1)**(1 / (2 - self.lmbda)) + 1, 0) + \
-            xp.where(neg * lmbda_two, -(xp.exp(-y) + 1), 0)
+        
+        if self.lmbda != 0:
+            x[pos] = (self.lmbda * y[pos] + 1) ** (1 / self.lmbda) - 1
+            x[neg] = -((2 - self.lmbda) * -y[neg] + 1) ** (1 / (2 - self.lmbda)) + 1
+        else:
+            x[pos] = xp.exp(y[pos]) - 1
+            x[neg] = -(xp.exp(-y[neg]) - 1)
         return x
 
+    def store(self):
+        return ('YeoJohnson', self.lmbda)
+    
+    '''
+    # This case is better differentiable
+    def forward(self, x):
+        if self.lmbda is None:
+            raise ValueError("Lambda is not initialized. Call 'fit' with valid data first.")
+
+        xp = torch if isinstance(x, torch.Tensor) else np
+
+        x_safe = x + self.__numerical_stability
+
+        pos            = x_safe >= 0
+        neg            = x_safe < 0
+        lmbda_zero     = self.lmbda == 0
+        lmbda_not_zero = self.lmbda != 0
+        lmbda_two      = self.lmbda == 2
+        lmbda_not_two  = self.lmbda != 2
+
+        y = xp.where(pos & lmbda_not_zero, ((x_safe + 1)**self.lmbda - 1) / self.lmbda, 0) + \
+            xp.where(pos & lmbda_zero, xp.log(x_safe + 1), 0) + \
+            xp.where(neg & lmbda_not_two, -((-x_safe + 1)**(2 - self.lmbda) - 1) / (2 - self.lmbda), 0) + \
+            xp.where(neg & lmbda_two, -xp.log(-x_safe + 1), 0)
+
+        return y   
+    
+
+    def backward(self, y):
+        if self.lmbda is None:
+            raise ValueError("Lambda is not initialized. Call 'fit' with valid data first.")
+        
+        # Dynamically select the appropriate library based on y's type
+        xp = torch if isinstance(y, torch.Tensor) else np
+        
+        # To ensure stability in computations, especially with exp and log, adjustments are made
+        y_safe = y + self.__numerical_stability
+
+        pos            = y_safe >= 0
+        neg            = y_safe < 0
+        lmbda_zero     = self.lmbda == 0
+        lmbda_not_zero = self.lmbda != 0
+        lmbda_two      = self.lmbda == 2
+        lmbda_not_two  = self.lmbda != 2
+
+        # Computing the inverse transformation with adjusted conditions
+        x = xp.where(pos & lmbda_not_zero, (self.lmbda * y_safe + 1)**(1 / self.lmbda) - 1, 0) + \
+            xp.where(pos & lmbda_zero, xp.exp(y_safe) - 1, 0) + \
+            xp.where(neg & lmbda_not_two, -((2 - self.lmbda) * -y_safe + 1)**(1 / (2 - self.lmbda)) + 1, 0) + \
+            xp.where(neg & lmbda_two, -(xp.exp(-y_safe) - 1), 0)
+            
+        return x
+    '''
 
 class BoxCox:
     def __init__(self, data=None, lmbda=None) -> None:
-        self.λ = lmbda
-        if data is not None and self.λ is None:
+        self.lmbda = lmbda
+        if data is not None and self.lmbda is None:
             self.fit(data)
 
     def fit(self, data):
-        self.λ = stats.boxcox_normmax(data)
+        self.lmbda = stats.boxcox_normmax(data)
 
     def forward(self, x):
         xp = torch if isinstance(x, torch.Tensor) else np
         # x = xp.abs(x+1e-12)
-        return xp.log(x) if abs(self.λ)<1e-6 else (xp.abs(x)**self.λ-1)/self.λ
+        return xp.log(x) if abs(self.lmbda)<1e-6 else (xp.abs(x)**self.lmbda-1)/self.lmbda
 
     def backward(self, y):
         xp = torch if isinstance(y, torch.Tensor) else np
         # y = xp.abs(y+1e-12) 
-        return xp.exp(y) if abs(self.λ)<1e-6 else (self.λ*xp.abs(y)+1)**(1/self.λ)
+        return xp.exp(y) if abs(self.lmbda)<1e-6 else (self.lmbda*xp.abs(y)+1)**(1/self.lmbda)
 
     def __call__(self, x):
         return self.forward(x)
+    
+    
+    def store(self):
+        return ('BoxCox', self.lmbda)
 
 
 class Gaussify:
@@ -226,6 +212,9 @@ class Gaussify:
     
     def backward(self, y):
         return self.cdf(self.ppf(y))
+    
+    def store(self):
+        return ('Gaussify')
 
 
 class Uniform:
@@ -251,6 +240,9 @@ class Uniform:
     
     def __call__(self, x):
         return self.forward(x)
+    
+    def store(self):
+        return ('Uniform', (self.a, self.b))
 
 class Uniform0_1:
     def __init__(self, data=None, a=None, b=None):
@@ -275,6 +267,9 @@ class Uniform0_1:
     
     def __call__(self, x):
         return self.forward(x)
+    
+    def store(self):
+        return ('Uniform0_1', (self.a, self.b))
 
 
 class Gauss:
@@ -295,8 +290,56 @@ class Gauss:
     
     def __call__(self, x):
         return self.forward(x)
+    
+    def store(self):
+        return ('Gauss', (self.mu, self.std))
 
-
+class Invert:
+    def __init__(self, data=None):
+        pass
+    
+    def fit(self, data):
+        pass
+    
+    def forward(self, x):
+        return 1-x
+    
+    def backward(self, y):
+        return 1-y
+    
+    def __call__(self, x):
+        return self.forward(x)
+    
+    def store(self):
+        return 'Invert'
+    
+    
+class Logify:
+    def __init__(self, data=None):
+        pass
+    
+    def fit(self, data=None):
+        pass
+    
+    def forward(self, x):
+        if isinstance(x, torch.Tensor):
+            return torch.log(x)
+        else:
+            return np.log(x)
+    
+    def backward(self, y):
+        if isinstance(y, torch.Tensor):
+            return torch.exp(y)
+        else:
+            return np.exp(y)
+    
+    def __call__(self, x):
+        return self.forward(x)
+    
+    def store(self):
+        return 'Logify'
+    
+    
 class TransformSequence:
     def __init__(self, transforms=None):
         self.transforms = transforms
@@ -316,20 +359,55 @@ class TransformSequence:
         for transform in reversed(self.transforms):
             y = transform.backward(y)
         return y
+    
+    def store(self):
+        return [transform.store() for transform in self.transforms]
+    
+    def __len__(self):
+        return len(self.transforms)
+    
+def LoadTransforms(state):
+    transforms = []
+    for transform in state: #[name, param_1, param_2, ...]
+        if type(transform) is str:
+            transform = [transform]      
+        if   transform[0] == 'YeoJohnson': transforms.append(YeoJohnson(lmbda=transform[1]))
+        elif transform[0] == 'BoxCox':     transforms.append(BoxCox(lmbda=transform[1]))
+        elif transform[0] == 'Gaussify':   transforms.append(Gaussify())
+        elif transform[0] == 'Uniform':    transforms.append(Uniform(a=transform[1][0], b=transform[1][1]))
+        elif transform[0] == 'Uniform0_1': transforms.append(Uniform0_1(a=transform[1][0], b=transform[1][1]))
+        elif transform[0] == 'Gauss':      transforms.append(Gauss(mu=transform[1][0], std=transform[1][1]))
+        elif transform[0] == 'Invert':     transforms.append(Invert())
+        elif transform[0] == 'Logify':     transforms.append(Logify())
+        else:
+            raise ValueError(f"Unknown transform \"{transform[0]}\"!") 
+    return TransformSequence(transforms)
 
 
-class Invert:
-    def __init__(self, data=None):
-        pass
+def CreateTransformSequence(entry, df, transforms_list, verbose=True):
+    data = df[entry].values
+    data_init = df[entry].values
+
+    transforms = []
+    for transform in transforms_list:
+        data = (trans := transform(data)).forward(data)
+        transforms.append(trans)
+
+    sequence = TransformSequence(transforms=transforms)
+    test = sequence.forward(data_init)
     
-    def fit(self, data):
-        pass
+    if verbose:
+        recover = sequence.backward(test)
+        diff = np.abs(data_init-recover).sum()
+        print('Error:', diff, '\n')
     
-    def forward(self, x):
-        return 1-x
-    
-    def backward(self, y):
-        return 1-y
-    
-    def __call__(self, x):
-        return self.forward(x)
+    return sequence
+
+
+def CreateTransformSequenceFromFile(filename):
+    with open(filename, 'rb') as handle:
+        df_transforms_stored = pickle.load(handle)
+        
+    df_transforms = {entry: LoadTransforms(df_transforms_stored[entry]) for entry in df_transforms_stored}
+     
+    return df_transforms

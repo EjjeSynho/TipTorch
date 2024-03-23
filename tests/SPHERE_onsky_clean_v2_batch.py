@@ -10,7 +10,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
-from tools.utils import plot_radial_profiles, SR, draw_PSF_stack, rad2mas, cropper
+from tools.utils import plot_radial_profiles, plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from tools.config_manager import GetSPHEREonsky
@@ -24,7 +24,7 @@ with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
 psf_df = psf_df[psf_df['Corrupted'] == False]
 psf_df = psf_df[psf_df['Low quality'] == False]
 psf_df = psf_df[psf_df['Medium quality'] == False]
-# psf_df = psf_df[psf_df['LWE'] == True]
+psf_df = psf_df[psf_df['LWE'] == True]
 # psf_df = psf_df[psf_df['mag R'] < 7]
 # psf_df = psf_df[psf_df['Num. DITs'] < 50]
 # psf_df = psf_df[psf_df['Class A'] == True]
@@ -43,25 +43,11 @@ good_ids = psf_df.index.values.tolist()
 # 1393 #50 DITs
 # 1408
 # 898
-
-# Samples with unrealisticly bad flux:
-# 93
-# 770
-# 1530
-# 1847
-# 2425
-# 2432
-# 2433
-# 2437
-# 2441
-# 2447
-# 2454
-# 3160
-# 3534
-# 3535
+ids = [3013, 3927, 2282, 3699, 2739, 4058, 2737, 1073]
+# ids = [3927, 3013, 2282, 3699]
 
 PSF_data, _, merged_config = SPHERE_preprocess(
-    sample_ids    = [93],
+    sample_ids    = ids,
     norm_regime   = 'sum',
     split_cube    = False,
     PSF_loader    = lambda x: SamplesByIds(x, synth=False),
@@ -69,27 +55,25 @@ PSF_data, _, merged_config = SPHERE_preprocess(
     framework     = 'pytorch',
     device        = device)
 
-PSF_0   = PSF_data[0]['PSF (mean)'].unsqueeze(0)
-PSF_var = PSF_data[0]['PSF (var)'].unsqueeze(0)
-bg      = PSF_data[0]['bg (mean)']
-norms   = PSF_data[0]['norm (mean)']
+PSF_0   = torch.stack([PSF_data[i]['PSF (mean)' ] for i in range(len(ids))])
+PSF_var = torch.stack([PSF_data[i]['PSF (var)'  ] for i in range(len(ids))])
+bg      = torch.stack([PSF_data[i]['bg (mean)'  ] for i in range(len(ids))])
+norms   = torch.stack([PSF_data[i]['norm (mean)'] for i in range(len(ids))])
 del PSF_data
 
-#% Initialize model
+#%% Initialize model
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 
 toy = TipTorch(merged_config, None, device)
 
 _ = toy()
 
-# print(toy.WFS_Nph.item())
-
 # toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
 # toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']
 # toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
 # toy.optimizables = []
 
-_ = toy({ 'bg': bg.unsqueeze(0).to(device) })
+_ = toy({ 'bg': bg.to(device) })
 
 PSF_1 = toy()
 #print(toy.EndTimer())
@@ -113,7 +97,6 @@ norm_dxy = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
 norm_J   = TransformSequence(transforms=[ Uniform(a=0,     b=30)  ])
 norm_Jxy = TransformSequence(transforms=[ Uniform(a=0,     b=50)  ])
 norm_LWE = TransformSequence(transforms=[ Uniform(a=-200,  b=200) ])
-norm_dn  = TransformSequence(transforms=[ Uniform(a=-0.05, b=0.05) ])
 
 transformer = InputsTransformer({
     'F':   norm_F,
@@ -121,7 +104,6 @@ transformer = InputsTransformer({
     'r0':  norm_r0,
     'dx':  norm_dxy,
     'dy':  norm_dxy,
-    'dn':  norm_dn,
     'Jx':  norm_J,
     'Jy':  norm_J,
     'Jxy': norm_Jxy,
@@ -135,7 +117,6 @@ inp_dict = {
     'dx':  toy.dx,
     'dy':  toy.dy,
     'bg':  toy.bg,
-    'dn':  toy.dn,
     'Jx':  toy.Jx,
     'Jy':  toy.Jy,
     'Jxy': toy.Jxy,
@@ -150,12 +131,13 @@ x0 = [1.0,
       0.0,
       0.0,
       0.0, 0.0,
-      0.0,
       0.5,
       0.5,
       0.1] + [0,]*3 + [0,]*8
 
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
+x0 = x0.repeat(PSF_0.shape[0], 1)
+
 x0.requires_grad = True
 
 if basis.coefs.requires_grad:
@@ -191,24 +173,46 @@ for i in range(100):
     loss.backward(retain_graph=True)
     optimizer.step( lambda: loss_fn_all(func(x0), PSF_0) )
 
-    print('Loss:', loss.item(), end="\r", flush=True)
+    print('Loss:', loss.item()/PSF_0.shape[0], end="\r", flush=True)
 
     if early_stopping.stop:
-        print('Stopped at it.', i, 'with loss:', loss.item())
+        print('Stopped at it.', i, 'with loss:', loss.item()/PSF_0.shape[0])
         break
 
 torch.cuda.empty_cache()
 
 #%%
 decomposed_variables = transformer.destack(x0)
+# for key, value in decomposed_variables.items(): print(f"{key}: {value}")
 
-for key, value in decomposed_variables.items():
-    print(f"{key}: {value}")
+PSF_1_joint = func(x0)
 
-draw_PSF_stack(PSF_0, PSF_1_joint:=func(x0), average=True)
+# draw_PSF_stack(PSF_0, PSF_1_joint, average=True)#, scale=None)
 
-destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
-plot_radial_profiles(destack(PSF_0), destack(PSF_1_joint), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+# id = 3
+
+# for id in range(PSF_0.shape[0]):
+#     destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
+#     plot_radial_profiles(destack(PSF_0[id,...].unsqueeze(0)), destack(PSF_1_joint[id,...].unsqueeze(0)), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+#     # plot_radial_profiles(destack(PSF_0), destack(PSF_1_joint), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+#     plt.show()
+
+plot_radial_profiles_new(
+    PSF_0[:,0,...].cpu().numpy(),
+    PSF_1_joint[:,0,...].detach().cpu().numpy(),
+    'Data',
+    'TipToy',
+    title='IRDIS PSF',
+    dpi=200)
+
+#%%
+A = PSF_0[id,...]
+B = PSF_1_joint[id,...]
+
+max_A = A.max().item()
+max_B = B.max().item()
+
+print( f'{np.abs(max_B-max_A)/max_A * 100} %')
 
 #%%
 from torch.autograd.functional import hessian, jacobian

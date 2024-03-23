@@ -7,3 +7,4 @@ tools/__pycache__/
 data/temp
 data/weights
 global_config.json
+data/*.npy

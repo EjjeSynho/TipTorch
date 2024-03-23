@@ -2,28 +2,50 @@
 # %reload_ext autoreload
 # %autoreload 2
 
-import os
 import sys
 sys.path.insert(0, '..')
 
-import numpy as np
 import pickle
 import torch
-from torch import nn
-from data_processing.SPHERE_preproc_utils import SPHERE_preprocess
-from tools.utils import OptimizeLBFGS, SR, pdims, FitGauss2D
+import numpy as np
+from torch import nn, optim
+from tools.utils import SR, pdims
+from tools.utils import cropper, FitGauss2D, LWE_basis, EarlyStopping
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
-from tools.config_manager import ConfigManager, GetSPHEREonsky
-
+from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
+from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
+from tools.config_manager import GetSPHEREonsky, ConfigManager
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
+from torch.autograd.functional import hessian
 
-# device = torch.device('cuda:0')
+default_device = device
+start_id, end_id = -1, -1
 
-#% Initialize data sample
+if len(sys.argv) > 1:
+    param1 = sys.argv[1]
+else:
+    device = default_device
+    print("No device specified, using default device.")
+
+if param1.startswith("cuda:") or param1.startswith("cpu"):
+    device = torch.device(device_choice:=param1)
+    print(f"Using device: {device_choice}")
+else:
+    device = default_device
+    print("No device specified, using default device.")
+
+if len(sys.argv) > 2:
+    start_id, end_id = int(sys.argv[2]), int(sys.argv[3])
+
+#%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
-psf_df = psf_df[psf_df['invalid'] == False]
+psf_df = psf_df[psf_df['Corrupted'] == False]
+# psf_df = psf_df[psf_df['Low quality'] == False]
+# psf_df = psf_df[psf_df['Medium quality'] == False]
+# psf_df = psf_df[psf_df['LWE'] == True]
+# psf_df = psf_df[psf_df['mag R'] < 7]
 # psf_df = psf_df[psf_df['Num. DITs'] < 50]
 # psf_df = psf_df[psf_df['Class A'] == True]
 # psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
@@ -31,14 +53,76 @@ psf_df = psf_df[psf_df['invalid'] == False]
 
 good_ids = psf_df.index.values.tolist()
 
-ids_fitted = [ int(file.split('.')[0]) for file in os.listdir(SPHERE_FITTING_FOLDER) ]
-good_ids = list(set(good_ids) - set(ids_fitted))
+# If no start or end ID is specified, use the first and last good IDs
+if start_id == -1:
+    start_id = good_ids[0]
+else:
+    start_id = min(good_ids, key=lambda x:abs(x-start_id))
+
+if end_id == -1:
+    end_id = good_ids[-1]
+else:
+    end_id = min(good_ids, key=lambda x:abs(x-end_id))
+
+good_ids = good_ids[good_ids.index(start_id):good_ids.index(end_id)+1]
+
+print(
+    f"Device:   {device}\n"
+    f"Start ID: {start_id}\n"
+    f"End ID:   {end_id}"
+)
 
 #%%
-regime = '1P21I'
-# regime = '1P2NI'
-# regime = 'NP2NI'
-norm_regime = 'sum'
+norm_F    = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0)  ])
+norm_bg   = TransformSequence(transforms=[ Uniform(a=-1e-5, b=1e-5) ])
+norm_r0   = TransformSequence(transforms=[ Uniform(a=0,     b=0.5)  ])
+norm_dxy  = TransformSequence(transforms=[ Uniform(a=-1,    b=1)    ])
+norm_J    = TransformSequence(transforms=[ Uniform(a=0,     b=30)   ])
+norm_Jxy  = TransformSequence(transforms=[ Uniform(a=0,     b=50)   ])
+norm_LWE  = TransformSequence(transforms=[ Uniform(a=-200,  b=200)  ])
+norm_FWHM = TransformSequence(transforms=[ Uniform(a=0,     b=5)    ])
+norm_dn   = TransformSequence(transforms=[ Uniform(a=-0.05, b=0.05) ])
+
+# Dump transforms
+transforms_dump = {
+    'F R':         norm_F,
+    'F L':         norm_F,
+    'bg R':        norm_bg,
+    'bg L':        norm_bg,
+    # 'F':         norm_F,
+    # 'bg':        norm_bg,
+    'r0':        norm_r0,
+    'dx':        norm_dxy,
+    'dy':        norm_dxy,
+    'dn':        norm_dn,
+    'Jx':        norm_J,
+    'Jy':        norm_J,
+    'Jxy':       norm_Jxy,
+    'LWE coefs': norm_LWE,
+    # 'FWHM fit':  norm_FWHM,
+    # 'FWHM data': norm_FWHM,
+    'FWHM fit L':  norm_FWHM,
+    'FWHM fit R':  norm_FWHM,
+    'FWHM data L': norm_FWHM,
+    'FWHM data R': norm_FWHM
+}
+
+with open('../data/temp/fitted_df_norm_transforms.pickle', 'wb') as handle:
+    df_transforms_store = {}
+    for entry in transforms_dump:
+        df_transforms_store[entry] = transforms_dump[entry].store()
+    pickle.dump(df_transforms_store, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    
+
+def to_store(x):
+    if x is not None:
+        if isinstance(x, torch.Tensor):
+            return x.detach().cpu().numpy()
+        else:
+            return x
+    else:
+        return None
+
 
 def gauss_fitter(PSF_stack):
     FWHMs = np.zeros([PSF_stack.shape[0], PSF_stack.shape[1], 2])
@@ -49,86 +133,156 @@ def gauss_fitter(PSF_stack):
             FWHMs[i,l,1] = f_y.item()
     return FWHMs
 
-to_store = lambda x: x.detach().cpu().numpy()
 
-
+#%%
 def load_and_fit_sample(id):
-    sample_ids = [id]
-    PSF_0, bg, norms, _, merged_config = SPHERE_preprocess(sample_ids, regime, norm_regime, device, synth=False)
+    try:
+        PSF_data, _, merged_config = SPHERE_preprocess(
+            sample_ids    = [id],
+            norm_regime   = 'sum',
+            split_cube    = False,
+            PSF_loader    = lambda x: SamplesByIds(x, synth=False),
+            config_loader = GetSPHEREonsky,
+            framework     = 'pytorch',
+            device        = device)
 
-    # Jx = merged_config['sensor_HO']['Jitter X'].abs()
-    # Jy = merged_config['sensor_HO']['Jitter Y'].abs()
+        PSF_0   = PSF_data[0]['PSF (mean)'].unsqueeze(0)
+        # PSF_var = PSF_data[0]['PSF (var)'].unsqueeze(0)
+        bg      = PSF_data[0]['bg (mean)']
+        norms   = PSF_data[0]['norm (mean)']
+        del PSF_data
+        
+    except Exception as e:
+        print(e)
+        print('Failed to load sample', id)
+        return None
 
-    # toy = TipTorch(merged_config, norm_regime, device)
-    toy = TipTorch(merged_config, None, device)
+    try:
+        toy = TipTorch(merged_config, None, device)
 
-    optimizables = ['F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
-    toy.optimizables = optimizables
-    _ = toy({
-        'F':   torch.tensor([0.89, 0.91]*toy.N_src, device=toy.device).flatten(),
-        'Jx':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
-        'Jy':  torch.tensor([28.8]*toy.N_src, device=toy.device).flatten(),
-        'Jxy': torch.tensor([1.0]*toy.N_src, device=toy.device).flatten(),
-        'bg':  bg.to(device)
-    })
+        _ = toy()
+        toy.optimizables = []
+        _ = toy({ 'bg': bg.unsqueeze(0).to(device) })
 
-    PSF_1 = toy()
-    PSF_DL = toy.DLPSF()
+        PSF_DL = toy.DLPSF()
 
-    # mask_in  = toy.mask_rim_in.unsqueeze(1).float()
-    # mask_out = toy.mask_rim_out.unsqueeze(1).float()
+        basis = LWE_basis(toy)
 
-    loss = nn.L1Loss(reduction='sum')
+        transformer = InputsTransformer({
+            'F':  norm_F,   'bg': norm_bg,
+            'r0': norm_r0,  'dx': norm_dxy, 
+            'dy': norm_dxy, 'dn': norm_dn,
+            'Jx': norm_J,   'Jy': norm_J,   
+            'Jxy': norm_Jxy,'basis_coefs': norm_LWE
+        })
 
-    '''
-    window_loss = lambda x, x_max: \
-        torch.gt(x,0)*(0.01/x)**2 + torch.lt(x,0)*100 + 100*torch.gt(x,x_max)*(x-x_max)**2
+        inp_dict = {
+            'r0':  toy.r0,  'F':  toy.F,
+            'dx':  toy.dx,  'dy': toy.dy,
+            'bg':  toy.bg,  'dn': toy.dn,
+            'Jx':  toy.Jx,  'Jy': toy.Jy, 
+            'Jxy': toy.Jxy, 'basis_coefs': basis.coefs
+        }
 
-    def loss_fn(a,b):
-        z = loss(a,b) + \
-            window_loss(toy.r0, 0.5).sum() * 1.0 + \
-            window_loss(toy.Jx, 50).sum() * 0.5 + \
-            window_loss(toy.Jy, 50).sum() * 0.5 + \
-            window_loss(toy.Jxy, 400).sum() * 0.5 + \
-            window_loss(toy.dn + toy.NoiseVariance(toy.r0), toy.NoiseVariance(toy.r0).max()*1.5).sum() * 0.1
-            torch.lt(torch.max(toy.PSD*mask_in), torch.max(toy.PSD*mask_out)).float() #+ \        
-        return z
-    '''
-    
-    loss_fn = loss
+        _ = transformer.stack(inp_dict) # to create index mapping
 
-    optimizer_lbfgs = OptimizeLBFGS(toy, loss_fn)
-    
-    optimizer_lbfgs.Optimize(PSF_0, [toy.bg], 5)
-    for _ in range(10):
-        optimizer_lbfgs.Optimize(PSF_0, [toy.F], 3)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.dx, toy.dy], 3)
-        # optimizer_lbfgs.Optimize(PSF_0, [toy.r0, toy.dn], 5)
-        # optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.Jx, toy.Jy], 3)
-        optimizer_lbfgs.Optimize(PSF_0, [toy.Jxy], 3)
+        x0 = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.1] + [0,]*3 + [0,]*8
 
-    PSF_1 = toy()
-    
+        x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
+        x0.requires_grad = True
+
+        if basis.coefs.requires_grad:
+            buf = basis.coefs.detach().clone()
+            basis.coefs = buf
+
+        optimizer = optim.LBFGS([x0], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
+        crop_all = cropper(PSF_0, 100)
+
+        def loss_fn(A, B):
+            return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all])
+
+        def func(x_):
+            x_torch = transformer.destack(x_)
+            return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
+
+        early_stopping = EarlyStopping(patience=2, tolerance=1e-4, relative=False)
+
+        for i in range(100):
+            optimizer.zero_grad()
+
+            loss = loss_fn(func(x0), PSF_0)
+
+            if np.isnan(loss.item()):
+                break
+            
+            early_stopping(loss)
+
+            loss.backward(retain_graph=True)
+            optimizer.step( lambda: loss_fn(func(x0), PSF_0) )
+
+            print('Loss:', loss.item(), end="\r", flush=True)
+
+            if early_stopping.stop:
+                print('Stopped at it.', i, 'with loss:', loss.item())
+                break
+
+        # decomposed_variables = transformer.destack(x0)
+
+        PSF_1 = func(x0)
+    except Exception as e:
+        print(e)
+        print('Failed to fit sample', id)
+        return None
+
+    hessian_mat  = None
+    hessian_mat_ = None
+    hessian_inv  = None
+    variance_estimates = None
+    L = None
+    V = None
+
+    try:
+        hessian_mat  = hessian(lambda x_: loss_fn(func(x_), PSF_0).log(), x0).squeeze()
+        hessian_mat_ = hessian_mat.clone()
+        hessian_mat_ = hessian_mat_.nan_to_num()
+        hessian_mat_[1:,0] = hessian_mat_[0,1:]
+        hessian_mat_[hessian_mat.abs() < 1e-11] = 1e-11
+    except Exception as e:
+        pass
+    else:
+        try:
+            hessian_inv = torch.inverse(hessian_mat_)
+            variance_estimates = torch.diag(hessian_inv).abs()
+            L_complex, V_complex = torch.linalg.eig(hessian_mat_)
+            L = L_complex.real.cpu().numpy()
+            V = V_complex.real.cpu().numpy()
+            V = V / np.linalg.norm(V, axis=0)
+            
+        except Exception as e:
+            pass
+
     config_manager = ConfigManager(GetSPHEREonsky())
     config_manager.Convert(merged_config, framework='numpy')
-    # config_manager.process_dictionary(merged_config)
 
     save_data = {
-        'comments':    'Photons are multiplied by rate, no PSD regularization',
-        'optimized':   optimizables,
+        'comments':    'All-normalized, new approach',
         'config':      merged_config,
         'bg':          to_store(bg),
         'F':           to_store(toy.F),
         'dx':          to_store(toy.dx),
         'dy':          to_store(toy.dy),
+        'dn':          to_store(toy.dn),
         'r0':          to_store(toy.r0),
         'n':           to_store(toy.NoiseVariance(toy.r0.abs())),
-        'dn':          to_store(toy.dn),
         'Jx':          to_store(toy.Jx),
         'Jy':          to_store(toy.Jy),
         'Jxy':         to_store(toy.Jxy),
         'Nph WFS':     to_store(toy.WFS_Nph),
+        'LWE coefs':   to_store(basis.coefs),
+        'Hessian':     to_store(hessian_mat_),
+        'Variances':   to_store(variance_estimates),
+        'Inv.H Ls':    to_store(L),
+        'Inv.H Vs':    to_store(V),
         'SR data':     SR(PSF_0, PSF_DL).detach().cpu().numpy(),
         'SR fit':      SR(PSF_1, PSF_DL).detach().cpu().numpy(),
         'FWHM fit':    gauss_fitter(PSF_0), 
@@ -143,15 +297,15 @@ def load_and_fit_sample(id):
     return save_data
 
 #%%
+# test = load_and_fit_sample(1660)
+
+#%%
 for id in good_ids:
     filename = SPHERE_FITTING_FOLDER + str(id) + '.pickle'
-    try:
-        save_data = load_and_fit_sample(id)
+    
+    save_data = load_and_fit_sample(id)
+    if save_data is not None:
         with open(filename, 'wb') as handle:
             pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    except Exception as e:
-        print(e)
-        print('Failed to fit sample', id)
-        continue
     

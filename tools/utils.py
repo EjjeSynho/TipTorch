@@ -11,6 +11,7 @@ from skimage.transform import resize
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from scipy.ndimage import label
+import seaborn as sns
 
 
 rad2mas  = 3600 * 180 * 1000 / np.pi
@@ -21,6 +22,29 @@ asec2rad = np.pi / 180 / 3600
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
+
+
+def corr_plot(data, entry_x, entry_y, lims=None, title=None):
+    j = sns.jointplot(data=data,   x=entry_x, y=entry_y, kind="kde", space=0, alpha = 0.8, fill=True, colormap='royalblue' )
+    i = sns.scatterplot(data=data, x=entry_x, y=entry_y, alpha=0.5, ax=j.ax_joint, color = 'black', s=10)
+    sns.set_style("darkgrid")
+    
+    j.ax_joint.set_aspect('equal')
+    
+    if lims is None:
+        lims = [np.min([j.ax_joint.get_xlim(), j.ax_joint.get_ylim()]),
+                np.max([j.ax_joint.get_xlim(), j.ax_joint.get_ylim()])]
+
+    if title is not None:
+        j.ax_joint.set_title(title, fontsize=16)
+        
+        plt.title(title, fontsize=16)
+    
+    j.ax_joint.set_xlim(lims)
+    j.ax_joint.set_ylim(lims)
+    j.ax_joint.plot([lims[0], lims[1]], [lims[0], lims[1]], 'gray', linewidth=1.5, linestyle='--')
+    
+    j.ax_joint.grid(True)
 
 
 def compare_dicts(d1, d2, path=''):
@@ -759,37 +783,57 @@ def plot_std(x,y, label, color, style): #TODO: deprecated
 
 def plot_radial_profiles_new(PSF_0,
                              PSF_1,
-                             label_0 = 'Data',
-                             label_1 = 'Simulated',
+                             label_0 = 'PSFs #1',
+                             label_1 = 'PSFs #2',
                              title   = '',
                              dpi     = 300,
                              scale   = 'log',
-                             colors  = ['tab:blue', 'tab:orange', 'tab:green'], cutoff=20, center=None):
+                             colors  = ['tab:blue', 'tab:orange', 'tab:green'],
+                             cutoff  = 20,
+                             centers = None,
+                             return_profiles = False):
     
-    from photutils.centroids import centroid_quadratic
+    from photutils.centroids import centroid_quadratic, centroid_com
     from photutils.profiles import RadialProfile
 
-    def _radial_profiles(PSFs, center=None):
-        if PSFs.ndim == 2: PSFs = PSFs[np.newaxis, ...]
+    def _safe_centroid(data):       
+        xycen = centroid_quadratic(np.abs(data))
+        if np.any(np.isnan(xycen)): xycen = centroid_com(np.abs(data))
+        if np.any(np.isnan(xycen)): xycen = np.array(data.shape)//2
+        return xycen
+        
+    def calc_profile(data, xycen=None):
+        xycen = _safe_centroid(data) if xycen is None else xycen
+        edge_radii = np.arange(data.shape[-1]//2)
+        rp = RadialProfile(data, xycen, edge_radii)
+        return rp.profile
 
-        listify = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
-        # listify = lambda PSF_stack: [ x for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
-        PSFs = listify(PSFs)
+    def _radial_profiles(PSFs, centers=None):
+        # if PSFs.ndim == 2: PSFs = PSFs[np.newaxis, ...]
+        listify_PSF = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
+        PSFs = listify_PSF(PSFs)
+        if centers is None:
+            centers = [None]*len(PSFs)
+        else:
+            if type(centers) is not list:
+                if centers.size == 2:
+                    centers = [centers] * len(PSFs)
+                else:
+                    centers = [centers[i,...] for i in range(len(PSFs))]
 
-        def calc_profile(data, xycen=None):
-            if xycen is None:
-                xycen = centroid_quadratic(np.abs(data))
-    
-            edge_radii = np.arange(data.shape[-1]//2)
-            rp = RadialProfile(data, xycen, edge_radii)
-            return rp.profile
-
-        profiles = np.vstack( [calc_profile(PSF,center) for PSF in PSFs if not np.all(np.isnan(PSF))] )
+        profiles = np.vstack( [calc_profile(PSF, center) for PSF, center in zip(PSFs, centers) if not np.all(np.isnan(PSF))] )
         return profiles
 
-    profis_0   = _radial_profiles( PSF_0[:,...], center )
-    profis_1   = _radial_profiles( PSF_1[:,...], center )
-    profis_err = _radial_profiles( PSF_0[:,...] - PSF_1[:,...], center )
+    if PSF_0.ndim == 2: PSF_0 = PSF_0[np.newaxis, ...]
+    if PSF_1.ndim == 2: PSF_1 = PSF_1[np.newaxis, ...]
+
+    profis_0 = _radial_profiles( PSF_0[:,...], centers )
+    profis_1 = _radial_profiles( PSF_1[:,...], centers )
+
+    center_0 = _safe_centroid(np.abs(np.nanmean(PSF_0, axis=0)))
+    center_1 = _safe_centroid(np.abs(np.nanmean(PSF_1, axis=0)))
+    center_  = np.mean([center_0, center_1], axis=0)
+    profis_err = _radial_profiles( PSF_0[:,...] - PSF_1[:,...], center_ )
 
     def _render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambda x: x):
         x = np.arange(0, profile.shape[-1])
@@ -819,7 +863,7 @@ def plot_radial_profiles_new(PSF_0,
     _render_profile(p_0,   color=colors[0], label=label_0, linewidth=2)
     _render_profile(p_1,   color=colors[1], label=label_1, linewidth=2)
     _render_profile(p_err, color=colors[2], label='Abs. error', linestyle='--')
-    
+
     max_err = np.median(p_err, axis=0).max()
     plt.axhline(max_err, color='green', linestyle='-', alpha=0.5)
 
@@ -839,6 +883,9 @@ def plot_radial_profiles_new(PSF_0,
     plt.xlabel('Pixels from on-axis, [pix]')
     plt.ylabel('Normalized intensity, [%]')
     plt.grid()
+
+    if return_profiles:
+        return p_0, p_1, p_err
 
 
 def DisplayDataset(samples_list, tiles_in_row, show_labels=True, dpi=300):
