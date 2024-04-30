@@ -3,9 +3,9 @@ import sys
 sys.path.insert(0, '..')
 
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk, font
-import os, re
-from PIL import Image, ImageTk  # Import from Pillow
+from tkinter import messagebox, ttk, font
+import os
+from PIL import Image, ImageTk
 
 from project_globals import SPHERE_DATA_FOLDER
 
@@ -208,19 +208,3 @@ if __name__ == "__main__":
     app = ImageLabeller(root, image_paths, labels_file)
     root.mainloop()
 
-# import numpy as np
-# passiert = SPHERE_DATA_FOLDER + 'labels.txt'
-# numos =[]
-
-# with open(passiert, 'r') as f:
-#     for line in f:
-#         parts = line.strip().split(': ')
-#         if len(parts) == 2:
-#             img, classes_str = parts
-#             numos.append(int(img.split('_')[0]))
-
-# numos.sort()
-
-# all = set(np.arange(1, max(numos)+1))
-
-# diffo = all - set(numos)

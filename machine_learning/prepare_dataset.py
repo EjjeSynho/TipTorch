@@ -14,7 +14,6 @@ from project_globals import SPHERE_DATA_FOLDER
 import pandas as pd
 from tqdm import tqdm
 
-
 #%%
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
@@ -75,7 +74,7 @@ def split_in_batches(ids, batch_size):
     np.random.shuffle(ids)
     return np.array_split(ids, n_batches)
 
-BATCH_SIZE = 64
+BATCH_SIZE = 64 #16
 
 def batch_config_and_images(ids):
     data_dict = {}
@@ -116,10 +115,10 @@ selected_entries_input = [
     # 'Seeing (SPARTA)',
     # 'FWHM',
     'Wind direction (header)',
-    'Wind direction (MASSDIMM)',
+    # 'Wind direction (MASSDIMM)',
     'Wind speed (header)',
     'Wind speed (SPARTA)',
-    'Wind speed (MASSDIMM)',
+    # 'Wind speed (MASSDIMM)',
     'Tau0 (header)',
     'Tau0 (SPARTA)',
     # 'Jitter X', 'Jitter Y',
@@ -129,8 +128,8 @@ selected_entries_input = [
     'DM pos (avg)',
     'DM pos (std)',
     'Pressure',
-    'Humidity',
-    'Temperature',
+    # 'Humidity',
+    # 'Temperature',
     'Nph WFS',
     # 'Flux WFS',
     'Rate',
@@ -165,22 +164,33 @@ def CreateDataset():
             ids = ids_train_batches[batch_id]
             batch_data = batch_config_and_images(ids) | batch_get_data_dicts(ids) | batch_get_inp_tensor(ids)
             
-            filename_batch = SPHERE_DATA_FOLDER + 'SPHERE_dataset/train/' + f'batch_{batch_id}_train_grp_{current_group}.pkl'
+            filename_batch = SPHERE_DATA_FOLDER + f'SPHERE_dataset_{BATCH_SIZE}/train/' + f'batch_{batch_id}_train_grp_{current_group}.pkl'
             with open(filename_batch, 'wb') as handle:
                 # print('Writing:', filename_batch)
                 pickle.dump(batch_data, handle)
-                
+
         print('Processing validation batches...')
         for batch_id in tqdm(range(len(ids_val_batches))):
             ids = ids_val_batches[batch_id]
             batch_data = batch_config_and_images(ids) | batch_get_data_dicts(ids) | batch_get_inp_tensor(ids)
 
-            filename_batch = SPHERE_DATA_FOLDER + 'SPHERE_dataset/validation/' + f'batch_{batch_id}_val_grp_{current_group}.pkl'
+            filename_batch = SPHERE_DATA_FOLDER + f'SPHERE_dataset_{BATCH_SIZE}/validation/' + f'batch_{batch_id}_val_grp_{current_group}.pkl'
             with open(filename_batch, 'wb') as handle:
                 # print('Writing:', filename_batch)
                 pickle.dump(batch_data, handle)
         
         print('\n')
 
-# CreateDataset()
+
+def WriteTestBatch():
+    ids = [1115, 2818, 637, 869, 1370, 159, 2719, 1588]
+    batch_data = batch_config_and_images(ids) | batch_get_data_dicts(ids) | batch_get_inp_tensor(ids)
+
+    filename_batch = SPHERE_DATA_FOLDER + f'SPHERE_dataset_{BATCH_SIZE}/' + f'batch_test.pkl'
+    with open(filename_batch, 'wb') as handle:
+        print('Writing:', filename_batch)
+        pickle.dump(batch_data, handle)
+        
 # %%
+CreateDataset()
+WriteTestBatch()

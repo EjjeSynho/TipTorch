@@ -218,15 +218,25 @@ class ConfigManager():
 
     def Convert(self, config, framework='pytorch', device=None):
         """Converts all values in a config file to a specified framework"""
-        if framework.lower() == 'pytorch':
+        if framework.lower() == 'pytorch' or framework.lower() == 'torch':
             if device is None: device = torch.device('cpu')
             convert_value = lambda x: torch.tensor(x, device=device).float()
         elif framework.lower() == 'numpy':
             convert_value = lambda x: np.array(x.cpu()) if isinstance(x, torch.Tensor) else np.array(x)
         elif framework.lower() == 'cupy':
             convert_value = lambda x: cp.array(x.cpu()) if isinstance(x, torch.Tensor) else cp.array(x)
+        elif framework.lower() == 'list':
+            def convert_value(x):
+                if isinstance(x, torch.Tensor):
+                    return x.cpu().tolist()
+                elif isinstance(x, np.ndarray):
+                    return x.tolist()
+                elif isinstance(x, cp.ndarray):
+                    return cp.asnumpy(x).tolist()
+                else:
+                    return x
         else:
-            raise NotImplementedError('Unsupported framework \"'+framework+'\"!')
+            raise NotImplementedError(f'Unsupported framework "{framework}"!')
 
         zero_d = lambda x: x if type(x) == float else convert_value(x)
         for entry in config:

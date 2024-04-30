@@ -1,26 +1,12 @@
 #%%
-%reload_ext autoreload
-%autoreload 2
-
 import sys
 sys.path.append('..')
 
 import pickle
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import GradientBoostingRegressor
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.neural_network import MLPRegressor
-from sklearn.multioutput import MultiOutputRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
-from sklearn.svm import SVR
-from sklearn.metrics import mean_squared_error
 from project_globals import SPHERE_DATA_FOLDER
-import pandas as pd
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
-from tools.utils import corr_plot
 
 
 #%% Initialize data sample
@@ -64,6 +50,15 @@ plt.show()
 psf_df = psf_df[ids_select]
 print(f'Remaining number of samples: {len(psf_df)}')
 
+
+# listo = ['Bad center', 'Central hole', 'Corrupted', 'Crossed', 'Extra',
+    #    'High SNR', 'High quality', 'LWE', 'Low quality', 'Medium quality',
+    #    'Multiples', 'Wings']
+# 
+# for entry in listo:
+    # print(f'{entry}: {psf_df.loc[637][entry].sum()}')
+# 
+
 #%%
 # Compute number of NaNs
 presence_factor = {}
@@ -84,7 +79,17 @@ def percent_presence_gt(percentage, comparator, verbose=True):
 
 good_fields = percent_presence_gt(75, np.greater_equal, True)
 
-remove_entries = ['Filter WFS', 'Jitter X', 'Jitter Y', 'mag V', 'mag R', 'mag G', 'mag J', 'mag H', 'mag K', 'RA', 'DEC']
+remove_entries = [
+    'Filter WFS', 'Filter common', 'Filter LR',
+    'Jitter X', 'Jitter Y',
+    'mag V', 'mag R', 'mag G', 'mag J', 'mag H', 'mag K',
+    'RA', 'DEC',
+    'Humidity',
+    'Temperature',
+    'Wind direction (MASSDIMM)',
+    'Wind speed (MASSDIMM)',
+]
+
 for entry in remove_entries:
     good_fields.pop(good_fields.index(entry))
 
@@ -92,6 +97,11 @@ for entry in remove_entries:
 psf_df_filtered = psf_df[good_fields].dropna()
 
 print('\n>>>> Samples remained:', len(psf_df_filtered))
+
+# Make all complex values real in df:
+for entry in psf_df_filtered.columns.values:
+    if np.iscomplexobj(psf_df_filtered[entry].values):
+        psf_df_filtered[entry] = psf_df_filtered[entry].apply(lambda x: x.real)
 
 # Remove all columns with NaNs
 # psf_df_processed = psf_df_processed.dropna(axis=1)
@@ -157,10 +167,8 @@ for entry, _, _, transforms_list in entry_data:
 #%%        
 psf_df_normalized = psf_df_filtered.copy()
 retain_entries = ['Filename', 'Date', 'Observation', 
-                  'Filename', 'Bad center', 'Corrupted',
-                  'Crossed', 'Extra', 'High SNR',
-                  'High quality', 'LWE', 'Low quality',
-                  'Medium quality', 'Multiples', 'Wings']
+                  'Crossed', 'High SNR', 'High quality', 'Medium quality', 'Low quality',
+                  'Multiples', 'Bad center', 'Corrupted', 'Wings', 'LWE', 'Central hole']
 
 # Delete all columns except the ones in the entry_data
 for entry in psf_df_normalized.columns.values:
@@ -188,3 +196,4 @@ for entry, _, _, _ in entry_data:
     if entry in psf_df_normalized.columns.values:
         sns.displot(data=psf_df_normalized, x=entry, kde=True, bins=100)
         plt.show()
+# %%

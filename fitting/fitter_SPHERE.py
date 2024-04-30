@@ -17,6 +17,7 @@ from data_processing.normalizers import TransformSequence, Uniform, InputsTransf
 from tools.config_manager import GetSPHEREonsky, ConfigManager
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
 from torch.autograd.functional import hessian
+from torchmin import minimize
 
 default_device = device
 start_id, end_id = -1, -1
@@ -74,14 +75,14 @@ print(
 
 #%%
 norm_F    = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0)  ])
-norm_bg   = TransformSequence(transforms=[ Uniform(a=-1e-5, b=1e-5) ])
+norm_bg   = TransformSequence(transforms=[ Uniform(a=-1e-6, b=1e-6) ])
 norm_r0   = TransformSequence(transforms=[ Uniform(a=0,     b=0.5)  ])
 norm_dxy  = TransformSequence(transforms=[ Uniform(a=-1,    b=1)    ])
 norm_J    = TransformSequence(transforms=[ Uniform(a=0,     b=30)   ])
 norm_Jxy  = TransformSequence(transforms=[ Uniform(a=0,     b=50)   ])
-norm_LWE  = TransformSequence(transforms=[ Uniform(a=-200,  b=200)  ])
+norm_LWE  = TransformSequence(transforms=[ Uniform(a=-20,   b=20)  ])
 norm_FWHM = TransformSequence(transforms=[ Uniform(a=0,     b=5)    ])
-norm_dn   = TransformSequence(transforms=[ Uniform(a=-0.05, b=0.05) ])
+norm_dn   = TransformSequence(transforms=[ Uniform(a=-0.02, b=0.02) ])
 
 # Dump transforms
 transforms_dump = {
@@ -134,6 +135,21 @@ def gauss_fitter(PSF_stack):
     return FWHMs
 
 
+def GetNewPhotons(model):
+    WFS_noise_var = model.dn + model.NoiseVariance(model.r0.abs())
+
+    N_ph_0 = model.WFS_Nph.clone()
+
+    def func_Nph(x):
+        model.WFS_Nph = x
+        var = model.NoiseVariance(model.r0.abs())
+        return (WFS_noise_var-var).flatten().abs().sum()
+
+    result_photons = minimize(func_Nph, N_ph_0, method='bfgs', disp=0)
+    model.WFS_Nph = N_ph_0.clone()
+
+    return result_photons.x
+
 #%%
 def load_and_fit_sample(id):
     try:
@@ -161,7 +177,7 @@ def load_and_fit_sample(id):
         toy = TipTorch(merged_config, None, device)
 
         _ = toy()
-        toy.optimizables = []
+        # toy.optimizables = []
         _ = toy({ 'bg': bg.unsqueeze(0).to(device) })
 
         PSF_DL = toy.DLPSF()
@@ -189,21 +205,23 @@ def load_and_fit_sample(id):
         x0 = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.1] + [0,]*3 + [0,]*8
 
         x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
-        x0.requires_grad = True
-
-        if basis.coefs.requires_grad:
-            buf = basis.coefs.detach().clone()
-            basis.coefs = buf
-
-        optimizer = optim.LBFGS([x0], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-        crop_all = cropper(PSF_0, 100)
-
-        def loss_fn(A, B):
-            return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all])
+        # x0.requires_grad = True
 
         def func(x_):
             x_torch = transformer.destack(x_)
             return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
+
+        crop_all = cropper(PSF_0, 100)
+        
+        def loss_fn(A, B):
+            return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all])
+
+        '''
+        # if basis.coefs.requires_grad:
+        #     buf = basis.coefs.detach().clone()
+        #     basis.coefs = buf
+
+        optimizer = optim.LBFGS([x0], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
 
         early_stopping = EarlyStopping(patience=2, tolerance=1e-4, relative=False)
 
@@ -227,8 +245,14 @@ def load_and_fit_sample(id):
                 break
 
         # decomposed_variables = transformer.destack(x0)
+        '''
+
+        result = minimize(lambda x_: loss_fn(func(x_), PSF_0), x0, method='bfgs', disp=3)
+
+        x0 = result.x
 
         PSF_1 = func(x0)
+        
     except Exception as e:
         print(e)
         print('Failed to fit sample', id)
@@ -265,39 +289,40 @@ def load_and_fit_sample(id):
     config_manager.Convert(merged_config, framework='numpy')
 
     save_data = {
-        'comments':    'All-normalized, new approach',
-        'config':      merged_config,
-        'bg':          to_store(bg),
-        'F':           to_store(toy.F),
-        'dx':          to_store(toy.dx),
-        'dy':          to_store(toy.dy),
-        'dn':          to_store(toy.dn),
-        'r0':          to_store(toy.r0),
-        'n':           to_store(toy.NoiseVariance(toy.r0.abs())),
-        'Jx':          to_store(toy.Jx),
-        'Jy':          to_store(toy.Jy),
-        'Jxy':         to_store(toy.Jxy),
-        'Nph WFS':     to_store(toy.WFS_Nph),
-        'LWE coefs':   to_store(basis.coefs),
-        'Hessian':     to_store(hessian_mat_),
-        'Variances':   to_store(variance_estimates),
-        'Inv.H Ls':    to_store(L),
-        'Inv.H Vs':    to_store(V),
-        'SR data':     SR(PSF_0, PSF_DL).detach().cpu().numpy(),
-        'SR fit':      SR(PSF_1, PSF_DL).detach().cpu().numpy(),
-        'FWHM fit':    gauss_fitter(PSF_0), 
-        'FWHM data':   gauss_fitter(PSF_1),
-        'Img. data':   to_store(PSF_0*pdims(norms,2)),
-        'Img. fit':    to_store(PSF_1*pdims(norms,2)),
-        'PSD':         to_store(toy.PSD),
-        'Data norms':  to_store(norms),
-        'Model norms': to_store(toy.norm_scale),
-        'loss':        loss_fn(PSF_1, PSF_0).item()
+        'comments':      'All-normalized, BFGS fitting from ',
+        'config':        merged_config,
+        'bg':            to_store(bg),
+        'F':             to_store(toy.F),
+        'dx':            to_store(toy.dx),
+        'dy':            to_store(toy.dy),
+        'dn':            to_store(toy.dn),
+        'r0':            to_store(toy.r0),
+        'n':             to_store(toy.NoiseVariance(toy.r0.abs())),
+        'Jx':            to_store(toy.Jx),
+        'Jy':            to_store(toy.Jy),
+        'Jxy':           to_store(toy.Jxy),
+        'Nph WFS':       to_store(toy.WFS_Nph),
+        'Nph WFS (new)': to_store(GetNewPhotons(toy)),
+        'LWE coefs':     to_store(basis.coefs),
+        'Hessian':       to_store(hessian_mat_),
+        'Variances':     to_store(variance_estimates),
+        'Inv.H Ls':      to_store(L),
+        'Inv.H Vs':      to_store(V),
+        'SR data':       SR(PSF_0, PSF_DL).detach().cpu().numpy(),
+        'SR fit':        SR(PSF_1, PSF_DL).detach().cpu().numpy(),
+        'FWHM fit':      gauss_fitter(PSF_0), 
+        'FWHM data':     gauss_fitter(PSF_1),
+        'Img. data':     to_store(PSF_0*pdims(norms,2)),
+        'Img. fit':      to_store(PSF_1*pdims(norms,2)),
+        'PSD':           to_store(toy.PSD),
+        'Data norms':    to_store(norms),
+        'Model norms':   to_store(toy.norm_scale),
+        'loss':          loss_fn(PSF_1, PSF_0).item()
     }
     return save_data
 
 #%%
-# test = load_and_fit_sample(1660)
+# test = load_and_fit_sample(1632)
 
 #%%
 for id in good_ids:

@@ -13,7 +13,7 @@ class InputsTransformer:
         # Store the transforms provided as a dictionary
         self.transforms = transforms
 
-    def stack(self, args_dict):
+    def stack(self, args_dict, no_transform=False):
         """
         Constructs a joint tensor from provided keyword arguments,
         applying the corresponding transforms to each.
@@ -25,10 +25,14 @@ class InputsTransformer:
         current_index = 0
 
         for key, value in args_dict.items():
-            if key not in self.transforms:
-                raise ValueError(f"Transform for {key} not found.")
+            if not no_transform:
+                if key not in self.transforms:
+                    raise ValueError(f"Transform for {key} not found.")
 
-            transformed_value = self.transforms[key](value.unsqueeze(-1) if value.dim() == 1 else value)
+                transformed_value = self.transforms[key](value.unsqueeze(-1) if value.dim() == 1 else value)
+            else:
+                transformed_value = value.unsqueeze(-1) if value.dim() == 1 else value
+            
             next_index = current_index + transformed_value.shape[1]
             self._slices[key] = slice(current_index, next_index)
             current_index = next_index
@@ -221,6 +225,7 @@ class Uniform:
     def __init__(self, data=None, a=None, b=None):
         self.a = a
         self.b = b
+        self.scale = lambda: self.b-self.a
         
         self.uniform_scaler     = lambda x, a, b: 2*((x-a)/(b-a)-0.5)
         self.inv_uniform_scaler = lambda x, a, b: (x/2 + 0.5)*(b-a)+a
@@ -370,7 +375,7 @@ def LoadTransforms(state):
     transforms = []
     for transform in state: #[name, param_1, param_2, ...]
         if type(transform) is str:
-            transform = [transform]      
+            transform = [transform]
         if   transform[0] == 'YeoJohnson': transforms.append(YeoJohnson(lmbda=transform[1]))
         elif transform[0] == 'BoxCox':     transforms.append(BoxCox(lmbda=transform[1]))
         elif transform[0] == 'Gaussify':   transforms.append(Gaussify())

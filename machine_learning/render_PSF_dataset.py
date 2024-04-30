@@ -38,12 +38,6 @@ ids   = list( ids_0.intersection(ids_1).intersection(ids_2).intersection(ids_3) 
 print('Final number of good samples:', len(ids))
 
 #%%
-
-a = psf_df.loc[93]
-
-print(a['Nph WFS'], a['Flux WFS'], a['mag G'])
-
-#%%
 profiles = {}
 bad_ids  = []
 
@@ -78,15 +72,35 @@ for id in profiles:
     central_deviations[id] = profile_m_err[0]
 
 #%%
+ids_deviants = [id for id in central_deviations if central_deviations[id] > 30]
 
-ids_deviants = [id for id in central_deviations if central_deviations[id] > 50]
+# Find the max values
+max_val = 0
+max_id  = None
+for id in ids_deviants:
+    if central_deviations[id] > max_val:
+        max_val = central_deviations[id]
+        max_id  = id
+        
+# Find the min values
+min_val = 100
+min_id  = None
+for id in central_deviations:
+    if central_deviations[id] < min_val:
+        min_val = central_deviations[id]
+        min_id  = id
 
-
-
+# Find the median
+dev_vals   = np.array( [central_deviations[id] for id in central_deviations] )
+median_val = np.median(dev_vals)
 
 #%%
+dev_vals = np.array( [central_deviations[id] for id in central_deviations] )
+# _ = plt.hist(dev_vals, bins=100)
 
-
+print(f'Max. deviation from data profiles: {max_val:.2f}% for id: {max_id}')
+print(f'Min. deviation from data profiles: {min_val:.2f}% for id: {min_id}')
+print(f'Median deviation from data profiles: {median_val:.2f}%')
 
 #%%
 # A = PSF_0[:,0,...]

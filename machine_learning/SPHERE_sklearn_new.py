@@ -2,6 +2,7 @@
 %reload_ext autoreload
 %autoreload 2
 
+import os
 import sys
 sys.path.append('..')
 
@@ -25,7 +26,6 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
-import os
 from tools.utils import seeing, corr_plot
 from astropy.io import fits
 from data_processing.normalizers import CreateTransformSequenceFromFile
@@ -118,10 +118,10 @@ selected_entries_X = [
     # 'Seeing (SPARTA)',
     # 'FWHM',
     'Wind direction (header)',
-    'Wind direction (MASSDIMM)',
+    # 'Wind direction (MASSDIMM)',
     'Wind speed (header)',
     'Wind speed (SPARTA)',
-    'Wind speed (MASSDIMM)',
+    # 'Wind speed (MASSDIMM)',
     'Tau0 (header)',
     'Tau0 (SPARTA)',
     # 'Jitter X', 'Jitter Y',
@@ -131,8 +131,8 @@ selected_entries_X = [
     'DM pos (avg)',
     'DM pos (std)',
     'Pressure',
-    'Humidity',
-    'Temperature',
+    # 'Humidity',
+    # 'Temperature',
     'Nph WFS',
     # 'Flux WFS',
     'Rate',
@@ -170,6 +170,32 @@ test_df = pd.DataFrame({
 corr_plot(test_df, 'SR predicted', 'SR from data')
 
 _ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
+
+#%% ================================== Predict all ==================================
+# =======================================================================================
+
+selected_entries_Y = ['r0', 'dn', 'Jx', 'Jy', 'Jxy', 'F L', 'F R']
+
+X = df_norm[selected_entries_X].to_numpy()
+Y = df_norm[selected_entries_Y].to_numpy()
+
+X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
+
+mlp = MLPRegressor(hidden_layer_sizes=(50,50,), max_iter=2000, random_state=42)
+mlp.fit(X_train, y_train)
+y_pred = mlp.predict(X_test)
+
+#%%
+param_to_plot = 'F R'
+id = selected_entries_Y.index(param_to_plot)
+
+test_df = pd.DataFrame({
+    param_to_plot+' predicted':   df_transforms_fitted[param_to_plot].backward(y_pred[:,id].flatten()),
+    param_to_plot+' from fitted': df_transforms_fitted[param_to_plot].backward(y_test[:,id].flatten()),
+})
+corr_plot(test_df, param_to_plot+' predicted', param_to_plot+' from fitted')
+
+# _ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
 
 #%% ================================== Predict LWE WFE ==================================
 # =======================================================================================

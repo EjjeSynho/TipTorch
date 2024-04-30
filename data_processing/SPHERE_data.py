@@ -619,13 +619,11 @@ def plot_sample(id):
     
     return samp
 
-# sample = plot_sample(5)
-
+# sample = plot_sample(1632)
 
 #%%
 def ReduceIRDISData():
-    bad_files = []
-    good_files = []
+    bad_files, good_files = [], []
 
     loader = SPHERE_loader(path_dtts)
 
@@ -649,29 +647,27 @@ def SaveReducedAsImages():
     # Visualize PSFs and save them into temporary folder
     import matplotlib
 
-    folder = SPHERE_DATA_FOLDER+'IRDIS_reduced/'
-    dir_save_imgs = SPHERE_DATA_FOLDER+'IRDIS_images/'
+    folder        = SPHERE_DATA_FOLDER + 'IRDIS_reduced/'
+    dir_save_imgs = SPHERE_DATA_FOLDER + 'IRDIS_images/'
 
     files = os.listdir(folder)
-    crop = slice(128-32, 128+32)
+    crop  = slice(128-32, 128+32)
 
-    # id, pure_file = purify_filename(file)
     for file in tqdm(files):
-        with open(os.path.join(folder, file), 'rb') as handle:
-            data = pickle.load(handle)
-
-            image = data['PSF L'].sum(axis=0)[crop,crop]
-            plt.figure(figsize=(7.5,7.5))
-            current_cmap = matplotlib.cm.get_cmap()
-            current_cmap.set_bad(color='red')
-            plt.imshow(np.log(np.abs(image)))
-            plt.title(file.replace('.pickle',''))
-            plt.axis('off')
-            # plt.show()
-            plt.savefig(dir_save_imgs + file.replace('.pickle','.png'), bbox_inches='tight', pad_inches=0)
+        if file not in os.listdir(dir_save_imgs):
+            with open(os.path.join(folder, file), 'rb') as handle:
+                data  = pickle.load(handle)
+                image = data['PSF L'].sum(axis=0)[crop,crop]
+                plt.figure(figsize=(7.5,7.5))
+                current_cmap = matplotlib.cm.get_cmap()
+                current_cmap.set_bad(color='red')
+                plt.imshow(np.log(np.abs(image)))
+                plt.title(file.replace('.pickle',''))
+                plt.axis('off')
+                # plt.show()
+                plt.savefig(dir_save_imgs + file.replace('.pickle','.png'), bbox_inches='tight', pad_inches=0)
 
 # SaveReducedAsImages()
-
 
 #%%
 '''
@@ -909,7 +905,8 @@ def CreateSPHEREdataframe(save_df_dir=None):
     labels_list = list(set( [x for xs in all_labels for x in xs] ))
     labels_list.sort()
 
-    for i in range(len(labels_list)): labels_df[labels_list[i]] = []
+    for i in range(len(labels_list)):
+        labels_df[labels_list[i]] = []
 
     for i in range(len(all_labels)):
         for label in labels_list:
@@ -923,10 +920,13 @@ def CreateSPHEREdataframe(save_df_dir=None):
     df.sort_values('ID', inplace=True)
     df.set_index('ID', inplace=True)
 
-    if save_df_dir is not None:
-        print('Saving dataframe to:', save_df_dir)
-        with open(save_df_dir, 'wb') as handle:
-            pickle.dump(df, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    try:
+        if save_df_dir is not None:
+            print('Saving dataframe to:', save_df_dir)
+            with open(save_df_dir, 'wb') as handle:
+                pickle.dump(df, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    except:
+        print('Error: Could not save the dataframe!')
 
     return df
 

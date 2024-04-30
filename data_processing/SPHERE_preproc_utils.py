@@ -7,7 +7,7 @@ import os
 import re
 import pickle
 from .SPHERE_data import LoadSPHEREsampleByID
-from tools.utils import SPHERE_PSF_spiders_mask, mask_circle
+from tools.utils import mask_circle
 from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
@@ -17,6 +17,25 @@ from tools.utils import rad2mas, pad_lists, cropper
 # delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
 # frame_delay = lambda r: r/1e3 * 2.3  if (r/1e3*2.3) > 1.0 else 1.0 # delay of 2.3 frames for 1000 Hz loop rate
 frame_delay = lambda r: torch.clamp(r/1e3 * 2.3, min=1.0)
+
+
+def SPHERE_PSF_spiders_mask(crop, thick=9):
+    def draw_line(start_point, end_point, thickness=10):
+        from PIL import Image, ImageDraw
+        image = Image.new("RGB", (256,256), (255,255,255))
+        draw = ImageDraw.Draw(image)
+        draw.line([start_point, end_point], fill=(0,0,0), width=thickness)
+        return np.round(np.array(image).mean(axis=2) / 256).astype('uint')
+
+    w, h = 256, 256
+    dw, dh = 7, 7
+    line_mask = draw_line((w, h-dh), (w//2+dw, h//2), thick) * \
+                draw_line((0, h-dh), (w//2-dw, h//2), thick) * \
+                draw_line((w, dh),   (w//2+dw, h//2), thick) * \
+                draw_line((0, dh),   (w//2-dw, h//2), thick)
+    
+    crop = slice(line_mask.shape[0]//2-crop//2, line_mask.shape[0]//2+crop//2+crop%2)
+    return line_mask[crop,crop]
 
 
 def LoadSPHEREsynthByID(target_id):

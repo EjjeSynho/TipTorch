@@ -1,25 +1,13 @@
 #%%
-%reload_ext autoreload
-%autoreload 2
-
 import sys
 sys.path.append('..')
 
 import os
 import pickle
-from sklearn.model_selection import train_test_split
-from sklearn.ensemble import GradientBoostingRegressor, RandomForestRegressor
-from sklearn.neural_network import MLPRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.multioutput import MultiOutputRegressor
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
-from sklearn.svm import SVR
 from project_globals import SPHERE_DATA_FOLDER
 import pandas as pd
 import numpy as np
-import seaborn as sns
 import matplotlib.pyplot as plt
-from tools.utils import corr_plot
 from tqdm import tqdm
 
 #%%
@@ -111,7 +99,6 @@ for entry in df_transforms:
 with open('../data/temp/fitted_df_norm.pickle', 'wb') as handle:
     pickle.dump(fitted_df_normalized, handle, protocol=pickle.HIGHEST_PROTOCOL)
     
-    
 #%% =============================================================================
 names = ['Piston',]*4 + ['Tip',]*4 + ['Tilt',]*4
 
@@ -121,8 +108,10 @@ for i in range(0, 4):
     names[i+8] += f' {i+1}'
 names.pop(0)
 
-names = names + ['r0', 'F L', 'F R', 'dx', 'dy', 'bg L', 'bg R', 'Jx', 'Jy', 'Jxy']
+names = ['r0', 'F L', 'F R', 'dx', 'dy', 'bg L', 'bg R', 'dn', 'Jx', 'Jy', 'Jxy'] + names
+transform_entries = ['r0', 'F L', 'F R', 'dx', 'dy', 'bg L', 'bg R', 'dn', 'Jx', 'Jy', 'Jxy'] + ['LWE coefs',]*11
 
+#%%
 variances_  = np.stack([variance for variance in variances if variance is not None])
 
 variances_m = np.mean(variances_, axis=0)**0.5
@@ -135,3 +124,69 @@ plt.yscale('log')
 plt.grid()
 plt.xticks(rotation=45)
 plt.title('Fitted variables standard deviation')
+
+#%%
+# %matplotlib qt
+# %matplotlib inline
+
+from matplotlib.colors import SymLogNorm
+
+norm = SymLogNorm(linthresh=1e-8, vmin=0, vmax=1)
+# norm = 
+
+Hessians_cube = np.stack(Hessians)
+
+scale_matrix = np.zeros(Hessians_cube.shape[1:])
+
+for i,j in np.ndindex(Hessians_cube.shape[1:]):
+    scale_i = df_transforms[transform_entries[i]].transforms[0].scale()
+    scale_j = df_transforms[transform_entries[j]].transforms[0].scale()
+    scale_matrix[i,j] = scale_i*scale_j
+  
+Hessians_normalized = Hessians_cube / scale_matrix[None,...]
+
+Hessians_m = np.nanmean(Hessians_cube, axis=0)
+Hessians_v = np.nanvar(Hessians_cube, axis=0)
+
+#%%
+a = np.diag(Hessians_m)
+b = np.diag(Hessians_v)
+
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.axhline(0, color='black', linewidth=0.5)
+plt.bar(names, a)
+plt.errorbar(names, a, yerr=b, fmt='.', color='black')
+plt.xticks(rotation=45, ha='right')
+plt.xlim(-0.5, 10.5)
+plt.ylim(-0.005, 0.005)
+plt.show()
+
+#%%
+plt.grid(True, linestyle='--', alpha=0.5)
+plt.axhline(0, color='black', linewidth=0.5)
+plt.bar(names, a)
+plt.errorbar(names, a, yerr=b, fmt='.', color='black')
+plt.xticks(rotation=45, ha='right')
+plt.xlim(10.5, 21.5)
+# plt.ylim(-0.005, 0.005)
+
+plt.show()
+
+#%%
+plt.imshow(Hessians_m, interpolation='nearest')
+plt.gca().xaxis.set_ticks_position('top')
+plt.xticks(np.arange(len(names)), names, rotation=45, ha='left')
+plt.yticks(np.arange(len(names)), names, rotation=0)
+plt.colorbar()
+
+#%%
+Hessians_Snyders_cut = Hessians_m[:11,:11]
+
+plt.imshow(np.flip(Hessians_Snyders_cut, 0), interpolation='nearest')
+plt.gca().xaxis.set_ticks_position('top')
+plt.xticks(np.arange(Hessians_Snyders_cut.shape[0]), names[:Hessians_Snyders_cut.shape[0]], rotation=45, ha='left')
+plt.yticks(np.flip(np.arange(Hessians_Snyders_cut.shape[1]),0), names[:Hessians_Snyders_cut.shape[0]], rotation=0)
+plt.xlim(-0.5,10.5)
+plt.ylim(-0.5,10.5)
+plt.colorbar()
+

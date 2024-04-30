@@ -10,7 +10,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
-from tools.utils import plot_radial_profiles, plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper
+from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from tools.config_manager import GetSPHEREonsky
@@ -21,17 +21,26 @@ from project_globals import SPHERE_DATA_FOLDER, device
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
-psf_df = psf_df[psf_df['Corrupted'] == False]
+psf_df = psf_df[psf_df['Corrupted']   == False]
 psf_df = psf_df[psf_df['Low quality'] == False]
-psf_df = psf_df[psf_df['Medium quality'] == False]
-psf_df = psf_df[psf_df['LWE'] == True]
+# psf_df = psf_df[psf_df['Medium quality'] == False]
+psf_df = psf_df[psf_df['Central hole'] == False]
+psf_df = psf_df[psf_df['Multiples']    == False]
+psf_df = psf_df[psf_df['λ left (nm)']  == 1625]
+psf_df = psf_df[ ~np.isnan(psf_df['Rate']) ]
+# psf_df = psf_df[psf_df['LWE'] == True]
 # psf_df = psf_df[psf_df['mag R'] < 7]
 # psf_df = psf_df[psf_df['Num. DITs'] < 50]
 # psf_df = psf_df[psf_df['Class A'] == True]
-# psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
+# psf_df = psf_df[np.isfinite(psf_df) < 1700]
 # psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
 
 good_ids = psf_df.index.values.tolist()
+
+# Randomly select 8 samples from the dataset
+# ids = np.random.choice(good_ids, 8, replace=False)
+# ids = np.array([ 487, 2803, 1053, 1653,  845, 1332, 3962,  183]) # one with one NaN
+ids = np.array([ 1115, 2818, 637, 869, 1370,  159, 2719, 1588 ])
 
 #%%
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581, 578, 576, 992
@@ -43,8 +52,6 @@ good_ids = psf_df.index.values.tolist()
 # 1393 #50 DITs
 # 1408
 # 898
-ids = [3013, 3927, 2282, 3699, 2739, 4058, 2737, 1073]
-# ids = [3927, 3013, 2282, 3699]
 
 PSF_data, _, merged_config = SPHERE_preprocess(
     sample_ids    = ids,
@@ -83,6 +90,17 @@ draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)
 # mask_in  = toy.mask_rim_in.unsqueeze(1).float()
 # mask_out = toy.mask_rim_out.unsqueeze(1).float()
 
+'''
+from tools.config_manager import ConfigManager
+import json
+from copy import deepcopy
+
+config_manager = ConfigManager(GetSPHEREonsky())
+config_manager.Convert(merged_config_2 := deepcopy(merged_config), framework='list')
+
+with open('C:/Users/akuznets/Desktop/presa_buf/config.json', 'w') as f:
+    json.dump(merged_config_2, f, indent=4)
+'''
 
 #%% PSF fitting (no early-stopping)
 from tools.utils import LWE_basis
@@ -144,7 +162,6 @@ if basis.coefs.requires_grad:
     buf = basis.coefs.detach().clone()
     basis.coefs = buf
 
-
 #%%
 from tools.utils import EarlyStopping
 
@@ -185,34 +202,15 @@ torch.cuda.empty_cache()
 decomposed_variables = transformer.destack(x0)
 # for key, value in decomposed_variables.items(): print(f"{key}: {value}")
 
-PSF_1_joint = func(x0)
+with torch.no_grad():
+    PSF_1_joint = func(x0)
+    plot_radial_profiles_new(
+        PSF_0[:,0,...].cpu().numpy(),
+        PSF_1_joint[:,0,...].cpu().numpy(),
+        'Data', 'TipToy', title='IRDIS PSF', dpi=200
+    )
+    # draw_PSF_stack(PSF_0, PSF_1_joint, average=True)#, scale=None)
 
-# draw_PSF_stack(PSF_0, PSF_1_joint, average=True)#, scale=None)
-
-# id = 3
-
-# for id in range(PSF_0.shape[0]):
-#     destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
-#     plot_radial_profiles(destack(PSF_0[id,...].unsqueeze(0)), destack(PSF_1_joint[id,...].unsqueeze(0)), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
-#     # plot_radial_profiles(destack(PSF_0), destack(PSF_1_joint), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
-#     plt.show()
-
-plot_radial_profiles_new(
-    PSF_0[:,0,...].cpu().numpy(),
-    PSF_1_joint[:,0,...].detach().cpu().numpy(),
-    'Data',
-    'TipToy',
-    title='IRDIS PSF',
-    dpi=200)
-
-#%%
-A = PSF_0[id,...]
-B = PSF_1_joint[id,...]
-
-max_A = A.max().item()
-max_B = B.max().item()
-
-print( f'{np.abs(max_B-max_A)/max_A * 100} %')
 
 #%%
 from torch.autograd.functional import hessian, jacobian
@@ -223,7 +221,6 @@ hessian_mat_[1:,0] = hessian_mat_[0,1:]
 hessian_mat_[0,0] = 0.0
 hessian_mat_[hessian_mat.abs() < 1e-11] = 1e-11
 
-
 #%%
 # plt.figure(dpi=200)
 plt.imshow(hessian_mat_.cpu().detach().numpy())
@@ -233,12 +230,12 @@ xticks = np.arange(0, hessian_mat_.shape[-1])
 xticklabels = \
     list(decomposed_variables.keys())[:-1] + \
     [f"Piston {i}" for i in range(2, 5)] + \
-    [f"Tip {i}" for i in range(1, 5)] + \
-    [f"Tilt {i}" for i in range(1, 5)]
+    [f"Tip {i}"    for i in range(1, 5)] + \
+    [f"Tilt {i}"   for i in range(1, 5)]
 
 # Insert value after 'bg'
 xticklabels.insert(xticklabels.index('bg')+1, 'bg R')
-xticklabels.insert(xticklabels.index('F')+1,  'F R')
+xticklabels.insert(xticklabels.index('F') +1, 'F R')
 
 xticklabels[xticklabels.index('bg')] = 'bg L'
 xticklabels[xticklabels.index('F')]  = 'F L'

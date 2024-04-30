@@ -276,14 +276,15 @@ class TipTorch(torch.nn.Module):
         # if self.piston_filter is None:
         self.piston_filter = self.PistonFilter(self.k_AO)
         
-        if self.PSD_include['aliasing'] and self.PR is None:
+        # To avoid reinitializing it without a need
+        if self.PSD_include['aliasing']:
             self.PR = self.PistonFilter(torch.hypot(self.km, self.kn))
 
         # Diffraction-limited PSF
         self.PSF_DL = self.OTF2PSF(self.OTF_static_standart)
         torch.cuda.empty_cache()
     
-       
+    
     def Phase2OTF(self, phase, sampling):    
         ''' Compute OTF from a phase screen''' 
         pupil_size   = phase.shape[-1]
@@ -342,13 +343,12 @@ class TipTorch(torch.nn.Module):
 
 
     def Update(self, reinit_grids=True, reinit_pupils=False):
-        
         # optimizables_copy = [i for i in self.optimizables]
         # self.optimizables = []
         self.InitValues()
         # self.optimizables = optimizables_copy
 
-        if reinit_grids:
+        if self.N_src != self.sampling.shape[0] or reinit_grids:
             self.InitGrids()
             
         if reinit_pupils:

@@ -94,6 +94,21 @@ def cropper(x, win):
                  x.shape[-1]//2-win//2 : x.shape[-1]//2 + win//2 + win%2]
 
 
+def separate_islands(binary_image):
+    # Label each connected component (each "island") with a unique integer
+    labeled_image, num_features = label(binary_image)
+    # Create an empty list to store the separated images
+    separated_images = []
+
+    # Iterate over each unique label (each island)
+    for i in range(1, num_features + 1):
+        # Create an image with only the current island
+        island_image = (labeled_image == i).astype(int)
+        separated_images.append(island_image)
+
+    return separated_images
+
+
 def BuildPetalBasis(segmented_pupil, pytorch=True):
     petals = np.stack( separate_islands(segmented_pupil) )
 
@@ -117,35 +132,24 @@ def BuildPetalBasis(segmented_pupil, pytorch=True):
         return torch.from_numpy( np.vstack([petals, tilt, tip]) ), torch.tensor(coefs)
 
 
-def separate_islands(binary_image):
-    # Label each connected component (each "island") with a unique integer
-    labeled_image, num_features = label(binary_image)
-    # Create an empty list to store the separated images
-    separated_images = []
-
-    # Iterate over each unique label (each island)
-    for i in range(1, num_features + 1):
-        # Create an image with only the current island
-        island_image = (labeled_image == i).astype(int)
-        separated_images.append(island_image)
-
-    return separated_images
 
 
 class LWE_basis():
-    def __init__(self, model, optimizable=True) -> None:
+    def __init__(self, model) -> None:
         from tools.utils import BuildPetalBasis
         self.model = model
-        self.modal_basis, self.coefs = BuildPetalBasis(self.model.pupil.cpu(), pytorch=True)
-        self.modal_basis = self.modal_basis[1:,...].float().to(model.device)
-        self.coefs = self.coefs[1:].to(model.device).repeat(model.N_src, 1)
-        if optimizable:
-            self.coefs = nn.Parameter(self.coefs)
+        self.modal_basis, self.__coefs_flat = BuildPetalBasis(self.model.pupil.cpu(), pytorch=True)
+        self.modal_basis  = self.modal_basis[1:,...].float().to(model.device)
+        self.__coefs_flat = self.__coefs_flat[1:].float().to(model.device)
+        self.coefs = self.__coefs_flat.repeat(self.model.N_src, 1)
+        # if optimizable:
+            # self.coefs = nn.Parameter(self.coefs)
 
     def forward(self, x=None):
         if x is not None:
             self.coefs = x
-            
+ 
+        # self.coefs = self.__coefs_flat.repeat(self.model.N_src, 1)
         OPD = torch.einsum('mn,nwh->mwh', self.coefs, self.modal_basis) * 1e-9  
         return pdims(self.model.pupil * self.model.apodizer, -2) * torch.exp(1j*2*np.pi / pdims(self.model.wvl,2)*OPD.unsqueeze(1))
     
@@ -486,25 +490,6 @@ def register_hooks(var):
     return make_dot
 
 
-def SPHERE_PSF_spiders_mask(crop, thick=9):
-    def draw_line(start_point, end_point, thickness=10):
-        from PIL import Image, ImageDraw
-        image = Image.new("RGB", (256,256), (255,255,255))
-        draw = ImageDraw.Draw(image)
-        draw.line([start_point, end_point], fill=(0,0,0), width=thickness)
-        return np.round(np.array(image).mean(axis=2) / 256).astype('uint')
-
-    w, h = 256, 256
-    dw, dh = 7, 7
-    line_mask = draw_line((w, h-dh), (w//2+dw, h//2), thick) * \
-                draw_line((0, h-dh), (w//2-dw, h//2), thick) * \
-                draw_line((w, dh),   (w//2+dw, h//2), thick) * \
-                draw_line((0, dh),   (w//2-dw, h//2), thick)
-    
-    crop = slice(line_mask.shape[0]//2-crop//2, line_mask.shape[0]//2+crop//2+crop%2)
-    return line_mask[crop,crop]
-
-
 def Center(im, centered=True):
     if type(im) == torch.Tensor: im = im.detach().cpu().numpy()
     im = im.squeeze()
@@ -543,7 +528,7 @@ class EarlyStopping:
         else: self.__counter = 0
         self.__previous_loss = current_loss.item()
 
-
+'''
 class OptimizeLBFGS:
     def __init__(self, model, loss_fn, verbous=True):
         self.model = model
@@ -608,6 +593,7 @@ class OptimizeTRF():
         for free_param in self.free_params: # restore intial requires_grad from PyTorch
             self.parameters[free_param].requires_grad = True
         return self.parameters
+'''
 
 
 def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, max_val=1e16, crop=None):
@@ -689,6 +675,7 @@ def FitGauss2D(PSF):
 
 
 
+'''
 # Function to calculate the radial profile of a PSF or of a PSF stack
 def radial_profile(data, center=None):
     t2np = lambda x: x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else x
@@ -708,7 +695,6 @@ def radial_profile(data, center=None):
     if len(data.shape) > 2:
         raise ValueError('PSF stack of wrong dimensionality is passed!')
     return calc_profile(t2np(data), t2np(center))
-
 
 def plot_radial_profiles(PSF_refs, PSF_estims, label_refs, label_estim, title='', dpi=300, scale='log', colors=['tab:blue', 'tab:orange'], cutoff=32):
     from tools.utils import radial_profile
@@ -779,19 +765,19 @@ def plot_std(x,y, label, color, style): #TODO: deprecated
     plt.fill_between(x, lower_bound, upper_bound, color=color, alpha=0.3)
     plt.plot(x, y_m, label=label, color=color, linestyle=style)
     plt.show()
-
+'''
 
 def plot_radial_profiles_new(PSF_0,
                              PSF_1,
                              label_0 = 'PSFs #1',
                              label_1 = 'PSFs #2',
                              title   = '',
-                             dpi     = 300,
                              scale   = 'log',
                              colors  = ['tab:blue', 'tab:orange', 'tab:green'],
                              cutoff  = 20,
                              centers = None,
-                             return_profiles = False):
+                             return_profiles = False,
+                             ax = None):
     
     from photutils.centroids import centroid_quadratic, centroid_com
     from photutils.profiles import RadialProfile
@@ -848,11 +834,14 @@ def plot_radial_profiles_new(PSF_0,
         for p in percentiles:
             upper_bound = np.percentile(profile-profile_m, 100-p, axis=0)
             lower_bound = np.percentile(profile-profile_m, p,  axis=0) 
-            plt.fill_between(x, func(profile_m)+lower_bound, func(profile_m)+upper_bound, alpha=alpha_func(n_quantiles), color=color)
+            ax.fill_between(x, func(profile_m)+lower_bound, func(profile_m)+upper_bound, alpha=alpha_func(n_quantiles), color=color)
         
-        plt.plot(x, func(profile_m), color=color, label=label, linestyle=linestyle, linewidth=linewidth)
+        ax.plot(x, func(profile_m), color=color, label=label, linestyle=linestyle, linewidth=linewidth)
 
-    fig = plt.figure(figsize=(6, 4), dpi=dpi)
+    if ax is None:
+        fig = plt.figure(figsize=(6, 4), dpi=300)
+        ax  = fig.gca()
+        
 
     y_max = np.median(profis_0, axis=0).max()
 
@@ -862,32 +851,33 @@ def plot_radial_profiles_new(PSF_0,
 
     _render_profile(p_0,   color=colors[0], label=label_0, linewidth=2)
     _render_profile(p_1,   color=colors[1], label=label_1, linewidth=2)
-    _render_profile(p_err, color=colors[2], label='Abs. error', linestyle='--')
+    _render_profile(p_err, color=colors[2], label='Error', linestyle='--')
 
     max_err = np.median(p_err, axis=0).max()
-    plt.axhline(max_err, color='green', linestyle='-', alpha=0.5)
+    ax.axhline(max_err, color='green', linestyle='-', alpha=0.5)
 
     y_lim = max([p_0.max(), p_1.max(), p_err.max()])
     if scale == 'log':
         x_max = cutoff
-        plt.yscale('symlog', linthresh=5e-1)
-        plt.ylim(1e-2, y_lim)
+        ax.set_yscale('symlog', linthresh=5e-1)
+        ax.set_ylim(1e-2, y_lim)
     else:
-        x_max = cutoff*0.7
-        plt.ylim(0, y_lim)
+        x_max = cutoff#*0.7
+        ax.ylim(0, y_lim)
 
-    plt.title(title)
-    plt.legend()
-    plt.xlim(0, x_max)
-    plt.text(x_max-8., max_err+2.5, "Max. abs. err.: {:.1f}%".format(max_err), fontsize=12)
-    plt.xlabel('Pixels from on-axis, [pix]')
-    plt.ylabel('Normalized intensity, [%]')
-    plt.grid()
+    ax.set_title(title)
+    ax.legend()
+    ax.set_xlim(0, x_max)
+    ax.text(x_max-16, max_err+2.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
+    ax.set_xlabel('Pixels from on-axis, [pix]')
+    ax.set_ylabel('Normalized intensity, [%]')
+    ax.grid()
 
     if return_profiles:
         return p_0, p_1, p_err
 
 
+'''
 def DisplayDataset(samples_list, tiles_in_row, show_labels=True, dpi=300):
     from PIL import Image, ImageDraw
     from matplotlib import cm
@@ -970,6 +960,7 @@ def DisplayDataset(samples_list, tiles_in_row, show_labels=True, dpi=300):
     plt.figure(dpi=dpi)
     plt.axis('off')
     plt.imshow(tile)
+'''
 
 
 def CircPupil(samples, D=8.0, centralObstruction=1.12):

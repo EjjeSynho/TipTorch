@@ -10,28 +10,26 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
-from tools.utils import plot_radial_profiles, SR, draw_PSF_stack, rad2mas, cropper
+from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from tools.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
-
+from torchmin import minimize
 
 #%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['Corrupted'] == False]
-psf_df = psf_df[psf_df['Low quality'] == False]
-psf_df = psf_df[psf_df['Medium quality'] == False]
+# psf_df = psf_df[psf_df['Low quality'] == False]
+# psf_df = psf_df[psf_df['Medium quality'] == False]
 # psf_df = psf_df[psf_df['LWE'] == True]
 # psf_df = psf_df[psf_df['mag R'] < 7]
 # psf_df = psf_df[psf_df['Num. DITs'] < 50]
 # psf_df = psf_df[psf_df['Class A'] == True]
 # psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
 # psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
-
-good_ids = psf_df.index.values.tolist()
 
 #%%
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581, 578, 576, 992
@@ -44,24 +42,17 @@ good_ids = psf_df.index.values.tolist()
 # 1408
 # 898
 
-# Samples with unrealisticly bad flux:
-# 93
-# 770
-# 1530
-# 1847
-# 2425
-# 2432
-# 2433
-# 2437
-# 2441
-# 2447
-# 2454
-# 3160
-# 3534
-# 3535
+# Too high blur
+# 2423
+# 3365
+
+sample_id = 501
+
+# LWE_flag = psf_df.loc[sample_id]['LWE']
+LWE_flag = True
 
 PSF_data, _, merged_config = SPHERE_preprocess(
-    sample_ids    = [93],
+    sample_ids    = [sample_id],
     norm_regime   = 'sum',
     split_cube    = False,
     PSF_loader    = lambda x: SamplesByIds(x, synth=False),
@@ -106,14 +97,14 @@ from data_processing.normalizers import TransformSequence, Uniform, InputsTransf
 
 basis = LWE_basis(toy)
 
-norm_F   = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0) ])
-norm_bg  = TransformSequence(transforms=[ Uniform(a=-1e-5, b=1e-5)])
-norm_r0  = TransformSequence(transforms=[ Uniform(a=0,     b=0.5) ])
-norm_dxy = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
-norm_J   = TransformSequence(transforms=[ Uniform(a=0,     b=30)  ])
-norm_Jxy = TransformSequence(transforms=[ Uniform(a=0,     b=50)  ])
-norm_LWE = TransformSequence(transforms=[ Uniform(a=-200,  b=200) ])
-norm_dn  = TransformSequence(transforms=[ Uniform(a=-0.05, b=0.05) ])
+norm_F   = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0)  ])
+norm_bg  = TransformSequence(transforms=[ Uniform(a=-1e-6, b=1e-6) ])
+norm_r0  = TransformSequence(transforms=[ Uniform(a=0,     b=0.5)  ])
+norm_dxy = TransformSequence(transforms=[ Uniform(a=-1,    b=1)    ])
+norm_J   = TransformSequence(transforms=[ Uniform(a=0,     b=30)   ])
+norm_Jxy = TransformSequence(transforms=[ Uniform(a=0,     b=50)   ])
+norm_LWE = TransformSequence(transforms=[ Uniform(a=-20,   b=20)   ])
+norm_dn  = TransformSequence(transforms=[ Uniform(a=-0.02, b=0.02) ])
 
 transformer = InputsTransformer({
     'F':   norm_F,
@@ -139,8 +130,11 @@ inp_dict = {
     'Jx':  toy.Jx,
     'Jy':  toy.Jy,
     'Jxy': toy.Jxy,
-    'basis_coefs': basis.coefs
+    # 'basis_coefs': basis.coefs
 }
+
+if LWE_flag:
+    inp_dict['basis_coefs'] = basis.coefs
 
 _ = transformer.stack(inp_dict) # to create index mapping
 
@@ -153,28 +147,28 @@ x0 = [1.0,
       0.0,
       0.5,
       0.5,
-      0.1] + [0,]*3 + [0,]*8
+      0.1]
+
+if LWE_flag:
+    x0 = x0 + [0,]*3 + [0,]*8
 
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
+
+def func(x_):
+    x_torch = transformer.destack(x_)
+    if 'basis_coefs' in x_torch:
+        return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
+    else:
+        return toy(x_torch)
+
+'''
 x0.requires_grad = True
-
-if basis.coefs.requires_grad:
-    buf = basis.coefs.detach().clone()
-    basis.coefs = buf
-
-
-#%%
-from tools.utils import EarlyStopping
-
-optimizer = optim.LBFGS([x0], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-crop_all = cropper(PSF_0, 100)
 
 def loss_fn_all(A, B):
     return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all])
 
-def func(x_):
-    x_torch = transformer.destack(x_)
-    return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
+optimizer = optim.LBFGS([x0], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
+crop_all = cropper(PSF_0, 100)
 
 early_stopping = EarlyStopping(patience=2, tolerance=1e-4, relative=False)
 
@@ -198,17 +192,53 @@ for i in range(100):
         break
 
 torch.cuda.empty_cache()
+'''
+
+def funco(x_):
+    loss = (func(x_)-PSF_0)
+    return loss.flatten().abs().sum()
+
+result = minimize(funco, x0, method='bfgs', disp=2)
+
+x0 = result.x
 
 #%%
-decomposed_variables = transformer.destack(x0)
+# decomposed_variables = transformer.destack(x0)
+# for key, value in decomposed_variables.items(): print(f"{key}: {value}")
 
-for key, value in decomposed_variables.items():
-    print(f"{key}: {value}")
+with torch.no_grad():
+    PSF_1 = func(x0)
+  
+    draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)#, scale=None)
+    
+    plot_radial_profiles_new(
+        PSF_0[:,0,...].cpu().numpy(),
+        PSF_1[:,0,...].cpu().numpy(),
+        'Data', 'TipToy', title='IRDIS PSF'
+    )
 
-draw_PSF_stack(PSF_0, PSF_1_joint:=func(x0), average=True)
+#%%
 
-destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
-plot_radial_profiles(destack(PSF_0), destack(PSF_1_joint), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+def GetNewPhotons():
+    WFS_noise_var = toy.dn + toy.NoiseVariance(toy.r0.abs())
+
+    N_ph_0 = toy.WFS_Nph.clone()
+
+    def func_Nph(x):
+        toy.WFS_Nph = x
+        var = toy.NoiseVariance(toy.r0.abs())
+        return (WFS_noise_var-var).flatten().abs().sum()
+
+    result_photons = minimize(func_Nph, N_ph_0, method='bfgs', disp=0)
+    toy.WFS_Nph = N_ph_0.clone()
+
+    return result_photons.x
+
+#%%
+xxx = transformer.destack(x0)
+WFEs = (xxx['basis_coefs']**2).sum().sqrt().cpu().numpy()
+
+print(f'WFE: {WFEs:.2f} nm (only LWE)')
 
 #%%
 from torch.autograd.functional import hessian, jacobian
