@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from tools.utils import cropper
 
 #%%
 fitted_samples_folder = SPHERE_DATA_FOLDER + 'IRDIS_fitted/'
@@ -22,7 +23,7 @@ for x in data.keys():
     print(x)
 
 df_relevant_entries = [
-    'bg', 'F', 'dx', 'dy', 'r0', 'n', 'dn', 'Jx', 'Jy', 'Jxy',
+    'bg', 'F', 'dx', 'dy', 'r0', 'n', 'dn', 'Jx', 'Jy', 'Jxy', 'Nph WFS (new)',
     'SR data', 'SR fit', 'FWHM fit', 'FWHM data', 'LWE coefs'
 ]
 
@@ -89,16 +90,29 @@ from data_processing.normalizers import CreateTransformSequenceFromFile
 
 df_transforms = CreateTransformSequenceFromFile('../data/temp/fitted_df_norm_transforms.pickle')
 
-#%%
 fitted_df_normalized = fitted_df_filtered.copy()
 
 for entry in df_transforms:
     fitted_df_normalized[entry] = df_transforms[entry].forward(fitted_df_normalized[entry].values)
 
-#%%
+
 with open('../data/temp/fitted_df_norm.pickle', 'wb') as handle:
     pickle.dump(fitted_df_normalized, handle, protocol=pickle.HIGHEST_PROTOCOL)
+   
+   
+#%% Write images
+
+crop_imgs = cropper(images_data[0], 80)
+
+im_d_ = [img[crop_imgs] for img in images_data  ]
+im_f_ = [img[crop_imgs] for img in images_fitted]
+
+images_df = { id: (im_d_[i], im_f_[i]) for i, id in enumerate(ids) }
+
+with open(SPHERE_DATA_FOLDER + 'images_df.pickle', 'wb') as handle:
+    pickle.dump(images_df, handle, protocol=pickle.HIGHEST_PROTOCOL)       
     
+ 
 #%% =============================================================================
 names = ['Piston',]*4 + ['Tip',]*4 + ['Tilt',]*4
 

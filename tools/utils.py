@@ -12,6 +12,9 @@ import matplotlib.pyplot as plt
 from matplotlib import cm
 from scipy.ndimage import label
 import seaborn as sns
+from photutils.centroids import centroid_quadratic, centroid_com
+from photutils.profiles import RadialProfile
+from astropy.modeling import models, fitting
 
 
 rad2mas  = 3600 * 180 * 1000 / np.pi
@@ -88,11 +91,44 @@ def pad_lists(input_list, pad_value):
     return [pad_element(x) for x in input_list]
 
 
-def cropper(x, win):
-    return np.s_[...,
-                 x.shape[-2]//2-win//2 : x.shape[-2]//2 + win//2 + win%2,
-                 x.shape[-1]//2-win//2 : x.shape[-1]//2 + win//2 + win%2]
+def cropper(x, win, center=None):
+    if center is None:
+        return np.s_[...,
+                    x.shape[-2]//2-win//2 : x.shape[-2]//2 + win//2 + win%2,
+                    x.shape[-1]//2-win//2 : x.shape[-1]//2 + win//2 + win%2]
+    else:
+        # return np.s_[...,
+        #             np.round(center[0]-win//2,2).astype(int) : np.round(center[0] + win//2 + win%2,2).astype(int),
+        #             np.round(center[1]-win//2,2).astype(int) : np.round(center[1] + win//2 + win%2,2).astype(int)]
+        
+        return np.s_[...,
+                np.round(center[0]).astype(int)-win//2 : np.round(center[0]).astype(int) + win//2 + win%2,
+                np.round(center[1]).astype(int)-win//2 : np.round(center[1]).astype(int) + win//2 + win%2]
 
+
+    # else:
+    #     return np.s_[...,
+    #                 np.floor(center[0]).astype(int)-win//2 : np.ceil(center[0]).astype(int)+win//2+win%2,
+    #                 np.floor(center[1]).astype(int)-win//2 : np.ceil(center[1]).astype(int)+win//2+win%2]
+        
+
+
+def gaussian_centroid(img):
+    x_, y_ = safe_centroid(img)
+    try:
+        image_cropped = img[cropper(img, 40, (int(x_), int(y_)))]
+        x_0, y_0 = safe_centroid(image_cropped)
+
+        size = image_cropped.shape[0]
+        y, x = np.mgrid[:size, :size]
+        fitter = fitting.LevMarLSQFitter()
+
+        gaussian_init = models.Gaussian2D(amplitude=np.max(image_cropped), x_mean=x_0, y_mean=y_0, x_stddev=3, y_stddev=3, theta=0)
+        fitted_gaussian = fitter(gaussian_init, x, y, image_cropped)
+        # gaussian_image  = fitted_gaussian(x, y)
+        return fitted_gaussian.x_mean.value - size//2 + x_, fitted_gaussian.y_mean.value - size//2 + y_
+    except:
+        return x_, y_
 
 def separate_islands(binary_image):
     # Label each connected component (each "island") with a unique integer
@@ -109,29 +145,53 @@ def separate_islands(binary_image):
     return separated_images
 
 
+decompose_WF = lambda WF, basis, pupil: WF[:, pupil > 0] @ basis[:, pupil > 0].T / pupil.sum()
+project_WF   = lambda WF, basis, pupil: torch.einsum('mn,nwh->mwh', decompose_WF(WF, basis, pupil), basis)
+calc_WFE     = lambda WF, pupil: WF[:, pupil > 0].std()
+
+
+def BuildPTTBasis(pupil, pytorch=True):
+    tip, tilt = np.meshgrid( np.linspace(-1, 1, pupil.shape[-2]), np.linspace(-1, 1, pupil.shape[-1]) )
+
+    tip  = pupil * tip  / np.std( tip [np.where(pupil > 0)] )
+    tilt = pupil * tilt / np.std( tilt[np.where(pupil > 0)] )
+
+    PTT_basis = np.stack([pupil, tip, tilt], axis=0)
+    
+    if pytorch:
+        PTT_basis = torch.tensor(PTT_basis)
+                
+    return PTT_basis
+
+
 def BuildPetalBasis(segmented_pupil, pytorch=True):
     petals = np.stack( separate_islands(segmented_pupil) )
-
     x, y = np.meshgrid(np.arange(segmented_pupil.shape[-1]), np.arange(segmented_pupil.shape[-2]))
 
     tilt = (x[None, ...]*petals).astype(np.float64)
     tip  = (y[None, ...]*petals).astype(np.float64)
 
+    tilt /= tilt.sum(axis=0)[np.where(segmented_pupil)].std()
+    tip  /= tip.sum(axis=0) [np.where(segmented_pupil)].std()
+
     def normalize_TT(x):
         for i in range(petals.shape[0]):
-            x[i,...] = x[i,...] - x[i,...][np.where(petals[i,...])].mean()
-            x[i,...] = x[i,...] / x[i,...][np.where(petals[i,...])].std()
-            x[i,...] *= petals[i,...]
+            x[i,...] = (x[i,...] - x[i,...][np.where(petals[i,...])].mean()) * petals[i,...]
         return x
 
     tilt, tip = normalize_TT(tilt), normalize_TT(tip)
     coefs = [1.]*petals.shape[0] + [0.]*petals.shape[0] + [0.]*petals.shape[0]
+    
+    basis = np.vstack([petals, tilt, tip])
+    
+    basis_flatten = basis[:, segmented_pupil > 0]
+    modes_STD = np.sqrt( np.diag(basis_flatten @ basis_flatten.T / segmented_pupil.sum()) )
+    basis /= modes_STD[:, None, None]
+    
     if not pytorch:
-        return np.vstack([petals, tilt, tip]), np.array(coefs)
+        return basis, np.array(coefs)
     else:
-        return torch.from_numpy( np.vstack([petals, tilt, tip]) ), torch.tensor(coefs)
-
-
+        return torch.from_numpy( basis ), torch.tensor(coefs)
 
 
 class LWE_basis():
@@ -139,8 +199,13 @@ class LWE_basis():
         from tools.utils import BuildPetalBasis
         self.model = model
         self.modal_basis, self.__coefs_flat = BuildPetalBasis(self.model.pupil.cpu(), pytorch=True)
-        self.modal_basis  = self.modal_basis[1:,...].float().to(model.device)
-        self.__coefs_flat = self.__coefs_flat[1:].float().to(model.device)
+        
+        # self.modal_basis  = self.modal_basis[1:,...].float().to(model.device)
+        # self.__coefs_flat = self.__coefs_flat[1:].float().to(model.device)
+       
+        self.modal_basis  = self.modal_basis.float().to(model.device)
+        self.__coefs_flat = self.__coefs_flat.float().to(model.device)
+        
         self.coefs = self.__coefs_flat.repeat(self.model.N_src, 1)
         # if optimizable:
             # self.coefs = nn.Parameter(self.coefs)
@@ -624,7 +689,7 @@ def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, m
         else:
             norm = None
         
-        plt.imshow(row, norm=norm)
+        plt.imshow(row, norm=norm)#, origin='lower')
         plt.title('Sources average')
         # plt.show()
 
@@ -639,7 +704,7 @@ def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, m
             else:
                 norm = None
                 
-            plt.imshow(row, norm=norm)
+            plt.imshow(row, norm=norm)#, origin='lower')
             plt.title('Source %d' % src)
             plt.show()
 
@@ -767,6 +832,18 @@ def plot_std(x,y, label, color, style): #TODO: deprecated
     plt.show()
 '''
 
+def safe_centroid(data):       
+    xycen = centroid_quadratic(np.abs(data))
+    
+    if np.any(np.isnan(xycen)):
+        xycen = centroid_com(np.abs(data))
+        
+    if np.any(np.isnan(xycen)):
+        xycen = np.array(data.shape)//2
+        
+    return xycen
+
+
 def plot_radial_profiles_new(PSF_0,
                              PSF_1,
                              label_0 = 'PSFs #1',
@@ -778,18 +855,9 @@ def plot_radial_profiles_new(PSF_0,
                              centers = None,
                              return_profiles = False,
                              ax = None):
-    
-    from photutils.centroids import centroid_quadratic, centroid_com
-    from photutils.profiles import RadialProfile
-
-    def _safe_centroid(data):       
-        xycen = centroid_quadratic(np.abs(data))
-        if np.any(np.isnan(xycen)): xycen = centroid_com(np.abs(data))
-        if np.any(np.isnan(xycen)): xycen = np.array(data.shape)//2
-        return xycen
-        
+            
     def calc_profile(data, xycen=None):
-        xycen = _safe_centroid(data) if xycen is None else xycen
+        xycen = safe_centroid(data) if xycen is None else xycen
         edge_radii = np.arange(data.shape[-1]//2)
         rp = RadialProfile(data, xycen, edge_radii)
         return rp.profile
@@ -816,8 +884,8 @@ def plot_radial_profiles_new(PSF_0,
     profis_0 = _radial_profiles( PSF_0[:,...], centers )
     profis_1 = _radial_profiles( PSF_1[:,...], centers )
 
-    center_0 = _safe_centroid(np.abs(np.nanmean(PSF_0, axis=0)))
-    center_1 = _safe_centroid(np.abs(np.nanmean(PSF_1, axis=0)))
+    center_0 = safe_centroid(np.abs(np.nanmean(PSF_0, axis=0)))
+    center_1 = safe_centroid(np.abs(np.nanmean(PSF_1, axis=0)))
     center_  = np.mean([center_0, center_1], axis=0)
     profis_err = _radial_profiles( PSF_0[:,...] - PSF_1[:,...], center_ )
 

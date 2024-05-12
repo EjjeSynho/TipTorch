@@ -9,7 +9,7 @@ import pickle
 import torch
 import numpy as np
 from torch import nn, optim
-from tools.utils import SR, pdims
+from tools.utils import SR, pdims, BuildPTTBasis, decompose_WF, project_WF, calc_WFE, rad2mas
 from tools.utils import cropper, FitGauss2D, LWE_basis, EarlyStopping
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
@@ -18,6 +18,13 @@ from tools.config_manager import GetSPHEREonsky, ConfigManager
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
 from torch.autograd.functional import hessian
 from torchmin import minimize
+
+import matplotlib.pyplot as plt
+from tools.utils import plot_radial_profiles_new, draw_PSF_stack
+
+import warnings
+
+warnings.filterwarnings("ignore")
 
 default_device = device
 start_id, end_id = -1, -1
@@ -80,9 +87,11 @@ norm_r0   = TransformSequence(transforms=[ Uniform(a=0,     b=0.5)  ])
 norm_dxy  = TransformSequence(transforms=[ Uniform(a=-1,    b=1)    ])
 norm_J    = TransformSequence(transforms=[ Uniform(a=0,     b=30)   ])
 norm_Jxy  = TransformSequence(transforms=[ Uniform(a=0,     b=50)   ])
-norm_LWE  = TransformSequence(transforms=[ Uniform(a=-20,   b=20)  ])
-norm_FWHM = TransformSequence(transforms=[ Uniform(a=0,     b=5)    ])
+norm_LWE  = TransformSequence(transforms=[ Uniform(a=-20,   b=20)   ])
 norm_dn   = TransformSequence(transforms=[ Uniform(a=-0.02, b=0.02) ])
+norm_FWHM = TransformSequence(transforms=[ Uniform(a=0,     b=5)    ])
+norm_wind_spd = TransformSequence(transforms=[ Uniform(a=0, b=20)   ])
+norm_wind_dir = TransformSequence(transforms=[ Uniform(a=0, b=360)  ])
 
 # Dump transforms
 transforms_dump = {
@@ -136,19 +145,22 @@ def gauss_fitter(PSF_stack):
 
 
 def GetNewPhotons(model):
-    WFS_noise_var = model.dn + model.NoiseVariance(model.r0.abs())
-
-    N_ph_0 = model.WFS_Nph.clone()
-
     def func_Nph(x):
         model.WFS_Nph = x
         var = model.NoiseVariance(model.r0.abs())
         return (WFS_noise_var-var).flatten().abs().sum()
+    
+    try:
+        WFS_noise_var = model.dn + model.NoiseVariance(model.r0.abs())
+        N_ph_0 = model.WFS_Nph.clone()
+        result_photons = minimize(func_Nph, N_ph_0, method='bfgs', disp=0)
+        model.WFS_Nph = N_ph_0.clone()
 
-    result_photons = minimize(func_Nph, N_ph_0, method='bfgs', disp=0)
-    model.WFS_Nph = N_ph_0.clone()
-
-    return result_photons.x
+        return result_photons.x
+    
+    except Exception as e:
+        print(e)
+        return None
 
 #%%
 def load_and_fit_sample(id):
@@ -162,11 +174,18 @@ def load_and_fit_sample(id):
             framework     = 'pytorch',
             device        = device)
 
-        PSF_0   = PSF_data[0]['PSF (mean)'].unsqueeze(0)
-        # PSF_var = PSF_data[0]['PSF (var)'].unsqueeze(0)
-        bg      = PSF_data[0]['bg (mean)']
-        norms   = PSF_data[0]['norm (mean)']
+        PSF_0    = PSF_data[0]['PSF (mean)'].unsqueeze(0)
+        PSF_var  = PSF_data[0]['PSF (var)'].unsqueeze(0)
+        PSF_mask = PSF_data[0]['mask (mean)'].unsqueeze(0)
+        norms    = PSF_data[0]['norm (mean)']
         del PSF_data
+
+        # if psf_df.loc[sample_id]['Nph WFS'] < 10:
+        PSF_mask   = PSF_mask * 0 + 1
+        # LWE_flag   = psf_df.loc[sample_id]['LWE']
+        LWE_flag = True
+        wings_flag = psf_df.loc[id]['Wings']
+
         
     except Exception as e:
         print(e)
@@ -174,15 +193,14 @@ def load_and_fit_sample(id):
         return None
 
     try:
-        toy = TipTorch(merged_config, None, device)
+        model = TipTorch(merged_config, None, device)
 
-        _ = toy()
-        # toy.optimizables = []
-        _ = toy({ 'bg': bg.unsqueeze(0).to(device) })
+        _ = model()
+        # _ = model({ 'bg': bg.unsqueeze(0).to(device) })
 
-        PSF_DL = toy.DLPSF()
+        PSF_DL = model.DLPSF()
 
-        basis = LWE_basis(toy)
+        basis = LWE_basis(model)
 
         transformer = InputsTransformer({
             'F':  norm_F,   'bg': norm_bg,
@@ -193,65 +211,93 @@ def load_and_fit_sample(id):
         })
 
         inp_dict = {
-            'r0':  toy.r0,  'F':  toy.F,
-            'dx':  toy.dx,  'dy': toy.dy,
-            'bg':  toy.bg,  'dn': toy.dn,
-            'Jx':  toy.Jx,  'Jy': toy.Jy, 
-            'Jxy': toy.Jxy, 'basis_coefs': basis.coefs
+            'r0':  model.r0,  'F':  model.F,
+            'dx':  model.dx,  'dy': model.dy,
+            'bg':  model.bg,  'dn': model.dn,
+            'Jx':  model.Jx,  'Jy': model.Jy, 
+            'Jxy': model.Jxy, 'basis_coefs': basis.coefs
         }
 
         _ = transformer.stack(inp_dict) # to create index mapping
 
-        x0 = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.1] + [0,]*3 + [0,]*8
+        x0 = [norm_r0.forward(model.r0).item(),
+            1.0, 1.0,
+            0.0, 0.0,
+            0.0, 0.0,
+            0.0, 0.0,
+            0.0,
+            0.5,
+            0.5,
+            0.1]
+
+        if wings_flag:
+            x0 = x0 + [
+                norm_wind_dir.forward(model.wind_dir).item(),
+                # norm_wind_spd.forward(model.wind_speed).item()
+            ]   
+
+        if LWE_flag:
+            x0 = x0 + [0,]*4 + [0,]*8
 
         x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
-        # x0.requires_grad = True
-
+        
         def func(x_):
             x_torch = transformer.destack(x_)
-            return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
-
-        crop_all = cropper(PSF_0, 100)
-        
-        def loss_fn(A, B):
-            return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all])
-
-        '''
-        # if basis.coefs.requires_grad:
-        #     buf = basis.coefs.detach().clone()
-        #     basis.coefs = buf
-
-        optimizer = optim.LBFGS([x0], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-
-        early_stopping = EarlyStopping(patience=2, tolerance=1e-4, relative=False)
-
-        for i in range(100):
-            optimizer.zero_grad()
-
-            loss = loss_fn(func(x0), PSF_0)
-
-            if np.isnan(loss.item()):
-                break
+            if 'basis_coefs' in x_torch:
+                return model(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
+            else:
+                return model(x_torch)
             
-            early_stopping(loss)
+        # crop_all = cropper(PSF_0, 100)
+        
+        if LWE_flag:
+            gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
 
-            loss.backward(retain_graph=True)
-            optimizer.step( lambda: loss_fn(func(x0), PSF_0) )
+            pattern_pos = torch.tensor([[0,0,0,0,  0,-1,1,0,  1,0,0,-1]]).to(device).float() * 50.0
+            pattern_neg = torch.tensor([[0,0,0,0,  0,1,-1,0, -1,0,0, 1]]).to(device).float() * 50.0
 
-            print('Loss:', loss.item(), end="\r", flush=True)
+            def loss_fn(x_):
+                img_punish = ( (func(x_)-PSF_0) * PSF_mask ).flatten().abs().sum()
+                LWE_punish = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, 40)).flatten().abs().sum()
+                coefs_ = transformer.destack(x_)['basis_coefs']
+                loss = img_punish + LWE_punish(pattern_pos, coefs_) + LWE_punish(pattern_neg, coefs_)
+                return loss
+        else:
+            def loss_fn(x_):
+                loss = (func(x_)-PSF_0) * PSF_mask
+                return loss.flatten().abs().sum()
 
-            if early_stopping.stop:
-                print('Stopped at it.', i, 'with loss:', loss.item())
-                break
-
-        # decomposed_variables = transformer.destack(x0)
-        '''
-
-        result = minimize(lambda x_: loss_fn(func(x_), PSF_0), x0, method='bfgs', disp=3)
+        result = minimize(lambda x_: loss_fn(x_), x0, method='bfgs', disp=1)
 
         x0 = result.x
 
+        LWE_coefs = transformer.destack(x0)['basis_coefs'].clone()
+        PTT_basis = BuildPTTBasis(model.pupil.cpu().numpy(), True).to(device).float()
+
+        TT_max = PTT_basis.abs()[1,...].max().item()
+        pixel_shift = lambda coef: 4 * TT_max * rad2mas / model.psInMas / model.D * 1e-9 * coef
+
+        LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, basis.modal_basis)
+        PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, model.pupil)
+        PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, model.pupil)
+
+        x0_new = transformer.destack(x0)
+        x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, model.pupil) 
+        x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
+        x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])
+        x0 = transformer.stack(x0_new)
+
         PSF_1 = func(x0)
+        
+        with torch.no_grad():
+            PSF_1 = func(x0)
+            fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+            plot_radial_profiles_new( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+            plot_radial_profiles_new( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+            plt.show()
+        
+            draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)#, scale=None)
+            
         
     except Exception as e:
         print(e)
@@ -266,11 +312,12 @@ def load_and_fit_sample(id):
     V = None
 
     try:
-        hessian_mat  = hessian(lambda x_: loss_fn(func(x_), PSF_0).log(), x0).squeeze()
+        hessian_mat  = hessian(lambda x_: loss_fn(x_).log(), x0).squeeze()
         hessian_mat_ = hessian_mat.clone()
         hessian_mat_ = hessian_mat_.nan_to_num()
         hessian_mat_[1:,0] = hessian_mat_[0,1:]
         hessian_mat_[hessian_mat.abs() < 1e-11] = 1e-11
+        
     except Exception as e:
         pass
     else:
@@ -289,20 +336,21 @@ def load_and_fit_sample(id):
     config_manager.Convert(merged_config, framework='numpy')
 
     save_data = {
-        'comments':      'All-normalized, BFGS fitting from ',
+        'comments':      'New LWE process',
         'config':        merged_config,
-        'bg':            to_store(bg),
-        'F':             to_store(toy.F),
-        'dx':            to_store(toy.dx),
-        'dy':            to_store(toy.dy),
-        'dn':            to_store(toy.dn),
-        'r0':            to_store(toy.r0),
-        'n':             to_store(toy.NoiseVariance(toy.r0.abs())),
-        'Jx':            to_store(toy.Jx),
-        'Jy':            to_store(toy.Jy),
-        'Jxy':           to_store(toy.Jxy),
-        'Nph WFS':       to_store(toy.WFS_Nph),
-        'Nph WFS (new)': to_store(GetNewPhotons(toy)),
+        'bg':            to_store(model.bg),
+        'F':             to_store(model.F),
+        'dx':            to_store(model.dx),
+        'dy':            to_store(model.dy),
+        'dn':            to_store(model.dn),
+        'r0':            to_store(model.r0),
+        'n':             to_store(model.NoiseVariance(model.r0.abs())),
+        'Jx':            to_store(model.Jx),
+        'Jy':            to_store(model.Jy),
+        'Jxy':           to_store(model.Jxy),
+        'Wind dir':      to_store(model.wind_dir),
+        'Nph WFS':       to_store(model.WFS_Nph),
+        'Nph WFS (new)': to_store(GetNewPhotons(model)),
         'LWE coefs':     to_store(basis.coefs),
         'Hessian':       to_store(hessian_mat_),
         'Variances':     to_store(variance_estimates),
@@ -314,22 +362,22 @@ def load_and_fit_sample(id):
         'FWHM data':     gauss_fitter(PSF_1),
         'Img. data':     to_store(PSF_0*pdims(norms,2)),
         'Img. fit':      to_store(PSF_1*pdims(norms,2)),
-        'PSD':           to_store(toy.PSD),
+        'PSD':           to_store(model.PSD),
         'Data norms':    to_store(norms),
-        'Model norms':   to_store(toy.norm_scale),
-        'loss':          loss_fn(PSF_1, PSF_0).item()
+        'Model norms':   to_store(model.norm_scale),
+        'loss':          loss_fn(x0).item()
     }
     return save_data
 
 #%%
-# test = load_and_fit_sample(1632)
+# test = load_and_fit_sample(2112)
 
 #%%
 for id in good_ids:
     filename = SPHERE_FITTING_FOLDER + str(id) + '.pickle'
+    print('>>>>>>>>>>>> Fitting sample', id)
     
-    save_data = load_and_fit_sample(id)
-    if save_data is not None:
+    if save_data := load_and_fit_sample(id) is not None:
         with open(filename, 'wb') as handle:
             pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 

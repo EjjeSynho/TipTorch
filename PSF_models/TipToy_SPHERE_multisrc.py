@@ -87,8 +87,8 @@ class TipTorch(torch.nn.Module):
         self.L0  = self.config['atmosphere']['L0'] # [m]
         self.F   = torch.ones (self.N_src, self.N_wvl, device=self.device)
         self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
-        self.dx  = torch.zeros(self.N_src, device=self.device)
-        self.dy  = torch.zeros(self.N_src, device=self.device)
+        self.dx  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
+        self.dy  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
         self.Jx  = torch.ones (self.N_src, device=self.device)#*0.1
         self.Jy  = torch.ones (self.N_src, device=self.device)#*0.1
         self.Jxy = torch.ones (self.N_src, device=self.device)*0.1
@@ -540,7 +540,7 @@ class TipTorch(torch.nn.Module):
         nT = torch.maximum( torch.hypot(self.WFS_spot_FWHM.max()/1e3, rad2arc*self.WFS_wvl/r0_WFS) / WFS_pixelScale, self.make_tensor(1.0) )
 
         varRON  = np.pi**2/3 * (self.WFS_RON**2/self.WFS_Nph**2) * (WFS_nPix**2/nD)**2
-        varShot = np.pi**2 / (2*self.WFS_Nph) * (nT/nD)**2
+        varShot = np.pi**2 / (2*self.WFS_Nph.abs()) * (nT/nD)**2
         
         # Noise variance calculation
         varNoise = self.WFS_excessive_factor * (varRON+varShot) # TODO: clarify with Benoit and Thierry
@@ -667,7 +667,7 @@ class TipTorch(torch.nn.Module):
         # Computing the Structure Function from the covariance
         SF = 2*(cov.abs().amax(dim=(-2,-1), keepdim=True) - cov.abs())
         # Phasor to shift the PSF with the subpixel accuracy
-        fftPhasor = torch.exp( -np.pi*1j * pdims(self.sampling_factor,2) * (self.U*dx + self.V*dy).unsqueeze(1) )
+        fftPhasor = torch.exp( -np.pi*1j * pdims(self.sampling_factor,2) * (self.U.unsqueeze(1)*dx + self.V.unsqueeze(1)*dy) )
         OTF_turb  = torch.exp( -0.5 * SF * pdims(2*np.pi*1e-9/self.wvl,2)**2 )
         # Compute the residual tip/tilt kernel
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
@@ -679,6 +679,7 @@ class TipTorch(torch.nn.Module):
         self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)
 
         return (PSF_out / self.norm_scale) * F + bg
+        # return torch.maximum( (PSF_out / self.norm_scale) * F,  bg )
 
 
     def _to_device_recursive(self, obj, device):

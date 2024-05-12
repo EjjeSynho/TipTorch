@@ -12,7 +12,11 @@ from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
 from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER #, device
-from tools.utils import rad2mas, pad_lists, cropper
+from tools.utils import rad2mas, pad_lists, cropper, gaussian_centroid
+from astropy.stats import sigma_clipped_stats
+from photutils.background import Background2D, MedianBackground
+import warnings
+from skimage.restoration import inpaint
 
 # delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
 # frame_delay = lambda r: r/1e3 * 2.3  if (r/1e3*2.3) > 1.0 else 1.0 # delay of 2.3 frames for 1000 Hz loop rate
@@ -63,11 +67,9 @@ def SamplesByIds(ids, synth=False):
 def SamplesFromDITs(init_sample):
     data_samples1 = []
     N_DITs = init_sample['PSF L'].shape[0]
+    
     if N_DITs > MAX_NDIT: 
-        print('***** WARNING! '+str(N_DITs)+' DITs might be too many to fit into VRAM! *****')
-    else:
-        # print('Split into '+str(N_DITs)+' samples')
-        pass
+        warnings.warn(f'Warning: {N_DITs} DITs might be too many to fit into VRAM!')
 
     for i in range(init_sample['PSF L'].shape[0]):
         data_samples1.append( deepcopy(init_sample) )
@@ -77,6 +79,16 @@ def SamplesFromDITs(init_sample):
         sample['PSF R'] = init_sample['PSF R'][i,...][None,...]
 
     return data_samples1
+
+
+def separate_background(img, mask=None):
+    bkg_estimator = MedianBackground()
+    bkg = Background2D(img, (25,)*2, filter_size=(3,), bkg_estimator=bkg_estimator)
+    
+    if mask is None:
+        return bkg.background
+    else:
+        return inpaint.inpaint_biharmonic(bkg.background, mask)
 
 
 def OnlyCentralWvl(samples):
@@ -100,80 +112,89 @@ def GetJitter(synth_sample, synth_config):
     return Jx, Jy
 
 
-def ProcessPSFCubes(data_samples, norm_regime, bg_subtraction, size):
-    # Auxiliary functions
-    N_pix        = data_samples[0]['PSF L'].shape[-1]
-    mask_noise   = (1-mask_circle(N_pix, 80, center=(0,0), centered=True)) * SPHERE_PSF_spiders_mask(N_pix, thick=10)
+def PSF_mask(img, center=(0,0)):
+    N_pix          = img.shape[0]
+    mask_PSF_inner = 1.0 - mask_circle(N_pix, 30, center=(0,0), centered=True)
+    mask_PSF_outer = 1.0 - mask_circle(N_pix, 80, center=(0,0), centered=True)
+    mask_noise     = (SPHERE_PSF_spiders_mask(N_pix, thick=12) + mask_PSF_outer) * mask_PSF_inner
+    mask_noise     = np.roll(mask_noise, center[0],  axis=0)
+    mask_noise     = np.roll(mask_noise, center[1], axis=1)
+    return np.clip(mask_noise, 0, 1)
+
+
+def process_PSF(PSF, bg_map, cropper): 
     check_center = lambda x: x if x[x.shape[-2]//2, x.shape[-1]//2] > 0 else x*-1 # for some reason, some images apperead flipped in sign
-    PSF_norm     = lambda x: x.sum() if norm_regime == 'sum' else x.max() if norm_regime == 'max' else 1
+    
+    PSF_subtr = check_center(PSF) - bg_map
+    
+    mask_valid_pix = np.ones_like(PSF_subtr)
+    
+    _, bg_median, std = sigma_clipped_stats(PSF_subtr, sigma=(N_sigma := 2))
 
-    def process_PSF(x):
-        PSF_  = check_center(x)
-        bg_   = np.median(PSF_[mask_noise > 0])
-        PSF_ -= bg_ # Remove background to compute normalizing factor more precisely
-        
-        norm_ = PSF_norm(PSF_*(1-mask_noise))
-        
-        if bg_subtraction:
-            return PSF_/norm_, 0.0, norm_
-        else:
-            return (PSF_+bg_)/norm_, bg_/norm_, norm_
+    mask_valid_pix[np.abs(PSF_subtr) < bg_median + N_sigma * std] = 0.0
+    
+    PSF_subtr = PSF_subtr[cropper]
+    bg_map = bg_map[cropper]
+    mask_valid_pix = mask_valid_pix[cropper]
+    
+    norma = np.sum(PSF_subtr * mask_valid_pix) # normalization factor
+    
+    mask_valid_pix[PSF_subtr < 0] = 0.0 # to prevent a bias by only-positives
+
+    return PSF_subtr, norma, mask_valid_pix.astype(np.int8)
 
 
-    def process_PSF_cube(PSF_cube):
-        '''This function normalizes and removes background for every DIT in a given PSF cube'''
-        N_DIT = PSF_cube.shape[0]
-        PSFs  = np.zeros_like(PSF_cube)
-        bgs   = np.zeros([N_DIT])
-        norms = np.zeros([N_DIT])
+def process_PSF_cube(PSF_cube, bg_map, cropper):
+    '''This function normalizes and removes background for every DIT in a given PSF cube'''
+    N_DIT  = PSF_cube.shape[0]
+    PSFs   = np.zeros_like(PSF_cube[cropper], dtype=PSF_cube.dtype)
+    masks  = np.zeros_like(PSF_cube[cropper], dtype=np.int8)
+    norms  = np.zeros([N_DIT], dtype=PSF_cube.dtype)
+    
+    for dit in range(N_DIT): 
+        PSFs[dit,...], norms[dit], masks[dit,...] = process_PSF(PSF_cube[dit,...].copy(), bg_map, cropper)
+    
+    return PSFs, norms, masks
+
+
+def ProcessPSFCubes(data_samples, size):
+
+    def compute_from_cube(cube):        
+        PSF_mean = cube.mean(axis=0)
+        PSF_var  = cube.var (axis=0)
         
-        for dit in range(N_DIT): 
-            PSFs[dit,...], bgs[dit], norms[dit] = process_PSF(PSF_cube[dit,...])
+        y,x = gaussian_centroid(PSF_mean)
         
-        return PSFs, bgs, norms
+        crop     = cropper(PSF_mean, size, (x,y))
+        mask_PSF = 1-PSF_mask(PSF_mean, center=(0,0)).astype(int) # cover the PSF with a wings
+        bg_map   = separate_background(PSF_mean, mask_PSF)
+        
+        PSF_mean, norm_mean, mask_mean = process_PSF(PSF_mean, bg_map, crop)
+        PSF_cube, norms, masks = process_PSF_cube(cube, bg_map, crop)
+
+        # Normalize
+        PSF_mean /= norm_mean
+        PSF_var   = PSF_var[crop] / norm_mean**2
+        bg_map   /= norm_mean
+
+        return PSF_mean, PSF_var, PSF_cube, norm_mean, norms, mask_mean, masks, bg_map 
+    
 
     PSF_data = []
-
-    # crop_cube  = np.s_[:, :, N_pix//2-crop_windows//2:N_pix//2+crop_windows//2+a, N_pix//2-crop_windows//2:N_pix//2+crop_windows//2+a]
-    # crop_slice = np.s_[:,    N_pix//2-crop_windows//2:N_pix//2+crop_windows//2+a, N_pix//2-crop_windows//2:N_pix//2+crop_windows//2+a]
-
-    # Reduce the size of the output PSFs
-    crop_cube  = cropper(data_samples[0]['PSF L'], size)
-    crop_slice = crop_cube#cropper(data_samples[0]['PSF L'][0], size)
-
-    # Process for all data samples
     for data_sample in data_samples:
-
-        N_dits = data_sample['PSF L'].shape[0]
-        assert N_dits == data_sample['PSF R'].shape[0]
     
-        if 'PSF L' in data_sample.keys() and data_sample['PSF L'] is not None:
-            PSFs_L, bgs_L, norms_L = process_PSF_cube(data_sample['PSF L'])
-            
-            PSF_L_mean = data_sample['PSF L'].mean(axis=0)
-            PSF_L_var  = data_sample['PSF L'].var(axis=0)
-            
-            PSF_L_mean, bg_L_mean, norm_L_mean = process_PSF(PSF_L_mean)
-            PSF_L_var /= norm_L_mean**2    
-
-        if 'PSF R' in data_sample.keys() and data_sample['PSF R'] is not None:
-            PSFs_R, bgs_R, norms_R = process_PSF_cube(data_sample['PSF R'])
-            
-            PSF_R_mean = data_sample['PSF R'].mean(axis=0)
-            PSF_R_var  = data_sample['PSF R'].var(axis=0)
-            
-            PSF_R_mean, bg_R_mean, norm_R_mean = process_PSF(PSF_R_mean)
-            PSF_R_var /= norm_R_mean**2
+        PSF_L_mean, PSF_L_var, PSFs_L, norm_L_mean, norms_L, mask_L_mean, masks_L, bg_map_L = compute_from_cube(data_sample['PSF L'])
+        PSF_R_mean, PSF_R_var, PSFs_R, norm_R_mean, norms_R, mask_R_mean, masks_R, bg_map_R = compute_from_cube(data_sample['PSF R'])
 
         data_record = {
-            'PSF (cube)':  np.stack([PSFs_L,  PSFs_R],   axis= 1)[crop_cube],
-            'bg (cube)':   np.stack([bgs_L,   bgs_R],     axis=-1),
-            'norm (cube)': np.stack([norms_L, norms_R], axis=-1),
-            
-            'PSF (mean)':  np.stack([PSF_L_mean,  PSF_R_mean], axis= 0)[crop_slice],
-            'PSF (var)':   np.stack([PSF_L_var,   PSF_R_var],  axis= 0)[crop_slice],
-            'bg (mean)':   np.array([bg_L_mean,   bg_R_mean]),
-            'norm (mean)': np.array([norm_L_mean, norm_R_mean])
+            'norm (cube)':   np.stack([norms_L,     norms_R    ], axis=-1),
+            'PSF (cube)':    np.stack([PSFs_L,      PSFs_R     ], axis= 1),
+            'PSF (mean)':    np.stack([PSF_L_mean,  PSF_R_mean ], axis= 0),
+            'PSF (var)':     np.stack([PSF_L_var,   PSF_R_var  ], axis= 0),
+            'mask (mean)':   np.stack([mask_L_mean, mask_R_mean], axis= 0),
+            'nask (cube)':   np.stack([masks_L,     masks_R    ], axis= 1),
+            'bg map (mean)': np.stack([bg_map_L,    bg_map_R   ], axis= 0),
+            'norm (mean)':   np.array([norm_L_mean, norm_R_mean])
         }
         PSF_data.append(data_record)
         
@@ -203,7 +224,7 @@ def SPHERE_preprocess(sample_ids, norm_regime, split_cube, PSF_loader, config_lo
             
     OnlyCentralWvl(data_samples)
 
-    PSF_data = ProcessPSFCubes(data_samples, norm_regime, bg_subtraction=False, size=121)
+    PSF_data = ProcessPSFCubes(data_samples, size=111)
 
     # Manage config files
     config_manager = ConfigManager()
