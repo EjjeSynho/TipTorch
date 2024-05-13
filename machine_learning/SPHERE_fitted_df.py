@@ -73,7 +73,7 @@ def separate_L_and_R(entry):
     fitted_df[entry + ' R'] = fitted_df[entry].apply(lambda x: x[1])
     fitted_df.pop(entry)
     
-for entry in ['F', 'bg', 'SR data', 'SR fit', 'FWHM fit', 'FWHM data']:
+for entry in ['F', 'bg', 'dx', 'dy', 'SR data', 'SR fit', 'FWHM fit', 'FWHM data']:
     separate_L_and_R(entry)
 
 fitted_df['LWE coefs'] = fitted_df['LWE coefs'].apply(lambda x: np.array(x))
@@ -122,8 +122,8 @@ for i in range(0, 4):
     names[i+8] += f' {i+1}'
 names.pop(0)
 
-names = ['r0', 'F L', 'F R', 'dx', 'dy', 'bg L', 'bg R', 'dn', 'Jx', 'Jy', 'Jxy'] + names
-transform_entries = ['r0', 'F L', 'F R', 'dx', 'dy', 'bg L', 'bg R', 'dn', 'Jx', 'Jy', 'Jxy'] + ['LWE coefs',]*11
+names = ['r0', 'F L', 'F R', 'dx L', 'dx R', 'dy L', 'dy R', 'bg L', 'bg R', 'dn', 'Jx', 'Jy', 'Jxy'] + names
+transform_entries = ['r0', 'F L', 'F R', 'dx L', 'dx R', 'dy L', 'dy R', 'bg L', 'bg R', 'dn', 'Jx', 'Jy', 'Jxy'] + ['LWE coefs',]*12
 
 #%%
 variances_  = np.stack([variance for variance in variances if variance is not None])

@@ -46,6 +46,10 @@ else:
 if len(sys.argv) == 4:
     start_id, end_id = int(sys.argv[2]), int(sys.argv[3])
 
+
+# device = torch.device('cuda:0')
+# device = torch.device('cuda:1')
+
 #%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
@@ -100,18 +104,16 @@ transforms_dump = {
     'F L':         norm_F,
     'bg R':        norm_bg,
     'bg L':        norm_bg,
-    # 'F':         norm_F,
-    # 'bg':        norm_bg,
-    'r0':        norm_r0,
-    'dx':        norm_dxy,
-    'dy':        norm_dxy,
-    'dn':        norm_dn,
-    'Jx':        norm_J,
-    'Jy':        norm_J,
-    'Jxy':       norm_Jxy,
-    'LWE coefs': norm_LWE,
-    # 'FWHM fit':  norm_FWHM,
-    # 'FWHM data': norm_FWHM,
+    'r0':          norm_r0,
+    'dx L':        norm_dxy,
+    'dx R':        norm_dxy,
+    'dy L':        norm_dxy,
+    'dy R':        norm_dxy,
+    'dn':          norm_dn,
+    'Jx':          norm_J,
+    'Jy':          norm_J,
+    'Jxy':         norm_Jxy,
+    'LWE coefs':   norm_LWE,
     'FWHM fit L':  norm_FWHM,
     'FWHM fit R':  norm_FWHM,
     'FWHM data L': norm_FWHM,
@@ -273,7 +275,7 @@ def load_and_fit_sample(id):
                 loss = (func(x_)-PSF_0) * PSF_mask
                 return loss.flatten().abs().sum()
 
-        result = minimize(lambda x_: loss_fn(x_), x0, method='bfgs', disp=2)
+        result = minimize(lambda x_: loss_fn(x_), x0, method='bfgs', disp=0)
 
         x0 = result.x
 
@@ -364,27 +366,32 @@ def load_and_fit_sample(id):
         'Inv.H Vs':      to_store(V),
         'SR data':       SR(PSF_0, PSF_DL).detach().cpu().numpy(),
         'SR fit':        SR(PSF_1, PSF_DL).detach().cpu().numpy(),
-        'FWHM fit':      gauss_fitter(PSF_0), 
+        'FWHM fit':      gauss_fitter(PSF_0),
         'FWHM data':     gauss_fitter(PSF_1),
         'Img. data':     to_store(PSF_0*pdims(norms,2)),
         'Img. fit':      to_store(PSF_1*pdims(norms,2)),
+        'PSF mask':      to_store(PSF_mask),
         'PSD':           to_store(model.PSD),
         'Data norms':    to_store(norms),
         'Model norms':   to_store(model.norm_scale),
-        'loss':          loss_fn(x0).item()
+        'loss':          loss_fn(x0).item(),
+        'Transforms':    df_transforms_store,
     }
     return save_data
 
 #%%
 # test = load_and_fit_sample(2112)
 
+good_ids = [2112]
+
 #%%
 for id in good_ids:
     filename = SPHERE_FITTING_FOLDER + str(id) + '.pickle'
     print('>>>>>>>>>>>> Fitting sample', id)
-    
-    if save_data := load_and_fit_sample(id) is not None:
+    save_data = load_and_fit_sample(id)
+    if save_data is not None:
         with open(filename, 'wb') as handle:
             pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     
+# %%

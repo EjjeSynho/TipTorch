@@ -1,6 +1,6 @@
 #%%
-%reload_ext autoreload
-%autoreload 2
+# %reload_ext autoreload
+# %autoreload 2
 
 import sys
 sys.path.insert(0, '..')
@@ -93,8 +93,8 @@ def batch_config_and_images(ids):
         
     data_dict['PSF_0']   = pack_data('PSF (mean)')
     data_dict['PSF_var'] = pack_data('PSF (var)')
-    data_dict['bg']      = pack_data('bg (mean)')
     data_dict['norms']   = pack_data('norm (mean)')
+    data_dict['masks']   = pack_data('mask (mean)')
     data_dict['configs'] = merged_config
     data_dict['IDs']     = ids
     
@@ -194,3 +194,5 @@ def WriteTestBatch():
 # %%
 CreateDataset()
 WriteTestBatch()
+
+# %%

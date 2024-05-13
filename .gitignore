@@ -8,3 +8,4 @@ data/temp
 data/weights
 global_config.json
 data/*.npy
+data/*.json

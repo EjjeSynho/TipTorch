@@ -220,7 +220,7 @@ test_df = pd.DataFrame({
     'LWE predicted': df_transforms_fitted['LWE coefs'].backward(y_pred),
     'LWE from data': df_transforms_fitted['LWE coefs'].backward(y_test),
 })
-corr_plot(test_df, 'LWE predicted', 'LWE from data', lims=[0, 500])
+corr_plot(test_df, 'LWE predicted', 'LWE from data', lims=[0, 200])
 
 _ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
 
@@ -269,7 +269,7 @@ for i in range(0, 4):
     names[i]   += f' {i+1}'
     names[i+4] += f' {i+1}'
     names[i+8] += f' {i+1}'
-names.pop(0)
+# names.pop(0)
 
 MDIs, MDI_stds, PIs, PI_stds = [], [], [], []
 
@@ -315,10 +315,10 @@ fig.tight_layout()
 plt.savefig('C:/Users/akuznets/Desktop/presa_buf/LWE/LWE_coefs_importances.png')
 
 #%%
-phase_pred = np.dot(y_pred, LWE_basis.reshape(11,-1))
+phase_pred = np.dot(y_pred, LWE_basis.reshape(12,-1))
 phase_pred = phase_pred.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
 
-phase_test = np.dot(y_test, LWE_basis.reshape(11,-1))
+phase_test = np.dot(y_test, LWE_basis.reshape(12,-1))
 phase_test = phase_test.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
 
 flipped_ids = []
@@ -341,7 +341,10 @@ flipped_id = np.array(flipped_ids)
 diff = phase_test - phase_pred
 
 def calc_WFEs(cube):
-    cube = np.atleast_3d(cube)
+    
+    if cube.ndim == 2:
+        cube = cube[None,...]
+    
     WFEs = np.zeros(cube.shape[0])
 
     for i in range(cube.shape[0]):
@@ -366,9 +369,13 @@ A = phase_test[rand_id,...]
 B = phase_pred[rand_id,...]
 C = diff      [rand_id,...]
 
+A /= calc_WFEs(A)
+B /= calc_WFEs(B)
+C = A - B
+
 fig, ax = plt.subplots(1, 3, figsize=(10, 5))
 
-c_lim = max(A.max(), B.max(), -A.min(), -B.min())
+c_lim = 4
 
 ax[0].imshow(A, vmin=-c_lim, vmax=c_lim, cmap='viridis')
 ax[0].set_title('Fitted LWE')
@@ -387,8 +394,8 @@ ax[2].axis('off')
 plt.tight_layout()
 plt.show()
 
-im_data = images_df[rand_id][0][0,0,...]
-im_fit  = images_df[rand_id][1][0,0,...]
+im_data = np.abs( images_df[rand_id][0][0,0,...] )
+im_fit  = np.abs( images_df[rand_id][1][0,0,...] )
 
 norm = LogNorm(vmin=np.maximum(im_data.min(), 1), vmax=np.minimum(im_data.max(), 1e16))
 fig2, ax2 = plt.subplots(1, 2)
@@ -446,6 +453,8 @@ PSF_1 = torch.tensor(images_df[rand_id][1])
 draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)
 
 #%%
+test_df_2 = test_df
+
 # Do linear fit
 X = test_df_2['Photons (data)'].values.reshape(-1, 1)
 Y = test_df_2['Photons (fitted)'].values
@@ -458,12 +467,13 @@ print('Slope:', lr.coef_[0])
 
 # draw linear fit
 plt.plot(X, Y_pred, color='red')
-# plt.plot([0, 10000], [0, 10000])
+plt.plot([0, 10000], [0, 1700])
 plt.scatter(X, Y, s=2)
 plt.xlabel('Photons (data)')
 plt.ylabel('Photons (fitted)')
+plt.xlim(0, 2e2)
+plt.ylim(0, 2e2)
 plt.show()
-
 
 #%%
 sns.scatterplot(data=test_df_2, x='Photons (data)', y='Photons (fitted)', s=2)

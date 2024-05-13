@@ -17,8 +17,10 @@ from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from tools.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
 from torchmin import minimize
-from astropy.stats import sigma_clipped_stats
 
+import dynesty
+from dynesty.pool import Pool
+from dynesty import plotting as dyplot
 
 #%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
@@ -206,6 +208,7 @@ if LWE_flag:
         loss = img_punish + LWE_punish(pattern_pos, coefs_) + LWE_punish(pattern_neg, coefs_)
         return loss
 else:
+    
     def loss_fn(x_):
         loss = (func(x_)-PSF_0)*PSF_mask
         return loss.flatten().abs().sum()
@@ -267,7 +270,72 @@ with torch.no_grad():
     plt.show()
   
     draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)#, scale=None)
-    
+
+#%%
+
+'''
+for attr in ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']:
+    inp_dict[attr] = getattr(toy, attr)
+    # inp_dict['wind_speed'] = toy.wind_speed
+    inp_dict['wind_dir']   = toy.wind_dir
+    inp_dict['basis_coefs'] = basis.coefs
+'''
+
+def func_dynesty(x_):
+    x_torch = transformer.destack(torch.tensor(x_).float().to(device).unsqueeze(0))
+    if 'basis_coefs' in x_torch:
+        return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
+    else:
+        return toy(x_torch)
+
+def likelihood(x):
+    return (func_dynesty(x)-PSF_0).abs().sum().cpu().numpy()
+
+sample_range = 1.0
+
+def prior_transform(u):
+    return sample_range*u
+
+print("Starting nested sampling...")
+
+# toy = toy.to(torch.device('cpu'))
+
+n_dim = x0.shape[1]
+
+sampler = dynesty.NestedSampler(
+    loglikelihood   = likelihood,
+    prior_transform = prior_transform,
+    ndim            = n_dim,
+    nlive           = 2000
+)
+
+sampler.run_nested()
+results = sampler.results
+
+#%%
+
+fg, ax = dyplot.cornerpoints(
+    results,
+    cmap='plasma',
+    kde=False
+)
+
+#%%
+
+buf = np.copy(results.samples)
+
+sample = np.zeros_like(results.samples)
+
+for i in range(0, sample.shape[1]):
+    sample[:,i] = transformer.destack(torch.tensor(sample[:,i]).float().unsqueeze(0).to(device)).cpu().numpy()
+
+
+
+#%%
+
+fg, ax = dyplot.cornerplot(results, color='blue',
+                           truth_color='black', show_titles=True,
+                           max_n_ticks=3, quantiles=None)
 
 #%%
 from torch.autograd.functional import hessian, jacobian
@@ -336,28 +404,3 @@ for eigenvalue_id in range(0, L.shape[0]):
 
 
 #%%
-print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
-draw_PSF_stack(PSF_0, PSF_1, average=True)
-
-destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
-plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
-
-#%%
-with torch.no_grad():
-    LWE_phase = torch.einsum('mn,nwh->mwh', basis.coefs, basis.modal_basis).cpu().numpy()[0,...]
-    plt.imshow(LWE_phase)
-    plt.axis('off')
-    cbar = plt.colorbar()
-    cbar.set_label('LWE OPD, [nm] RMS')
-
-#%%
-WFE = torch.mean(toy.PSD.sum(axis=(-2,-1))**0.5)
-WFE_jitter = toy.D/4 * 1e9*(toy.Jx+toy.Jy)*0.5/rad2mas
-WFE_total  = torch.sqrt(WFE**2 + WFE_jitter**2).item()
-
-rads = 2*np.pi*WFE_total*1e-9 / toy.wvl.flatten()[0]
-
-S_0 = SR(PSF_0, PSF_DL).detach().cpu().numpy()
-S = torch.exp(-rads**2).detach().cpu().numpy()
-
-print(f'WFE: {WFE_total:.2f} nm (no LWE)')

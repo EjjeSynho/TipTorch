@@ -1,6 +1,6 @@
 #%%
-%reload_ext autoreload
-%autoreload 2
+# %reload_ext autoreload
+# %autoreload 2
 
 import os
 import sys
@@ -30,28 +30,28 @@ df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/fitted_df_n
 #%%
 # Here, all possible transormations are inputed, order and content doesn not matter here
 transformer = InputsTransformer({
-    'F':  df_transforms_fitted['F L'], 'bg':  df_transforms_fitted['bg L'], # bg R and bg R, as well as F are the same
-    'r0': df_transforms_fitted['r0'],  'dx':  df_transforms_fitted['dx'],
-    'dy': df_transforms_fitted['dy'],  'Jx':  df_transforms_fitted['Jx'],
-    'Jy': df_transforms_fitted['Jy'],  'Jxy': df_transforms_fitted['Jxy'],
-    'dn': df_transforms_fitted['dn'],  'basis_coefs': df_transforms_fitted['LWE coefs']
+    'F':  df_transforms_fitted['F L'],  'bg':  df_transforms_fitted['bg L'], # bg R and bg R, as well as F are the same
+    'r0': df_transforms_fitted['r0'],   'dx':  df_transforms_fitted['dx L'],
+    'dy': df_transforms_fitted['dy L'], 'Jx':  df_transforms_fitted['Jx'],
+    'Jy': df_transforms_fitted['Jy'],   'Jxy': df_transforms_fitted['Jxy'],
+    'dn': df_transforms_fitted['dn'],   'basis_coefs': df_transforms_fitted['LWE coefs']
 })
 
 # Here, only the variables that need to be predicted must be added, order and content matter
 inp_dict = {
     'r0':  torch.ones([1]),
     'F':   torch.ones([1, 2]),
-    'dx':  torch.zeros([1]),
-    'dy':  torch.zeros([1]),
+    'dx':  torch.zeros([1, 2]),
+    'dy':  torch.zeros([1, 2]),
     'bg':  torch.zeros([1, 2]),
     'dn':  torch.zeros([1]),
     'Jx':  torch.ones([1])*0.5,
     'Jy':  torch.ones([1])*0.5,
     'Jxy': torch.ones([1])*0.1,
-    'basis_coefs': torch.zeros([1, 11])
+    'basis_coefs': torch.zeros([1, 12])
 }
 
-fixed_entries  = ['dx', 'dy', 'bg L', 'bg R', 'Jxy'] #, 'LWE coefs']
+fixed_entries  = ['dx L', 'dx R', 'dy L', 'dy L', 'bg L', 'bg R', 'Jxy'] #, 'LWE coefs']
 
 # Remove 'L' and 'R' endings
 fixed_entries_ = copy(fixed_entries)
@@ -125,7 +125,7 @@ net = Gnosis(batch_data['NN input'].shape[1], transformer.get_packed_size(), 200
 net.to(device)
 net.float()
 
-net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v1.dict'))
+# net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v1.dict'))
 
 
 x0 = x0.float().repeat(len(batch_data['IDs']), 1).to(device)
@@ -191,7 +191,7 @@ x0, fixed_inputs, PSF_0, init_config = get_data(batch_data)
 toy.config = init_config
 toy.Update(reinit_grids=True, reinit_pupils=False)
 
-crop_all    = cropper(PSF_0, 101)
+crop_all    = cropper(PSF_0, 91)
 crop_center = cropper(PSF_0, 7)
 
 #%%
@@ -253,12 +253,14 @@ wvls_L_all = np.array(wvls_L_all)
 wvls_R_all = np.array(wvls_R_all)
 
 #%%
-optimizer = optim.Adam(net.parameters(), lr=0.0001)  # Learning rate is set to 0.1
+optimizer = optim.Adam(net.parameters(), lr=0.0001)
+
+loss_stats_train, loss_stats_val = [], []
 
 def loss_fn(A, B):
     return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all]) + nn.MSELoss(reduction='sum')(A[crop_center], B[crop_center])
 
-epochs = 100
+epochs = 50
 
 loss_train, loss_val = [], []
 
@@ -298,9 +300,9 @@ for epoch in range(epochs):
             epoch_train_loss.append(loss.item()/batch_size)
             
             print(f'Running loss ({i+1}/{len(train_ids)}): {loss.item()/batch_size:.4f}', end="\r", flush=True)
-        
+     
+    loss_stats_train.append(np.array(epoch_train_loss).mean().item())
     print(f'Epoch: {epoch+1}/{epochs}, train loss: {np.array(epoch_train_loss).mean().item()}')
-    
     
     for l, wvl_L in enumerate(wvls_L_all[4:]):
         print(f'Wavelengths: {wvl_L}, {wvl_R}')
@@ -325,10 +327,16 @@ for epoch in range(epochs):
                 
                 print(f'Running loss ({i+1}/{len(val_ids)}): {loss.item()/batch_size:.4f}', end="\r", flush=True)
 
+    loss_stats_val.append(np.array(epoch_val_loss).mean().item())
     print(f'Epoch: {epoch+1}/{epochs}, validation loss: {np.array(epoch_val_loss).mean().item()}\n')
+    torch.save(net.state_dict(), f'../data/weights/gnosis_new_weights_v3_epoch_{epoch+1}.dict')
+
+
+loss_stats_val = np.array(loss_stats_val)
+loss_stats_train = np.array(loss_stats_train)
 
 # Save weights
-# torch.save(net.state_dict(), '../data/weights/gnosis_new_weights_v2.dict')
+# torch.save(net.state_dict(), '../data/weights/gnosis_new_weights_v3.dict')
 
 #%%
 PSFs_0_val_all = {}
@@ -432,244 +440,3 @@ sns.heatmap(spearman_corr, mask=mask, cmap=cmap, vmax=.3, center=0,
 plt.xticks(rotation=45, ha='right')
 # plt.yticks(rotation=45)
 plt.show()
-
-#%%
-
-# sns.kdeplot(data = input_df,
-#             x='Rate',
-#             y='Nph WFS',
-#             color='r', fill=True, Label='Iris_Setosa',
-#             cmap="Reds", thresh=0.02)
-
-# sns.kdeplot(data = input_df,
-#             x='r0 (SPARTA)',
-#             y='Tau0 (header)',
-#             color='r', fill=True, Label='Iris_Setosa',
-#             cmap="Reds", thresh=0.02)
-
-sns.pairplot(data=psf_df, vars=[
-    'Nph WFS',
-    'r0 (SPARTA)',
-    'Tau0 (header)',
-    'Wind speed (header)',
-    'FWHM'], corner=True, kind='kde')
-    # 'FWHM'], hue='λ left (nm)', kind='kde')
-
-
-
-#%%
-def UnitTest_Batch_vs_Individuals():
-    toy = TipTorch(batches_dict_valid[0]['configs'], norm_regime, device, TipTop=False, PSFAO=True)
-    toy.optimizables = []
-
-    torch.cuda.empty_cache()
-
-    for i, batch in tqdm(enumerate(batches_dict_valid)):
-        # Test in batched fashion
-        batch = batches_dict_valid[i]
-        
-        # Read data
-        sample_ids = batch['ids']
-        X, Y  = batch['X'].to(device), batch['Y'].to(device)
-        PSF_0 = batch['PSF (data)']
-        config_file = batch['configs']
-                
-        toy.config = config_file
-        toy.Update(reinit_grids=True, reinit_pupils=False)
-
-        PSF_1 = toy_run(toy, gnosis2PAO(Y))
-
-        # Now test individual samples
-        PSFs_test = []
-        for sample in tqdm(sample_ids):
-
-            PSF_0, _, norms, _, init_config = SPHERE_preprocess([sample], '1P21I', norm_regime, device)
-            PSF_0 = PSF_0[...,1:,1:].to(device)
-            init_config['sensor_science']['FieldOfView'] = 255
-            
-            norms = norms[:, None, None].cpu().numpy()
-
-            file = 'E:/ESO/Data/SPHERE/IRDIS_fitted_PAO_1P21I/' + str(sample) + '.pickle'
-
-            with open(file, 'rb') as handle:
-                data = pickle.load(handle)
-
-            toy = TipTorch(init_config, norm_regime, device, TipTop=False, PSFAO=True)
-            toy.optimizables = []
-
-            tensy = lambda x: torch.tensor(x).to(device)
-            toy.F     = tensy( data['F']     ).squeeze()
-            toy.bg    = tensy( data['bg']    ).squeeze()
-            toy.Jy    = tensy( data['Jy']    ).flatten()
-            toy.Jxy   = tensy( data['Jxy']   ).flatten()
-            toy.Jx    = tensy( data['Jx']    ).flatten()
-            toy.dx    = tensy( data['dx']    ).flatten()
-            toy.dy    = tensy( data['dy']    ).flatten()
-            toy.b     = tensy( data['b']     ).flatten()
-            toy.r0    = tensy( data['r0']    ).flatten()
-            toy.amp   = tensy( data['amp']   ).flatten()
-            toy.beta  = tensy( data['beta']  ).flatten()
-            toy.theta = tensy( data['theta'] ).flatten()
-            toy.alpha = tensy( data['alpha'] ).flatten()
-            toy.ratio = tensy( data['ratio'] ).flatten()
-
-            PSFs_test.append( toy().detach().clone() )
-
-        PSFs_test = torch.stack(PSFs_test).squeeze()
-        if PSFs_test.ndim == 3: PSFs_test = PSFs_test.unsqueeze(0)
-
-        destack = lambda PSF_stack: [ x for x in np.split(PSF_stack[:,0,...], PSF_stack.shape[0], axis=0) ]
-        plot_radial_profiles(destack(PSF_1),  destack(PSFs_test),  'Stack', 'Singles', title='Fitted TipTop', dpi=200, cutoff=32, scale='log')
-        plt.show()
-
-
-def UnitTest_TransformsBackprop():
-    batch = batches_dict_valid[5]
-    _, Y  = batch['X'].double().to(device), batch['Y'].double().to(device)
-
-    keys_test = [
-        'F (left)',
-        'bg (left)',
-        'b',
-        'dx',
-        'dy',
-        'r0',
-        'amp',
-        'beta',
-        'alpha',
-        'theta',
-        'ratio',
-        'Jx',
-        'Jy',
-        'Jxy'
-    ]
-
-    vec = torch.rand(Y.shape[-1]).to(device)
-    vec.requires_grad = True
-
-    def run_test(Y):  
-        dictionary = {}
-        for i in range(len(fl_out_keys)):
-            dictionary[fl_out_keys[i]] = transforms_output[fl_out_keys[i]].backward(Y[:,i])
-        return torch.stack([dictionary[key] for key in fl_out_keys if key in keys_test]).T
-
-    Z_ref = run_test(Y)
-    optimizer = optim.LBFGS([vec], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-    loss_fn = nn.MSELoss(reduction='mean')
-
-    for _ in range(10):
-        optimizer.zero_grad()
-        Z_1 = run_test(vec * Y)
-        loss = loss_fn(Z_1, Z_ref)
-        loss.backward()
-        optimizer.step( lambda: loss_fn(Z_ref, run_test(vec*Y)) )
-        print('Current loss:', loss.item())
-
-
-def UnitTest_TipTorch_transform_out():
-    torch.cuda.empty_cache()
-    def toy_run2(model, dictionary):
-            model.F  = dictionary['F (left)'].unsqueeze(-1)
-            model.bg = dictionary['bg (left)'].unsqueeze(-1)
-            
-            for attr in ['Jy','Jxy','Jx','dx','dy','b','r0','amp','beta','theta','alpha','ratio']:
-                setattr(model, attr, dictionary[attr])
-                
-            return model.forward()
-
-    batch = batches_dict_valid[5]
-    Y = batch['Y'].double().to(device)
-
-    toy = TipTorch(batch['configs'], norm_regime, device)
-    toy.optimizables = []
-
-    PSF_0_ = toy_run2(toy, gnosis2PAO(Y))
-
-    vec = torch.rand(Y.shape[-1]).to(device)
-    vec.requires_grad = True
-
-    optimizer = optim.LBFGS([vec], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-    loss_fn = nn.L1Loss(reduction='sum')
-
-    for _ in range(27):
-        optimizer.zero_grad()
-        PSF_1 = toy_run2(toy, gnosis2PAO(vec * Y))
-        loss = loss_fn(PSF_1, PSF_0_)
-        loss.backward()
-        optimizer.step( lambda: loss_fn( PSF_0_, toy_run2(toy, gnosis2PAO(vec * Y)) ))
-        print('Current loss:', loss.item(), end='\r')
-
-
-def UnitTest_TipTorch_and_NN():
-    class Agnosis(nn.Module):
-        def __init__(self, size):
-            super(Agnosis, self).__init__()
-            self.fc1 = nn.Linear(size, size*2)
-            self.fc2 = nn.Linear(size*2, size)
-
-        def forward(self, x):
-            x = torch.tanh(self.fc1(x))
-            x = torch.tanh(self.fc2(x))
-            return x
-
-    torch.cuda.empty_cache()
-
-
-    def toy_run2(model, dictionary):
-            model.F  = dictionary['F (left)'].unsqueeze(-1)
-            model.bg = dictionary['bg (left)'].unsqueeze(-1)
-            
-            for attr in ['Jy','Jxy','Jx','dx','dy','b','r0','amp','beta','theta','alpha','ratio']:
-                setattr(model, attr, dictionary[attr])
-                
-            return model.forward()
-
-    batch = batches_dict_valid[5]
-    sample_ids = batch['ids']
-    X = batch['X'].double().to(device)
-    Y = batch['Y'].double().to(device)
-
-    net = Agnosis(Y.shape[1])
-    net.to(device)
-    net.double()
-
-    toy = TipTorch(batch['configs'], norm_regime, device)
-    toy.optimizables = []
-
-    PSF_0_ = toy_run2(toy, gnosis2PAO(Y))
-
-    optimizer = optim.Adam(net.parameters(), lr=0.0005)
-    loss_fn = nn.L1Loss(reduction='sum')
-
-    for _ in range(100):
-        optimizer.zero_grad()
-        PSF_1 = toy_run2(toy, gnosis2PAO(net(Y)))
-        loss = loss_fn(PSF_1, PSF_0_)
-        loss.backward()
-        optimizer.step( lambda: loss_fn( PSF_0_, toy_run2(toy, gnosis2PAO(net(Y))) ))
-        print('Current loss:', loss.item(), end='\r')
-       
-
-# UnitTest_Batch_vs_Individuals()
-# UnitTest_TransformsBackprop()
-# UnitTest_TipTorch_transform_out()
-# UnitTest_TipTorch_and_NN()
-
-
-#%%
-
-# gnosis2PAO(net(Y)))
-
-#%%
-from tools.utils import register_hooks
-
-# PSF_1 = toy_run2(toy, gnosis2PAO(vec * Y))
-Y_1 = run_test(gnosis2PAO(vec * Y))
-
-Q = loss_fn(Y_1, Y_ref)
-get_dot = register_hooks(Q)
-Q.backward()
-dot = get_dot()
-#dot.save('tmp.dot') # to get .dot
-#dot.render('tmp') # to get SVG
-dot # in Jupyter, you can just render the variable

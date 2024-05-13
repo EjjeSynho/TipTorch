@@ -2,6 +2,7 @@
 %reload_ext autoreload
 %autoreload 2
 
+import os
 import sys
 sys.path.insert(0, '..')
 
@@ -9,16 +10,14 @@ import pickle
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from pprint import pprint
-from torch import nn
-from torch import optim
-from tools.utils import ParameterReshaper, plot_radial_profiles, SR, draw_PSF_stack
+from torch import nn, optim
+from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
-from tools.parameter_parser import ParameterParser
-from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
-from tools.utils import rad2mas, SR, pdims, mask_circle, cropper
+from tools.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
+from torchmin import minimize
+from astropy.stats import sigma_clipped_stats
 
 
 #%% Initialize data sample
@@ -26,18 +25,25 @@ with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['Corrupted'] == False]
-psf_df = psf_df[psf_df['Low quality'] == False]
-psf_df = psf_df[psf_df['Medium quality'] == False]
-psf_df = psf_df[psf_df['LWE'] == True]
+# psf_df = psf_df[psf_df['Low quality'] == False]
+# psf_df = psf_df[psf_df['Medium quality'] == False]
+# psf_df = psf_df[psf_df['LWE'] == True]
 # psf_df = psf_df[psf_df['mag R'] < 7]
 # psf_df = psf_df[psf_df['Num. DITs'] < 50]
 # psf_df = psf_df[psf_df['Class A'] == True]
 # psf_df = psf_df[np.isfinite(psf_df['λ left (nm)']) < 1700]
 # psf_df = psf_df[psf_df['Δλ left (nm)'] < 80]
-
-good_ids = psf_df.index.values.tolist()
+#%
+subset_df = psf_df[psf_df['High quality'] == True]
+subset_df = subset_df[subset_df['High SNR'] == True]
+# subset_df = subset_df[subset_df['LWE'] == False]
+subset_df = subset_df[subset_df['LWE'] == True]
+subset_df = subset_df[subset_df['Central hole'] == False]
 
 #%%
+from matplotlib.colors import LogNorm
+from data_processing.SPHERE_preproc_utils import LoadSPHEREsampleByID
+
 # 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581, 578, 576, 992
 # 1209 # high noise
 # 1452 # high noise
@@ -48,8 +54,19 @@ good_ids = psf_df.index.values.tolist()
 # 1408
 # 898
 
+# Too high blur
+# 2423
+# 3365
+
+# [114, 549, 811, 816, 1176, 1192, 1304, 1573, 2146,
+# 2726, 3121, 3613, 3651, 3706, 3875, 3882, 3886, 3906, 3909, 4002, 405]
+
+sample_id = 3200 #2112 #1921 #3909
+
+# LWE_flag = psf_df.loc[sample_id]['LWE']
+#%
 PSF_data, _, merged_config = SPHERE_preprocess(
-    sample_ids    = [1660],
+    sample_ids    = [sample_id],
     norm_regime   = 'sum',
     split_cube    = False,
     PSF_loader    = lambda x: SamplesByIds(x, synth=False),
@@ -57,11 +74,18 @@ PSF_data, _, merged_config = SPHERE_preprocess(
     framework     = 'pytorch',
     device        = device)
 
-PSF_0   = PSF_data[0]['PSF (mean)'].unsqueeze(0)
-PSF_var = PSF_data[0]['PSF (var)'].unsqueeze(0)
-bg      = PSF_data[0]['bg (mean)']
-norms   = PSF_data[0]['norm (mean)']
+PSF_0    = PSF_data[0]['PSF (mean)'].unsqueeze(0)
+PSF_var  = PSF_data[0]['PSF (var)'].unsqueeze(0)
+PSF_mask = PSF_data[0]['mask (mean)'].unsqueeze(0)
+norms    = PSF_data[0]['norm (mean)']
 del PSF_data
+
+# if psf_df.loc[sample_id]['Nph WFS'] < 10:
+PSF_mask   = PSF_mask * 0 + 1
+# LWE_flag   = psf_df.loc[sample_id]['LWE']
+LWE_flag = True
+wings_flag = psf_df.loc[sample_id]['Wings']
+
 
 #%% Initialize model
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
@@ -70,239 +94,182 @@ toy = TipTorch(merged_config, None, device)
 
 _ = toy()
 
+# print(toy.WFS_Nph.item())
+
 # toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
 # toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']
 # toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
-toy.optimizables = []
+# toy.optimizables = []
 
-_ = toy({ 'bg': bg.unsqueeze(0).to(device) })
+# _ = toy({ 'bg': bg.unsqueeze(0).to(device) })
+# _ = toy({ 'dx': torch.tensor([[0.0, 0.0]]).to(device) })
+# _ = toy({ 'dy': torch.tensor([[0.0, 0.0]]).to(device) })
 
 PSF_1 = toy()
 #print(toy.EndTimer())
 PSF_DL = toy.DLPSF()
 
-draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)
+
+draw_PSF_stack(PSF_0*PSF_mask, PSF_1, average=True, crop=80, scale='log')
 # mask_in  = toy.mask_rim_in.unsqueeze(1).float()
 # mask_out = toy.mask_rim_out.unsqueeze(1).float()
-#%%
-r0  = toy.r0.clone()
-F   = toy.F.clone()
-Jx  = toy.Jx.clone()
-Jy  = toy.Jy.clone()
-Jxy = toy.Jxy.clone()
-bg  = toy.bg.clone()
-dx  = toy.dx.clone()
-dy  = toy.dy.clone()
-
-
-r0.requires_grad  = True
-F.requires_grad   = True
-Jx.requires_grad  = True
-Jy.requires_grad  = True
-Jxy.requires_grad = True
-bg.requires_grad  = True
-dx.requires_grad  = True
-dy.requires_grad  = True
-
-
-#%%
-import numpy as np
-import matplotlib.pyplot as plt
-import torch
-from torch import fft
-
-with torch.no_grad():
-    PSD = toy.ComputePSD()[0,0,...]
-    PSD[..., toy.nOtf_AO//2, toy.nOtf_AO//2] = 0.0
-    cov = fft.fftshift(fft.fft2(fft.fftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1 #TODO: real FFT?
-    
-    PSD_2 = PSD[121//2:, :]
-    # PSD_2 = PSD[:, 121//2:]
-    # cov2 = fft.fftshift(fft.rfft2(fft.fftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1 #TODO: real FFT?
-    # cov2 = fft.fftshift(fft.rfft2(PSD), dim=(-2,-1)) # FFT axes are -2,-1 #TODO: real FFT?
-    cov2 = fft.fftshift(fft.rfft2(fft.fftshift(PSD, dim=(-2,-1))), dim=-2) # FFT axes are -2,-1 #TODO: real FFT?
-    
-    SF = 2*(cov2.abs().amax(dim=(-2,-1), keepdim=True) - cov2.abs())
-
-plt.imshow(SF.real.log().cpu().numpy())
-
-
-#%%
-N = 127
-# def gen_grid(N):
-factor = 0.5*(1-N%2)
-ggrid = torch.meshgrid(*[torch.linspace(-N//2+N%2+factor, N//2-factor, N)]*2, indexing = 'ij')
-
-ggrid[0][:,]
 
 
 #%% PSF fitting (no early-stopping)
-from tools.utils import OptimizeLBFGS
-from tools.utils import pdims
-
-class LWE_basis():
-    def __init__(self, model, optimizable=True) -> None:
-        from tools.utils import BuildPetalBasis
-        self.model = model
-        self.modal_basis, self.coefs = BuildPetalBasis(self.model.pupil.cpu(), pytorch=True)
-        self.modal_basis = self.modal_basis[1:,...].float().to(device)
-        self.coefs = self.coefs[1:].to(device).repeat(model.N_src, 1)
-        if optimizable:
-            self.coefs = nn.Parameter(self.coefs)
-
-    def forward(self, x=None):
-        if x is not None:
-            self.coefs = x
-            
-        OPD = torch.einsum('mn,nwh->mwh', self.coefs, self.modal_basis) * 1e-9  
-        return pdims(self.model.pupil * self.model.apodizer, -2) * torch.exp(1j*2*np.pi / pdims(self.model.wvl,2)*OPD.unsqueeze(1))
-    
-    def __call__(self, *args):
-        return self.forward(*args)
+from tools.utils import LWE_basis
+from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
 
 basis = LWE_basis(toy)
 
-#%%
-crop_LWE = cropper(PSF_0, 20)
-crop_all = cropper(PSF_0, 100)
+# np.save('../data/LWE_basis_SPHERE.npy', basis.modal_basis.cpu().numpy())
 
-def loss_fn(A, B):
-    return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all])
-    # return nn.HuberLoss(reduction='sum', delta=0.1)(A[crop_all], B[crop_all])
+norm_F   = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0)  ])
+norm_bg  = TransformSequence(transforms=[ Uniform(a=-1e-6, b=1e-6) ])
+norm_r0  = TransformSequence(transforms=[ Uniform(a=0,     b=0.5)  ])
+norm_dxy = TransformSequence(transforms=[ Uniform(a=-1,    b=1)    ])
+norm_J   = TransformSequence(transforms=[ Uniform(a=0,     b=30)   ])
+norm_Jxy = TransformSequence(transforms=[ Uniform(a=0,     b=50)   ])
+norm_LWE = TransformSequence(transforms=[ Uniform(a=-20,   b=20)   ])
+norm_dn  = TransformSequence(transforms=[ Uniform(a=-0.02, b=0.02) ])
+norm_wind_spd = TransformSequence(transforms=[ Uniform(a=0, b=20)  ])
+norm_wind_dir = TransformSequence(transforms=[ Uniform(a=0, b=360) ])
 
-def loss_LWE(A, B):
-    return nn.MSELoss(reduction='sum')(A[crop_LWE], B[crop_LWE])*10000
-
-optimizer_lbfgs_all = OptimizeLBFGS(toy, loss_fn)
-optimizer_lbfgs_LWE = OptimizeLBFGS(toy, loss_LWE)
-
-x = {
-    'r0':  r0,
-    'F':   F,
-    'dx':  dx,
-    'dy':  dy,
-    'bg':  bg,
-    'Jx':  Jx,
-    'Jy':  Jy,
-    'Jxy': Jxy
-}
-
-optimizer_lbfgs_LWE.Optimize(PSF_0, [basis.coefs], 10, [None, toy.PSD, lambda: basis()])
-optimizer_lbfgs_all.Optimize(PSF_0, [bg], 3, [x, None, None])
-for i in range(15):
-    optimizer_lbfgs_LWE.Optimize(PSF_0, [basis.coefs], 10, [None, toy.PSD, lambda: basis()])
-    optimizer_lbfgs_all.Optimize(PSF_0, [F], 4, [x, None, None])
-    optimizer_lbfgs_all.Optimize(PSF_0, [dx, dy], 4, [x, None, None])
-    optimizer_lbfgs_all.Optimize(PSF_0, [r0], 3, [x, None, None])
-    # optimizer_lbfgs.Optimize(PSF_0, [dn], 3, [x, None, None])
-    # optimizer_lbfgs.Optimize(PSF_0, [wind_dir, wind_speed], 3, [x, None, None])
-    optimizer_lbfgs_all.Optimize(PSF_0, [Jx, Jy], 4, [x, None, None])
-
-with torch.no_grad():
-    PSF_1 = toy()
-
-
-#%%
-from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
-
-norm_F   = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0) ])
-norm_bg  = TransformSequence(transforms=[ Uniform(a=-1e-5, b=1e-5)])
-norm_r0  = TransformSequence(transforms=[ Uniform(a=0,     b=0.5) ])
-norm_dxy = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
-norm_J   = TransformSequence(transforms=[ Uniform(a=0,     b=30)  ])
-norm_Jxy = TransformSequence(transforms=[ Uniform(a=0,     b=50)  ])
-norm_LWE = TransformSequence(transforms=[ Uniform(a=-200,  b=200) ])
 
 transformer = InputsTransformer({
-    'F':   norm_F,
-    'bg':  norm_bg,
     'r0':  norm_r0,
+    'F':   norm_F,
     'dx':  norm_dxy,
     'dy':  norm_dxy,
+    'bg':  norm_bg,
+    'dn':  norm_dn,
     'Jx':  norm_J,
     'Jy':  norm_J,
     'Jxy': norm_Jxy,
+    'wind_speed': norm_wind_spd,
+    'wind_dir':   norm_wind_dir,
     'basis_coefs': norm_LWE
 })
 
 
-inp_dict = {
-    'r0':  r0,
-    'F':   F,
-    'dx':  dx,
-    'dy':  dy,
-    'bg':  bg,
-    'Jx':  Jx,
-    'Jy':  Jy,
-    'Jxy': Jxy,
-    'basis_coefs': basis.coefs
-}
+inp_dict = {}
+
+# Loop through the class attributes
+for attr in ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']:
+    inp_dict[attr] = getattr(toy, attr)
+
+if wings_flag:
+    # inp_dict['wind_speed'] = toy.wind_speed
+    inp_dict['wind_dir']   = toy.wind_dir
+    
+if LWE_flag:
+    inp_dict['basis_coefs'] = basis.coefs
 
 _ = transformer.stack(inp_dict) # to create index mapping
 
 #%%
-x0 = [1.0,
+x0 = [norm_r0.forward(toy.r0).item(),
       1.0, 1.0,
-      0.0,
-      0.0,
       0.0, 0.0,
+      0.0, 0.0,
+      0.0, 0.0,
+      0.0,
       0.5,
       0.5,
-      0.1] + [0,]*3 + [0,]*8
+      0.1]
+
+if wings_flag:
+    x0 = x0 + [
+        norm_wind_dir.forward(toy.wind_dir).item(),
+        # norm_wind_spd.forward(toy.wind_speed).item()
+    ]   
+
+if LWE_flag:
+    x0 = x0 + [0,]*4 + [0,]*8
 
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
-x0.requires_grad = True
-
-if basis.coefs.requires_grad:
-    buf = basis.coefs.detach().clone()
-    basis.coefs = buf
-
-
-#%%
-from tools.utils import EarlyStopping
-
-optimizer = optim.LBFGS([x0], lr=10, history_size=20, max_iter=4, line_search_fn="strong_wolfe")
-
-def loss_fn_all(A, B):
-    return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all])
 
 def func(x_):
     x_torch = transformer.destack(x_)
-    return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
+    if 'basis_coefs' in x_torch:
+        return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
+    else:
+        return toy(x_torch)
 
-early_stopping = EarlyStopping(patience=2, tolerance=1e-4, relative=False)
+if LWE_flag:
+    gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
 
-for i in range(100):
-    optimizer.zero_grad()
+    pattern_pos = torch.tensor([[0,0,0,0,  0,-1,1,0,  1,0,0,-1]]).to(device).float() * 50.0
+    pattern_neg = torch.tensor([[0,0,0,0,  0,1,-1,0, -1,0,0, 1]]).to(device).float() * 50.0
 
-    loss = loss_fn_all(func(x0), PSF_0)
+    def loss_fn(x_):
+        img_punish = ( (func(x_)-PSF_0) * PSF_mask ).flatten().abs().sum()
+        LWE_punish = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, 40)).flatten().abs().sum()
+        coefs_ = transformer.destack(x_)['basis_coefs']
+        loss = img_punish + LWE_punish(pattern_pos, coefs_) + LWE_punish(pattern_neg, coefs_)
+        return loss
+else:
+    def loss_fn(x_):
+        loss = (func(x_)-PSF_0)*PSF_mask
+        return loss.flatten().abs().sum()
 
-    if np.isnan(loss.item()):
-        break
-    
-    early_stopping(loss)
+result = minimize(loss_fn, x0, method='bfgs', disp=2)
 
-    loss.backward(retain_graph=True)
-    optimizer.step( lambda: loss_fn_all(func(x0), PSF_0) )
-
-    print('Loss:', loss.item(), end="\r", flush=True)
-
-    if early_stopping.stop:
-        print('Stopped at it.', i, 'with loss:', loss.item())
-        break
-    
+x0 = result.x
+# x0_buf = x0.clone()
 
 #%%
-decomposed_variables = transformer.destack(x0)
+def GetNewPhotons():
+    WFS_noise_var = toy.dn + toy.NoiseVariance(toy.r0.abs())
 
-for key, value in decomposed_variables.items():
-    print(f"{key}: {value}")
+    N_ph_0 = toy.WFS_Nph.clone()
 
-draw_PSF_stack(PSF_0, PSF_1_joint:=func(x0), average=True)
+    def func_Nph(x):
+        toy.WFS_Nph = x
+        var = toy.NoiseVariance(toy.r0.abs())
+        return (WFS_noise_var-var).flatten().abs().sum()
 
-destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
-plot_radial_profiles(destack(PSF_0), destack(PSF_1_joint), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+    result_photons = minimize(func_Nph, N_ph_0, method='bfgs', disp=0)
+    toy.WFS_Nph = N_ph_0.clone()
 
+    return result_photons.x
+
+Nph_new = GetNewPhotons()
+
+print(toy.WFS_Nph.item(), Nph_new.item())
+
+#%%
+from tools.utils import BuildPTTBasis, decompose_WF, project_WF, calc_WFE
+
+LWE_coefs = transformer.destack(x0)['basis_coefs'].clone()
+PTT_basis = BuildPTTBasis(toy.pupil.cpu().numpy(), True).to(device).float()
+
+TT_max = PTT_basis.abs()[1,...].max().item()
+pixel_shift = lambda coef: 4 * TT_max * rad2mas / toy.psInMas / toy.D * 1e-9 * coef
+
+LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, basis.modal_basis)
+PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, toy.pupil)
+PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, toy.pupil)
+
+#%
+x0_new = transformer.destack(x0)
+x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, toy.pupil) 
+x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
+x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])
+x0 = transformer.stack(x0_new)
+
+#%
+# x0 = x0_buf.clone()
+
+#%
+with torch.no_grad():
+    PSF_1 = func(x0)
+    fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+    plot_radial_profiles_new( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+    plot_radial_profiles_new( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+    plt.show()
+  
+    draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)#, scale=None)
+    
 
 #%%
 from torch.autograd.functional import hessian, jacobian
@@ -363,55 +330,12 @@ for eigenvalue_id in range(0, L.shape[0]):
     ax[1].bar(np.arange(0, V.shape[0]), np.abs(V[:, eigenvalue_id]), color='green')
     ax[1].set_xticks(xticks, xticklabels, rotation=45, ha="right")
 
-    plt.show()
+    # plt.show()
+    numeration = str(eigenvalue_id)
+    if eigenvalue_id < 10:
+        numeration = '0' + numeration
+    plt.savefig(f'C:/Users/akuznets/Desktop/buf/couplings/eigen_{numeration}.png', dpi=200)
 
-#%%
-r0_stats  = torch.tensor(0.3  + 0.3j).to(device)
-F_stats   = torch.tensor(1.0  + 0.2j).to(device)
-bg_stats  = torch.tensor(0.0  + 1e-5j).to(device)
-dxy_stats = torch.tensor(0.0  + 0.5j).to(device)
-Jxy_stats = torch.tensor(10.0 + 10.0j).to(device)
-LWE_stats = torch.tensor(0.0  + 100.0j).to(device)
-
-MAP = lambda x, x0: (x - x0.real)**2 / x0.imag**2
-
-param_loss_all = lambda:\
-    MAP(toy.r0,  r0_stats) + \
-    MAP(toy.F,   F_stats) + \
-    MAP(toy.dx,  dxy_stats) + \
-    MAP(toy.dy,  dxy_stats) #+ \
-    # MAP(toy.bg,  bg_stats) + \
-    # MAP(toy.Jxy, Jxy_stats)
-    
-param_loss_LWE = lambda: MAP(basis.coefs, LWE_stats).sum()
-
-basis = LWE_basis()
-
-crop_LWE = cropper(PSF_0, 20)
-crop_all = cropper(PSF_0, 100)
-
-def loss_fn(A, B):
-    return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all]) + param_loss_all().sum() * 0.5
-
-def loss_LWE(A, B):
-    return nn.MSELoss(reduction='sum')(A[crop_LWE], B[crop_LWE])*10000
-
-optimizer_lbfgs_all = OptimizeLBFGS(toy, loss_fn)
-optimizer_lbfgs_LWE = OptimizeLBFGS(toy, loss_LWE)
-
-optimizer_lbfgs_all.Optimize(PSF_0, [toy.bg], 3)
-for i in range(15):
-    optimizer_lbfgs_LWE.Optimize(PSF_0, [basis.coefs], 10, [None, None, lambda x: basis(x)])
-    optimizer_lbfgs_all.Optimize(PSF_0, [toy.F], 4)
-    optimizer_lbfgs_all.Optimize(PSF_0, [toy.dx, toy.dy], 4)
-    optimizer_lbfgs_all.Optimize(PSF_0, [toy.r0], 3)
-    # optimizer_lbfgs.Optimize(PSF_0, [toy.dn], 3)
-    # optimizer_lbfgs.Optimize(PSF_0, [toy.wind_dir, toy.wind_speed], 3)
-    optimizer_lbfgs_all.Optimize(PSF_0, [toy.Jx, toy.Jy], 4)
-
-
-with torch.no_grad():
-    PSF_1 = toy(None, None, lambda x: basis(x))
 
 #%%
 print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
@@ -427,12 +351,6 @@ with torch.no_grad():
     plt.axis('off')
     cbar = plt.colorbar()
     cbar.set_label('LWE OPD, [nm] RMS')
-
-#%%
-with torch.no_grad():
-    windy = torch.sum(pdims(basis.coefs, 2) * basis.modal_basis, dim=0) * 1e-9 
-    
-plt.imshow(windy.cpu().numpy())
 
 #%%
 WFE = torch.mean(toy.PSD.sum(axis=(-2,-1))**0.5)
