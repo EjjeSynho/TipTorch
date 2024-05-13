@@ -2,6 +2,7 @@
 # %reload_ext autoreload
 # %autoreload 2
 
+import os
 import sys
 sys.path.insert(0, '..')
 
@@ -42,7 +43,7 @@ else:
     device = default_device
     print("No device specified, using default device.")
 
-if len(sys.argv) > 2:
+if len(sys.argv) == 4:
     start_id, end_id = int(sys.argv[2]), int(sys.argv[3])
 
 #%% Initialize data sample
@@ -117,7 +118,12 @@ transforms_dump = {
     'FWHM data R': norm_FWHM
 }
 
-with open('../data/temp/fitted_df_norm_transforms.pickle', 'wb') as handle:
+path_transforms = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    '../data/temp/fitted_df_norm_transforms.pickle'
+)
+
+with open(path_transforms, 'wb') as handle:
     df_transforms_store = {}
     for entry in transforms_dump:
         df_transforms_store[entry] = transforms_dump[entry].store()
@@ -267,7 +273,7 @@ def load_and_fit_sample(id):
                 loss = (func(x_)-PSF_0) * PSF_mask
                 return loss.flatten().abs().sum()
 
-        result = minimize(lambda x_: loss_fn(x_), x0, method='bfgs', disp=1)
+        result = minimize(lambda x_: loss_fn(x_), x0, method='bfgs', disp=2)
 
         x0 = result.x
 
@@ -289,14 +295,14 @@ def load_and_fit_sample(id):
 
         PSF_1 = func(x0)
         
-        with torch.no_grad():
-            PSF_1 = func(x0)
-            fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-            plot_radial_profiles_new( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-            plot_radial_profiles_new( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
-            plt.show()
+        # with torch.no_grad():
+        #     PSF_1 = func(x0)
+        #     fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+        #     plot_radial_profiles_new( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+        #     plot_radial_profiles_new( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+        #     plt.show()
         
-            draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)#, scale=None)
+        #     draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)
             
         
     except Exception as e:

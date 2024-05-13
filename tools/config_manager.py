@@ -3,7 +3,12 @@ sys.path.insert(0, '..')
 
 import torch
 import numpy as np
-import cupy as cp
+
+try:
+    import cupy as cp
+except ImportError:
+    cp = np
+    
 from copy import deepcopy
 from functools import reduce
 import operator

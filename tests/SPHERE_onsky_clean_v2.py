@@ -2,6 +2,7 @@
 %reload_ext autoreload
 %autoreload 2
 
+import os
 import sys
 sys.path.insert(0, '..')
 
@@ -17,6 +18,7 @@ from tools.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
 from torchmin import minimize
 from astropy.stats import sigma_clipped_stats
+
 
 #%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
