@@ -30,7 +30,7 @@ from tools.utils import seeing, corr_plot
 from astropy.io import fits
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from sklearn.inspection import permutation_importance
-
+from matplotlib.colors import LogNorm
 from project_globals import WEIGHTS_FOLDER
 
 
@@ -226,7 +226,7 @@ _ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
 
 #%%
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, explained_variance_score, median_absolute_error
-from matplotlib.colors import LogNorm
+
 
 MAPE  = mean_absolute_percentage_error(y_test, y_pred)
 EVP   = explained_variance_score(y_test, y_pred) # 1.0 is the best
@@ -242,25 +242,29 @@ print( 'Median absolute error (MedAE) {:.3f}'.format(MedAE) )
 
 from sklearn.decomposition import PCA
 
-LWE_coefs = Y = np.array([x for x in df_norm['LWE coefs'].to_numpy()])
+LWE_coefs = np.array([x for x in df_norm['LWE coefs'].to_numpy()])
 
-pca = PCA(n_components=11)
+pca = PCA(n_components=8)
 pca.fit(LWE_coefs)
 
 plt.title('PCA of LWE coefs')
-plt.scatter(Y[:,0], pca.inverse_transform(pca.transform(Y))[:,0], label='Train')
+plt.scatter(LWE_coefs[:,0], pca.inverse_transform(pca.transform(LWE_coefs))[:,0], label='Train')
 plt.xlabel('Original')
 plt.ylabel('Reconstructed')
 
+Y_pca = pca.transform(LWE_coefs)
+
 #%%
 # Make dataframes from the PCA results
-X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
+X_train, X_test, y_train_pca, y_test_pca = train_test_split(X, Y_pca, test_size=0.2, random_state=42)
 
 gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
 mor = MultiOutputRegressor(gbr, n_jobs=-1)
-mor.fit(X_train, y_train_pca:=pca.transform(y_train))
+mor.fit(X_train, y_train_pca)
 y_pred_pca = mor.predict(X_test)
-y_pred = pca.inverse_transform(y_pred_pca)
+
+y_pred = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_pred_pca))
+y_test = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_test_pca))
 
 #%%
 names = ['Piston',]*4 + ['Tip',]*4 + ['Tilt',]*4
@@ -369,13 +373,13 @@ A = phase_test[rand_id,...]
 B = phase_pred[rand_id,...]
 C = diff      [rand_id,...]
 
-A /= calc_WFEs(A)
-B /= calc_WFEs(B)
-C = A - B
+# A /= calc_WFEs(A)
+# B /= calc_WFEs(B)
+# C = A - B
 
-fig, ax = plt.subplots(1, 3, figsize=(10, 5))
+fig, ax = plt.subplots(1, 3, figsize=(8, 4))
 
-c_lim = 4
+c_lim = np.array([50, np.abs(A.max()), np.abs(B.max())]).max()
 
 ax[0].imshow(A, vmin=-c_lim, vmax=c_lim, cmap='viridis')
 ax[0].set_title('Fitted LWE')
@@ -391,9 +395,15 @@ ax[2].imshow(C, vmin=-c_lim, vmax=c_lim, cmap='viridis')
 ax[2].set_title('Difference')
 ax[2].grid(False)
 ax[2].axis('off')
-plt.tight_layout()
-plt.show()
 
+PCM=ax[2].get_children()[0] #get the mappable, the 1st and the 2nd are the x and y axes
+plt.colorbar(PCM, ax=ax, anchor=(2.2,0.0))
+
+plt.tight_layout()
+# plt.show()
+# plt.savefig(f'../data/temp/LWE_shapes/LWE_{rand_id}.png')
+
+#%%
 im_data = np.abs( images_df[rand_id][0][0,0,...] )
 im_fit  = np.abs( images_df[rand_id][1][0,0,...] )
 

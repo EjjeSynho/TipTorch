@@ -61,7 +61,7 @@ from data_processing.SPHERE_preproc_utils import LoadSPHEREsampleByID
 # [114, 549, 811, 816, 1176, 1192, 1304, 1573, 2146,
 # 2726, 3121, 3613, 3651, 3706, 3875, 3882, 3886, 3906, 3909, 4002, 405]
 
-sample_id = 3200 #2112 #1921 #3909
+sample_id = 2318 #2112 #1921 #3909
 
 # LWE_flag = psf_df.loc[sample_id]['LWE']
 #%

@@ -23,9 +23,12 @@ class TipTorch(torch.nn.Module):
         pupil_path = self.config['telescope']['PathPupil']
         pupil_apodizer = self.config['telescope']['PathApodizer']
         
-        self.pupil    = self.make_tensor(fits.getdata(pupil_path).astype('float'))
-        self.apodizer = self.make_tensor(fits.getdata(pupil_apodizer).astype('float'))
-        
+        try:  
+            self.pupil    = self.make_tensor(fits.getdata(pupil_path).astype('float'))
+            self.apodizer = self.make_tensor(fits.getdata(pupil_apodizer).astype('float'))
+        except FileNotFoundError:
+            pupil_path = pupil_path.replace('\\', '/')
+            pupil_apodizer = pupil_apodizer.replace('\\', '/')
         
     def InitValues(self):
         # with profiler.record_function("INIT PARAMETERS"):

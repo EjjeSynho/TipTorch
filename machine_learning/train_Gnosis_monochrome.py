@@ -126,6 +126,7 @@ net.to(device)
 net.float()
 
 # net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v1.dict'))
+net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v3_epoch_35.dict'))
 
 
 x0 = x0.float().repeat(len(batch_data['IDs']), 1).to(device)
@@ -332,11 +333,20 @@ for epoch in range(epochs):
     torch.save(net.state_dict(), f'../data/weights/gnosis_new_weights_v3_epoch_{epoch+1}.dict')
 
 
-loss_stats_val = np.array(loss_stats_val)
+loss_stats_val   = np.array(loss_stats_val)
 loss_stats_train = np.array(loss_stats_train)
+
+np.save('../data/loss_stats_val.npy', loss_stats_val)
+np.save('../data/loss_stats_train.npy', loss_stats_train)
 
 # Save weights
 # torch.save(net.state_dict(), '../data/weights/gnosis_new_weights_v3.dict')
+
+#%%
+
+plt.plot(loss_stats_val)
+plt.plot(loss_stats_train)
+plt.show()
 
 #%%
 PSFs_0_val_all = {}
@@ -371,7 +381,7 @@ with torch.no_grad():
                 'Jy':  torch.ones([1])*33.0,
                 'Jxy': torch.zeros([1]),
                 'dn':  torch.zeros([1]),
-                'basis_coefs': torch.zeros([1, 11])
+                'basis_coefs': torch.zeros([1, 12])
             }
             
             current_batch_size = len(batch_data['IDs'])
@@ -397,6 +407,9 @@ with torch.no_grad():
 
 
 #%%
+
+wvl = 1625
+
 PSF_cube_data   = torch.tensor(PSFs_0_val_all[wvl]).unsqueeze(1)
 PSF_cube_calib  = torch.tensor(PSFs_1_val_all[wvl]).unsqueeze(1)
 PSF_cube_direct = torch.tensor(PSFs_2_val_all[wvl]).unsqueeze(1)
@@ -406,6 +419,24 @@ plt.show()
 draw_PSF_stack(PSF_cube_data, PSF_cube_calib,  average=True, crop=40)
 plt.show()
 
+#%%
+
+rand_id = np.random.randint(0, PSFs_0_val_all[wvl].shape[0])
+
+PSF_0_val = PSFs_0_val_all[wvl][rand_id,...]
+PSF_2_val = PSFs_2_val_all[wvl][rand_id,...]
+PSF_1_val = PSFs_1_val_all[wvl][rand_id,...]
+
+fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+plot_radial_profiles_new(PSF_0_val, PSF_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
+plot_radial_profiles_new(PSF_0_val, PSF_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
+fig.suptitle(f'λ = {wvl} [nm]')
+plt.show()
+
+draw_PSF_stack(PSF_0_val, PSF_2_val, average=True, crop=40)
+plt.show()
+draw_PSF_stack(PSF_0_val, PSF_1_val,  average=True, crop=40)
+plt.show()
 
 #%% ==========================================================================================
 # df_ultimate = pd.concat([input_df, output_df], axis=1)

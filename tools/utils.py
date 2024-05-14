@@ -664,6 +664,15 @@ class OptimizeTRF():
 def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, max_val=1e16, crop=None):
     from matplotlib.colors import LogNorm
     
+    if PSF_in.ndim == 2:  PSF_in  = PSF_in [None, None, ...]
+    if PSF_out.ndim == 2: PSF_out = PSF_out[None, None, ...]
+    
+    if PSF_in.ndim  == 3:  PSF_in = PSF_in [None, ...]
+    if PSF_out.ndim == 3: PSF_out = PSF_out[None, ...]
+    
+    if isinstance(PSF_in,  np.ndarray): PSF_in  = torch.tensor(PSF_in)
+    if isinstance(PSF_out, np.ndarray): PSF_out = torch.tensor(PSF_out)
+    
     if crop is not None:
         if PSF_in.shape[-2] < crop or PSF_in.shape[-1] < crop:
             raise ValueError('Crop size is larger than the PSF size!')
@@ -671,11 +680,11 @@ def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, m
         ROI_y = slice(PSF_in.shape[-1]//2-crop//2, PSF_in.shape[-1]//2+crop//2)
     else:
         ROI_x, ROI_y = slice(None), slice(None)
-        
+    
+
     dPSF = (PSF_out - PSF_in).abs()
-
     cut = lambda x: x.abs().detach().cpu().numpy()[..., ROI_x, ROI_y] if crop is not None else x.abs().detach().cpu().numpy()
-
+    
     if average:
         row = []
         for wvl in range(PSF_in.shape[1]):
