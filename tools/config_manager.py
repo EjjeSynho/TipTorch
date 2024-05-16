@@ -225,11 +225,19 @@ class ConfigManager():
         """Converts all values in a config file to a specified framework"""
         if framework.lower() == 'pytorch' or framework.lower() == 'torch':
             if device is None: device = torch.device('cpu')
-            convert_value = lambda x: torch.tensor(x, device=device).float()
+            
+            def convert_value(x):
+                if isinstance(x, torch.Tensor):
+                    return x.clone().to(device).float()
+                else:
+                    return torch.tensor(x, device=device).float()
+            
         elif framework.lower() == 'numpy':
             convert_value = lambda x: np.array(x.cpu()) if isinstance(x, torch.Tensor) else np.array(x)
+        
         elif framework.lower() == 'cupy':
             convert_value = lambda x: cp.array(x.cpu()) if isinstance(x, torch.Tensor) else cp.array(x)
+        
         elif framework.lower() == 'list':
             def convert_value(x):
                 if isinstance(x, torch.Tensor):

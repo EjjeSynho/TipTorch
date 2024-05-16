@@ -853,6 +853,31 @@ def safe_centroid(data):
     return xycen
 
 
+
+def render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambda x: x, ax=None):
+    x = np.arange(0, profile.shape[-1])
+    profile_m = np.median(profile, axis=0)
+    
+    p_cutoff = 68.2/2
+    n_quantiles = 1
+    percentiles = np.linspace(p_cutoff/2, 100-p_cutoff, n_quantiles)
+    
+    alpha_func = lambda x: 0.21436045 * np.exp(-0.11711102 * x)
+
+    for p in percentiles:
+        upper_bound = np.percentile(profile-profile_m, 100-p, axis=0)
+        lower_bound = np.percentile(profile-profile_m, p,  axis=0)
+        if ax is not None:
+            ax.fill_between(x, func(profile_m)+lower_bound, func(profile_m)+upper_bound, alpha=alpha_func(n_quantiles), color=color)
+        else:
+            plt.plot(x, func(profile_m)+lower_bound, color=color, linestyle='--', alpha=alpha_func(n_quantiles))
+    
+    if not ax is None:
+        ax.plot(x, func(profile_m), color=color, label=label, linestyle=linestyle, linewidth=linewidth)
+    else:
+        plt.plot(x, func(profile_m), color=color, label=label, linestyle=linestyle, linewidth=linewidth)
+
+
 def plot_radial_profiles_new(PSF_0,
                              PSF_1,
                              label_0 = 'PSFs #1',
@@ -863,7 +888,8 @@ def plot_radial_profiles_new(PSF_0,
                              cutoff  = 20,
                              centers = None,
                              return_profiles = False,
-                             ax = None):
+                             ax = None,
+                             suppress_plot = False):
             
     def calc_profile(data, xycen=None):
         xycen = safe_centroid(data) if xycen is None else xycen
@@ -898,27 +924,11 @@ def plot_radial_profiles_new(PSF_0,
     center_  = np.mean([center_0, center_1], axis=0)
     profis_err = _radial_profiles( PSF_0[:,...] - PSF_1[:,...], center_ )
 
-    def _render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambda x: x):
-        x = np.arange(0, profile.shape[-1])
-        profile_m = np.median(profile, axis=0)
-        
-        p_cutoff = 68.2/2
-        n_quantiles = 1
-        percentiles = np.linspace(p_cutoff/2, 100-p_cutoff, n_quantiles)
-        
-        alpha_func = lambda x: 0.21436045 * np.exp(-0.11711102 * x)
-
-        for p in percentiles:
-            upper_bound = np.percentile(profile-profile_m, 100-p, axis=0)
-            lower_bound = np.percentile(profile-profile_m, p,  axis=0) 
-            ax.fill_between(x, func(profile_m)+lower_bound, func(profile_m)+upper_bound, alpha=alpha_func(n_quantiles), color=color)
-        
-        ax.plot(x, func(profile_m), color=color, label=label, linestyle=linestyle, linewidth=linewidth)
-
-    if ax is None:
-        fig = plt.figure(figsize=(6, 4), dpi=300)
-        ax  = fig.gca()
-        
+    if not suppress_plot:
+        if ax is None:
+            fig = plt.figure(figsize=(6, 4), dpi=300)
+            ax  = fig.gca()
+            
 
     y_max = np.median(profis_0, axis=0).max()
 
@@ -926,29 +936,31 @@ def plot_radial_profiles_new(PSF_0,
     p_1 = profis_1 / y_max * 100.0
     p_err = np.abs(profis_err / y_max * 100.0)
 
-    _render_profile(p_0,   color=colors[0], label=label_0, linewidth=2)
-    _render_profile(p_1,   color=colors[1], label=label_1, linewidth=2)
-    _render_profile(p_err, color=colors[2], label='Error', linestyle='--')
 
-    max_err = np.median(p_err, axis=0).max()
-    ax.axhline(max_err, color='green', linestyle='-', alpha=0.5)
+    if not suppress_plot:
+        render_profile(p_0,   color=colors[0], label=label_0, linewidth=2, ax=ax)
+        render_profile(p_1,   color=colors[1], label=label_1, linewidth=2, ax=ax)
+        render_profile(p_err, color=colors[2], label='Error', linestyle='--', ax=ax)
 
-    y_lim = max([p_0.max(), p_1.max(), p_err.max()])
-    if scale == 'log':
-        x_max = cutoff
-        ax.set_yscale('symlog', linthresh=5e-1)
-        ax.set_ylim(1e-2, y_lim)
-    else:
-        x_max = cutoff#*0.7
-        ax.ylim(0, y_lim)
+        max_err = np.median(p_err, axis=0).max()
+        ax.axhline(max_err, color='green', linestyle='-', alpha=0.5)
 
-    ax.set_title(title)
-    ax.legend()
-    ax.set_xlim(0, x_max)
-    ax.text(x_max-16, max_err+2.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
-    ax.set_xlabel('Pixels from on-axis, [pix]')
-    ax.set_ylabel('Normalized intensity, [%]')
-    ax.grid()
+        y_lim = max([p_0.max(), p_1.max(), p_err.max()])
+        if scale == 'log':
+            x_max = cutoff
+            ax.set_yscale('symlog', linthresh=5e-1)
+            ax.set_ylim(1e-2, y_lim)
+        else:
+            x_max = cutoff#*0.7
+            ax.ylim(0, y_lim)
+
+        ax.set_title(title)
+        ax.legend()
+        ax.set_xlim(0, x_max)
+        ax.text(x_max-16, max_err+2.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
+        ax.set_xlabel('Pixels from on-axis, [pix]')
+        ax.set_ylabel('Normalized intensity, [%]')
+        ax.grid()
 
     if return_profiles:
         return p_0, p_1, p_err

@@ -39,7 +39,7 @@ for file in tqdm(files):
 
     with open(fitted_samples_folder + file, 'rb') as handle:
         data = pickle.load(handle)
-        
+    
     images_data.append( data['Img. data'] )
     images_fitted.append( data['Img. fit'] )
     Hessians.append( data['Hessian'] )

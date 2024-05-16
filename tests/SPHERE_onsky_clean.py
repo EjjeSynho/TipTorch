@@ -60,8 +60,10 @@ from data_processing.SPHERE_preproc_utils import LoadSPHEREsampleByID
 
 # [114, 549, 811, 816, 1176, 1192, 1304, 1573, 2146,
 # 2726, 3121, 3613, 3651, 3706, 3875, 3882, 3886, 3906, 3909, 4002, 405]
-
-sample_id = 2318 #2112 #1921 #3909
+# 1296
+# 444
+sample_id = 444 #1296 #305 #471    427
+#2818 #2112 #1921 #3909
 
 # LWE_flag = psf_df.loc[sample_id]['LWE']
 #%
@@ -84,23 +86,20 @@ del PSF_data
 PSF_mask   = PSF_mask * 0 + 1
 # LWE_flag   = psf_df.loc[sample_id]['LWE']
 LWE_flag = True
-wings_flag = psf_df.loc[sample_id]['Wings']
-
+wings_flag = True#psf_df.loc[sample_id]['Wings']
+# wings_flag = False
 
 #%% Initialize model
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
+from tools.utils import LWE_basis
 
 toy = TipTorch(merged_config, None, device)
 
 _ = toy()
 
+basis = LWE_basis(toy)
+
 # print(toy.WFS_Nph.item())
-
-# toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'wind_speed']
-# toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']
-# toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
-# toy.optimizables = []
-
 # _ = toy({ 'bg': bg.unsqueeze(0).to(device) })
 # _ = toy({ 'dx': torch.tensor([[0.0, 0.0]]).to(device) })
 # _ = toy({ 'dy': torch.tensor([[0.0, 0.0]]).to(device) })
@@ -114,12 +113,9 @@ draw_PSF_stack(PSF_0*PSF_mask, PSF_1, average=True, crop=80, scale='log')
 # mask_in  = toy.mask_rim_in.unsqueeze(1).float()
 # mask_out = toy.mask_rim_out.unsqueeze(1).float()
 
-
 #%% PSF fitting (no early-stopping)
-from tools.utils import LWE_basis
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
-
-basis = LWE_basis(toy)
+from tools.utils import mask_circle
 
 # np.save('../data/LWE_basis_SPHERE.npy', basis.modal_basis.cpu().numpy())
 
@@ -145,8 +141,8 @@ transformer = InputsTransformer({
     'Jx':  norm_J,
     'Jy':  norm_J,
     'Jxy': norm_Jxy,
-    'wind_speed': norm_wind_spd,
-    'wind_dir':   norm_wind_dir,
+    'wind_speed':  norm_wind_spd,
+    'wind_dir':    norm_wind_dir,
     'basis_coefs': norm_LWE
 })
 
@@ -158,8 +154,8 @@ for attr in ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']:
     inp_dict[attr] = getattr(toy, attr)
 
 if wings_flag:
+    inp_dict['wind_dir'] = toy.wind_dir
     # inp_dict['wind_speed'] = toy.wind_speed
-    inp_dict['wind_dir']   = toy.wind_dir
     
 if LWE_flag:
     inp_dict['basis_coefs'] = basis.coefs
@@ -167,6 +163,10 @@ if LWE_flag:
 _ = transformer.stack(inp_dict) # to create index mapping
 
 #%%
+mask_core = 1-mask_circle(PSF_0.shape[-1], 5, center=(0,0), centered=True)
+mask_core *= mask_circle(PSF_0.shape[-1], 10, center=(0,0), centered=True)                    
+mask_core = torch.tensor(mask_core[None,None,...]).to(device)
+
 x0 = [norm_r0.forward(toy.r0).item(),
       1.0, 1.0,
       0.0, 0.0,
@@ -183,8 +183,15 @@ if wings_flag:
         # norm_wind_spd.forward(toy.wind_speed).item()
     ]   
 
-if LWE_flag:
-    x0 = x0 + [0,]*4 + [0,]*8
+if LWE_flag: x0 = x0 + [0,]*4 + [0,]*8
+
+# x0 += (np.array([0,0,0,0,  0,-1,1,0,  1,0,0,-1])*10).tolist()
+# x0 += (np.array([0,0,0,0,  0,1,-1,0, -1,0,0, 1])*10).tolist()
+# x0 += (np.array([0,0,0,0,  0,-1,1,0, -1,0,0, 1])*10).tolist()
+# x0 += (np.array([0,0,0,0,  0,1,-1,0,  1,0,0,-1])*10).tolist()
+# x0 += (np.array([0,0,0,0,  1,0,0,-1,  0,1,-1,0])*10).tolist()
+# x0 += (np.array([0,0,0,0,  -1,0,0,1,  0,-1,1,0])*10).tolist()
+# x0 += (np.array([1,0,0,1,  0,0,0,0,  0,0,0,0])*10).tolist()
 
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 
@@ -195,27 +202,93 @@ def func(x_):
     else:
         return toy(x_torch)
 
+# testo = func(x0)
+# draw_PSF_stack(PSF_0, testo, average=True, crop=80, scale='log')
+
+#%%
+# pattern_3 = torch.tensor().float().to(device).unsqueeze(0)
+# pattern_4 = torch.tensor().float().to(device).unsqueeze(0)
+
+# # testo1 = torch.einsum('mn,nwh->mwh', pattern_pos, basis.modal_basis).squeeze().cpu()
+# # testo2 = torch.einsum('mn,nwh->mwh', pattern_neg, basis.modal_basis).squeeze().cpu()
+# # testo3 = torch.einsum('mn,nwh->mwh', pattern_1, basis.modal_basis).squeeze().cpu()
+# # testo4 = torch.einsum('mn,nwh->mwh', pattern_2, basis.modal_basis).squeeze().cpu()
+# # testo4 = torch.einsum('mn,nwh->mwh', pattern_4, basis.modal_basis).squeeze().cpu()
+# # testo4 = torch.einsum('mn,nwh->mwh', pattern_4, basis.modal_basis).squeeze().cpu()
+
+# plt.imshow(testo4.cpu().squeeze(0))
+# plt.colorbar()
+# plt.show()
+
+
+#%
 if LWE_flag:
+
+    A = 50.0
+
+    pattern_pos = torch.tensor([[0,0,0,0,  0,-1,1,0,  1,0,0,-1]]).to(device).float() * A
+    pattern_neg = torch.tensor([[0,0,0,0,  0,1,-1,0, -1,0,0, 1]]).to(device).float() * A
+    pattern_1   = torch.tensor([[0,0,0,0,  0,-1,1,0, -1,0,0, 1]]).to(device).float() * A
+    pattern_2   = torch.tensor([[0,0,0,0,  0,1,-1,0,  1,0,0,-1]]).to(device).float() * A
+    pattern_3   = torch.tensor([[0,0,0,0,  1,0,0,-1,  0,1,-1,0]]).to(device).float() * A
+    pattern_4   = torch.tensor([[0,0,0,0,  -1,0,0,1,  0,-1,1,0]]).to(device).float() * A
+
     gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
-
-    pattern_pos = torch.tensor([[0,0,0,0,  0,-1,1,0,  1,0,0,-1]]).to(device).float() * 50.0
-    pattern_neg = torch.tensor([[0,0,0,0,  0,1,-1,0, -1,0,0, 1]]).to(device).float() * 50.0
-
+    img_punish = lambda x: ( (func(x)-PSF_0) * PSF_mask ).flatten().abs().sum()
+    Gauss_err  = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, A/2)).flatten().abs().sum()
+            
+    LWE_regularizer = lambda c: \
+        Gauss_err(pattern_pos, c) + Gauss_err(pattern_neg, c) + \
+        Gauss_err(pattern_1, c)   + Gauss_err(pattern_2, c) + \
+        Gauss_err(pattern_3, c)   + Gauss_err(pattern_4, c)
+    
     def loss_fn(x_):
-        img_punish = ( (func(x_)-PSF_0) * PSF_mask ).flatten().abs().sum()
-        LWE_punish = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, 40)).flatten().abs().sum()
         coefs_ = transformer.destack(x_)['basis_coefs']
-        loss = img_punish + LWE_punish(pattern_pos, coefs_) + LWE_punish(pattern_neg, coefs_)
+        loss = img_punish(x_) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
         return loss
+    
 else:
     def loss_fn(x_):
         loss = (func(x_)-PSF_0)*PSF_mask
         return loss.flatten().abs().sum()
 
-result = minimize(loss_fn, x0, method='bfgs', disp=2)
+result = minimize(loss_fn, x0, max_iter=200, tol=1e-4, method='bfgs', disp=2)
 
 x0 = result.x
 # x0_buf = x0.clone()
+
+#%%
+from tools.utils import BuildPTTBasis, decompose_WF, project_WF, calc_WFE
+
+LWE_coefs = transformer.destack(x0)['basis_coefs'].clone()
+PTT_basis = BuildPTTBasis(toy.pupil.cpu().numpy(), True).to(device).float()
+
+TT_max = PTT_basis.abs()[1,...].max().item()
+pixel_shift = lambda coef: 4 * TT_max * rad2mas / toy.psInMas / toy.D * 1e-9 * coef
+
+LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, basis.modal_basis)
+PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, toy.pupil)
+PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, toy.pupil)
+
+x0_new = transformer.destack(x0)
+x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, toy.pupil) 
+x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
+x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])
+x0 = transformer.stack(x0_new)
+
+plt.imshow((LWE_OPD-PPT_OPD).cpu().numpy()[0,...])
+plt.colorbar()
+
+#%%
+with torch.no_grad():
+    PSF_1 = func(x0)
+    fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+    plot_radial_profiles_new( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+    plot_radial_profiles_new( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+    plt.show()
+  
+    draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)#, scale=None)
+
 
 #%%
 def GetNewPhotons():
@@ -237,39 +310,6 @@ Nph_new = GetNewPhotons()
 
 print(toy.WFS_Nph.item(), Nph_new.item())
 
-#%%
-from tools.utils import BuildPTTBasis, decompose_WF, project_WF, calc_WFE
-
-LWE_coefs = transformer.destack(x0)['basis_coefs'].clone()
-PTT_basis = BuildPTTBasis(toy.pupil.cpu().numpy(), True).to(device).float()
-
-TT_max = PTT_basis.abs()[1,...].max().item()
-pixel_shift = lambda coef: 4 * TT_max * rad2mas / toy.psInMas / toy.D * 1e-9 * coef
-
-LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, basis.modal_basis)
-PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, toy.pupil)
-PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, toy.pupil)
-
-#%
-x0_new = transformer.destack(x0)
-x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, toy.pupil) 
-x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
-x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])
-x0 = transformer.stack(x0_new)
-
-#%
-# x0 = x0_buf.clone()
-
-#%
-with torch.no_grad():
-    PSF_1 = func(x0)
-    fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-    plot_radial_profiles_new( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-    plot_radial_profiles_new( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
-    plt.show()
-  
-    draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)#, scale=None)
-    
 
 #%%
 from torch.autograd.functional import hessian, jacobian

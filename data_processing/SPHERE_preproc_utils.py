@@ -163,11 +163,10 @@ def ProcessPSFCubes(data_samples, size):
         PSF_mean = cube.mean(axis=0)
         PSF_var  = cube.var (axis=0)
         
-        center_mask = mask_circle(PSF_mean.shape[0], 50, center=(0,0), centered=True)
+        # center_mask = mask_circle(PSF_mean.shape[0], 50, center=(0,0), centered=True)
+        # y,x = gaussian_centroid(PSF_mean*center_mask)
         
-        y,x = gaussian_centroid(PSF_mean*center_mask)
-        
-        crop     = cropper(PSF_mean, size, (x,y))
+        crop     = cropper(PSF_mean, size)#, (x,y))
         mask_PSF = 1-PSF_mask(PSF_mean, center=(0,0)).astype(int) # cover the PSF with a wings
         bg_map   = separate_background(PSF_mean, mask_PSF)
         

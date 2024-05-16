@@ -1,6 +1,6 @@
 #%%
-# %reload_ext autoreload
-# %autoreload 2
+%reload_ext autoreload
+%autoreload 2
 
 import os
 import sys
@@ -18,7 +18,7 @@ from tools.utils import plot_radial_profiles_new, LWE_basis, cropper, draw_PSF_s
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from tools.config_manager import GetSPHEREonsky, ConfigManager
-from project_globals import SPHERE_DATASET_FOLDER, device
+from project_globals import SPHERE_DATASET_FOLDER, SPHERE_DATA_FOLDER, device
 from data_processing.normalizers import InputsTransformer, CreateTransformSequenceFromFile
 from copy import copy, deepcopy
 
@@ -51,7 +51,7 @@ inp_dict = {
     'basis_coefs': torch.zeros([1, 12])
 }
 
-fixed_entries  = ['dx L', 'dx R', 'dy L', 'dy L', 'bg L', 'bg R', 'Jxy'] #, 'LWE coefs']
+fixed_entries  = ['dx L', 'dx R', 'dy L', 'dy R', 'bg L', 'bg R', 'Jxy'] #, 'LWE coefs']
 
 # Remove 'L' and 'R' endings
 fixed_entries_ = copy(fixed_entries)
@@ -126,7 +126,7 @@ net.to(device)
 net.float()
 
 # net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v1.dict'))
-net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v3_epoch_35.dict'))
+# net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v3_epoch_35.dict'))
 
 
 x0 = x0.float().repeat(len(batch_data['IDs']), 1).to(device)
@@ -145,16 +145,27 @@ def get_fixed_inputs(batch, entries=[]):
     
     fixed_inputs = { entry: batch['fitted data'][entry] for entry in entries }
 
-    for items, keys in fixed_inputs.items():
-        fixed_inputs[items] = torch.tensor(keys).float().to(device)
+    entries_to_remove = []
+    dict_to_add = {}
 
-    if 'bg L' in fixed_inputs or 'bg R' in fixed_inputs:
-        fixed_inputs['bg'] = torch.stack([fixed_inputs['bg L'], fixed_inputs['bg R']], axis=1)
-
-        _ = fixed_inputs.pop('bg L')
-        _ = fixed_inputs.pop('bg R')
-        
-    return fixed_inputs
+    for entry, value in fixed_inputs.items():
+        if entry.endswith(' L'):
+            entry_ = entry.replace(' L', '')
+            
+            dict_to_add[entry_] = torch.stack([
+                torch.tensor(np.array(fixed_inputs[entry_+' L'])).float().to(device),
+                torch.tensor(np.array(fixed_inputs[entry_+' R'])).float().to(device)
+            ], axis=1)
+            
+            entries_to_remove.append(entry_+' L')
+            entries_to_remove.append(entry_+' R')
+               
+        else:
+            fixed_inputs[entry] = torch.tensor(np.array(value)).float().to(device)
+            
+    for entry in entries_to_remove: _ = fixed_inputs.pop(entry)
+    
+    return fixed_inputs | dict_to_add
 
 
 def run_model(model, batch, predicted_inputs, fixed_inputs={}):
@@ -194,6 +205,89 @@ toy.Update(reinit_grids=True, reinit_pupils=False)
 
 crop_all    = cropper(PSF_0, 91)
 crop_center = cropper(PSF_0, 7)
+
+#%%
+with open(SPHERE_DATA_FOLDER + 'fitted_and_data_PSF_profiles.pickle', 'rb') as handle:
+    profiles_L, profiles_R = pickle.load(handle)
+
+with open(SPHERE_DATA_FOLDER + 'images_df.pickle', 'rb') as handle:
+    images = pickle.load(handle)
+
+profs_L = np.stack([profiles_L[id_test][0] for id_test in batch_data['IDs']], axis=0).squeeze()
+profs_R = np.stack([profiles_R[id_test][0] for id_test in batch_data['IDs']], axis=0).squeeze()
+
+PSF_0 = batch_data['PSF_0'].cpu().numpy()
+
+fitted_entres = ['F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R', 'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'LWE coefs']
+
+fitted_dict = get_fixed_inputs(batch_data, fitted_entres)
+
+PSF_1 = run_model(toy, batch_data, {}, fixed_inputs=fitted_dict).cpu().numpy()
+
+p_0, p_1, p_err = plot_radial_profiles_new(
+    PSF_0[:,0,...], PSF_1[:,0,...], return_profiles=True, suppress_plot=True
+)    
+#%%
+
+# 2719 1370 869 2818
+
+id_problem = 2818
+index_problem = batch_data['IDs'].index(id_problem)
+
+# for j in range(8):
+#     pp_0  = p_0[j]
+#     ppp_0 = profs_L[j]
+#     d_p = np.abs(pp_0 - ppp_0)
+#     plt.title('Profile ' + str(batch_data['IDs'][j]))
+#     plt.plot(pp_0,  color='tab:blue')
+#     plt.plot(ppp_0, color='tab:orange')
+#     plt.plot(d_p,   color='tab:green')
+#     plt.yscale('symlog', linthresh=5e-1)
+#     plt.xlim(0, 20)
+#     plt.grid()
+#     plt.show()
+
+crop_img = cropper(batch_data['PSF_0'], 80)
+
+norma = batch_data['norms'][index_problem]
+psfa  = images[id_problem][1][0,0,...] / norma[0, None, None]
+psfa  = psfa.numpy() 
+psfb  = PSF_1[index_problem,0,...][crop_img]
+
+# psfb = np.roll(psfb, 0, axis=0)
+# psfb = np.roll(psfb, 0, axis=1)
+
+plt.imshow(np.log(psfa))
+plt.colorbar()
+plt.show()
+plt.imshow(np.log(psfb))
+plt.colorbar()
+plt.show()
+plt.imshow(psfb-psfa)
+plt.colorbar()
+plt.show()
+
+#%%
+from tools.utils import render_profile
+
+fig = plt.figure(figsize=(6, 4), dpi=300)
+ax  = fig.gca()
+
+render_profile(profs_L, 'tab:blue', 'El datto', linestyle='-',  linewidth=1, ax=ax)
+render_profile(p_0, 'tab:orange', 'El fitto', linestyle='-',  linewidth=1, ax=ax)
+render_profile(np.abs(profs_L-p_0), 'tab:green',  'El error', linestyle='--', linewidth=1, ax=ax)
+
+y_lim = max([profs_L.max(), p_0.max()])
+
+ax.set_yscale('symlog', linthresh=5e-1)
+ax.set_ylim(1e-2, y_lim)
+ax.set_xlim(0, 20)
+
+ax.set_xlabel('Pixels from on-axis, [pix]')
+ax.set_ylabel('Normalized intensity, [%]')
+ax.grid()
+plt.show()
+
 
 #%%
 '''
@@ -253,7 +347,92 @@ for group in groups:
 wvls_L_all = np.array(wvls_L_all)
 wvls_R_all = np.array(wvls_R_all)
 
-#%%
+#%% =============================== Monochromatic training ==================================
+
+optimizer = optim.Adam(net.parameters(), lr=0.0001)
+
+loss_stats_train, loss_stats_val = [], []
+
+def loss_fn(A, B):
+    return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all]) + nn.MSELoss(reduction='sum')(A[crop_center], B[crop_center])
+
+epochs = 50
+
+loss_train, loss_val = [], []
+
+net.train()
+
+wvl_L, wvl_R = 1625, 1625
+train_ids = train_ids_all[wvl_L]
+val_ids   = val_ids_all[wvl_L]
+
+for epoch in range(epochs):
+    print(f'>>>>>>>>> Epoch: {epoch+1}/{epochs}')
+    
+    epoch_train_loss, epoch_val_loss = [], []
+    
+    np.random.shuffle(train_ids)
+
+    for i, id in enumerate(train_ids):
+        optimizer.zero_grad()
+        
+        batch_data = batches_train_all[wvl_L][id]
+
+        x0, fixed_inputs, PSF_0, current_config = get_data(batch_data)
+        # toy = TipTorch(current_config, None, device)
+        toy.config = current_config
+        toy.Update(reinit_grids=True, reinit_pupils=True)
+        basis.model = toy
+
+        batch_size = len(batch_data['IDs'])
+
+        loss = loss_fn(func(x0, fixed_inputs), PSF_0)
+        loss.backward()#retain_graph=True)
+        optimizer.step()
+
+        loss_train.append(loss.item()/batch_size)
+        epoch_train_loss.append(loss.item()/batch_size)
+        
+        print(f'Running loss ({i+1}/{len(train_ids)}): {loss.item()/batch_size:.4f}', end="\r", flush=True)
+    
+    loss_stats_train.append(np.array(epoch_train_loss).mean().item())
+    print(f'Epoch: {epoch+1}/{epochs}, train loss: {np.array(epoch_train_loss).mean().item()}')
+    
+    
+    np.random.shuffle(val_ids)
+    
+    for i, id in enumerate(val_ids):
+        with torch.no_grad():
+            batch_data = batches_val_all[wvl_L][id]
+            
+            x0, fixed_inputs, PSF_0, current_config = get_data(batch_data)
+            # toy = TipTorch(current_config, None, device)
+            toy.config = current_config
+            toy.Update(reinit_grids=True, reinit_pupils=True)
+            basis.model = toy
+
+            batch_size = len(batch_data['IDs'])
+
+            loss = loss_fn(func(x0, fixed_inputs), PSF_0) 
+            loss_val.append(loss.item()/batch_size)
+            epoch_val_loss.append(loss.item()/batch_size)
+            
+            print(f'Running loss ({i+1}/{len(val_ids)}): {loss.item()/batch_size:.4f}', end="\r", flush=True)
+
+
+    loss_stats_val.append(np.array(epoch_val_loss).mean().item())
+    print(f'Epoch: {epoch+1}/{epochs}, validation loss: {np.array(epoch_val_loss).mean().item()}\n')
+    torch.save(net.state_dict(), f'../data/weights/gnosis_poly_ep_{epoch+1}.dict')
+
+
+loss_stats_val   = np.array(loss_stats_val)
+loss_stats_train = np.array(loss_stats_train)
+
+plt.plot(loss_stats_val)
+plt.plot(loss_stats_train)
+plt.show()
+
+#%% =============================== Polychromatic training ==================================
 optimizer = optim.Adam(net.parameters(), lr=0.0001)
 
 loss_stats_train, loss_stats_val = [], []
@@ -330,93 +509,113 @@ for epoch in range(epochs):
 
     loss_stats_val.append(np.array(epoch_val_loss).mean().item())
     print(f'Epoch: {epoch+1}/{epochs}, validation loss: {np.array(epoch_val_loss).mean().item()}\n')
-    torch.save(net.state_dict(), f'../data/weights/gnosis_new_weights_v3_epoch_{epoch+1}.dict')
+    torch.save(net.state_dict(), f'../data/weights/gnosis_poly_ep_{epoch+1}.dict')
 
 
 loss_stats_val   = np.array(loss_stats_val)
 loss_stats_train = np.array(loss_stats_train)
 
-np.save('../data/loss_stats_val.npy', loss_stats_val)
-np.save('../data/loss_stats_train.npy', loss_stats_train)
+# np.save('../data/loss_stats_val.npy', loss_stats_val)
+# np.save('../data/loss_stats_train.npy', loss_stats_train)
 
 # Save weights
 # torch.save(net.state_dict(), '../data/weights/gnosis_new_weights_v3.dict')
 
-#%%
 
-plt.plot(loss_stats_val)
-plt.plot(loss_stats_train)
-plt.show()
 
 #%%
 PSFs_0_val_all = {}
 PSFs_1_val_all = {}
 PSFs_2_val_all = {}
+PSFs_3_val_all = {}
 
 net.eval()
 with torch.no_grad():
-    for wvl in wvls_L_all:
-        PSFs_0_val, PSFs_1_val, PSFs_2_val = [], [], []
-        val_ids = val_ids_all[wvl]
+    # for wvl in wvls_L_all:
+    wvl = 1625
+    
+    PSFs_0_val, PSFs_1_val, PSFs_2_val, PSFs_3_val = [], [], [], []
+    val_ids = val_ids_all[wvl]
 
-        for i in tqdm(val_ids):
-            # ------------------------- Validate predicted -------------------------
-            batch_data = batches_val_all[wvl][i]
-            
-            x0, fixed_inputs, PSF_0, init_config = get_data(batch_data)
-            toy.config = init_config
-            toy.Update(reinit_grids=True, reinit_pupils=True)
+    fitted_entres = [
+        'F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R',
+        'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'LWE coefs'
+    ]
 
-            batch_size = len(batch_data['IDs'])
-            
-            fixed_inputs['Jxy'] *= 0
-            
-            PSFs_0_val.append(PSF_0.cpu())
-            PSFs_1_val.append(func(x0, fixed_inputs).cpu())
+    for i in tqdm(val_ids):
+        # ------------------------- Validate calibrated -------------------------
+        batch_data = batches_val_all[wvl][i]
+        
+        x0, fixed_inputs, PSF_0, init_config = get_data(batch_data)
+        toy.config = init_config
+        toy.Update(reinit_grids=True, reinit_pupils=True)
 
-            # ------------------------- Validate direct -------------------------
-            inputs = {
-                'F':   torch.ones([1, 2]),
-                'Jx':  torch.ones([1])*33.0,
-                'Jy':  torch.ones([1])*33.0,
-                'Jxy': torch.zeros([1]),
-                'dn':  torch.zeros([1]),
-                'basis_coefs': torch.zeros([1, 12])
-            }
-            
-            current_batch_size = len(batch_data['IDs'])
+        batch_size = len(batch_data['IDs'])
+        
+        fixed_inputs['Jxy'] *= 0
+        
+        PSFs_0_val.append(PSF_0.cpu())
+        PSFs_1_val.append(func(x0, fixed_inputs).cpu())
 
-            for key, value in inputs.items():
-                inputs[key] = value.float().to(device).repeat(current_batch_size, 1).squeeze()
-            
-            PSFs_2_val.append(run_model(toy, batch_data, inputs).cpu())
+        # ------------------------- Validate direct -------------------------
+        inputs = {
+            'F':   torch.ones([1, 2]),
+            'Jx':  torch.ones([1])*33.0,
+            'Jy':  torch.ones([1])*33.0,
+            'Jxy': torch.zeros([1]),
+            'dn':  torch.zeros([1]),
+            'basis_coefs': torch.zeros([1, 12])
+        }
+        
+        current_batch_size = len(batch_data['IDs'])
 
-        PSFs_0_val = torch.cat(PSFs_0_val, dim=0)[:,0,...].numpy()
-        PSFs_1_val = torch.cat(PSFs_1_val, dim=0)[:,0,...].numpy()
-        PSFs_2_val = torch.cat(PSFs_2_val, dim=0)[:,0,...].numpy()
+        for key, value in inputs.items():
+            inputs[key] = value.float().to(device).repeat(current_batch_size, 1).squeeze()
+        
+        PSFs_2_val.append(run_model(toy, batch_data, inputs).cpu())
 
-        PSFs_0_val_all[wvl] = PSFs_0_val.copy()
-        PSFs_1_val_all[wvl] = PSFs_1_val.copy()
-        PSFs_2_val_all[wvl] = PSFs_2_val.copy()
+        # ------------------------- Validate fitted -------------------------
+        fitted_dict = get_fixed_inputs(batch_data, fitted_entres)
 
-        fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-        plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
-        plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
-        fig.suptitle(f'λ = {wvl} [nm]')
-        # plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
+        PSFs_3_val.append(run_model(toy, batch_data, {}, fixed_inputs=fitted_dict).cpu())
+
+        # def get_data(batch):
+        #     x_0    = batch['NN input'].float().to(device)
+        #     PSF_0  = batch['PSF_0'].float().to(device)
+        #     config = batch['configs']
+        #     fixed_inputs = get_fixed_inputs(batch, fixed_entries)
+        #     config_manager.Convert(config, framework='pytorch', device=device)
+        #     return x_0, fixed_inputs, PSF_0, config
+
+    PSFs_0_val = torch.cat(PSFs_0_val, dim=0)[:,0,...].numpy()
+    PSFs_1_val = torch.cat(PSFs_1_val, dim=0)[:,0,...].numpy()
+    PSFs_2_val = torch.cat(PSFs_2_val, dim=0)[:,0,...].numpy()
+    PSFs_3_val = torch.cat(PSFs_3_val, dim=0)[:,0,...].numpy()
+
+    PSFs_0_val_all[wvl] = PSFs_0_val.copy()
+    PSFs_1_val_all[wvl] = PSFs_1_val.copy()
+    PSFs_2_val_all[wvl] = PSFs_2_val.copy()
+    PSFs_3_val_all[wvl] = PSFs_3_val.copy()
+
+    fig, ax = plt.subplots(1, 3, figsize=(10, 3))
+    plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
+    plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
+    plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[2])
+    fig.suptitle(f'λ = {wvl} [nm]')
+    # plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
 
 
 #%%
-
 wvl = 1625
 
 PSF_cube_data   = torch.tensor(PSFs_0_val_all[wvl]).unsqueeze(1)
 PSF_cube_calib  = torch.tensor(PSFs_1_val_all[wvl]).unsqueeze(1)
 PSF_cube_direct = torch.tensor(PSFs_2_val_all[wvl]).unsqueeze(1)
+PSF_cube_fitted = torch.tensor(PSFs_3_val_all[wvl]).unsqueeze(1)
 
 draw_PSF_stack(PSF_cube_data, PSF_cube_direct, average=True, crop=40)
 plt.show()
-draw_PSF_stack(PSF_cube_data, PSF_cube_calib,  average=True, crop=40)
+draw_PSF_stack(PSF_cube_data, PSF_cube_fitted,  average=True, crop=40)
 plt.show()
 
 #%%

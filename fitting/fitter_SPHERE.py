@@ -51,7 +51,7 @@ if len(sys.argv) == 4:
 # device = torch.device('cuda:1')
 
 #%% Initialize data sample
-with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
+with open(SPHERE_DATA_FOLDER + 'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['Corrupted'] == False]
@@ -192,7 +192,7 @@ def load_and_fit_sample(id):
         PSF_mask   = PSF_mask * 0 + 1
         # LWE_flag   = psf_df.loc[sample_id]['LWE']
         LWE_flag = True
-        wings_flag = psf_df.loc[id]['Wings']
+        wings_flag = True #psf_df.loc[id]['Wings']
 
         
     except Exception as e:
@@ -204,29 +204,42 @@ def load_and_fit_sample(id):
         model = TipTorch(merged_config, None, device)
 
         _ = model()
-        # _ = model({ 'bg': bg.unsqueeze(0).to(device) })
 
         PSF_DL = model.DLPSF()
 
         basis = LWE_basis(model)
 
         transformer = InputsTransformer({
-            'F':  norm_F,   'bg': norm_bg,
-            'r0': norm_r0,  'dx': norm_dxy, 
-            'dy': norm_dxy, 'dn': norm_dn,
-            'Jx': norm_J,   'Jy': norm_J,   
-            'Jxy': norm_Jxy,'basis_coefs': norm_LWE
+            'r0':  norm_r0,
+            'F':   norm_F,
+            'dx':  norm_dxy,
+            'dy':  norm_dxy,
+            'bg':  norm_bg,
+            'dn':  norm_dn,
+            'Jx':  norm_J,
+            'Jy':  norm_J,
+            'Jxy': norm_Jxy,
+            'wind_speed':  norm_wind_spd,
+            'wind_dir':    norm_wind_dir,
+            'basis_coefs': norm_LWE
         })
 
-        inp_dict = {
-            'r0':  model.r0,  'F':  model.F,
-            'dx':  model.dx,  'dy': model.dy,
-            'bg':  model.bg,  'dn': model.dn,
-            'Jx':  model.Jx,  'Jy': model.Jy, 
-            'Jxy': model.Jxy, 'basis_coefs': basis.coefs
-        }
+
+        inp_dict = {}
+
+        # Loop through the class attributes
+        for attr in ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']:
+            inp_dict[attr] = getattr(model, attr)
+
+        if wings_flag:
+            inp_dict['wind_dir'] = model.wind_dir
+            # inp_dict['wind_speed'] = toy.wind_speed
+            
+        if LWE_flag:
+            inp_dict['basis_coefs'] = basis.coefs
 
         _ = transformer.stack(inp_dict) # to create index mapping
+
 
         x0 = [norm_r0.forward(model.r0).item(),
             1.0, 1.0,
@@ -259,20 +272,32 @@ def load_and_fit_sample(id):
         # crop_all = cropper(PSF_0, 100)
         
         if LWE_flag:
+            A = 50.0
+
+            pattern_pos = torch.tensor([[0,0,0,0,  0,-1,1,0,  1,0,0,-1]]).to(device).float() * A
+            pattern_neg = torch.tensor([[0,0,0,0,  0,1,-1,0, -1,0,0, 1]]).to(device).float() * A
+            pattern_1   = torch.tensor([[0,0,0,0,  0,-1,1,0, -1,0,0, 1]]).to(device).float() * A
+            pattern_2   = torch.tensor([[0,0,0,0,  0,1,-1,0,  1,0,0,-1]]).to(device).float() * A
+            pattern_3   = torch.tensor([[0,0,0,0,  1,0,0,-1,  0,1,-1,0]]).to(device).float() * A
+            pattern_4   = torch.tensor([[0,0,0,0,  -1,0,0,1,  0,-1,1,0]]).to(device).float() * A
+
             gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
-
-            pattern_pos = torch.tensor([[0,0,0,0,  0,-1,1,0,  1,0,0,-1]]).to(device).float() * 50.0
-            pattern_neg = torch.tensor([[0,0,0,0,  0,1,-1,0, -1,0,0, 1]]).to(device).float() * 50.0
-
+            img_punish = lambda x: ( (func(x)-PSF_0) * PSF_mask ).flatten().abs().sum()
+            Gauss_err  = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, A/2)).flatten().abs().sum()
+                    
+            LWE_regularizer = lambda c: \
+                Gauss_err(pattern_pos, c) + Gauss_err(pattern_neg, c) + \
+                Gauss_err(pattern_1, c)   + Gauss_err(pattern_2, c) + \
+                Gauss_err(pattern_3, c)   + Gauss_err(pattern_4, c)
+            
             def loss_fn(x_):
-                img_punish = ( (func(x_)-PSF_0) * PSF_mask ).flatten().abs().sum()
-                LWE_punish = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, 40)).flatten().abs().sum()
                 coefs_ = transformer.destack(x_)['basis_coefs']
-                loss = img_punish + LWE_punish(pattern_pos, coefs_) + LWE_punish(pattern_neg, coefs_)
+                loss = img_punish(x_) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
                 return loss
+            
         else:
             def loss_fn(x_):
-                loss = (func(x_)-PSF_0) * PSF_mask
+                loss = (func(x_)-PSF_0)*PSF_mask
                 return loss.flatten().abs().sum()
 
         result = minimize(lambda x_: loss_fn(x_), x0, method='bfgs', disp=0)
@@ -297,15 +322,17 @@ def load_and_fit_sample(id):
 
         PSF_1 = func(x0)
         
-        # with torch.no_grad():
-        #     PSF_1 = func(x0)
-        #     fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-        #     plot_radial_profiles_new( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-        #     plot_radial_profiles_new( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
-        #     plt.show()
+        with torch.no_grad():
+            PSF_1 = func(x0)
+            fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+            plot_radial_profiles_new( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+            plot_radial_profiles_new( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+            plt.show()
         
-        #     draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)
+            draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)
             
+        plt.imshow((LWE_OPD-PPT_OPD).cpu().numpy()[0,...])
+        plt.colorbar()
         
     except Exception as e:
         print(e)
@@ -368,8 +395,8 @@ def load_and_fit_sample(id):
         'SR fit':        SR(PSF_1, PSF_DL).detach().cpu().numpy(),
         'FWHM fit':      gauss_fitter(PSF_0),
         'FWHM data':     gauss_fitter(PSF_1),
-        'Img. data':     to_store(PSF_0*pdims(norms,2)),
-        'Img. fit':      to_store(PSF_1*pdims(norms,2)),
+        'Img. data':     to_store(PSF_0),
+        'Img. fit':      to_store(PSF_1),
         'PSF mask':      to_store(PSF_mask),
         'PSD':           to_store(model.PSD),
         'Data norms':    to_store(norms),
@@ -380,9 +407,9 @@ def load_and_fit_sample(id):
     return save_data
 
 #%%
-# test = load_and_fit_sample(2112)
 
-good_ids = [2112]
+# good_ids = [444]
+# test = load_and_fit_sample(444)
 
 #%%
 for id in good_ids:
