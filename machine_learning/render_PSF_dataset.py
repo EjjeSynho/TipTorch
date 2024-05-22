@@ -72,6 +72,8 @@ with open(SPHERE_DATA_FOLDER + 'fitted_and_data_PSF_profiles.pickle', 'wb') as h
 
 #%%
 
+profiles = profiles_L
+
 central_deviations = {}
 
 for id in profiles:
@@ -120,10 +122,10 @@ render_profile(p1, 'tab:orange', 'El fitto', linestyle='-',  linewidth=1, ax=ax)
 render_profile(p2, 'tab:green',  'El error', linestyle='--', linewidth=1, ax=ax)
 
 
-y_lim = max([p0.max(), p1.max(), p2.max()])
+# y_lim = np.nanmax([np.nanmax(p0), np.nanmax(p1), np.nanmax(p2)])
 
-ax.set_yscale('symlog', linthresh=5e-1)
-ax.set_ylim(1e-2, y_lim)
+# ax.set_yscale('symlog', linthresh=5e-1)
+ax.set_ylim(1e-2, 110)
 ax.set_xlim(0, 20)
 
 # ax.set_title(title)

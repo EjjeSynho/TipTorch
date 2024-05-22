@@ -113,6 +113,8 @@ transforms_dump = {
     'Jx':          norm_J,
     'Jy':          norm_J,
     'Jxy':         norm_Jxy,
+    'Wind dir':    norm_wind_dir,
+    'Wind speed':  norm_wind_spd,
     'LWE coefs':   norm_LWE,
     'FWHM fit L':  norm_FWHM,
     'FWHM fit R':  norm_FWHM,

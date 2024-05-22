@@ -19,6 +19,23 @@ from project_globals import SPHERE_DATA_FOLDER, device
 from torchmin import minimize
 from astropy.stats import sigma_clipped_stats
 
+'''
+files_1 = os.listdir(SPHERE_DATA_FOLDER+'IRDIS_fitted')
+files_2 = os.listdir(SPHERE_DATA_FOLDER+'IRDIS_fitted_prev_BFBS-2')
+
+files_1 = set(files_1)
+files_2 = set(files_2)
+
+files_diff = list(files_2-files_1)
+
+for file in files_diff:
+    with open(SPHERE_DATA_FOLDER+'IRDIS_fitted_prev_BFBS-2/'+file, 'rb') as handle:
+        data_1 = pickle.load(handle)
+        PSF_ = data_1['Img. fit']
+        if np.isfinite(PSF_.sum()):
+            print('Juan.', file)
+            break
+'''
 
 #%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
@@ -62,7 +79,7 @@ from data_processing.SPHERE_preproc_utils import LoadSPHEREsampleByID
 # 2726, 3121, 3613, 3651, 3706, 3875, 3882, 3886, 3906, 3909, 4002, 405]
 # 1296
 # 444
-sample_id = 444 #1296 #305 #471    427
+sample_id = 637 #1296 #305 #471    427
 #2818 #2112 #1921 #3909
 
 # LWE_flag = psf_df.loc[sample_id]['LWE']
@@ -220,7 +237,6 @@ def func(x_):
 # plt.colorbar()
 # plt.show()
 
-
 #%
 if LWE_flag:
 
@@ -244,7 +260,7 @@ if LWE_flag:
     
     def loss_fn(x_):
         coefs_ = transformer.destack(x_)['basis_coefs']
-        loss = img_punish(x_) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
+        loss = img_punish(x_)  + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
         return loss
     
 else:
@@ -289,6 +305,18 @@ with torch.no_grad():
   
     draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)#, scale=None)
 
+#%
+# for entry in x0_new:
+#     item_ = x0_new[entry]
+    
+#     if len(item_.shape) == 0:
+#         print(f'{entry}: {item_.item():.3f}')
+#     else:
+#         print(entry, end=': ')
+#         for x in item_.cpu().numpy().tolist():
+#             print(f'{x:.3f}',  end=' ')
+#         print('')
+    
 
 #%%
 def GetNewPhotons():

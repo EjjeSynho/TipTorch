@@ -218,15 +218,14 @@ y_pred = gbr.predict(X_test)
 #%%
 test_df = pd.DataFrame({
     'LWE predicted': df_transforms_fitted['LWE coefs'].backward(y_pred),
-    'LWE from data': df_transforms_fitted['LWE coefs'].backward(y_test),
+    'LWE from fitted': df_transforms_fitted['LWE coefs'].backward(y_test),
 })
-corr_plot(test_df, 'LWE predicted', 'LWE from data', lims=[0, 200])
+corr_plot(test_df, 'LWE predicted', 'LWE from fitted', lims=[0, 200])
 
 _ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
 
 #%%
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, explained_variance_score, median_absolute_error
-
 
 MAPE  = mean_absolute_percentage_error(y_test, y_pred)
 EVP   = explained_variance_score(y_test, y_pred) # 1.0 is the best
@@ -476,8 +475,11 @@ Y_pred = lr.predict(X)
 print('Slope:', lr.coef_[0])
 
 # draw linear fit
-plt.plot(X, Y_pred, color='red')
-plt.plot([0, 10000], [0, 1700])
+# plt.plot(X, Y_pred, color='red')
+plt.plot([0, 10000], [0, 10000], color='red')
+plt.plot([0, 10000], [0, 9000], color='red')
+plt.plot([0, 10000], [0, 1000])
+plt.plot([0, 10000], [0, 1800])
 plt.scatter(X, Y, s=2)
 plt.xlabel('Photons (data)')
 plt.ylabel('Photons (fitted)')

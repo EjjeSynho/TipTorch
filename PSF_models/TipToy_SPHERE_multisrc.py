@@ -58,7 +58,7 @@ class TipTorch(torch.nn.Module):
         self.zenith_angle  = self.config['telescope']['ZenithAngle']
         self.airmass       = 1.0 / torch.cos(self.zenith_angle * deg2rad)
 
-        self.GS_wvl     = self.config['sources_HO']['Wavelength'][0].item() #[m]
+        self.GS_wvl     = self.config['sources_HO']['Wavelength'] #[m]
         #self.GS_height  = self.AO_config['sources_HO']['Height'] * self.airmass #[m]
         self.wind_speed  = self.config['atmosphere']['WindSpeed']
         self.wind_dir    = self.config['atmosphere']['WindDirection']
@@ -453,13 +453,15 @@ class TipTorch(torch.nn.Module):
         self.SxAv = ( 2j*np.pi*self.kx_AO*self.WFS_d_sub*Av ).repeat([self.N_src,1,1])
         self.SyAv = ( 2j*np.pi*self.ky_AO*self.WFS_d_sub*Av ).repeat([self.N_src,1,1])
 
+        WFS_wvl = pdims(self.GS_wvl, 2)
+
         MV = 0
         Wn = WFS_noise_var / (2*self.kc)**2 #TODO: should it be kc for 500 nm?
         # TODO: isn't this one computed for the WFSing wvl?
 
         self.W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * self.piston_filter   #TODO: clarify this V
 
-        gPSD = torch.abs(self.SxAv)**2 + torch.abs(self.SyAv)**2 + MV*Wn/self.W_atm / (500e-9/self.GS_wvl)**2
+        gPSD = torch.abs(self.SxAv)**2 + torch.abs(self.SyAv)**2 + MV*Wn/self.W_atm / (500e-9/WFS_wvl)**2
         self.Rx = torch.conj(self.SxAv) / gPSD
         self.Ry = torch.conj(self.SyAv) / gPSD
         self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-9 # For numerical stability
@@ -518,10 +520,10 @@ class TipTorch(torch.nn.Module):
         # wvlRef = self.wvl[:,0].flatten() if self.wvl.ndim > 1 else self.wvl #TODO: wavelength dependency!
         wvlRef = self.wvl
         # W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * self.piston_filter
-        IOR = lambda lmbd: 23.7+6839.4/(130-(lmbd*1.e6)**(-2))+45.47/(38.9-(lmbd*1.e6)**(-2))
-        n2 = IOR(self.GS_wvl)
-        n1 = IOR(wvlRef)
-        chromatic_PSD = pdims(((n2-n1)/n2)**2, 2) * self.W_atm.unsqueeze(1)
+        IOR = lambda lmbd: 23.7+6839.4/(130-(lmbd*1.e6)**(-2))+45.47/(38.9-(lmbd*1.e6)**(-2)) #TODO: proper IOR for wavelength
+        n2 = pdims(IOR(self.GS_wvl), 3)
+        n1 = pdims(IOR(wvlRef), 2)
+        chromatic_PSD = ((n2-n1)/n2)**2 * self.W_atm.unsqueeze(1)
         return chromatic_PSD
 
 
@@ -533,21 +535,23 @@ class TipTorch(torch.nn.Module):
 
 
     def NoiseVariance(self, r0):
-        r0_WFS = r0_new(r0.abs(), self.WFS_wvl, 0.5e-6).flatten() #from (Nsrc x 1 x 1) to (Nsrc)
+        WFS_wvl = pdims(self.WFS_wvl, 2)
+        WFS_Nph = pdims(self.WFS_Nph.abs(), 2)
+        r0_WFS = r0_new(r0.abs(), WFS_wvl, 0.5e-6)
         WFS_nPix = self.WFS_FOV / self.WFS_n_sub
         WFS_pixelScale = self.WFS_psInMas / 1e3 # [arcsec]
        
         # Read-out noise calculation
-        nD = torch.maximum( rad2arc*self.WFS_wvl/self.WFS_d_sub/WFS_pixelScale, self.make_tensor(1.0) ) #spot FWHM in pixels and without turbulence
+        nD = torch.maximum( rad2arc*WFS_wvl/self.WFS_d_sub/WFS_pixelScale, self.make_tensor(1.0) ) #spot FWHM in pixels and without turbulence
         # Photon-noise calculation
-        nT = torch.maximum( torch.hypot(self.WFS_spot_FWHM.max()/1e3, rad2arc*self.WFS_wvl/r0_WFS) / WFS_pixelScale, self.make_tensor(1.0) )
+        nT = torch.maximum( torch.hypot(self.WFS_spot_FWHM.max()/1e3, rad2arc*WFS_wvl/r0_WFS) / WFS_pixelScale, self.make_tensor(1.0) )
 
-        varRON  = np.pi**2/3 * (self.WFS_RON**2/self.WFS_Nph**2) * (WFS_nPix**2/nD)**2
-        varShot = np.pi**2 / (2*self.WFS_Nph.abs()) * (nT/nD)**2
+        varRON  = np.pi**2/3 * (self.WFS_RON**2/WFS_Nph**2) * (WFS_nPix**2/nD)**2
+        varShot = np.pi**2 / (2*WFS_Nph) * (nT/nD)**2
         
         # Noise variance calculation
         varNoise = self.WFS_excessive_factor * (varRON+varShot) # TODO: clarify with Benoit and Thierry
-        return varNoise * (500e-9/self.GS_wvl)**2
+        return varNoise * (500e-9/WFS_wvl)**2
 
 
     def MoffatPSD(self, amp, b, alpha, beta, ratio, theta):
@@ -588,6 +592,7 @@ class TipTorch(torch.nn.Module):
     def ComputePSD(self):
         r0  = pdims(self.r0, 2)
         L0  = pdims(self.L0, 2)
+        
 
         if self.PSD_include['Moffat']:
             amp   = pdims(self.amp,   2)
@@ -598,7 +603,8 @@ class TipTorch(torch.nn.Module):
             theta = pdims(self.theta, 2)
 
         if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
-            WFS_noise_var = torch.abs( pdims(self.dn,2) + pdims(self.NoiseVariance(r0.abs()),2) ) # [rad^2] at WFSing wavelength TODO: really?
+            WFS_wvl = pdims(self.WFS_wvl, 2)
+            WFS_noise_var = torch.abs( pdims(self.dn, 2) + self.NoiseVariance(r0) ) # [rad^2] at WFSing wavelength TODO: really?
             self.vx = pdims( min_2d(self.wind_speed) * torch.cos(min_2d(self.wind_dir) * np.pi/180.0), 2 )
             self.vy = pdims( min_2d(self.wind_speed) * torch.sin(min_2d(self.wind_dir) * np.pi/180.0), 2 )
 

@@ -20,10 +20,10 @@ with open(fitted_samples_folder + files[0], 'rb') as handle:
     data = pickle.load(handle)
 
 for x in data.keys():
-    print(x)
+    print(x, end=', ')
 
 df_relevant_entries = [
-    'bg', 'F', 'dx', 'dy', 'r0', 'n', 'dn', 'Jx', 'Jy', 'Jxy', 'Nph WFS (new)',
+    'bg', 'F', 'dx', 'dy', 'r0', 'n', 'dn', 'Jx', 'Jy', 'Jxy', 'Nph WFS (new)', 'Wind dir',
     'SR data', 'SR fit', 'FWHM fit', 'FWHM data', 'LWE coefs'
 ]
 
@@ -102,10 +102,10 @@ with open('../data/temp/fitted_df_norm.pickle', 'wb') as handle:
    
 #%% Write images
 
-crop_imgs = cropper(images_data[0], 80)
+# crop_imgs = cropper(images_data[0], 80)
 
-im_d_ = [img[crop_imgs] for img in images_data  ]
-im_f_ = [img[crop_imgs] for img in images_fitted]
+im_d_ = [img for img in images_data  ]
+im_f_ = [img for img in images_fitted]
 
 images_df = { id: (im_d_[i], im_f_[i]) for i, id in enumerate(ids) }
 
@@ -120,7 +120,7 @@ for i in range(0, 4):
     names[i]   += f' {i+1}'
     names[i+4] += f' {i+1}'
     names[i+8] += f' {i+1}'
-names.pop(0)
+# names.pop(0)
 
 names = ['r0', 'F L', 'F R', 'dx L', 'dx R', 'dy L', 'dy R', 'bg L', 'bg R', 'dn', 'Jx', 'Jy', 'Jxy'] + names
 transform_entries = ['r0', 'F L', 'F R', 'dx L', 'dx R', 'dy L', 'dy R', 'bg L', 'bg R', 'dn', 'Jx', 'Jy', 'Jxy'] + ['LWE coefs',]*12
