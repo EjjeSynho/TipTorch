@@ -9,3 +9,5 @@ data/weights
 global_config.json
 data/*.npy
 data/*.json
+data/*.predictor
+data/*.txt

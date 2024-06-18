@@ -25,7 +25,12 @@ from copy import copy, deepcopy
 df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/psf_df_norm_transforms.pickle')
 df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/fitted_df_norm_transforms.pickle')
 
-# device = torch.device('cpu')
+with open('../data/temp/fitted_df_norm.pickle', 'rb') as handle:
+    fitted_df_norm = pickle.load(handle)
+
+with open('../data/temp/psf_df_norm.pickle', 'rb') as handle:
+    psf_df_norm = pickle.load(handle)
+    
 
 #%%
 # Here, all possible transormations are inputed, order and content doesn not matter here
@@ -58,7 +63,7 @@ inp_dict = {
     'basis_coefs': torch.zeros([1, 12])
 }
 
-fixed_entries  = ['dx L', 'dx R', 'dy L', 'dy R', 'bg L', 'bg R', 'Jxy'] #, 'LWE coefs']
+fixed_entries  = ['dx L', 'dx R', 'dy L', 'dy R', 'bg L', 'bg R', 'Jxy', 'LWE coefs']
 
 # Remove 'L' and 'R' endings
 fixed_entries_ = copy(fixed_entries)
@@ -134,8 +139,8 @@ net = Gnosis(batch_data['NN input'].shape[1], transformer.get_packed_size(), 200
 net.to(device)
 net.float()
 
-net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v3.dict'))
-# net.load_state_dict(torch.load('../data/weights/gnosis_poly_ep_3.dict'))
+# net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v3.dict'))
+net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_noLWE_v1.dict'))
 
 x0 = x0.float().repeat(len(batch_data['IDs']), 1).to(device)
 # x0.requires_grad = True
@@ -232,9 +237,9 @@ profs_R = np.stack([profiles_R[id_test][0] for id_test in batch_data['IDs']], ax
 
 PSF_0 = batch_data['PSF_0'].cpu().numpy()
 
-fitted_entres = ['F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R', 'Wind dir', 'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'LWE coefs']
+fitted_entries = ['F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R', 'Wind dir', 'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'LWE coefs']
 
-fitted_dict = get_fixed_inputs(batch_data, fitted_entres)
+fitted_dict = get_fixed_inputs(batch_data, fitted_entries)
 
 PSF_1 = run_model(toy, batch_data, {}, fixed_inputs=fitted_dict).cpu().numpy()
 
@@ -336,25 +341,27 @@ gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2
 img_punish    = lambda A, B: (A-B)[crop_all].flatten().abs().sum()
 center_punish = lambda A, B: (A-B)[crop_center].flatten().abs().sum()
 Gauss_err     = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, A/2)).flatten().abs().sum()
-        
+coefs_compare = lambda A,B: (A-B).pow(2).sum().sqrt() / A.numel()
+
 LWE_regularizer = lambda c: \
     Gauss_err(pattern_pos, c) + Gauss_err(pattern_neg, c) + \
     Gauss_err(pattern_1, c)   + Gauss_err(pattern_2, c)   + \
     Gauss_err(pattern_3, c)   + Gauss_err(pattern_4, c)
 
-
 def loss_fn(x_, PSF_data):
     pred_inputs = transformer.destack(net(x_))
-    PSD_pred = run_model(toy, batch_data, pred_inputs, fixed_inputs)
-    coefs_ = transformer.destack(x_)['basis_coefs']
-    # loss = img_punish(PSD_pred, PSF_data) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4 + center_punish(PSD_pred, PSF_data)
-    loss = img_punish(PSD_pred, PSF_data)+ LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
-    # loss = img_punish(PSD_pred, PSF_data) + center_punish(PSD_pred, PSF_data)
+    PSF_pred = run_model(toy, batch_data, pred_inputs, fixed_inputs)
+    # coefs_ = transformer.destack(x_)['basis_coefs']
+    # coefs_gt = torch.tensor(np.array(batch_data['fitted data']['LWE coefs']), device=device).float()
+    # loss = img_punish(PSF_pred, PSF_data) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4 + center_punish(PSD_pred, PSF_data)
+    # loss = img_punish(PSF_pred, PSF_data) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
+    # loss = img_punish(PSF_pred, PSF_data) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4 + coefs_compare(coefs_, coefs_gt)*0.25
+    # loss = img_punish(PSF_pred, PSF_data) + coefs_compare(coefs_, coefs_gt)*0.75
+    loss = img_punish(PSF_pred, PSF_data)
     return loss
 
 # def loss_fn(A, B):
 #     return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all]) + nn.MSELoss(reduction='sum')(A[crop_center], B[crop_center])
-
 
 #%%
 optimizer = optim.Adam(net.parameters(), lr=0.0001)
@@ -365,6 +372,8 @@ epochs = 50
 
 loss_train, loss_val = [], []
 
+basis.model = toy
+        
 net.train()
 
 wvl_L, wvl_R = 1625, 1625
@@ -386,12 +395,11 @@ for epoch in range(epochs):
         x0, fixed_inputs, PSF_0, current_config = get_data(batch_data, fixed_entries)
         toy.config = current_config
         toy.Update(reinit_grids=True, reinit_pupils=True)
-        basis.model = toy
 
         batch_size = len(batch_data['IDs'])
 
         loss = loss_fn(x0, PSF_0)
-        loss.backward()#retain_graph=True)
+        loss.backward()
         optimizer.step()
 
         loss_train.append(loss.item()/batch_size)
@@ -412,7 +420,6 @@ for epoch in range(epochs):
             x0, fixed_inputs, PSF_0, current_config = get_data(batch_data, fixed_entries)
             toy.config = current_config
             toy.Update(reinit_grids=True, reinit_pupils=True)
-            basis.model = toy
 
             batch_size = len(batch_data['IDs'])
 
@@ -425,7 +432,7 @@ for epoch in range(epochs):
 
     loss_stats_val.append(np.array(epoch_val_loss).mean().item())
     print(f'Epoch: {epoch+1}/{epochs}, validation loss: {np.array(epoch_val_loss).mean().item()}\n')
-    torch.save(net.state_dict(), f'../data/weights/gnosis_poly_ep_{epoch+1}.dict')
+    torch.save(net.state_dict(), f'../data/weights/gnosis_mono_ep_{epoch+1}.dict')
 
 
 loss_stats_val   = np.array(loss_stats_val)
@@ -446,8 +453,15 @@ optimizer = optim.Adam(net.parameters(), lr=0.0001)
 
 loss_stats_train, loss_stats_val = [], []
 
-def loss_fn(A, B):
-    return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all]) + nn.MSELoss(reduction='sum')(A[crop_center], B[crop_center])
+def loss_fn(x_, PSF_0):
+    A = func(x_, fixed_inputs)
+    B = PSF_0
+    
+    loss_1 = nn.L1Loss (reduction='sum')(A[crop_all],    B[crop_all])
+    loss_2 = nn.MSELoss(reduction='sum')(A[crop_center], B[crop_center])
+    
+    return loss_1 + loss_2
+
 
 epochs = 50
 
@@ -476,19 +490,21 @@ for epoch in range(epochs):
             # toy = TipTorch(current_config, None, device)
             toy.config = current_config
             toy.Update(reinit_grids=True, reinit_pupils=True)
-            basis.model = toy
-
+            
             batch_size = len(batch_data['IDs'])
 
-            loss = loss_fn(func(x0, fixed_inputs), PSF_0)
-            loss.backward()#retain_graph=True)
+            # loss = loss_fn(func(x0, fixed_inputs), PSF_0)
+            loss = loss_fn(x0, PSF_0)
+            
+            loss.backward()
             optimizer.step()
 
             loss_train.append(loss.item()/batch_size)
             epoch_train_loss.append(loss.item()/batch_size)
             
             print(f'Running loss ({i+1}/{len(train_ids)}): {loss.item()/batch_size:.4f}', end="\r", flush=True)
-     
+            
+    print()
     loss_stats_train.append(np.array(epoch_train_loss).mean().item())
     print(f'Epoch: {epoch+1}/{epochs}, train loss: {np.array(epoch_train_loss).mean().item()}')
     
@@ -505,16 +521,19 @@ for epoch in range(epochs):
                 # toy = TipTorch(current_config, None, device)
                 toy.config = current_config
                 toy.Update(reinit_grids=True, reinit_pupils=True)
-                basis.model = toy
 
                 batch_size = len(batch_data['IDs'])
 
-                loss = loss_fn(func(x0, fixed_inputs), PSF_0) 
+                # loss = loss_fn(func(x0, fixed_inputs), PSF_0)
+                
+                loss = loss_fn(x0, PSF_0)
+                
                 loss_val.append(loss.item()/batch_size)
                 epoch_val_loss.append(loss.item()/batch_size)
                 
                 print(f'Running loss ({i+1}/{len(val_ids)}): {loss.item()/batch_size:.4f}', end="\r", flush=True)
 
+    print()
     loss_stats_val.append(np.array(epoch_val_loss).mean().item())
     print(f'Epoch: {epoch+1}/{epochs}, validation loss: {np.array(epoch_val_loss).mean().item()}\n')
     torch.save(net.state_dict(), f'../data/weights/gnosis_poly_ep_{epoch+1}.dict')
@@ -530,6 +549,30 @@ loss_stats_train = np.array(loss_stats_train)
 # torch.save(net.state_dict(), '../data/weights/gnosis_new_weights_v3.dict')
 
 
+#%% ============================================ Validation ============================================
+from joblib import load
+
+df_norm = pd.concat([psf_df_norm, fitted_df_norm], axis=1)#.fillna(0)
+
+with open('../data/LWE.predictor', 'rb') as handle:
+    LWE_predictor_dict = load(handle)
+
+entries = LWE_predictor_dict['inputs']
+mor = LWE_predictor_dict['LWE WFE predictor']
+pca = LWE_predictor_dict['PCA']
+gbr_LWE = LWE_predictor_dict['LWE coefs predictor']
+
+def predict_LWE(IDs):
+    X_inp = df_norm.loc[IDs][entries].to_numpy()
+    LWE_WFE_pred = df_transforms_fitted['LWE coefs'].backward(gbr_LWE.predict(X_inp))
+    LWE_coefs_pred_pca = mor.predict(X_inp)
+    LWE_coefs_pred = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(LWE_coefs_pred_pca))
+    
+    LWE_coefs_pred /= np.linalg.norm(LWE_coefs_pred, ord=2, axis=1)[:, np.newaxis]
+    LWE_coefs_pred *= LWE_WFE_pred[:, np.newaxis]
+    return torch.tensor(LWE_coefs_pred, device=device).float()
+
+# coefs = predict_LWE(batch_data['IDs'])
 
 #%%
 PSFs_0_val_all = {}
@@ -537,17 +580,18 @@ PSFs_1_val_all = {}
 PSFs_2_val_all = {}
 PSFs_3_val_all = {}
 
+fitted_entries = [
+    'F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R',
+    'Wind dir', 'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'LWE coefs'
+]
+
 net.eval()
 with torch.no_grad():
-    for wvl in wvls_L_all:
+    for wvl in [1625]: #wvls_L_all:
         # wvl = 1625
         
         PSFs_0_val, PSFs_1_val, PSFs_2_val, PSFs_3_val = [], [], [], []
         val_ids = val_ids_all[wvl]
-
-        fitted_entres = [
-            'F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R', 'Wind dir', 'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'LWE coefs'
-        ]
 
         for i in tqdm(val_ids):
             # ------------------------- Validate calibrated -------------------------
@@ -560,6 +604,8 @@ with torch.no_grad():
             batch_size = len(batch_data['IDs'])
             
             fixed_inputs['Jxy'] *= 0
+            
+            fixed_inputs['basis_coefs'] = predict_LWE(batch_data['IDs'])
             
             PSFs_0_val.append(PSF_0.cpu())
             PSFs_1_val.append(func(x0, fixed_inputs).cpu())
@@ -582,7 +628,7 @@ with torch.no_grad():
             PSFs_2_val.append(run_model(toy, batch_data, inputs).cpu())
 
             # ------------------------- Validate fitted -------------------------
-            fitted_dict = get_fixed_inputs(batch_data, fitted_entres)
+            fitted_dict = get_fixed_inputs(batch_data, fitted_entries)
 
             PSFs_3_val.append(run_model(toy, batch_data, {}, fixed_inputs=fitted_dict).cpu())
 
@@ -597,19 +643,46 @@ with torch.no_grad():
         PSFs_2_val_all[wvl] = PSFs_2_val.copy()
         PSFs_3_val_all[wvl] = PSFs_3_val.copy()
 
-        fig, ax = plt.subplots(1, 3, figsize=(10, 3))
+        fig, ax = plt.subplots(1, 2, figsize=(10, 4))
         plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
         plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
-        plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[2])
+        # plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[2])
         fig.suptitle(f'λ = {wvl} [nm]')
-        plt.show()
-        # plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
+        plt.tight_layout()
+        # plt.show()
+        plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
         
+#%%
+# wvl = np.random.choice(wvls_L_all)
+wvl = 1625
+i = np.random.choice(val_ids_all[wvl])
+
+batch_data = batches_val_all[wvl][i]
+
+j = np.random.choice(batch_data['IDs'])
+index_ = batch_data['IDs'].tolist().index(j)
+
+x0, fixed_inputs, _, _ = get_data(batch_data, fitted_entries)
+
+pred_coefs = transformer.destack(net(x0))['basis_coefs'][index_, ...]
+test_coefs = fixed_inputs['basis_coefs'][index_, ...]
+        
+with torch.no_grad():
+    phase_pred = (pred_coefs.unsqueeze(-1).unsqueeze(-1) * basis.modal_basis).sum(dim=0)
+    phase_test = (test_coefs.unsqueeze(-1).unsqueeze(-1) * basis.modal_basis).sum(dim=0)
+
+    MSE_1 = ( (phase_pred-phase_test)**2 ).mean()
+    MSE_2 = ( (phase_pred+phase_test)**2 ).mean()
+
+    if MSE_1 > MSE_2:
+        phase_pred *= -1
+
+    img = torch.hstack([phase_pred, phase_test, phase_test-phase_pred]).cpu()
+    plt.imshow(img)
 
 #%% -=-===-=-=-=-=-=-=-=-=--=-=-==-=-=-=-=-=-=-=-=-=-===-=-=-=-=-=-=-=-=-=-=--=-=-==-=-=-=-=-=-=-=-=-=-===-=-=-=-=-=-=-=-=--=-=-==-=-=-=-=-=-=-=-=
 
-PSFs_data   = []
-PSFs_fitted = []
+PSFs_data, PSFs_fitted  = [], []
 
 net.eval()
 
@@ -618,7 +691,7 @@ wvl = 1625
 
 val_ids = val_ids_all[wvl]
 
-fitted_entres = ['F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R', 'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'Wind dir', 'LWE coefs']
+fitted_entries = ['F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R', 'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'Wind dir', 'LWE coefs']
 
 batch_directory = SPHERE_DATASET_FOLDER + 'batch_test.pkl'
 
@@ -629,12 +702,12 @@ with open(batch_directory, 'rb') as handle:
 
 with torch.no_grad():
     # ------------------------- Validate calibrated -------------------------
-    x0, fixed_inputs, PSF_0, init_config = get_data(batch_data, fitted_entres)
+    x0, fixed_inputs, PSF_0, init_config = get_data(batch_data, fitted_entries)
     toy.config = init_config
     toy.Update(reinit_grids=True, reinit_pupils=True)
     
     PSFs_data.append(PSF_0.cpu())
-    fitted_dict = get_fixed_inputs(batch_data, fitted_entres)
+    fitted_dict = get_fixed_inputs(batch_data, fitted_entries)
     PSFs_fitted.append(run_model(toy, batch_data, {}, fixed_inputs=fitted_dict).cpu())
 
 PSFs_data   = torch.cat(PSFs_data,   dim=0)[:,0,...].numpy()
@@ -719,26 +792,173 @@ draw_PSF_stack(PSF_cube_data, PSF_cube_direct, average=True, crop=40, min_val=1e
 plt.show()
 draw_PSF_stack(PSF_cube_data, PSF_cube_calib,  average=True, crop=40, min_val=1e-5, max_val=1e-1)
 plt.show()
+draw_PSF_stack(PSF_cube_data, PSF_cube_fitted,  average=True, crop=40, min_val=1e-5, max_val=1e-1)
+plt.show()
 
 #%%
-
 rand_id = np.random.randint(0, PSFs_0_val_all[wvl].shape[0])
+#%
+PSF_0_val = PSFs_0_val_all[wvl][rand_id,...].copy()
+PSF_1_val = PSFs_1_val_all[wvl][rand_id,...].copy()
+PSF_2_val = PSFs_2_val_all[wvl][rand_id,...].copy()
+PSF_3_val = PSFs_3_val_all[wvl][rand_id,...].copy()
 
-PSF_0_val = PSFs_0_val_all[wvl][rand_id,...]
-PSF_1_val = PSFs_1_val_all[wvl][rand_id,...]
-PSF_2_val = PSFs_2_val_all[wvl][rand_id,...]
-PSF_3_val = PSFs_3_val_all[wvl][rand_id,...]
+#%
+from matplotlib.colors import LogNorm
 
-fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-plot_radial_profiles_new(PSF_0_val, PSF_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
-plot_radial_profiles_new(PSF_0_val, PSF_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
-fig.suptitle(f'λ = {wvl} [nm]')
-plt.show()
+# PSF_0 = PSF_0_val
+# PSF_1 = PSF_1_val
 
-draw_PSF_stack(PSF_0_val, PSF_2_val, average=True, crop=40)
-plt.show()
-draw_PSF_stack(PSF_0_val, PSF_1_val,  average=True, crop=40)
-plt.show()
+# if PSF_0.ndim == 2: PSF_0 = PSF_0[None, None, ...]
+# if PSF_1.ndim == 2: PSF_1 = PSF_1[None, None, ...]
+
+# if PSF_0.ndim == 3: PSF_0 = PSF_0[None, ...]
+# if PSF_1.ndim == 3: PSF_1 = PSF_1[None, ...]
+
+# def draw_PSF_stack_new(PSF_0, PSF_1, crop_size, norm, ax, titles):
+
+size = 2.5
+
+titles = [
+    ['Data', 'Direct pred.',     'Difference'],
+    ['Data', 'Calibrated pred.', 'Difference']
+]
+
+crop_size = 60
+
+PSF_0 = PSF_0_val.copy()
+PSF_1 = PSF_1_val.copy()
+PSF_2 = PSF_2_val.copy()
+
+vmin = np.min( [PSF_0_val.min(), PSF_1_val.min(), PSF_2_val.min()] )
+vmax = np.max( [PSF_0_val.max(), PSF_1_val.max(), PSF_2_val.max()] )
+
+PSF_0 += 2e-5
+PSF_1 += 2e-5
+PSF_2 += 2e-5
+
+norm = LogNorm(vmin=vmin, vmax=vmax)
+
+_, ax = plt.subplots(2, 3, figsize=(size*2.5, 2*size))
+
+PSF_0_ = PSF_0.cpu().numpy().copy() if isinstance(PSF_0, torch.Tensor) else PSF_0.copy()
+PSF_1_ = PSF_1.cpu().numpy().copy() if isinstance(PSF_1, torch.Tensor) else PSF_1.copy()
+PSF_2_ = PSF_2.cpu().numpy().copy() if isinstance(PSF_2, torch.Tensor) else PSF_2.copy()
+
+crop = cropper(PSF_0_, crop_size)
+
+diff1 = PSF_0_-PSF_1_
+diff2 = PSF_0_-PSF_2_
+
+ax[0,0].imshow(np.abs(PSF_0_)[crop], norm=norm)
+ax[0,1].imshow(np.abs(PSF_2_)[crop], norm=norm)
+ax[0,2].imshow(np.abs(diff2) [crop], norm=norm)
+
+ax[1,0].imshow(np.abs(PSF_0_)[crop], norm=norm)
+ax[1,1].imshow(np.abs(PSF_1_)[crop], norm=norm)
+ax[1,2].imshow(np.abs(diff1) [crop], norm=norm)
+
+for i in range(0,3):
+    ax[0,i].set_axis_off()
+    ax[0,i].set_title(titles[0][i])
+    
+    ax[1,i].set_axis_off()
+    ax[1,i].set_title(titles[1][i])
+
+plt.tight_layout()
+plt.suptitle(f'{rand_id}')
+
+# _, ax1 = plt.subplots(1,3, figsize=(size*2.5, size))
+# draw_PSF_stack_new(PSF_0_val, PSF_1_val, 60, norm, ax1, ['Data', 'Calibrated pred.', 'Difference'])
+# plt.show()
+
+# _, ax2 = plt.subplots(1,3, figsize=(size*2.5, size))
+# draw_PSF_stack_new(PSF_0_val, PSF_0_val, 60, norm, ax2, ['Data', 'Direct pred.', 'Difference'])
+# plt.tight_layout()
+# plt.show()
+
+#%%
+ids_example = [120, 97, 173, 144, 152, 103, 18, 29, 133, 66, 42, 124]
+
+def save_PSF_img(PSF_, filename, norm, size=2.5):
+    fig, ax = plt.subplots(1,1, figsize=(size, size))
+    ax.imshow(np.abs(PSF_.copy()), cmap='viridis', norm=norm)
+    ax.axis('off')  # Remove axes
+
+    extent = ax.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
+    fig.savefig(f'C:/Users/akuznets/Desktop/didgereedo/PSF_examples/{filename}.png', bbox_inches=extent, pad_inches=0)
+
+    plt.tight_layout()
+    plt.close(fig)
+
+
+for id in ids_example:
+    crop = cropper(PSFs_0_val_all[1625][0,...], 60)
+    
+    temp_0 = PSFs_0_val_all[1625][id,...][crop].copy()
+    temp_1 = PSFs_1_val_all[1625][id,...][crop].copy() + 1.25e-5
+    temp_2 = PSFs_2_val_all[1625][id,...][crop].copy()
+        
+    vmin = np.min( [temp_0.min(), temp_1.min(), temp_2.min()] )
+    vmax = np.max( [temp_0.max(), temp_1.max(), temp_2.max()] )
+    norm = LogNorm(vmin=vmin, vmax=vmax)
+        
+    save_PSF_img(temp_0, f'{id}_data',   norm, size=2.5)
+    save_PSF_img(temp_1, f'{id}_calib',  norm, size=2.5)
+    save_PSF_img(temp_2, f'{id}_direct', norm, size=2.5)
+    
+    save_PSF_img(np.abs(temp_0-temp_2), f'{id}_diff_direct',   norm, size=2.5)
+    save_PSF_img(np.abs(temp_0-temp_1), f'{id}_diff_calib',   norm, size=2.5)
+
+
+#%%
+from tools.utils import save_GIF_RGB
+from matplotlib import cm
+from PIL import Image
+from PIL.Image import Resampling
+    
+base_dir = 'C:/Users/akuznets/Desktop/didgereedo/PSF_examples/'
+
+def save_stack_GIF(name):
+    gif_anim = []
+    path_save = base_dir + f'PSF_{name}.gif'
+
+    for filename in os.listdir(base_dir+f'{name}/'):
+        if filename.endswith('.png'):
+            img = Image.open(base_dir + f'{name}/' + filename)
+
+            img = np.array(img)
+            img = img[:,1:,:3]
+            img = Image.fromarray(img)
+
+            gif_anim.append(img)
+            gif_anim[0].save(path_save, save_all=True, append_images=gif_anim[1:], optimize=True, duration=2e3, loop=0)
+
+save_stack_GIF('data')
+save_stack_GIF('calib')
+save_stack_GIF('direct')
+save_stack_GIF('diff_calib')
+save_stack_GIF('diff_direct')
+
+#%%
+# fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+# plot_radial_profiles_new(PSF_0_val, PSF_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
+# plot_radial_profil(PSF_0_val, PSF_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
+# fig.suptitle(f'λ = {wvl} [nm]')
+# plt.show()
+
+fig, ax = plt.subplots(2, 1, figsize=(5, 4))
+
+draw_PSF_stack(PSF_0_val, PSF_2_val, average=True, crop=60, ax=ax[0])
+ax[0].set_title('Direct prediction')
+
+draw_PSF_stack(PSF_0_val, PSF_1_val,  average=True, crop=60, ax=ax[1])
+ax[1].set_title('Calibrated prediction')
+
+plt.tight_layout()
+# plt.savefig(f'C:/Users/akuznets/Desktop/didgereedo/{rand_id}_pred.png', dpi=300)
+# plt.show()
+
 
 #%%
 norm_ = PSF_cube_data.median(dim=0)[0].max()
@@ -747,8 +967,8 @@ dPSF_1 = (torch.abs(PSF_cube_calib  - PSF_cube_data).median(dim=0)[0].max() / no
 dPSF_2 = (torch.abs(PSF_cube_direct - PSF_cube_data).median(dim=0)[0].max() / norm_).item() * 100
 dPSF_3 = (torch.abs(PSF_cube_fitted - PSF_cube_data).median(dim=0)[0].max() / norm_).item() * 100
 
-#%%
-print(dPSF_1, dPSF_2, dPSF_3)
+#%
+print(f"Calib.: {dPSF_1:.2f} \nDirect: {dPSF_2:.2f} \nFitted: {dPSF_3:.2f} \n")
 
 #%% ==========================================================================================
 # df_ultimate = pd.concat([input_df, output_df], axis=1)
@@ -783,3 +1003,5 @@ sns.heatmap(spearman_corr, mask=mask, cmap=cmap, vmax=.3, center=0,
 plt.xticks(rotation=45, ha='right')
 # plt.yticks(rotation=45)
 plt.show()
+
+#%%

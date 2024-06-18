@@ -211,18 +211,18 @@ Y = df_norm['LWE coefs'].apply(lambda x: np.linalg.norm(x, ord=2)) # Just calcul
 
 X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
 
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-gbr.fit(X_train, y_train)
-y_pred = gbr.predict(X_test)
+gbr_LWE = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
+gbr_LWE.fit(X_train, y_train)
+y_pred = gbr_LWE.predict(X_test)
 
 #%%
 test_df = pd.DataFrame({
-    'LWE predicted': df_transforms_fitted['LWE coefs'].backward(y_pred),
+    'LWE predicted':   df_transforms_fitted['LWE coefs'].backward(y_pred),
     'LWE from fitted': df_transforms_fitted['LWE coefs'].backward(y_test),
 })
 corr_plot(test_df, 'LWE predicted', 'LWE from fitted', lims=[0, 200])
 
-_ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
+_ = AnalyseImpurities(gbr_LWE, selected_entries_X, X_test, y_test)
 
 #%%
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, explained_variance_score, median_absolute_error
@@ -262,8 +262,47 @@ mor = MultiOutputRegressor(gbr, n_jobs=-1)
 mor.fit(X_train, y_train_pca)
 y_pred_pca = mor.predict(X_test)
 
-y_pred = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_pred_pca))
-y_test = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_test_pca))
+y_pred  = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_pred_pca))
+y_test  = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_test_pca))
+y_train = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_train_pca))
+
+#%%
+from joblib import dump, load
+
+store_dict = {
+    'PCA': pca,
+    'inputs': selected_entries_X,
+    'LWE WFE predictor': mor,
+    'LWE coefs predictor': gbr_LWE,
+}
+dump(store_dict, '../data/LWE.predictor')
+
+# IDs = [456, 1112, 1610, 579]
+
+# def run_predictor(IDs):
+#     X_inp = df_norm.loc[IDs][selected_entries_X].to_numpy()
+#     LWE_WFE_pred = df_transforms_fitted['LWE coefs'].backward(gbr_LWE.predict(X_inp))
+#     LWE_coefs_pred_pca = mor.predict(X_inp)
+#     LWE_coefs_pred = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(LWE_coefs_pred_pca))
+#     return LWE_coefs_pred
+
+#%%
+WFE_pred_pow = df_transforms_fitted['LWE coefs'].backward(gbr_LWE.predict(X_test))
+
+WFE_pred = np.linalg.norm(y_pred, ord=2, axis=1)
+
+y_pred_norm = y_pred / WFE_pred[:,None]
+y_pred_norm *= WFE_pred_pow[:,None]
+
+WFE_pred = np.linalg.norm(y_pred_norm, ord=2, axis=1)
+WFE_test = np.linalg.norm(y_test, ord=2, axis=1)
+
+plt.scatter(WFE_test, WFE_pred, s=2)
+# plt.scatter(WFE_pred, WFE_pred_pow, s=2)
+
+# plt.xlim(0, 200)
+# plt.ylim(0, 200)
+y_pred = y_pred_norm
 
 #%%
 names = ['Piston',]*4 + ['Tip',]*4 + ['Tilt',]*4
@@ -318,17 +357,20 @@ fig.tight_layout()
 plt.savefig('C:/Users/akuznets/Desktop/presa_buf/LWE/LWE_coefs_importances.png')
 
 #%%
-phase_pred = np.dot(y_pred, LWE_basis.reshape(12,-1))
-phase_pred = phase_pred.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
+phase_pred  = np.dot(y_pred, LWE_basis.reshape(12,-1))
+phase_pred  = phase_pred.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
 
-phase_test = np.dot(y_test, LWE_basis.reshape(12,-1))
-phase_test = phase_test.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
+phase_test  = np.dot(y_test, LWE_basis.reshape(12,-1))
+phase_test  = phase_test.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
+
+phase_train = np.dot(y_train, LWE_basis.reshape(12,-1))
+phase_train = phase_train.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
+
 
 flipped_ids = []
 
 for i in range(0, phase_pred.shape[0]):
-    A = phase_test[i,...]
-    B = phase_pred[i,...]
+    A, B = phase_test[i,...], phase_pred[i,...]
 
     MSE_1 = np.mean( (A-B)**2 )
     MSE_2 = np.mean( (A+B)**2 )
@@ -339,8 +381,7 @@ for i in range(0, phase_pred.shape[0]):
 
 flipped_id = np.array(flipped_ids) 
 
-# phase_pred *= 2
-# phase_pred *= 1.5
+
 diff = phase_test - phase_pred
 
 def calc_WFEs(cube):
@@ -403,6 +444,19 @@ plt.tight_layout()
 # plt.savefig(f'../data/temp/LWE_shapes/LWE_{rand_id}.png')
 
 #%%
+
+phase_all = np.concatenate([phase_train, phase_test], axis=0)
+#%%
+rand_id = np.random.randint(0, phase_all.shape[0])
+# phase_all -= phase_all.mean(axis=0)[None,...]
+
+#%
+plt.imshow(phase_all[rand_id,...], cmap='viridis')
+plt.grid(False)
+plt.colorbar()
+plt.axis('off')
+
+#%% =================================================================================================
 im_data = np.abs( images_df[rand_id][0][0,0,...] )
 im_fit  = np.abs( images_df[rand_id][1][0,0,...] )
 

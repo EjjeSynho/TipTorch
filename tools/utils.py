@@ -237,17 +237,19 @@ def save_GIF(array, duration=1e3, scale=1, path='test.gif', colormap=cm.viridis)
 
 def save_GIF_RGB(images_stack, duration=1e3, downscale=4, path='test.gif'):
     from PIL import Image
+    from PIL.Image import Resampling
+    
     gif_anim = []
     
     def remove_transparency(img, bg_colour=(255, 255, 255)):
-        alpha = im.convert('RGBA').split()[-1]
-        bg = Image.new("RGBA", im.size, bg_colour + (255,))
-        bg.paste(im, mask=alpha)
+        alpha = img.convert('RGBA').split()[-1]
+        bg = Image.new("RGBA", img.size, bg_colour + (255,))
+        bg.paste(img, mask=alpha)
         return bg
     
     for layer in images_stack:
         im = Image.fromarray(np.uint8(layer*255))
-        im.thumbnail((im.size[0]//downscale, im.size[1]//downscale), Image.ANTIALIAS)
+        im.thumbnail((im.size[0]//downscale, im.size[1]//downscale), resample=Resampling.BICUBIC)
         gif_anim.append( remove_transparency(im) )
         gif_anim[0].save(path, save_all=True, append_images=gif_anim[1:], optimize=True, duration=duration, loop=0)
 
@@ -661,7 +663,13 @@ class OptimizeTRF():
 '''
 
 
-def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, max_val=1e16, crop=None):
+def draw_PSF_stack(
+    PSF_in, PSF_out,
+    average=False,
+    scale='log',
+    min_val=1e-16, max_val=1e16,
+    crop=None, ax=None):
+    
     from matplotlib.colors import LogNorm
     
     if PSF_in.ndim == 2:  PSF_in  = PSF_in [None, None, ...]
@@ -687,6 +695,10 @@ def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, m
     
     if average:
         row = []
+        if ax is None:
+            fig = plt.figure(figsize=(6, 4), dpi=300)
+            ax  = fig.gca()
+            
         for wvl in range(PSF_in.shape[1]):
             row.append(
                 np.hstack([cut(PSF_in[:, wvl,...].mean(dim=0)),
@@ -698,23 +710,30 @@ def draw_PSF_stack(PSF_in, PSF_out, average=False, scale='log', min_val=1e-16, m
         else:
             norm = None
         
-        plt.imshow(row, norm=norm)#, origin='lower')
-        plt.title('Sources average')
+        ax.imshow(row, norm=norm)
+        ax.set_title('Sources average')
+        ax.axis('off')
         # plt.show()
 
     else:
         for src in range(PSF_in.shape[0]):
+            if ax is None:
+                fig = plt.figure(figsize=(6, 4), dpi=300)
+                ax  = fig.gca()
+            
             row = []
             for wvl in range(PSF_in.shape[1]):
                 row.append( np.hstack([cut(PSF_in[src, wvl,...]), cut(PSF_out[src, wvl,...]), cut(dPSF[src, wvl,...])]) )
             row  = np.vstack(row)
+            
             if scale == 'log':
                 norm = LogNorm(vmin=np.maximum(row.min(), min_val), vmax=np.minimum(row.max(), max_val))
             else:
                 norm = None
                 
-            plt.imshow(row, norm=norm)#, origin='lower')
-            plt.title('Source %d' % src)
+            ax.imshow(row, norm=norm)
+            ax.set_title('Source %d' % src)
+            ax.axis('off')
             plt.show()
 
 
