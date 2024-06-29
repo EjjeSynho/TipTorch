@@ -80,7 +80,7 @@ _ = toy()
 # toy.optimizables = ['r0', 'F', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy']
 # toy.optimizables = []
 
-_ = toy({ 'bg': bg.to(device) })
+# _ = toy({ 'bg': bg.to(device) })
 
 PSF_1 = toy()
 #print(toy.EndTimer())

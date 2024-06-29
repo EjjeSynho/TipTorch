@@ -22,6 +22,7 @@ import astropy.units as u
 from astropy.time import Time
 import requests
 from io import StringIO
+from photutils.centroids import centroid_2dg, centroid_com, centroid_quadratic
 
 
 UT4_coords = ('24d37min37.36s', '-70d24m14.25s', 2635.43)
@@ -153,8 +154,9 @@ def time_from_str(timestamp_strs):
 def GetIRLOScube(hdul_raw):
     if 'SPARTA_TT_CUBE' in hdul_raw:
         IRLOS_cube = hdul_raw['SPARTA_TT_CUBE'].data.transpose(1,2,0)
-        win_size = 20
+        win_size = 20 
 
+        # Removing the frame of zeros around the cube
         quadrant_1 = np.s_[1:win_size-1,  1:win_size-1, ...]
         quadrant_2 = np.s_[1:win_size-1,  win_size+1:win_size*2-1, ...]
         quadrant_3 = np.s_[win_size+1:win_size*2-1, 1:win_size-1, ...]
@@ -341,6 +343,15 @@ def GetSpectrum(white, radius=5):
     return np.nansum(hdul_cube[1].data[:, ids[0], ids[1]], axis=(1,2))
 
 
+def range_overlap(v_min, v_max, h_min, h_max):
+    start_of_overlap, end_of_overlap = max(v_min, h_min), min(v_max, h_max)
+    
+    if start_of_overlap > end_of_overlap:
+        return 0.0
+    else:
+        return (end_of_overlap - start_of_overlap) / (v_max - v_min)
+
+
 def GetImageSpectrumHeader(hdul_cube, show_plots=True):
     find_closest = lambda λ, λs: np.argmin(np.abs(λs-λ)).astype('int')
 
@@ -384,11 +395,11 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
         bin_ids_before = [find_closest(wvl, λs) for wvl in λ_bins_before]
 
         # After the sodium filter
-        λ_bins_num = (λ_max-bad_wvls[1][1]) / np.diff(λ_bins_before).mean()
-        λ_bins_after = bad_wvls[1][1] + np.arange(λ_bins_num+1)*λ_bin
+        λ_bins_num    = (λ_max-bad_wvls[1][1]) / np.diff(λ_bins_before).mean()
+        λ_bins_after  = bad_wvls[1][1] + np.arange(λ_bins_num+1)*λ_bin
         bin_ids_after = [find_closest(wvl, λs) for wvl in λ_bins_after]
-        bins_smart = bin_ids_before + bin_ids_after
-        λ_bins_smart = λs[bins_smart]
+        bins_smart    = bin_ids_before + bin_ids_after
+        λ_bins_smart  = λs[bins_smart]
 
     print('Wavelength bins, [nm]:', *λ_bins_smart.astype('int'))
 
@@ -415,20 +426,28 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
         # ax.get_yaxis().set_visible(False)
         # plt.show()
 
-    _, ROI, _ = GetROIaroundMax(white, win=100)
+    _, ROI, _ = GetROIaroundMax(white, win=200)
 
     # Generate reduced cubes
     data_reduced = np.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
     std_reduced  = np.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
+    # Central λs at each spectral bin
     wavelengths  = np.zeros(len(λ_bins_smart)-1)
     flux         = np.zeros(len(λ_bins_smart)-1)
 
-    bad_layers = []
+    bad_layers = [] # list of spectral layers that are corrupted (excluding the sodium filter)
+
+    bins_to_ignore = []
 
     for bin in tqdm( range(len(bins_smart)-1) ):
         chunk = hdul_cube[1].data[ bins_smart[bin]:bins_smart[bin+1], ROI[0], ROI[1] ]
         wvl_chunck = λs[bins_smart[bin]:bins_smart[bin+1]]
         flux_chunck = spectrum[bins_smart[bin]:bins_smart[bin+1]]
+
+        # Check if it is a sodium filter range
+        if range_overlap(wvl_chunck.min(), wvl_chunck.max(), bad_wvls[1][0], bad_wvls[1][1]) > 0.9:
+            bins_to_ignore.append(bin)
+            continue
 
         for i in range(chunk.shape[0]):
             layer = chunk[i,:,:]
@@ -447,10 +466,15 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
         wavelengths[bin] = np.nanmean(np.array(wvl_chunck)) # central wavelength for this bin
         flux[bin] = np.nanmean(np.array(flux_chunck))
 
+    data_reduced = np.delete(data_reduced, bins_to_ignore, axis=0)
+    std_reduced  = np.delete(std_reduced,  bins_to_ignore, axis=0)
+    wavelengths  = np.delete(wavelengths,  bins_to_ignore)
+    flux         = np.delete(flux,         bins_to_ignore)
+
     print(str(len(bad_layers))+'/'+str(hdul_cube[1].data.shape[0]), '('+str(np.round(len(bad_layers)/hdul_cube[1].data.shape[0],2))+'%)', 'slices are corrupted')
 
     # Collect the telemetry from the header
-    misc_info = {
+    spectral_info = {
         'spectrum (full)': (λs, spectrum),
         'wvl range':     [λ_min, λ_max, Δλ], # From header
         'filtered wvls': bad_wvls,
@@ -473,7 +497,6 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
 
     def format_dms(degrees, minutes, seconds):
         return f"{degrees:+03}d{minutes:02}m{seconds:06.3f}s"
-
 
     alpha = hdul_cube[0].header[h+'AOS NGS ALPHA'] # Alpha coordinate for the NGS, [hms]
     delta = hdul_cube[0].header[h+'AOS NGS DELTA'] # Delta coordinate for the NGS, [dms]
@@ -565,7 +588,7 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
     data_df.set_index('time', inplace=True)
     data_df.index = pd.to_datetime(data_df.index).tz_localize('UTC')
 
-    return images, data_df, misc_info
+    return images, data_df, spectral_info
 
 
 # with open('C:/Users/akuznets/Data/MUSE/DATA_raw_binned/'+files[file_id].split('.fits')[0]+'.pickle', 'wb') as handle:
@@ -825,7 +848,7 @@ bad_ids = []
 
 # for file_id in tqdm(files_bad):
 # for file_id in tqdm(range(0, len(files_matches))):
-for file_id in tqdm([408, 409, 410, 411]):
+for file_id in tqdm([409, 410, 411]):
     print(f'>>>>>>>>>>>>>> Processing file {file_id}...')
     try:
         hdul_raw  = fits.open(os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ]))
@@ -839,9 +862,9 @@ for file_id in tqdm([408, 409, 410, 411]):
         IRLOS_cube    = GetIRLOScube(hdul_raw)
         IRLOS_data_df = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
         LGS_data_df   = GetLGSdata(hdul_cube, cube_name, start_time)
-        MUSE_images, MUSE_data_df, misc_info    = GetImageSpectrumHeader(hdul_cube, show_plots=False)
-        Cn2_data_df, atm_data_df, asm_data_df   = GetRawHeaderData(hdul_raw)
-        asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
+        MUSE_images, MUSE_data_df, spectral_info = GetImageSpectrumHeader(hdul_cube, show_plots=False)
+        Cn2_data_df, atm_data_df, asm_data_df    = GetRawHeaderData(hdul_raw)
+        asm_df, massdimm_df, dimm_df, slodar_df  = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
 
         hdul_cube.close()
         hdul_raw.close()
@@ -862,17 +885,17 @@ for file_id in tqdm([408, 409, 410, 411]):
         data_store = {
             'images': MUSE_images,
             'IRLOS data': IRLOS_data_df,
-            'LGS dara': LGS_data_df,
+            'LGS data': LGS_data_df,
             'MUSE header data': MUSE_data_df,
             'Raw Cn2 data': Cn2_data_df,
             'Raw atm data': atm_data_df,
             'Raw ASM data': asm_data_df,
             'ASM data': asm_df,
-            'MSS-DIMM data': massdimm_df,
+            'MASS-DIMM data': massdimm_df,
             'DIMM data': dimm_df,
             'SLODAR data': slodar_df,
             'All data': flat_df,
-            'misc data': misc_info,
+            'spectral data': spectral_info,
         }
 
         path_new = cube_name.split('.fits')[0] + '.pickle'
@@ -888,6 +911,7 @@ for file_id in tqdm([408, 409, 410, 411]):
         continue
         
 # Save the list of bad files
+
 
 #%%
 %matplotlib agg  # Temporarily use the 'agg' backend to suppress inline display
@@ -926,14 +950,15 @@ IRLOS_cube    = GetIRLOScube(hdul_raw)
 IRLOS_data_df = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
 LGS_data_df   = GetLGSdata(hdul_cube, cube_name, start_time)
 
+#%%
 MUSE_images, MUSE_data_df, misc_info    = GetImageSpectrumHeader(hdul_cube, show_plots=True)
+#%%
 Cn2_data_df, atm_data_df, asm_data_df   = GetRawHeaderData(hdul_raw)
 asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
 
-#%%
 hdul_cube.close()
 hdul_raw.close()
-#%%
+
 # Create a flat DataFrame with temporal dimension compressed
 all_df = pd.concat([
     IRLOS_data_df, LGS_data_df, MUSE_data_df, Cn2_data_df, atm_data_df,
@@ -1152,55 +1177,174 @@ plt.show()
 #TEL POS THETA: [deg] actual telescope position in THETA E/W. This position is logged at intervals of typically 1 minute.
 #TEL PRESET NAME: Name of the target star. This action is logged when presetting to a new target star (asmws).
 
-#%%
-from elasticsearch import Elasticsearch
-es = Elasticsearch("datalab.pl.eso.org:9200")
 
-import elasticsearch_dsl as es_dsl
-es_dsl.connections.create_connection(hosts='datalab.pl.eso.org')
+Filename: F:/ESO/Data/MUSE/DATA_raw/MUSE.2024-01-13T00-43-55.650.fits.fz
+No.    Name      Ver    Type      Cards   Dimensions   Format
+  0  PRIMARY       1 PrimaryHDU    1800   (0, 0)      
+  1  CHAN23        1 CompImageHDU     99   (4224, 4240)   int16   
+  2  CHAN17        1 CompImageHDU     99   (4224, 4240)   int16   
+  3  CHAN15        1 CompImageHDU     99   (4224, 4240)   int16   
+  4  CHAN11        1 CompImageHDU     99   (4224, 4240)   int16   
+  5  CHAN05        1 CompImageHDU     99   (4224, 4240)   int16   
+  6  CHAN03        1 CompImageHDU     99   (4224, 4240)   int16   
+  7  CHAN22        1 CompImageHDU     99   (4224, 4240)   int16   
+  8  CHAN20        1 CompImageHDU     99   (4224, 4240)   int16   
+  9  CHAN14        1 CompImageHDU     99   (4224, 4240)   int16   
+ 10  CHAN10        1 CompImageHDU     99   (4224, 4240)   int16   
+ 11  CHAN08        1 CompImageHDU     99   (4224, 4240)   int16   
+ 12  CHAN02        1 CompImageHDU     99   (4224, 4240)   int16   
+ 13  CHAN21        1 CompImageHDU     99   (4224, 4240)   int16   
+ 14  CHAN19        1 CompImageHDU     99   (4224, 4240)   int16   
+ 15  CHAN13        1 CompImageHDU     99   (4224, 4240)   int16   
+ 16  CHAN09        1 CompImageHDU     99   (4224, 4240)   int16   
+ 17  CHAN07        1 CompImageHDU     99   (4224, 4240)   int16   
+ 18  CHAN01        1 CompImageHDU     99   (4224, 4240)   int16   
+ 19  CHAN24        1 CompImageHDU     99   (4224, 4240)   int16   
+ 20  CHAN18        1 CompImageHDU     99   (4224, 4240)   int16   
+ 21  CHAN16        1 CompImageHDU     99   (4224, 4240)   int16   
+ 22  CHAN12        1 CompImageHDU     99   (4224, 4240)   int16   
+ 23  CHAN06        1 CompImageHDU     99   (4224, 4240)   int16   
+ 24  CHAN04        1 CompImageHDU     99   (4224, 4240)   int16   
+ 25  ASM_DATA      1 BinTableHDU     75   5R x 32C   ['26A', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D']   
+ 26  SPARTA_TT_ACQ_IMG    1 CompImageHDU     14   (256, 256)   float32   
+ 27  SPARTA_ATM_DATA    1 BinTableHDU    103   5R x 46C   [1J, 1J, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E]   
+ 28  SPARTA_CN2_DATA    1 BinTableHDU     85   1R x 37C   [1J, 1J, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E]   
+ 29  SPARTA_TT_CUBE    1 CompImageHDU     15   (40, 40, 100)   float32
 
-# import dlt
-import hashlib
-import pandas as pd
 
-def print_result(search):
-    result = search.execute()['hits']['hits']
-    for i in result:
-        for j in i['_source']:
-            print(j, ': ', i['_source'][j])
-        print()
+SPARTA_ATM_DATA:
+'Sec'
+'USec'
+'LGS1_R0 '
+'LGS1_L0 '
+'LGS1_SEEING'
+'LGS1_FWHM_GAIN'
+'LGS1_STREHL'
+'LGS1_TURVAR_RES
+'LGS1_TURVAR_TOT
+'LGS1_TUR_ALT'
+'LGS1_TUR_GND'
+'LGS2_SLOPERMSX'
+'LGS2_SLOPERMSY'
+'LGS2_R0'
+'LGS2_L0'
+'LGS2_SEEING'
+'LGS2_FWHM_GAIN'
+'LGS2_STREHL'
+'LGS2_TURVAR_RES'
+'LGS2_TURVAR_TOT'
+'LGS2_TUR_ALT'
+'LGS2_TUR_GND'
+'LGS3_SLOPERMSX'
+'LGS3_SLOPERMSY'
+'LGS3_R0'
+'LGS3_L0'
+'LGS3_SEEING'
+'LGS1_SLOPERMSX'
+'LGS3_FWHM_GAIN'
+'LGS3_STREHL'
+'LGS3_TURVAR_RES'
+'LGS3_TURVAR_TOT'
+'LGS3_TUR_ALT'
+'LGS3_TUR_GND'
+'LGS4_SLOPERMSX'
+'LGS4_SLOPERMSY'
+'LGS4_R0 '
+'LGS4_L0 '
+'LGS1_SLOPERMSY'
+'LGS4_SEEING'
+'LGS4_FWHM_GAIN'
+'LGS4_STREHL'
+'LGS4_TURVAR_RES'
+'LGS4_TURVAR_TOT'
+'LGS4_TUR_ALT'
+'LGS4_TUR_GND'
 
-s = es_dsl.Search(using = es, index = 'dev_galacsi_health_checks')
-s = s.sort('-timestamp')
-s = s.query('match', keywname = "LGS1_JIT_YREF")
-print_result(s)# s = es_dsl.Search(using = es, index = 'dev_galacsi_health_checks')
-# s = s.sort('-timestamp')
-# s = s.query('match', keywname = "LGS1_JIT_YREF")
-# print_result(s)
+f'LGS{}_'
+['R0', 'L0', 'SEEING', 'FWHM_GAIN', 'STREHL', 'TURVAR_RES, 'TURVAR_TOT, 'TUR_ALT', 'TUR_GND']
 
-#%%
-from elasticsearch import Elasticsearch
-from elasticsearch_dsl import Search
+SPARTA_TT_CUBE:
 
-es = Elasticsearch( hosts=['https://datalab.pl.eso.org:9020'] )
-#%
-# vltlog* index in Elastic is for non keyword-value logs
-query = (Search(using=es, index='vltlog*')
-         # time filter (lt = less than, gt = greater than)
-         .filter('range', **{'@timestamp': {
-             'lt': '2019-04-14T00:10:30',
-             'gt': '2019-04-13T23:50:30',
-         }})
-         # filter by environment and module
-         .filter('term', envname__keyword='wmfsgw')
-#          .filter('term', module__keyword='IRAVCOpt')
-         # make sure the log contains mode and filter
-#          .query('match', logtext='mode')
-         .query('match', logtext='IRLOS')
-         # sorting
-         .sort('-@timestamp')
-         .params(preserve_order=True))
-#%%
-for result in query.scan():
-    print(result['@timestamp'], result.logtext)
-    
+SPARTA_CN2_DATA:
+'Sec'
+'USec'
+'L0Tot'
+'r0Tot'
+'seeingTot'
+'CN2_ALT1'
+'CN2_ALT2'
+'CN2_ALT3'
+'CN2_ALT4'
+'CN2_ALT5'
+'CN2_ALT6'
+'CN2_ALT7'
+'CN2_ALT8'
+'CN2_FRAC_ALT1'
+'CN2_FRAC_ALT2'
+'CN2_FRAC_ALT3'
+'CN2_FRAC_ALT4'
+'CN2_FRAC_ALT5'
+'CN2_FRAC_ALT6'
+'CN2_FRAC_ALT7'
+'CN2_FRAC_ALT8'
+'L0_ALT1'
+'L0_ALT2'
+'L0_ALT3'
+'L0_ALT4'
+'L0_ALT5'
+'L0_ALT6'
+'L0_ALT7'
+'L0_ALT8'
+'ALT1'
+'ALT2'
+'ALT3'
+'ALT4'
+'ALT5'
+'ALT6'
+'ALT7'
+'ALT8'
+
+'Sec'
+'USec'
+'L0Tot'
+'r0Tot'
+'seeingTot'
+f'CN2_ALT{i}'
+f'CN2_FRAC_ALT{i}'
+f'L0_ALT{i}'
+f'ALT{i}'
+
+
+ASM_DATA:
+'TIME_STAMP'
+'ASM_WINDDIR_10'
+'ASM_WINDDIR_30'
+'ASM_WINDSPEED_10'
+'ASM_WINDSPEED_30'
+'ASM_RFLRMS'
+'MASS_FRACGL'
+'SLODAR_FRACGL_300'
+'SLODAR_FRACGL_500'
+'ASM_TAU0'
+'IA_FWHMLIN'
+'MASS_TURB0'
+'MASS_TURB1'
+'MASS_TURB2'
+'MASS_TURB3'
+'MASS_TURB4'
+'MASS_TURB5'
+'MASS_TURB6'
+'SLODAR_CNSQ2'
+'SLODAR_CNSQ3'
+'SLODAR_CNSQ4'
+'SLODAR_CNSQ5'
+'SLODAR_CNSQ6'
+'SLODAR_CNSQ7'
+'SLODAR_CNSQ8'
+'IA_FWHMLINOBS'
+'SLODAR_TOTAL_CN2'
+'R0'
+'IA_FWHM'
+'AZ'
+'AIRMASS'
+'DIMM_SEEING'

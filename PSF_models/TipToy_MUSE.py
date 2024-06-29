@@ -22,19 +22,17 @@ from graphviz import Digraph
 import pickle
 import os
 from os import path
+from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas
 
 from tools.parameter_parser import ParameterParser
-from data_processing.MUSE_read_preproc import MUSEcube
-from tools.utils import plot_radial_profile, rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
-from tools.utils import Center, BackgroundEstimate, CircularMask
-from tools.utils import register_hooks, iter_graph
-from tools.utils import OptimizeTRF, OptimizeLBFGS
-from tools.utils import radial_profile
+from data_processing.MUSE_read_preproc_old import MUSEcube
+from tools.utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
+
 
 path_ini = '../data/parameter_files/muse_ltao.ini'
 
 # Load image
-data_dir = path.normpath('C:/Users/akuznets/Data/MUSE/DATA/')
+data_dir = path.normpath('C:/Users/akuznets/Data/MUSE/DATA_Fernando/')
 listData = os.listdir(data_dir)
 sample_id = 5
 sample_name = listData[sample_id]
@@ -315,7 +313,7 @@ class TipToyMUSE(torch.nn.Module):
         self.Ry[self.nOtf_AO//2, self.nOtf_AO//2] *= 0
 
 
-    def TomographicReconstructors(self, r0, L0, WFS_noise_var, inv_method='fast'):
+    def TomographicReconstructors(self, r0, L0, WFS_noise_var, inv_method='standart'):
         M = 2j*np.pi*self.k_nGs_nGs * \
             torch.sinc(self.WFS_d_sub*self.kx_nGs_nGs) * torch.sinc(self.WFS_d_sub*self.ky_nGs_nGs)
         P = torch.exp(2j*np.pi*self.h * \
@@ -342,15 +340,15 @@ class TipToyMUSE(torch.nn.Module):
 
         if inv_method == 'standart':
             W_tomo = (self.C_phi @ MP_t) @ torch.linalg.pinv(MP @ self.C_phi @ MP_t + \
-                self.C_b + self.noise_nGs_nGs, rcond=1e-2)
+                self.C_b, rcond=1e-2)
 
-        elif inv_method == 'fast':
-            W_tomo = torch.linalg.pinv(MP_t @ C_b_inv @ MP + C_phi_inv, rcond=1e-2) @ (MP_t @ C_b_inv) * \
-                torch.unsqueeze(torch.unsqueeze(self.piston_filter,2),3).repeat(1,1,self.nL,self.nGS)
+        # elif inv_method == 'fast':
+        #     W_tomo = torch.linalg.pinv(MP_t @ C_b_inv @ MP + C_phi_inv, rcond=1e-2) @ (MP_t @ C_b_inv) * \
+        #         torch.unsqueeze(torch.unsqueeze(self.piston_filter,2),3).repeat(1,1,self.nL,self.nGS)
                 
-        elif inv_method == 'lstsq':
-            W_tomo = torch.linalg.lstsq(MP_t @ C_b_inv @ MP + C_phi_inv, MP_t @ C_b_inv).solution * \
-                torch.unsqueeze(torch.unsqueeze(self.piston_filter,2),3).repeat(1,1,2,4)
+        # elif inv_method == 'lstsq':
+        #     W_tomo = torch.linalg.lstsq(MP_t @ C_b_inv @ MP + C_phi_inv, MP_t @ C_b_inv).solution * \
+        #         torch.unsqueeze(torch.unsqueeze(self.piston_filter,2),3).repeat(1,1,2,4)
 
         #TODO: in vanilla TIPTOP windspeeds are interpolated linearly if number of mod layers is changed!!!!!
 
@@ -544,22 +542,72 @@ class TipToyMUSE(torch.nn.Module):
 #%%
 toy_MUSE = TipToyMUSE(config_file, obs_info, 'CUDA')
 
-r0  = torch.tensor(0.1,   requires_grad=True,  device=toy_MUSE.device)
-L0  = torch.tensor(47.93, requires_grad=False, device=toy_MUSE.device)
-F   = torch.tensor(1.0,   requires_grad=True,  device=toy_MUSE.device)
-dx  = torch.tensor(0.0,   requires_grad=True,  device=toy_MUSE.device)
-dy  = torch.tensor(0.0,   requires_grad=True,  device=toy_MUSE.device)
-bg  = torch.tensor(0.0,   requires_grad=True,  device=toy_MUSE.device)
-n   = torch.tensor(3.5,   requires_grad=True,  device=toy_MUSE.device)
-Jx  = torch.tensor(5.0,   requires_grad=True,  device=toy_MUSE.device)
-Jy  = torch.tensor(5.0,   requires_grad=True,  device=toy_MUSE.device)
-Jxy = torch.tensor(2.0,   requires_grad=True,  device=toy_MUSE.device)
+r0  = torch.tensor(0.1,   device=toy_MUSE.device)
+L0  = torch.tensor(47.93, device=toy_MUSE.device)
+F   = torch.tensor(1.0,   device=toy_MUSE.device)
+dx  = torch.tensor(0.0,   device=toy_MUSE.device)
+dy  = torch.tensor(0.0,   device=toy_MUSE.device)
+bg  = torch.tensor(0.0,   device=toy_MUSE.device)
+n   = torch.tensor(3.5,   device=toy_MUSE.device)
+Jx  = torch.tensor(5.0,   device=toy_MUSE.device)
+Jy  = torch.tensor(5.0,   device=toy_MUSE.device)
+Jxy = torch.tensor(2.0,   device=toy_MUSE.device)
 
 parameters = [r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy]
 
 PSF_1 = toy_MUSE.PSD2PSF(*parameters)
 PSF_0 = torch.tensor(im/im.sum(), device=toy_MUSE.device) #* 1e2
-plt.imshow(torch.log(PSF_0).detach().cpu())
+plt.imshow(torch.log10(PSF_0).detach().cpu())
+plt.show()
+plt.imshow(torch.log10(PSF_1).detach().cpu())
+plt.show()
+
+#%%
+from torchmin import minimize
+
+# Join tensors to a single tensor
+def join_tensors(tensors):
+    return torch.cat([t.view(-1) for t in tensors])
+
+#Split a single tensor to a list of tensors
+def split_tensor(tensor_list):
+    return [tensor_list[i] for i in range(len(tensor_list))]
+
+x0 = join_tensors([r0, F, dx, dy, n, Jx, Jy, Jxy])
+
+def func(x_):
+    inputs = split_tensor(x_)
+    inputs.insert(1, L0)
+    inputs.insert(4, bg)
+    return toy_MUSE.PSD2PSF(*inputs)
+    
+def loss_fn(x_):
+    loss = func(x_)- PSF_0
+    return loss.flatten().abs().sum()
+
+#%%
+result = minimize(loss_fn, x0, max_iter=200, tol=1e-4, method='l-bfgs', disp=2)
+
+x0 = result.x
+
+#%%
+with torch.no_grad():
+    PSF_1 = func(x0)
+    fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+    plot_radial_profiles_new( PSF_0[None,...].cpu().numpy(),  PSF_1[None,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+    # plot_radial_profiles_new( PSF_0[:,-1,...].cpu().numpy(), PSF_1[:,-1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+    plt.show()
+  
+    # wvl_select = np.s_[0, -N_wvl//2, -1]
+  
+    draw_PSF_stack(
+        # PSF_0[:,wvl_select,...],
+        # PSF_1[:,wvl_select,...],
+        PSF_0[None,...],
+        PSF_1[None,...],
+        average=True, crop=80)#, scale=None)
+        
+
 
 #%%
 optimizer_trf = OptimizeTRF(toy_MUSE, parameters)

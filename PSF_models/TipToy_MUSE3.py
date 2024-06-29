@@ -19,10 +19,9 @@ import os
 from os import path
 
 from tools.parameter_parser import ParameterParser
-from data_processing.MUSE_read_preproc import MUSEcube
-from tools.utils import plot_radial_profiles, rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
-from tools.utils import OptimizeTRF, OptimizeLBFGS
-from tools.utils import radial_profile
+from data_processing.MUSE_read_preproc_old import MUSEcube
+from tools.utils import rad2mas, rad2arc, deg2rad, r0, r0_new
+
 
 device = torch.device('cuda') if torch.cuda.is_available else torch.device('cpu')
 
@@ -332,6 +331,10 @@ class TipToyMUSE(torch.nn.Module):
             (self.kx_nGs_nL*self.GS_dirs_x_nGs_nL + self.ky_nGs_nL*self.GS_dirs_y_nGs_nL))
 
         MP = M @ P
+        self.MP = MP
+        self.M = M
+        self.P = P
+        
         MP_t = torch.conj(torch.permute(MP, (0,1,3,2)))
 
         ones_mat = (torch.ones(self.nOtf_AO, self.nOtf_AO, self.nGS, self.nGS) * torch.eye(4)).to(self.device) + 0j
@@ -396,10 +399,15 @@ class TipToyMUSE(torch.nn.Module):
         www = 2j*torch.pi*self.k_nGs_nL * \
             torch.sinc(samp_time*self.WFS_det_clock_rate*self.wind_speed*self.freq_t).repeat([1,1,self.nGS,1]) #* dim_1_nL_to_nGS_nL
 
+        self.www = www
+
         #MP_alpha_L = www*torch.sinc(WFS_d_sub*kx_1_1)*torch.sinc(WFS_d_sub*ky_1_1)\
         #                                *torch.exp(2j*np.pi*h*(kx_nGs_nL*GS_dirs_x_nGs_nL + ky_nGs_nL*GS_dirs_y_nGs_nL))
         MP_alpha_L = www * P * \
             ( torch.sinc(self.WFS_d_sub*self.kx_1_1)*torch.sinc(self.WFS_d_sub*self.ky_1_1) )
+            
+        self.MP_alpha_L = MP_alpha_L
+         
         self.W_alpha = (self.W @ MP_alpha_L)
 
 
@@ -417,8 +425,7 @@ class TipToyMUSE(torch.nn.Module):
 
         proj = P_beta_L - self.P_beta_DM @ self.W_alpha
         proj_t = torch.conj(torch.permute(proj,(0,1,3,2)))
-        psd_ST = torch.squeeze(torch.squeeze(torch.abs((proj @ self.C_phi @ proj_t)))) * \
-            self.piston_filter * self.mask_corrected_AO
+        psd_ST = torch.squeeze(torch.squeeze(torch.abs((proj @ self.C_phi @ proj_t)))) * self.piston_filter * self.mask_corrected_AO
         return psd_ST
 
 
@@ -524,17 +531,21 @@ class TipToyMUSE(torch.nn.Module):
         PSD = self.PSDs['fitting'] + \
                 self.PSD_padder(
                     self.PSDs['WFS noise'] + \
-                    # self.PSDs['spatio-temporal'] + \
+                    self.PSDs['spatio-temporal'] + \
                     self.PSDs['aliasing'] + \
-                    self.PSDs['chromatism'])
-
-        cov = 2*fft.fftshift(fft.fft2(fft.fftshift(PSD)))
-        SF  = torch.abs(cov).max()-cov
-
+                    self.PSDs['chromatism']
+                )
+        self.PSD = PSD
+        cov = fft.fftshift(fft.fft2(fft.fftshift(PSD)))
+        SF  = 2*(torch.abs(cov).max()-cov)
+        self.cov = cov
+        self.SF = SF
+        
         center_aligned = torch.exp(-np.pi*1j*(self.nOtf%2)*(self.U+self.V))
         fftPhasor = torch.exp(-np.pi*1j*self.sampling_factor*(self.U*dx+self.V*dy)) * center_aligned
 
         OTF_turb  = torch.exp(-0.5*SF*(2*np.pi*1e-9/self.wvl)**2)
+        self.OTF_turb = OTF_turb
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         OTF = OTF_turb * self.OTF_static * OTF_jitter * fftPhasor
 
@@ -576,18 +587,24 @@ class TipToyMUSE(torch.nn.Module):
 #%%
 # config_file['sensor_science']['FieldOfView'] = 201
 toy = TipToyMUSE(config_file, obs_info, device=device)
-if device == torch.device('cpu'): toy.is_gpu = False
-else: toy.is_gpu = True
+if device == torch.device('cpu'):
+    toy.is_gpu = False
+else:
+    toy.is_gpu = True
 
-r0  = torch.tensor(obs_info['SPTR0'], requires_grad=True,  device=toy.device)
-L0  = torch.tensor(obs_info['SPTL0'], requires_grad=False, device=toy.device)
-#r0  = torch.tensor(0.1,   requires_grad=True,  device=toy_MUSE.device)
-#L0  = torch.tensor(47.93, requires_grad=False, device=toy_MUSE.device)
+toy.wind_dir = torch.tensor([14.0, 4.0], device=device)
+toy.wind_speed = torch.tensor([7.0, 2.0], device=device)
+
+# r0  = torch.tensor(obs_info['SPTR0'], requires_grad=True,  device=toy.device)
+# L0  = torch.tensor(obs_info['SPTL0'], requires_grad=False, device=toy.device)
+r0  = torch.tensor(0.07,  requires_grad=True,  device=toy.device)
+L0  = torch.tensor(40.0,  requires_grad=False, device=toy.device)
 F   = torch.tensor(1.0,   requires_grad=True,  device=toy.device)
 dx  = torch.tensor(0.0,   requires_grad=True,  device=toy.device)
 dy  = torch.tensor(0.0,   requires_grad=True,  device=toy.device)
 bg  = torch.tensor(0.0,   requires_grad=True,  device=toy.device)
-n   = torch.tensor(3.5,   requires_grad=True,  device=toy.device)
+# n   = torch.tensor(3.5,   requires_grad=True,  device=toy.device)
+n   = torch.tensor(0.1443,   requires_grad=True,  device=toy.device)
 Jx  = torch.tensor(5.0,   requires_grad=True,  device=toy.device)
 Jy  = torch.tensor(5.0,   requires_grad=True,  device=toy.device)
 Jxy = torch.tensor(2.0,   requires_grad=True,  device=toy.device)
@@ -597,8 +614,30 @@ parameters = [r0, L0, F, dx, dy, bg, n, Jx, Jy, Jxy]
 toy.StartTimer()
 PSF_1 = toy.PSD2PSF(*parameters)
 print( toy.EndTimer() )
+#%%
+# plt.imshow(toy.MP_alpha_L.abs().squeeze()[...,-3,-2].cpu().numpy())
+# plt.colorbar()
 
-PSF_0 = torch.tensor(im/im.sum(), device=toy.device) #* 1e2
+delta_T  = (1 + toy.HOloop_delay) / toy.HOloop_rate
+delta_h  = -delta_T * toy.freq_t * toy.wind_speed
+P_beta_L = torch.exp(2j*np.pi*delta_h)
+
+# proj = P_beta_L - toy.P_beta_DM @ toy.W_alpha
+# proj_t = torch.conj(torch.permute(proj, (0,1,2,4,3)))
+# psd_ST = torch.squeeze(torch.squeeze(torch.abs((proj @ toy.C_phi @ proj_t)))) * toy.piston_filter * toy.mask_corrected_AO
+    
+# plt.imshow(psd_ST.squeeze().log10().cpu().numpy())
+# plt.imshow(toy.W.detach().squeeze()[...,1].imag.cpu().numpy())
+# plt.colorbar()
+# plt.show()
+
+
+plt.imshow(toy.PSDs['spatio-temporal'].detach().abs().squeeze().log10().cpu().numpy())
+plt.colorbar()
+plt.show()
+
+#%%
+# PSF_0 = torch.tensor(im/im.sum(), device=toy.device) #* 1e2
 
 # plt.imshow(torch.log(PSF_0).detach().cpu())
 
@@ -607,7 +646,8 @@ PSF_0 = torch.tensor(im/im.sum(), device=toy.device) #* 1e2
 
 # plt.imshow(torch.log(PSF_1[el_croppo]).detach().cpu())
 plt.imshow(torch.log(PSF_1).detach().cpu())
-
+plt.colorbar()
+plt.show()
 #%%
 loss_fn1 = nn.L1Loss(reduction='sum')
 def loss_fn(A,B):

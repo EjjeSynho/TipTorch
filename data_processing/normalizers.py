@@ -6,6 +6,7 @@ import numpy as np
 
 from scipy import stats
 from scipy.stats import boxcox, yeojohnson, norm
+from scipy.optimize import curve_fit
 
 
 class InputsTransformer:
@@ -58,6 +59,73 @@ class InputsTransformer:
             val = self.transforms[key].backward(joint_tensor[:, sl])
             decomposed[key] = val.squeeze(-1) if sl.stop-sl.start<2 else val # expects the TipTorch's conventions about the tensors dimensions
         
+        return decomposed
+
+
+class LineModel:
+    def __init__(self, x, norms):
+        self.norms = norms
+        self.x = x
+        self.x_min = x.min().item()
+
+    @staticmethod
+    def line(λ, k, y_min, λ_min, A, B):
+        return (A * k * (λ - λ_min) + y_min) * B
+
+    def fit(self, y):
+        x_ = self.x.flatten().cpu().numpy()
+        y_ = y.flatten().cpu().numpy()
+
+        func = lambda x, k, y_min: self.line(x, k, y_min, self.x_min, *self.norms)
+        popt, _ = curve_fit(func, x_, y_, p0=[1e-6, 1e-6])
+        return popt
+    
+    def __call__(self, params):
+        return self.line(self.x, *params, self.x_min, *self.norms)
+
+
+class InputsCompressor:
+    def __init__(self, transforms, models):
+        self.transforms = transforms
+        self.models = models
+        self._slices = {}
+        self._packed_size = None
+
+    def stack(self, args_dict, no_transform=False):
+        tensors = []
+        current_index = 0
+
+        for key, value in args_dict.items():
+            if key in self.models:
+                transformed_value = value.unsqueeze(-1) if value.ndim == 1 else value
+            else:
+                if not no_transform:
+                    transformed_value = self.transforms[key](value.unsqueeze(-1) if value.dim() == 1 else value)
+
+            next_index = current_index + transformed_value.numel()
+            self._slices[key] = slice(current_index, next_index)
+            current_index = next_index
+            tensors.append(transformed_value.view(-1))
+
+        joint_tensor = torch.cat(tensors)
+        self._packed_size = joint_tensor.shape[0]
+        return joint_tensor
+
+    def get_packed_size(self):
+        return self._packed_size
+
+    def destack(self, joint_tensor):
+        decomposed = {}
+        for key, sl in self._slices.items():
+            if key in self.models.keys():
+                params = joint_tensor[:, sl]
+                
+                y_pred = self.models[key](*params)
+                decomposed[key] = y_pred.squeeze(-1) if sl.stop - sl.start < 2 else y_pred
+            else:
+                val = self.transforms[key].backward(joint_tensor[:, sl])
+                decomposed[key] = val.squeeze(-1) if sl.stop - sl.start < 2 else val
+
         return decomposed
 
 

@@ -18,7 +18,7 @@ import os
 from os import path
 
 from tools.parameter_parser import ParameterParser
-from data_processing.MUSE_read_preproc import MUSEcube
+from data_processing.MUSE_read_preproc_old import MUSEcube
 from tools.utils import plot_radial_profile, rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 from tools.utils import Center, BackgroundEstimate, CircularMask
 from tools.utils import register_hooks, iter_graph

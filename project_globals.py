@@ -13,6 +13,7 @@ SPHERE_FITTING_FOLDER = folder_data["SPHERE_fitting_folder"]
 SPHERE_DATASET_FOLDER = folder_data["SPHERE_dataset_folder"]
 SPHERE_DATA_FOLDER = folder_data["SPHERE_data_folder"]
 MUSE_CUBES_FOLDER = folder_data["MUSE_cubes_folder"]
+MUSE_DATA_FOLDER = folder_data["MUSE_data_folder"]
 MUSE_RAW_FOLDER = folder_data["MUSE_raw_folder"]
 WEIGHTS_FOLDER = path / Path("data/weights")
 DATA_FOLDER = path / Path("data/")

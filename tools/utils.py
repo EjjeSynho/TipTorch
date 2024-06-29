@@ -15,7 +15,8 @@ import seaborn as sns
 from photutils.centroids import centroid_quadratic, centroid_com
 from photutils.profiles import RadialProfile
 from astropy.modeling import models, fitting
-
+from astropy.nddata import Cutout2D
+from photutils.centroids import centroid_2dg, centroid_com, centroid_quadratic
 
 rad2mas  = 3600 * 180 * 1000 / np.pi
 rad2arc  = rad2mas / 1000
@@ -25,6 +26,19 @@ asec2rad = np.pi / 180 / 3600
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
+
+
+def to_little_endian(array):
+    # Determine the current data type and convert to little-endian if necessary
+    type_map = {
+        '>f8': '<f8',  # Convert from big-endian double to little-endian double
+        '>f4': '<f4'   # Convert from big-endian float to little-endian float
+    }
+    # Check if the current data type needs conversion
+    new_type = type_map.get(array.dtype.str)
+    if new_type:
+        return array.astype(new_type)
+    return array
 
 
 def corr_plot(data, entry_x, entry_y, lims=None, title=None):
@@ -306,7 +320,7 @@ def CroppedROI(im, point, win):
              slice(max(point[1]-win//2, 0), min(point[1]+win//2+win%2, im.shape[1])) )
 
 
-def GetROIaroundMax(im, win=100):
+def GetROIaroundMax(im, win=200):
     im[np.isinf(im)] = np.nan
     # determine the position of maximum intensity, so the image is centered around the brightest star
     max_id = np.unravel_index(np.nanargmax(im), im.shape)
@@ -317,6 +331,33 @@ def GetROIaroundMax(im, win=100):
     ids = CroppedROI(im, max_id, win)
     return im[ids], ids, max_id
 
+'''
+def CroppedROI(im, point, win):
+    return ( np.s_[max(point[0]-win//2, 0): min(point[0]+win//2+win%2, im.shape[0])],
+             np.s_[max(point[1]-win//2, 0): min(point[1]+win//2+win%2, im.shape[1])] )
+
+
+def GetROIaroundMax(im, win=200):
+    im[np.isinf(im)] = np.nan  # replacing inf values with nan to handle with astropy
+    
+    # determine the position of maximum intensity, so the image is centered around the brightest star
+    max_id = np.unravel_index(np.nanargmax(im), im.shape)
+
+    max_crop = CroppedROI(im, max_id, 20)
+    cropped_im = im[max_crop]
+    
+    # Applying centroiding on the non-NaN values using CoM
+    try:
+        x_centroid, y_centroid = centroid_com(cropped_im)
+        max_id = (max_crop[0].start + int(round(x_centroid)), max_crop[1].start + int(round(y_centroid)))
+        
+    # If centroid fails, fallback to the simple max position
+    except Exception as e:
+        print(f"Centroid computation failed: {e}")
+        
+    ids = CroppedROI(im, max_id, win)
+    return im[ids], ids, max_id
+'''
 
 # Adds singleton dimensions to the tensor. If negative, dimensions are added in the beginning, else in the end
 def pdims(x, ns):
@@ -711,7 +752,7 @@ def draw_PSF_stack(
             norm = None
         
         ax.imshow(row, norm=norm)
-        ax.set_title('Sources average')
+        # ax.set_title('Sources average')
         ax.axis('off')
         # plt.show()
 
@@ -732,7 +773,7 @@ def draw_PSF_stack(
                 norm = None
                 
             ax.imshow(row, norm=norm)
-            ax.set_title('Source %d' % src)
+            # ax.set_title('Source %d' % src)
             ax.axis('off')
             plt.show()
 
@@ -863,14 +904,10 @@ def plot_std(x,y, label, color, style): #TODO: deprecated
 def safe_centroid(data):       
     xycen = centroid_quadratic(np.abs(data))
     
-    if np.any(np.isnan(xycen)):
-        xycen = centroid_com(np.abs(data))
-        
-    if np.any(np.isnan(xycen)):
-        xycen = np.array(data.shape)//2
-        
+    if np.any(np.isnan(xycen)): xycen = centroid_com(np.abs(data))
+    if np.any(np.isnan(xycen)): xycen = np.array(data.shape)//2
+    
     return xycen
-
 
 
 def render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambda x: x, ax=None):
@@ -908,6 +945,8 @@ def plot_radial_profiles_new(PSF_0,
                              centers = None,
                              return_profiles = False,
                              ax = None,
+                             linthresh = 5e-1,
+                             y_min = 1e-2,
                              suppress_plot = False):
             
     def calc_profile(data, xycen=None):
@@ -917,14 +956,13 @@ def plot_radial_profiles_new(PSF_0,
         return rp.profile
 
     def _radial_profiles(PSFs, centers=None):
-        # if PSFs.ndim == 2: PSFs = PSFs[np.newaxis, ...]
         listify_PSF = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
         PSFs = listify_PSF(PSFs)
         if centers is None:
             centers = [None]*len(PSFs)
         else:
             if type(centers) is not list:
-                if centers.size == 2:
+                if centers.size == 2: 
                     centers = [centers] * len(PSFs)
                 else:
                     centers = [centers[i,...] for i in range(len(PSFs))]
@@ -932,29 +970,37 @@ def plot_radial_profiles_new(PSF_0,
         profiles = np.vstack( [calc_profile(PSF, center) for PSF, center in zip(PSFs, centers) if not np.all(np.isnan(PSF))] )
         return profiles
 
-    if PSF_0.ndim == 2: PSF_0 = PSF_0[np.newaxis, ...]
-    if PSF_1.ndim == 2: PSF_1 = PSF_1[np.newaxis, ...]
-
-    profis_0 = _radial_profiles( PSF_0[:,...], centers )
-    profis_1 = _radial_profiles( PSF_1[:,...], centers )
-
-    center_0 = safe_centroid(np.abs(np.nanmean(PSF_0, axis=0)))
-    center_1 = safe_centroid(np.abs(np.nanmean(PSF_1, axis=0)))
-    center_  = np.mean([center_0, center_1], axis=0)
-    profis_err = _radial_profiles( PSF_0[:,...] - PSF_1[:,...], center_ )
+    if PSF_0.ndim == 2:
+        PSF_0 = PSF_0[np.newaxis, ...]
+    
+    if PSF_1.ndim == 2:
+        PSF_1 = PSF_1[np.newaxis, ...]
+    
+    if centers is None:
+        centers = safe_centroid(np.nanmean(PSF_0, axis=0))
+        
+    profis_0   = _radial_profiles( PSF_0, centers )
+    profis_1   = _radial_profiles( PSF_1, centers )
+    profis_err = _radial_profiles( PSF_0-PSF_1, centers )
+    
+    # center_0 = safe_centroid(np.abs(np.nanmean(PSF_0, axis=0)))
+    # center_1 = safe_centroid(np.abs(np.nanmean(PSF_1, axis=0)))
+    # center_  = np.mean([center_0, center_1], axis=0)
+    
+    # profis_0 = _radial_profiles( PSF_0, centers )
+    # profis_1 = _radial_profiles( PSF_1, centers )
+    # profis_err = _radial_profiles( PSF_0 - PSF_1, center_ )
 
     if not suppress_plot:
         if ax is None:
             fig = plt.figure(figsize=(6, 4), dpi=300)
             ax  = fig.gca()
-            
-
+    
     y_max = np.median(profis_0, axis=0).max()
 
     p_0 = profis_0 / y_max * 100.0
     p_1 = profis_1 / y_max * 100.0
     p_err = np.abs(profis_err / y_max * 100.0)
-
 
     if not suppress_plot:
         render_profile(p_0,   color=colors[0], label=label_0, linewidth=2, ax=ax)
@@ -967,10 +1013,10 @@ def plot_radial_profiles_new(PSF_0,
         y_lim = max([p_0.max(), p_1.max(), p_err.max()])
         if scale == 'log':
             x_max = cutoff
-            ax.set_yscale('symlog', linthresh=5e-1)
-            ax.set_ylim(1e-2, y_lim)
+            ax.set_yscale('symlog', linthresh=linthresh)
+            ax.set_ylim(y_min, y_lim)
         else:
-            x_max = cutoff#*0.7
+            x_max = cutoff
             ax.ylim(0, y_lim)
 
         ax.set_title(title)
@@ -985,92 +1031,6 @@ def plot_radial_profiles_new(PSF_0,
         return p_0, p_1, p_err
 
 
-'''
-def DisplayDataset(samples_list, tiles_in_row, show_labels=True, dpi=300):
-    from PIL import Image, ImageDraw
-    from matplotlib import cm
-
-    def prepare_single_img(sample, crop_region=32):
-        buf_data = sample['input']['image']
-        label_buf = sample['file_id']
-
-        crop_region = 32
-        ROI_x = slice(buf_data.shape[0]//2-crop_region, buf_data.shape[0]//2+crop_region)
-        ROI_y = slice(buf_data.shape[1]//2-crop_region, buf_data.shape[1]//2+crop_region)
-        buf_data = np.log(buf_data/buf_data.max())[(ROI_x, ROI_y)]
-        buf_data -= buf_data[np.where(np.isfinite(buf_data))].min()
-        buf_data[np.where(np.isnan(buf_data))] = 0.0
-
-        im_buf = Image.fromarray( np.uint8(cm.viridis(buf_data/buf_data.max())*255) )
-        if show_labels:
-            I1 = ImageDraw.Draw(im_buf)
-            I1.text((0,0), str(label_buf), fill=(255,255,255))
-        return np.asarray(im_buf)
-
-    def prepare_row(row_list):
-        row_processed = [prepare_single_img(buf) for buf in row_list]
-        hspace = 3
-        hgap = np.ones([row_processed[0].shape[0], hspace, 4], dtype=row_processed[0].dtype)
-
-        row = []
-        for i in range(len(row_processed)-1):
-            row.append(row_processed[i])
-            row.append(hgap)
-        row.append(row_processed[-1])
-        return np.hstack(row)
-
-    def prepare_ids(num_in_row, samples_num):
-        A = []
-        ids = np.arange(samples_num).tolist()
-        c = 0
-        if num_in_row > samples_num: num_in_row = samples_num
-        for i in range(samples_num//num_in_row+1):
-            a = []
-            for j in range(num_in_row):
-                if c >= samples_num: break
-                a.append(ids[c])
-                c = c+1
-            if len(a) > 0: A.append(a)
-        return A
-
-    def match_dimensions(col_list):
-        delta_width = col_list[-2].shape[1] - col_list[-1].shape[1]
-
-        if delta_width > 0:
-            filler = np.ones([col_list[-2].shape[0], delta_width, 4], dtype=np.uint8)*255
-            col_list[-1] = np.hstack([col_list[-1], filler])
-        return col_list
-
-    def prepare_cols(samples_list, ids_list):
-        col_list = []
-        for a in ids_list:
-            buf_samples = [samples_list[i] for i in a]
-            col_list.append(prepare_row(buf_samples))
-
-        col_list = match_dimensions(col_list)
-
-        col_processed = [col for col in col_list]
-        vspace = 3
-        vgap = np.ones([vspace, col_processed[0].shape[1], 4], dtype=col_processed[0].dtype)*255
-
-        cols = []
-        for i in range(len(col_processed)-1):
-            cols.append(col_processed[i])
-            cols.append(vgap)
-        cols.append(col_processed[-1])
-        return np.vstack(cols)
-
-    samples_num = len(samples_list)
-
-    ids  = prepare_ids(tiles_in_row, samples_num)
-    tile = prepare_cols(samples_list, ids)
-
-    plt.figure(dpi=dpi)
-    plt.axis('off')
-    plt.imshow(tile)
-'''
-
-
 def CircPupil(samples, D=8.0, centralObstruction=1.12):
     x      = np.linspace(-1/2, 1/2, samples)*D
     xx,yy  = np.meshgrid(x,x)
@@ -1080,105 +1040,97 @@ def CircPupil(samples, D=8.0, centralObstruction=1.12):
     return pupil * obs
 
 
-def PupilVLT(samples, vangle=[0,0], petal_modes=False):
-    pupil_diameter = 8.0	  # pupil diameter [m]
-    secondary_diameter = 1.12 # diameter of central obstruction [m] 1.12
-    alpha = 101				  # spider angle [degrees]
-    spider_width = 0.039	  # spider width [m] 0.039;  spider is 39 mm
-    # wide excepted on small areas where 50 mm width are reached over a length 
-    # of 80 mm,near the centre of the spider (before GRAVITY modification?), 
-    # see VLT-DWG-AES-11310-101010
+def PupilVLT(samples, vangle=[0,0], rotation_angle=0, secondary_diameter=1.12, spider_width=0.039, petal_modes=False):
+    pupil_diameter = 8.0
+    alpha = 101.4
 
-    shx = np.cos(np.deg2rad(vangle[1]))* 101.4*np.tan(np.deg2rad(vangle[0]/60))  # shift of the obscuration on the entrance pupil [m]
-    shx = np.cos(np.deg2rad(vangle[1]))* 101.4*np.tan(np.deg2rad(vangle[0]/60))  # shift of the obscuration on the entrance pupil [m]
-    shy = np.sin(np.deg2rad(vangle[1]))* 101.4*np.tan(np.deg2rad(vangle[0]/60))  # shift of the obscuration on the entrance pupil [m]
-    delta = pupil_diameter/samples # distance between samples [m]
-    ext = 2*np.max(np.fix(np.abs(np.array([shx, shy]))))+1
+    # Calculate shift of the obscuration
+    rad_vangle = np.deg2rad(vangle[0]/60)
+    shx = np.cos(np.deg2rad(vangle[1])) * 101.4 * np.tan(rad_vangle)
+    shy = np.sin(np.deg2rad(vangle[1])) * 101.4 * np.tan(rad_vangle)
 
-    # create coordinate matrices
-    x1_min = -(pupil_diameter+ext - 2*delta)/2
-    x1_max = (pupil_diameter + ext)/2
-    num_grid = int((x1_max-x1_min)/delta)+1
+    # Create coordinate matrices
+    delta = pupil_diameter / samples
+    ext = 2 * np.max(np.abs([shx, shy])) + 1
+    grid_range = np.arange(-(pupil_diameter + ext - 2 * delta) / 2, (pupil_diameter + ext) / 2 + delta, delta)
+    x, y = np.meshgrid(grid_range, grid_range)
 
-    x1 = np.linspace(x1_min, x1_max, num_grid) #int(1/delta))
-    x, y = np.meshgrid(x1, x1)
+    # Mask for pupil and central obstruction
+    mask = (np.sqrt((x-shx)**2 + (y-shy)**2) <= pupil_diameter / 2) & (np.sqrt(x**2+y**2) >= secondary_diameter*1.1 / 2)
 
-    #  Member data
-    mask = np.ones([num_grid, num_grid], dtype='bool')
-    mask[ np.where( np.sqrt( (x-shx)**2 + (y-shy)**2 ) > pupil_diameter/2 ) ] = False
-    mask[ np.where( np.sqrt( x**2 + y**2 ) < secondary_diameter/2 ) ] = False
+    # Rotation function
+    def rotate(x, y, angle):
+        rad_angle = np.deg2rad(angle)
+        x_rot = x * np.cos(rad_angle) - y * np.sin(rad_angle)
+        y_rot = x * np.sin(rad_angle) + y * np.cos(rad_angle)
+        return x_rot, y_rot
 
-    # Spiders
-    alpha_rad = alpha * np.pi / 180
-    slope     = np.tan( alpha_rad/2 )
+    # Rotate coordinates
+    x_rot, y_rot = rotate(x, y, rotation_angle)
 
-    petal_1 = np.zeros([num_grid, num_grid], dtype='bool')
-    petal_2 = np.zeros([num_grid, num_grid], dtype='bool')
-    petal_3 = np.zeros([num_grid, num_grid], dtype='bool')
-    petal_4 = np.zeros([num_grid, num_grid], dtype='bool')
+    # Function to create spider petals
+    def create_petal(condition):
+        petal = np.zeros_like(x_rot, dtype=bool)
+        petal[condition] = True
+        return petal & mask
 
-    #North
-    petal_1[ np.where(   
-        (( -y > 0.039/2 + slope*(-x - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x<0)  & (y<=0)) | \
-        (( -y > 0.039/2 + slope*( x - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x>=0) & (y<=0)) )] = True
-    petal_1 *= mask
+    # Calculate spider petals with rotation
+    alpha_rad = np.deg2rad(alpha)
+    slope = np.tan(alpha_rad / 2)
+    
+    petal_conditions = [
+        np.where(
+            (( -y_rot > spider_width/2 + slope*(-x_rot - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x_rot<0)  & (y_rot<=0)) | \
+            (( -y_rot > spider_width/2 + slope*( x_rot - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x_rot>=0) & (y_rot<=0))
+        ),
+        np.where(
+            (( -y_rot < spider_width/2 + slope*( x_rot - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x_rot>0) & (y_rot<=0)) | \
+            ((  y_rot < spider_width/2 + slope*( x_rot - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x_rot>0) & (y_rot>0))
+        ),
+        np.where(
+            ((  y_rot > spider_width/2 + slope*(-x_rot - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x_rot<=0) & (y_rot>0)) | \
+            ((  y_rot > spider_width/2 + slope*( x_rot - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x_rot>0)  & (y_rot>0))
+        ),
+        np.where(
+            (( -y_rot < spider_width/2 + slope*(-x_rot - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x_rot<0) & (y_rot<0)) |\
+            ((  y_rot < spider_width/2 + slope*(-x_rot - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x_rot<0) & (y_rot>=0))
+        )
+    ]
+    petals = [create_petal(condition) for condition in petal_conditions]
 
-    #East 
-    petal_2[ np.where(   
-        (( -y < 0.039/2 + slope*( x - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x>0) & (y<=0)) | \
-        ((  y < 0.039/2 + slope*( x - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x>0) & (y>0)) )] = True
-    petal_2 *= mask
-        
-    #South
-    petal_3[ np.where(   
-        ((  y > 0.039/2 + slope*(-x - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x<=0) & (y>0)) | \
-        ((  y > 0.039/2 + slope*( x - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x>0)  & (y>0)) )] = True
-    petal_3 *= mask
-        
-    #West
-    petal_4[ np.where(   
-        (( -y < 0.039/2 + slope*(-x - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x<0) & (y<0)) |\
-        ((  y < 0.039/2 + slope*(-x - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x<0) & (y>=0)) )] = True
-    petal_4 *= mask
-        
-    lim_x = [ ( np.fix((shy+ext/2)/delta) ).astype('int'), ( -np.fix((-shy+ext/2)/delta) ).astype('int') ]
-    lim_y = [ ( np.fix((shx+ext/2)/delta) ).astype('int'), ( -np.fix((-shx+ext/2)/delta) ).astype('int') ]
-
-    petal_1 = resize(petal_1[ lim_x[0]:-1+lim_x[1], lim_y[0]:-1+lim_y[1] ], (samples, samples), anti_aliasing=False)
-    petal_2 = resize(petal_2[ lim_x[0]:-1+lim_x[1], lim_y[0]:-1+lim_y[1] ], (samples, samples), anti_aliasing=False)
-    petal_3 = resize(petal_3[ lim_x[0]:-1+lim_x[1], lim_y[0]:-1+lim_y[1] ], (samples, samples), anti_aliasing=False)
-    petal_4 = resize(petal_4[ lim_x[0]:-1+lim_x[1], lim_y[0]:-1+lim_y[1] ], (samples, samples), anti_aliasing=False)
+    # Resize petals
+    lim_x = [(np.fix((shy + ext / 2) / delta)).astype(int), (-np.fix((-shy + ext / 2) / delta)).astype(int)]
+    lim_y = [(np.fix((shx + ext / 2) / delta)).astype(int), (-np.fix((-shx + ext / 2) / delta)).astype(int)]
+    resized_petals = [resize(petal[lim_x[0]:lim_x[1], lim_y[0]:lim_y[1]], (samples, samples), anti_aliasing=False) for petal in petals]
 
     if petal_modes:
-        xx1, yy1 = np.meshgrid(np.linspace( -0.5, 0.5,  samples), np.linspace(-0.25, 0.75, samples))
-        xx2, yy2 = np.meshgrid(np.linspace(-0.75, 0.25, samples), np.linspace( -0.5, 0.5,  samples))
-        xx3, yy3 = np.meshgrid(np.linspace( -0.5, 0.5,  samples), np.linspace(-0.75, 0.25, samples))
-        xx4, yy4 = np.meshgrid(np.linspace(-0.25, 0.75, samples), np.linspace( -0.5, 0.5,  samples))
+        limits = [(( -0.5,  0.5 ),  (-0.25, 0.75)),
+                  (( -0.75, 0.25),  (-0.5,  0.5 )),
+                  (( -0.5,  0.5 ),  (-0.75, 0.25)),
+                  (( -0.25, 0.75),  (-0.5,  0.5 ))]
 
         def normalize_petal_mode(petal, coord):
             mode = petal.astype('double') * coord
             mode -= mode.min()
-            mode /= (mode.max()+mode.min())
+            mode /= (mode.max() + mode.min())
             mode -= 0.5
             mode[np.where(petal==False)] = 0.0
             mode[np.where(petal==True)] -= mode[np.where(petal==True)].mean()
             mode /= mode[np.where(petal==True)].std()
             return mode
 
-        tip_1 = normalize_petal_mode(petal_1, yy1)
-        tip_2 = normalize_petal_mode(petal_2, yy2)
-        tip_3 = normalize_petal_mode(petal_3, yy3)
-        tip_4 = normalize_petal_mode(petal_4, yy4)
+        tips, tilts  = [], []
 
-        tilt_1 = normalize_petal_mode(petal_1, xx1)
-        tilt_2 = normalize_petal_mode(petal_2, xx2)
-        tilt_3 = normalize_petal_mode(petal_3, xx3)
-        tilt_4 = normalize_petal_mode(petal_4, xx4)
+        for i in range(4):
+            xx, yy = np.meshgrid(np.linspace(*limits[i][0],  samples), np.linspace(*limits[i][1], samples))
+            xx_rot, yy_rot = rotate(xx, yy, rotation_angle)
+            tips.append(  normalize_petal_mode(resized_petals[i], yy_rot) )
+            tilts.append( normalize_petal_mode(resized_petals[i], xx_rot) )
 
-        return np.dstack( [petal_1, petal_2, petal_3, petal_4, tip_1, tip_2, tip_3, tip_4, tilt_1, tilt_2, tilt_3, tilt_4] )
+        return np.dstack([*resized_petals, *tips, *tilts])
 
     else:
-        return petal_1 + petal_2 + petal_3 + petal_4
+        return sum(resized_petals)
 
 
 def VLTpupilArea(instrument='SPHERE'): # [m2]
