@@ -19,7 +19,7 @@ import os
 from os import path
 
 from tools.parameter_parser import ParameterParser
-from data_processing.MUSE_read_preproc_old import MUSEcube
+from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tools.utils import rad2mas, rad2arc, deg2rad, r0, r0_new
 
 

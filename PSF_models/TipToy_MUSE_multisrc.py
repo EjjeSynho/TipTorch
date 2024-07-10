@@ -8,13 +8,12 @@ from torch import fft, nn
 from torch.nn.functional import interpolate
 import scipy.special as spc
 from astropy.io import fits
+import torchvision.transforms as transforms
+
 import time
 
 import matplotlib.pyplot as plt
-from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, r0, pdims, min_2d, to_little_endian
-
-from tools.utils import PupilVLT
-
+from tools.utils import rad2mas, rad2arc, deg2rad, r0_new, r0, pdims, min_2d, to_little_endian, PupilVLT
 
 # import torch.autograd.profiler as profiler
 
@@ -22,36 +21,31 @@ class TipTorch(torch.nn.Module):
     def InitPupils(self):
         # with profiler.record_function("INIT PUPLAS"):
         
-        apodizer_flag = self.config['telescope']['PathApodizer'] is not None
-        self.apodizer = None
-        
-        pupil_path = self.config['telescope']['PathPupil']
-        
-        if apodizer_flag:
-            pupil_apodizer = self.config['telescope']['PathApodizer']
-    
         try:
-            # self.pupil = self.make_tensor( to_little_endian(fits.getdata(pupil_path)) )
-            
+            # Manage pupil      
+            pupil_path = self.config['telescope']['PathPupil']
             if 'PupilAngle' in self.config['telescope']:
                 self.pupil_angle = self.config['telescope']['PupilAngle']
             else:
                 self.pupil_angle = 0.0
-            
+            # TODOL pupil generator
             self.pupil =  self.make_tensor( PupilVLT(
                 samples = 320,
                 vangle = [0,0],
-                rotation_angle = -45.0 + self.pupil_angle,
+                rotation_angle = self.pupil_angle,
                 secondary_diameter=1.12,
                 spider_width=0.039*2
             ) )
             
-            if apodizer_flag:
-                self.apodizer = self.make_tensor( to_little_endian(fits.getdata(pupil_apodizer)) )
+            # Manage apodizer
+            apodizer_path = self.config['telescope']['PathApodizer']
+            
+            if apodizer_path is not None and self.apodizer is None:
+                self.apodizer = self.make_tensor( to_little_endian(fits.getdata(apodizer_path)) )
     
         except FileNotFoundError:
             pupil_path = pupil_path.replace('\\', '/')
-            pupil_apodizer = pupil_apodizer.replace('\\', '/')
+            apodizer_path = apodizer_path.replace('\\', '/')
                     
         
     def InitValues(self):
@@ -192,17 +186,39 @@ class TipTorch(torch.nn.Module):
         # with profiler.record_function("INIT GRIDDIES"):
         # Initialize grids
         # for all generated PSDs within one batch sampling must be the same
+        '''
         to_odd = lambda f: int( np.ceil(f)//2 * 2 - 1) if not f % 2 else int(f)
+        to_odd_arr = lambda arr: np.array([to_odd(f) for f in arr])
+
+        # to_odd = lambda f: int( np.ceil(f)//2 * 2 - 1) if not f % 2 else np.ceil(f).astype(int)
         # to_even = lambda f: int( np.ceil(f)//2 * 2 )
 
         # Manage sampling
         pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
         self.sampling_factor = torch.ceil(2.0/pixels_per_l_D) * self.oversampling # to avoid aliasing or to provide oversampling
         self.sampling = self.sampling_factor * pixels_per_l_D
-        self.nOtf = self.nPix * self.sampling_factor.max().item()
-        self.nOtf = to_odd(self.nOtf) + 2 #Forces nOtf to be odd
+        self.nOtf = to_odd(self.nPix * self.sampling_factor.max().item()) + 2
+        '''
+        
+        def to_odd(x):
+            odd = int(np.round(x))
+            if odd % 2 == 0:
+                odd += 1 if x > odd else -1
+            return odd
 
-        self.dk = 1/self.D/self.sampling.max() # PSD spatial frequency step
+        to_odd_arr = lambda arr: np.vectorize(to_odd)(arr)
+        
+        pixels_per_l_D = self.wvl*rad2mas / (self.psInMas*self.D)
+        self.sampling_factor = 2.0/pixels_per_l_D * self.oversampling 
+        self.sampling = self.sampling_factor * pixels_per_l_D # must be = 2*oversamplig
+
+        self.nOtfs = to_odd_arr(self.nPix * self.sampling_factor.cpu().numpy().flatten())
+        self.nOtf  = self.nOtfs.max().item()
+
+        # sampling_factor_ = self.nOtfs / self.nPix
+        # sampling_ = sampling_factor_ * pixels_per_l_D.cpu().numpy()    
+        
+        self.dk = 1/self.D/self.sampling.min() # PSD spatial frequency step
         self.cte = (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3)))
         
         # Initialize PSD spatial frequencies
@@ -328,7 +344,11 @@ class TipTorch(torch.nn.Module):
 
     
     def Phase2OTF(self, phase, sampling):    
-        ''' Compute OTF from a phase screen''' 
+        '''
+        Compute OTF from a phase screen.
+        All phase screens are sampled equally for all wavelengths.
+        However, phase screens might be different for each wavelength.
+        '''
         pupil_size   = phase.shape[-1]
         pupil_padder = torch.nn.ZeroPad2d( int(pupil_size*sampling/2-pupil_size/2) )
         phase_padded = pupil_padder(phase)
@@ -337,18 +357,19 @@ class TipTorch(torch.nn.Module):
         phase_padded = phase_padded[:-1, :-1] if fl_even else phase_padded # to center-align if number of pixels is even
 
         OTF = self._fftAutoCorr(phase_padded)
+        OTF = OTF.view(1, 1, *OTF.shape) if OTF.ndim == 2 else OTF
 
         interp = lambda x: \
-            interpolate(x[None,None,...], size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False).squeeze() * sampling**2
+            interpolate(x, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False) * sampling**2
             
-        # PyTorch doesn't support interpolation of complex tensors yet TODO: or is it?
+        # PyTorch doesn't support interpolation of complex tensors yet
         OTF_ = interp(OTF.real) + interp(OTF.imag)*1j
-        
         return OTF_ / OTF_.abs().max()
     
     
     def StandartStaticOTF(self):
-        ''' Compute static OTF for each wavelength'''
+        '''
+        # Compute static OTF for each wavelength
         wvl_cpu = self.wvl.cpu().numpy()
         ids = np.unravel_index(np.unique(wvl_cpu, return_index=True)[1], self.wvl.shape)
         
@@ -370,11 +391,20 @@ class TipTorch(torch.nn.Module):
         del OTF_static_dict
         
         return OTF_static_
-    
+        '''
+
+        if self.apodizer is not None:
+            pupil_phase = self.pupil * self.apodizer
+        else:
+            pupil_phase = self.pupil
+
+        return self.Phase2OTF(pupil_phase, self.sampling.min().item())
+        
 
     def ComputeStaticOTF(self, phase_generator):
         if phase_generator is not None:
-        
+            # raise NotImplementedError('Phase generator is not implemented yet')
+            '''            
             OTF_static = torch.zeros([self.N_src, self.wvl.shape[1], self.nOtf, self.nOtf], device=self.device, dtype=torch.complex64)
             phase = phase_generator()
 
@@ -382,7 +412,9 @@ class TipTorch(torch.nn.Module):
                 for j in range(len(self.wvl[i])):
                     OTF_static[i,j,...] = self.Phase2OTF(phase[i,j,...], self.sampling[i][j])
 
-            self.OTF_static = OTF_static
+            self.OTF_static = OTF_static 
+            '''
+            self.OTF_static = self.Phase2OTF(phase_generator(), self.sampling.min().item())
 
         return self.OTF_static
 
@@ -442,6 +474,7 @@ class TipTorch(torch.nn.Module):
         # Read data and initialize AO system
         self.piston_filter = None
         self.PR = None
+        self.apodizer = None
         
         self.config = AO_config
         self.InitValues()
@@ -669,10 +702,8 @@ class TipTorch(torch.nn.Module):
         
         # Noise variance calculation
         varNoise = self.WFS_excessive_factor * (varRON+varShot) * (500e-9/WFS_wvl)**2
-        # if varNoise.shape[1] > 1: # it means that there are several LGS, 0th dim is reserved for the targets
-            # varNoise = varNoise.mean(dim=1) # averaging the varience over the LGSs
+
         return varNoise
-        # return torch.tensor([[0.23455516,]*4]).to(self.device) #TODO: remove this later
 
 
     def TomographicReconstructors(self, r0, L0, WFS_noise_var, inv_method='lstsq'):
@@ -885,10 +916,22 @@ class TipTorch(torch.nn.Module):
     
 
     def OTF2PSF(self, OTF):
+        '''
         # s = tuple([OTF.shape[-2] + 1-self.nPix%2]*2)
         # PSF = fft.fftshift(fft.ifft2(fft.ifftshift(OTF*self.center_aligner, dim=(-2,-1)), s=s), dim=(-2,-1)).abs()
-        PSF = fft.fftshift(fft.ifft2(fft.ifftshift(OTF, dim=(-2,-1))), dim=(-2,-1)).abs()
-        return interpolate(PSF, size=(self.nPix, self.nPix), mode='bilinear') if OTF.shape[-1] != self.nPix else PSF           
+        PSF = fft.fftshift(fft.ifft2(fft.ifftshift(OTF*self.center_aligner, dim=(-2,-1))), dim=(-2,-1)).abs()
+        return interpolate(PSF, size=(self.nPix, self.nPix), mode='bilinear') if OTF.shape[-1] != self.nPix else PSF    
+        '''
+        # PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF*self.center_aligner, dim=(-2,-1)), s=s), dim=(-2,-1)).abs()
+        PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF*self.center_aligner, dim=(-2,-1))), dim=(-2,-1)).abs()
+
+        PSF = []
+        for i in range(self.wvl.shape[-1]):
+            n = 0 if PSF_big.shape[1] == 1 else i # In the case OTF is only computed for minimal sampling
+            transform = transforms.CenterCrop((self.nOtfs[i], self.nOtfs[i]))
+            PSF.append(interpolate(transform(PSF_big[:,n,...]).unsqueeze(1), size=(self.nPix, self.nPix), mode='bilinear') if OTF.shape[-1] != self.nPix else transform(PSF_big[:,n,...]).unsqueeze(1))
+            
+        return torch.hstack(PSF)
 
 
     def PSD2PSF(self, PSD, OTF_static):
@@ -913,12 +956,13 @@ class TipTorch(torch.nn.Module):
         # Phasor to shift the PSF with the subpixel accuracy
         fftPhasor = torch.exp( -np.pi*1j * pdims(self.sampling_factor,2) * (self.U.unsqueeze(1)*dx + self.V.unsqueeze(1)*dy) )
         OTF_turb  = torch.exp( -0.5 * SF * pdims(2*np.pi*1e-9/self.wvl,2)**2 )
+        # self.OTF_turb = OTF_turb
+        
         # Compute the residual tip/tilt kernel
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         # Resulting combined OTF
         self.OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
-
-        self.OTF_jitter = OTF_jitter
+        # self.OTF_jitter = OTF_jitter
 
         PSF_out = self.OTF2PSF(self.OTF)
         self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)

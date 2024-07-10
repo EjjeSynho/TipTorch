@@ -84,6 +84,37 @@ class LineModel:
         return self.line(self.x, *params, self.x_min, *self.norms)
 
 
+import numpy as np
+from scipy.optimize import curve_fit
+
+class PolyModel:
+    def __init__(self, x, norms):
+        self.norms = norms
+        self.x = x
+        self.x_min = x.min().item()
+
+    @staticmethod
+    def poly(λ, a, b, c, λ_min, A, B):
+        y_2 = A * λ-λ_min
+        return (a*y_2**2 + b*y_2 + c) * B
+    
+    def fit(self, y):
+        # Flatten the arrays and move data to CPU and numpy for processing with curve_fit
+        x_ = self.x.flatten().cpu().numpy()
+        y_ = y.flatten().cpu().numpy()
+
+        # Define the fitting function adjusting to the model's x_min and norms
+        func = lambda x, a, b, c: self.poly(x, a, b, c, self.x_min, *self.norms)
+        
+        # Use curve_fit to find the optimal parameters
+        popt, _ = curve_fit(func, x_, y_, p0=[1e-6, 1e-6, 1e-6])
+        return popt
+
+    def __call__(self, params):
+        # Call the polynomial function with the found parameters and stored x-values
+        return self.poly(self.x, *params, self.x_min, *self.norms)
+
+
 class InputsCompressor:
     def __init__(self, transforms, models):
         self.transforms = transforms

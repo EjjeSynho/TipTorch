@@ -13,262 +13,224 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
+from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID
 from tools.config_manager import GetSPHEREonsky
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
 from astropy.stats import sigma_clipped_stats
-
 from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager
-
-from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, InputsCompressor
-    
-from data_processing.MUSE_read_preproc_old import MUSEcube
+from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, PolyModel, InputsCompressor
+from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tqdm import tqdm
 
-#%% My new process
-
-sample_name = '411_M.MUSE.2024-05-06T16-57-21.086.pickle'
-# sample_name = '410_M.MUSE.2024-05-06T16-44-36.486.pickle'
-# sample_name = '409_M.MUSE.2024-05-02T22-51-44.900.pickle'
-
-with open(MUSE_DATA_FOLDER+'DATA_reduced/'+sample_name, 'rb') as f:
-    sample = pickle.load(f)
-
-#%
-# %matplotlib qt
-PSF_0_ = sample['images']['cube'][:,1:,1:]
-PSF_0_ /= PSF_0_.sum(axis=(-1,-2), keepdims=True)
-PSF_0_ = torch.tensor(PSF_0_).float().unsqueeze(0).to(device)
-
-# plt.imshow(PSF_0[-1,:,...].mean(dim=0).log().cpu().numpy())
-# plt.show()
-
-wvls_ = [(sample['spectral data']['wvls binned']*1e-9).tolist()]
-N_wvl_ = len(wvls_[0])
 #%%
-
-# 'images'
-# 'IRLOS data'
-# 'LGS data'
-# 'MUSE header data'
-# 'Raw Cn2 data'
-# 'Raw atm data'
-# 'Raw ASM data'
-# 'ASM data'
-# 'MASS-DIMM data',
-# 'DIMM data',
-# 'SLODAR data',
-# 'All data',
-# 'spectral data'
-
-# x0s = []
-# PSF_1s = []
-
-# Manage config files
-# for wvl_id in tqdm(range(N_wvl_)):
-
-# wvl_id = 0
-# wvls = [wvls_[0][wvl_id]]
-# N_wvl = 1
-# PSF_0 = PSF_0_[:,wvl_id,...].unsqueeze(1)
-
-wvls  = wvls_
-PSF_0 = PSF_0_
-N_wvl = N_wvl_
-
-config_manager = ConfigManager()
-config_file    = ParameterParser('../data/parameter_files/muse_ltao.ini').params
-# merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample, *config_loader()) for sample in data_samples])
-
-#%
-# For NFM it's save to assume gound layer to be below 2 km, for WFM it's lower than that
-h_GL = 2000
-
-Cn2_weights = np.array([sample['Raw Cn2 data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
-altitudes   = np.array([sample['Raw Cn2 data'][f'ALT{i}'].item() for i in range(1, 9)])*100 # in meters
-
-Cn2_weights_GL = Cn2_weights[altitudes < h_GL]
-altitudes_GL   = altitudes  [altitudes < h_GL]
-
-GL_frac  = Cn2_weights_GL.sum()  # Ground layer fraction
-Cn2_w_GL = np.interp(h_GL, altitudes, Cn2_weights)
-
-
-config_file['NumberSources'] = 1
-
-config_file['telescope']['TelescopeDiameter'] = 8.0
-config_file['telescope']['ZenithAngle'] = [90.0 - sample['MUSE header data']['Tel. altitude'].item()]
-config_file['telescope']['Azimuth']     = [sample['MUSE header data']['Tel. azimuth'].item()]
-config_file['telescope']['PupilAngle']  = 22+5.5
-
-config_file['atmosphere']['Seeing'] = [sample['MUSE header data']['Seeing (header)'].item()]
-config_file['atmosphere']['L0'] = [sample['Raw Cn2 data']['L0Tot'].item()]
-config_file['atmosphere']['Cn2Weights'] = [[GL_frac, 1-GL_frac]]
-config_file['atmosphere']['Cn2Heights'] = [[0, h_GL]]
-config_file['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item(),]*2]
-config_file['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item(),]*2]
-config_file['sources_science']['Wavelength'] = wvls
-
-config_file['sources_LO']['Wavelength'] = (1215+1625)/2.0 * 1e-9
-
-config_file['sensor_science']['PixelScale'] = sample['MUSE header data']['Pixel scale (science)'].item()
-config_file['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
-
-LGS_ph = [[sample['All data'][f'LGS{i} photons, [photons/m^2/s]'].item() / 1240e3 for i in range(1,5)]]
-
-# LGS_ph = [[200,]*4]
-# config_file['DM']['DmPitchs'] = [config_file['DM']['DmPitchs'][0]*1.25]
-    
-config_file['sensor_HO']['NumberPhotons'] = LGS_ph
-config_file['sensor_HO']['SizeLenslets']  = config_file['sensor_HO']['SizeLenslets'][0]
-# config_file['sensor_HO']['NoiseVariance'] = 4.5
-
-IRLOS_ph_per_subap_per_frame = \
-    sample['IRLOS data']['IRLOS photons, [photons/s/m^2]'].item() / sample['IRLOS data']['frequency'].item() / 4
-
-config_file['sensor_LO']['PixelScale'] = sample['IRLOS data']['plate scale, [mas/pix]'].item()
-config_file['sensor_LO']['NumberPhotons'] = [IRLOS_ph_per_subap_per_frame]
-config_file['sensor_LO']['SigmaRON']      = sample['IRLOS data']['RON, [e-]'].item()
-config_file['sensor_LO']['Gain']          = [sample['IRLOS data']['gain'].item()]
-
-config_file['RTC']['SensorFrameRate_LO'] = [sample['IRLOS data']['frequency'].item()]
-config_file['RTC']['SensorFrameRate_HO'] = [config_file['RTC']['SensorFrameRate_HO']]
-
-config_file['RTC']['LoopDelaySteps_HO'] = [config_file['RTC']['LoopDelaySteps_HO']]
-config_file['RTC']['LoopGain_HO'] = [config_file['RTC']['LoopGain_HO']]
-
-config_file['sensor_HO']['ClockRate'] = np.mean([config_file['sensor_HO']['ClockRate']])
-
-config_manager.Convert(config_file, framework='pytorch', device=device)
-
-
-#% Fernandos's process
-'''
-# Load image
-data_dir = path.normpath('C:/Users/akuznets/Data/MUSE/DATA_Fernando/')
-listData = os.listdir(data_dir)
-sample_id = 5
-sample_name = listData[sample_id]
-path_im = path.join(data_dir, sample_name)
-angle = np.zeros([len(listData)])
-angle[0] = -46
-angle[5] = -44
-angle = angle[sample_id]
-
-data_cube = MUSEcube(path_im, crop_size=200, angle=angle)
-im, _, wvl = data_cube.Layer(5)
-obs_info = dict( data_cube.obs_info )
-
-PSF_0 = torch.tensor(im).unsqueeze(0).unsqueeze(0).to(device)
-PSF_0 /= PSF_0.sum(dim=(-1,-2), keepdim=True)
-
-
-config_manager = ConfigManager()
-config_file    = ParameterParser('../data/parameter_files/muse_ltao.ini').params
-
-config_file['NumberSources'] = 1
-
-config_file['telescope']['TelescopeDiameter'] = 8.0
-config_file['telescope']['ZenithAngle'] = [90.0-obs_info['TELALT']]
-config_file['telescope']['Azimuth']     = [obs_info['TELAZ']]
-
-config_file['atmosphere']['Cn2Weights'] = [config_file['atmosphere']['Cn2Weights']]
-config_file['atmosphere']['Cn2Heights'] = [config_file['atmosphere']['Cn2Heights']]
-
-config_file['atmosphere']['Seeing']        = [obs_info['SPTSEEIN']]
-config_file['atmosphere']['L0']            = [obs_info['SPTL0']]
-config_file['atmosphere']['WindSpeed']     = [[obs_info['WINDSP'],] * 2]
-config_file['atmosphere']['WindDirection'] = [[obs_info['WINDIR'],] * 2]
-
-config_file['sensor_science']['Zenith']      = [90.0-obs_info['TELALT']]
-config_file['sensor_science']['Azimuth']     = [obs_info['TELAZ']]
-config_file['sensor_science']['PixelScale']  = 25
-config_file['sensor_science']['FieldOfView'] = im.shape[0]
-
-config_file['sources_science']['Wavelength'] = [wvl]
-
-config_file['sources_LO']['Wavelength'] = (1215+1625)/2.0 * 1e-9
-
-config_file['sensor_HO']['NoiseVariance'] = 4.5
-config_file['sensor_HO']['SizeLenslets']  = config_file['sensor_HO']['SizeLenslets'][0]
-# config_file['sensor_HO']['NumberPhotons'] = [[200,]*4]
-config_file['sensor_HO']['ClockRate'] = np.mean([config_file['sensor_HO']['ClockRate']])
-
-config_file['RTC']['SensorFrameRate_HO'] = [config_file['RTC']['SensorFrameRate_HO']]
-config_file['RTC']['LoopDelaySteps_HO']  = [config_file['RTC']['LoopDelaySteps_HO']]
-config_file['RTC']['LoopGain_HO']        = [config_file['RTC']['LoopGain_HO']]
-
-config_manager.Convert(config_file, framework='pytorch', device=device)
-'''
+# 411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335
+sample = LoadMUSEsampleByID(405)
+PSF_0, var_mask, norms = LoadImages(sample)
+config_file, PSF_0 = GetConfig(sample, PSF_0)
+N_wvl = PSF_0.shape[1]
 
 #%% Initialize the model
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
-# from tools.utils import LWE_basis
+from tools.utils import SausageFeature
 
-toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=False, oversampling=1)
+Moffat_absorber = False
+
+toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+sausage_absorber = SausageFeature(toy)
+sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
 
 toy.PSD_include['fitting'] = True
 toy.PSD_include['WFS noise'] = True
 toy.PSD_include['spatio-temporal'] = True
-toy.PSD_include['aliasing'] = True
+toy.PSD_include['aliasing'] = False
 toy.PSD_include['chromatism'] = True
-toy.PSD_include['Moffat'] = False   
+toy.PSD_include['Moffat'] = Moffat_absorber
 
 toy.to_float()
 # toy.to_double()
 
-inputs = {
+inputs_tiptorch = {
     # 'r0':  torch.tensor([0.09561153075597545], device=toy.device),
     'F':   torch.tensor([[1.0,]*N_wvl], device=toy.device),
     # 'L0':  torch.tensor([47.93], device=toy.device),
     'dx':  torch.tensor([[0.0,]*N_wvl], device=toy.device),
     'dy':  torch.tensor([[0.0,]*N_wvl], device=toy.device),
+    # 'dx':  torch.tensor([[0.0]], device=toy.device),
+    # 'dy':  torch.tensor([[0.0]], device=toy.device),
     'bg':  torch.tensor([[1e-06,]*N_wvl], device=toy.device),
-    # 'dn':  torch.tensor([4.5], device=toy.device),
+    'dn':  torch.tensor([1.5], device=toy.device),
     'Jx':  torch.tensor([[10,]*N_wvl], device=toy.device),
-    'Jy':  torch.tensor([[20,]*N_wvl], device=toy.device),
+    'Jy':  torch.tensor([[10,]*N_wvl], device=toy.device),
+    # 'Jx':  torch.tensor([[10]], device=toy.device),
+    # 'Jy':  torch.tensor([[10]], device=toy.device),
     'Jxy': torch.tensor([[45]], device=toy.device)
 }
 
-# inputs2 = {
-#     'amp':   torch.ones (toy.N_src, device=toy.device)*4.0,  # Phase PSD Moffat amplitude [rad²]
-#     'b':     torch.ones (toy.N_src, device=toy.device)*0.01, # Phase PSD background [rad² m²]
-#     'alpha': torch.ones (toy.N_src, device=toy.device)*0.1,  # Phase PSD Moffat alpha [1/m]
-#     'beta':  torch.ones (toy.N_src, device=toy.device)*2,    # Phase PSD Moffat beta power law
-#     'ratio': torch.ones (toy.N_src, device=toy.device),      # Phase PSD Moffat ellipticity
-#     'theta': torch.zeros(toy.N_src, device=toy.device),      # Phase PSD Moffat angle
-# }
+if Moffat_absorber:
+    inputs_psfao = {
+        'amp':   torch.ones (toy.N_src, device=toy.device)*0.0,   # Phase PSD Moffat amplitude [rad²]
+        'b':     torch.ones (toy.N_src, device=toy.device)*0.0,  # Phase PSD background [rad² m²]
+        'alpha': torch.ones (toy.N_src, device=toy.device)*0.1,   # Phase PSD Moffat alpha [1/m]
+        'beta':  torch.ones (toy.N_src, device=toy.device)*2,     # Phase PSD Moffat beta power law
+        'ratio': torch.ones (toy.N_src, device=toy.device),       # Phase PSD Moffat ellipticity
+        'theta': torch.zeros(toy.N_src, device=toy.device),       # Phase PSD Moffat angle
+    }
+else:
+    inputs_psfao = {}
 
-PSF_1 = toy(x=inputs)
+inputs = inputs_tiptorch | inputs_psfao
+
+# PSF_1 = toy(x=inputs)
 # PSF_1 = toy(x=inputs2)
+
+# angle_correction = angle_search()
+# print('Angle correction', angle_correction)
+# config_file['telescope']['PupilAngle'] += angle_correction
+
+# toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=True, oversampling=1)
+PSF_1 = toy(x=inputs)
+# PSF_1 = toy(x=inputs, phase_generator=lambda: sausage_absorber(0.25, -20))
 
 #print(toy.EndTimer())
 # PSF_DL = toy.DLPSF()
 
 # draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80, scale='log')
-plt.imshow(PSF_1[0,-1,...].log10().cpu().numpy())
+
+aa = 0
+plt.imshow(PSF_1[0,aa,...].log10().cpu().numpy())
+plt.show()
+# plt.imshow(PSF_1[0,-1,...].log10().cpu().numpy())
+# plt.show()
+plt.imshow(PSF_0[0,aa,...].abs().log10().cpu().numpy())
+plt.show()
+# plt.imshow(PSF_0[0,-1,...].abs().log10().cpu().numpy())
+# plt.show()
+
+#%%
+from tools.utils import safe_centroid, RadialProfile, wavelength_to_rgb
+
+def calc_profile(data, xycen=None):
+    xycen = safe_centroid(data) if xycen is None else xycen
+    edge_radii = np.arange(data.shape[-1]//2)
+    rp = RadialProfile(data, xycen, edge_radii)
+    return rp.profile
+
+def _radial_profiles(PSFs, centers=None):
+    listify_PSF = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
+    PSFs = listify_PSF(PSFs)
+    if centers is None:
+        centers = [None]*len(PSFs)
+    else:
+        if type(centers) is not list:
+            if centers.size == 2: 
+                centers = [centers] * len(PSFs)
+            else:
+                centers = [centers[i,...] for i in range(len(PSFs))]
+
+    profiles = np.vstack( [calc_profile(PSF, center) for PSF, center in zip(PSFs, centers) if not np.all(np.isnan(PSF))] )
+    return profiles
+
+
+#%
+
+plt.figure(figsize=(10, 8))
+
+profis_0 = _radial_profiles(PSF_0[0, ...].cpu().numpy(), centers=None)
+profis_1 = _radial_profiles(PSF_1[0, ...].cpu().numpy(), centers=None)
+colors = [wavelength_to_rgb(toy.wvl[0][i]*1e9-100, show_invisible=True) for i in range(N_wvl)]
+
+# colors2 = []
+# for i in range(N_wvl):
+#     buffo = wavelength_to_rgb(toy.wvl[0][i]*1e9-100, show_invisible=True)
+#     buffy = [0,0,0]
+#     for j in range(3):
+#         buffy[j] = buffo[j]*0.5 + 0.5
+#     colors2.append(buffy)
+
+for i in range(PSF_0.shape[1]):
+    plt.plot(profis_0[i], color=colors[i], alpha=0.5)
+    plt.plot(profis_1[i], color=colors[i], alpha=0.2)
+    
+    
+plt.yscale('symlog', linthresh=1e-5)
+plt.xlim(0, 40)
+plt.ylim(1e-5, 0.1)
+plt.grid()
+
+#%
+a = [[51.4, 61.1, 70.3],[47.4,60.5,74.5],[43.6,60.0,78.1]]
+a = np.array(a)
+b = a[:,-1] - a[:,1]
+c = a[:,1] - a[:,0]
+r = (b+c)/2 # [pix]
+
+pix_mas = 25
+
+w = np.array([495, 722, 919])*1e-9
+r_mas = r*pix_mas / rad2mas
+D = 8
+
+l_D = w / D
+
+#%
+a = [9.2, 10.7, 12.1, 14, 15.7, 16.5, 17.6]
+b = [10.5, 12, 13.4, 15.3, 17.6, 18, 19.6]
+w = [495, 560, 622, 722, 820, 853, 919]
+
+# Fit line
+w = np.array(w)
+a = np.array(a)
+b = np.array(b)
+
+w = w.reshape(-1, 1)
+a = a.reshape(-1, 1)
+b = b.reshape(-1, 1)
+
+from sklearn.linear_model import LinearRegression
+
+reg = LinearRegression().fit(w, a)
+a_pred = reg.coef_ * w + reg.intercept_
+
+reg = LinearRegression().fit(w, b)
+b_pred = reg.coef_ * w + reg.intercept_
+
+# a_pred -= a_pred[0]
+# b_pred -= b_pred[0]
+
+# plt.plot(w, a, 'o-', color='blue')
+plt.plot(w, a_pred, 'o-', color='blue')
+# plt.plot(w, b, 'o-', color='red')
+plt.plot(w, b_pred, 'o-', color='red')
+
+
 
 
 #%% PSF fitting (no early-stopping)
 norm_F     = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0) ])
 norm_bg    = TransformSequence(transforms=[ Uniform(a=-5e-6, b=5e-6)])
-norm_r0    = TransformSequence(transforms=[ Uniform(a=0,     b=0.5) ])
+norm_r0    = TransformSequence(transforms=[ Uniform(a=0,     b=1)  ])
 norm_dxy   = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
 norm_J     = TransformSequence(transforms=[ Uniform(a=0,     b=50)  ])
 norm_Jxy   = TransformSequence(transforms=[ Uniform(a=-180,  b=180) ])
-norm_dn    = TransformSequence(transforms=[ Uniform(a=0,     b=10)  ])
+norm_dn    = TransformSequence(transforms=[ Uniform(a=0,     b=5)  ])
 
-# norm_amp   = TransformSequence(transforms=[ Uniform(a=0,     b=5)   ])
-# norm_b     = TransformSequence(transforms=[ Uniform(a=0,     b=1)   ])
-# norm_alpha = TransformSequence(transforms=[ Uniform(a=0,     b=5)   ])
-# norm_beta  = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
-# norm_ratio = TransformSequence(transforms=[ Uniform(a=0,     b=2)   ])
-# norm_theta = TransformSequence(transforms=[ Uniform(a=-np.pi/2, b=np.pi/2)])
+norm_sausage_pow = TransformSequence(transforms=[ Uniform(a=0, b=1)  ])
+# norm_sausage_ang = TransformSequence(transforms=[ Uniform(a=-30, b=30)  ])
 
-# The order matters here!
-transformer = InputsTransformer({
+norm_amp   = TransformSequence(transforms=[ Uniform(a=0,     b=10)   ])
+norm_b     = TransformSequence(transforms=[ Uniform(a=0,     b=0.1)   ])
+norm_alpha = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
+norm_beta  = TransformSequence(transforms=[ Uniform(a=0,     b=10)   ])
+norm_ratio = TransformSequence(transforms=[ Uniform(a=0,     b=2)   ])
+norm_theta = TransformSequence(transforms=[ Uniform(a=-np.pi/2, b=np.pi/2)])
+
+include_sausage = True
+# include_sausage = False
+
+# The order of definition matters here!
+transformer_dict = {
     'r0':  norm_r0,
     'F':   norm_F,
     'dx':  norm_dxy,
@@ -278,123 +240,166 @@ transformer = InputsTransformer({
     'Jx':  norm_J,
     'Jy':  norm_J,
     'Jxy': norm_Jxy,
-    
-    # 'amp'  : norm_amp,
-    # 'b'    : norm_b,
-    # 'alpha': norm_alpha,
-    # 'beta' : norm_beta,
-    # 'ratio': norm_ratio,
-    # 'theta': norm_theta
-})
+    's_pow': norm_sausage_pow,
+    # 's_ang': norm_sausage_ang
+}
 
-# Loop through the class attributes to get the initial values and dimensions
-# inp_dict = {}
-# ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']:
-inp_dict = { attr: getattr(toy, attr) for attr in transformer.transforms.keys() }
-_ = transformer.stack(inp_dict) # to create index mapping
+if Moffat_absorber:
+    transformer_dict.update({
+        'amp'  : norm_amp,
+        'b'    : norm_b,
+        'alpha': norm_alpha,
+        # 'beta' : norm_beta,
+        # 'ratio': norm_ratio,
+        # 'theta': norm_theta
+    })
+
+
+transformer = InputsTransformer(transformer_dict)
+
+# Loop through the class attributes to get the initial values and their dimensions
+if include_sausage:
+    toy.s_pow = torch.zeros([1,1], device=toy.device).float()
+
+_ = transformer.stack({ attr: getattr(toy, attr) for attr in transformer_dict }) # to create index mapping
 
 #%%
 x0 = [\
-    # TipTorch realm
-    norm_r0.forward(toy.r0).item(),
-    *([1.0,]*N_wvl),
-    *([0.0,]*N_wvl),
-    *([0.0,]*N_wvl),
-    *([0.0,]*N_wvl),
-    0.5,
-    *([-0.9,]*N_wvl),
-    *([-0.1,]*N_wvl),
-    0.25,
-
-    #PSFAO realm
-    # norm_amp.forward(toy.amp).item(),
-    # norm_b.forward(toy.b).item(),
-    # norm_alpha.forward(toy.alpha).item(),
-    # norm_beta.forward(toy.beta).item(),
-    # norm_ratio.forward(toy.ratio).item(),
-    # norm_theta.forward(toy.theta).item(),
+    norm_r0.forward(toy.r0).item(), # r0
+    *([1.0,]*N_wvl), # F
+    *([0.0,]*N_wvl), # dx
+    *([0.0,]*N_wvl), # dy
+    # 0.0,
+    # 0.0,
+    *([0.0,]*N_wvl), # bg
+    0.7, # dn
+    # -0.9,
+    # -0.9,
+    *([-0.9,]*N_wvl), # Jx
+    *([-0.9,]*N_wvl), # Jy
+    0.0, # Jxy
 ]
+
+if Moffat_absorber:
+    x0 += [\
+        # PSFAO realm
+        *([ 1.0,]*N_wvl),
+        *([-0.5,]*N_wvl),
+        *([ 0.3,]*N_wvl),
+        # *([ 1.0,]*N_wvl),
+        # *([ 0.0,]*N_wvl),
+        # *([ 0.3,]*N_wvl)
+    ]
+
+if include_sausage:
+    x0 += [0.9]
 
 # x0 = transformer.stack(inputs)
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 
-#%
-def func(x_):
+def func(x_, include_list=None):
     x_torch = transformer.destack(x_)
-    return toy(x_torch)
+    
+    if include_sausage and 's_pow' in x_torch:
+        phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
+    else:
+        phase_func = None
+    
+    if include_list is not None:
+        return toy({ key: x_torch[key] for key in include_list }, None, phase_generator=phase_func)
+    else:
+        return toy(x_torch, None, phase_generator=phase_func)
 
-
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl_).to(device).view(1, N_wvl_, 1, 1) * 2
-
-mask = torch.tensor(mask_circle(PSF_1.shape[-1], 20)).view(1, 1, *PSF_1.shape[-2:]).to(device)
-mask_inv = 1.0 - mask
 #%
-def loss_MSE(x_):
-    diff = (func(x_) - PSF_0) * wvl_weights
-    return diff.pow(2).sum() * 200 / PSF_0.shape[0] / PSF_0.shape[1]
-    # return diff.abs().sum() / PSF_0.shape[0] / PSF_0.shape[1]
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl_).to(device).view(1, N_wvl_, 1, 1) * 2
+mask = torch.tensor(mask_circle(PSF_1.shape[-1], 5)).view(1, 1, *PSF_1.shape[-2:]).to(device)
+mask_inv = 1.0 - mask
+
+# plt.imshow(mask.cpu().numpy().squeeze())
+
+#%
+# XX, YY = np.meshgrid(np.arange(PSF_0.shape[-1]), np.arange(PSF_0.shape[-2]))
+# grad_map = np.sqrt( (XX - PSF_0.shape[-1]//2)**2 + (YY - PSF_0.shape[-2]//2)**2 )
+# grad_map = grad_map / grad_map.max()
+# grad_map += 0.25
+# grad_map = grad_map / grad_map.max() * 2
+# grad_map = torch.tensor(grad_map).float().to(device).unsqueeze(0).unsqueeze(0)
+
+def loss_MSE(x_, include_list=None, mask_=1):
+    diff = (func(x_, include_list) - PSF_0) * mask_ * wvl_weights ##
+    return diff.pow(2).sum() * 200 / PSF_0.shape[0] / PSF_0.shape[1] #+ MAP*0.25
+    # MAP = ((x_-dn_m)*mask_dn).sum()**2 /0.5**2 + ((x_-r0_m)*mask_r0).sum()**2 / 0.5**2
     # return ( mask*diff.pow(2)*200 + diff.abs() ).flatten().sum() / PSF_0.shape[0] / PSF_0.shape[1]
 
-def loss_MAE(x_):
-    diff = (func(x_) - PSF_0) * wvl_weights
-    # return diff.pow(2).sum() * 200 / PSF_0.shape[0] / PSF_0.shape[1]
+def loss_MAE(x_, include_list=None, mask_=1):
+    diff = (func(x_, include_list) - PSF_0) * wvl_weights * mask_
     return diff.abs().sum() / PSF_0.shape[0] / PSF_0.shape[1]
-    # return ( mask*diff.pow(2)*200 + diff.abs() ).flatten().sum() / PSF_0.shape[0] / PSF_0.shape[1]
+
+
+# include_MAE = ['r0', 'bg', 'dn', 's_pow']
+# include_MSE = ['F', 'dx', 'dy', 'Jx', 'Jy', 'Jxy', 'r0', 'bg']
+# include_all.remove('dn')
 
 def loss_fn(x_):
-    diff = (func(x_) - PSF_0)*wvl_weights
-    # return diff.pow(2).sum() * 200 / PSF_0.shape[0] / PSF_0.shape[1]
-    # return diff.abs().sum() / PSF_0.shape[0] / PSF_0.shape[1]
-    return ( diff.pow(2)*200 + mask_inv*diff.abs()*0.5 ).flatten().sum() / PSF_0.shape[0] / PSF_0.shape[1]
-
-#%
-# PSF_1 = func(x0)
-# plt.imshow((PSF_1[0,0,...]).log10().cpu().numpy())
-
+    return loss_MSE(x_) + loss_MAE(x_) * 0.4
+    
 #%%
-result = minimize(loss_MSE, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+# if toy.N_wvl > 1:
+_ = func(x0)
+
+result = minimize(loss_MAE, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+x0 = result.x
+result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
 x0 = result.x
 
-# result = minimize(loss_MSE, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
-# x0 = result.x
-# result = minimize(loss_MAE, x0, max_iter=20, tol=1e-3, method='bfgs', disp=2)
-# result = minimize(loss_MSE, x0, max_iter=20, tol=1e-3, method='bfgs', disp=2)
-# result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
-# x0_buf = x0.clone()
+x_torch = transformer.destack(x0)
 
-# x0s.append(x0_buf)
-# PSF_1s.append(func(x0_buf).clone())
+phase_func = lambda: sausage_absorber(toy.s_pow.flatten()) if include_sausage else None
+PSF_1 = toy(x_torch, None, phase_generator=phase_func)
 
-# x0s_ = torch.stack(x0s).squeeze().detach().cpu().numpy()
-# PSF_1s_ = torch.stack(PSF_1s).squeeze().detach().cpu().numpy()
-# np.save('../data/temp/x0s.npy', x0s_)
-# np.save('../data/temp/PSF_1s_.npy', x0s_)
+
+'''
+else:
+    _ = func(x0)
+
+    result = minimize(lambda x: loss_MAE(x, mask_=mask_inv), x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+    x0 = result.x
+
+    x_torch = transformer.destack(x0)
+    x_torch['Jx'] = x_torch['Jx']*0 + 10
+    x_torch['Jy'] = x_torch['Jy']*0 + 10
+    result = minimize(lambda x: loss_MSE(x, include_MSE), x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+    # result = minimize(loss_fn, x0_tiptorch, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+    x0 = result.x
+
+    x_torch = transformer.destack(x0)
+
+    phase_func = lambda: sausage_absorber(toy.s_pow.flatten()) if include_sausage else None
+    PSF_1 = toy(x_torch, None, phase_generator=phase_func)
+'''
 
 
 #%%
 from tools.utils import plot_radial_profiles_new
 
-many_wvls = len(toy.wvl[0]) > 1
-
-PSF_1 = func(x0) 
 center = np.array([PSF_0.shape[-2]//2, PSF_0.shape[-1]//2])
 
-if many_wvls:
+if len(toy.wvl[0]) > 1:
     wvl_select = np.s_[0, 6, 12]
 
     draw_PSF_stack( PSF_0.cpu().numpy()[0, wvl_select, ...], PSF_1.cpu().numpy()[0, wvl_select, ...], average=True, crop=120 )
     
     PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
-    
+
     fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
     for i, lmbd in enumerate(wvl_select):
-        plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=40,  ax=ax[i] )
+        plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=60,  ax=ax[i] )
     plt.show()
-    
+
 else:
     draw_PSF_stack( PSF_0.cpu().numpy()[:,0,...], PSF_1.cpu().numpy()[:,0,...], average=True, crop=120 )
     
-    plot_radial_profiles_new( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=20, title='Left PSF')
+    plot_radial_profiles_new( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
     plt.show()
 
 #%%
@@ -425,44 +430,9 @@ plt.plot(toy.wvl.squeeze().cpu().numpy().flatten()*1e9, toy.Jx.detach().cpu().nu
 plt.plot(toy.wvl.squeeze().cpu().numpy().flatten()*1e9, toy.dx.detach().cpu().numpy().flatten())
 # plt.plot(toy.wvl.squeeze().cpu().numpy().flatten()*1e9, toy.F.cpu().numpy().flatten())
 # plt.plot(toy.wvl.squeeze().cpu().numpy().flatten()*1e9, toy.Jxy.cpu().numpy().flatten())
-#%%
-from sklearn.linear_model import LinearRegression
-
-X = toy.wvl.squeeze().cpu().numpy().flatten().reshape(-1, 1) * 1e9
-y = toy.bg.detach().cpu().numpy().flatten() * 1e6
-
-reg = LinearRegression().fit(X, y)
-
-y_pred = reg.coef_ * X + reg.intercept_
-
-print(reg.coef_, reg.intercept_)
-
-plt.plot(X, y)
-plt.plot(X, y_pred)
-plt.show()
-
 
 
 #%%
-# Fit parabolic function to the background
-from scipy.optimize import curve_fit
-
-line = lambda λ, k, y_min, λ_min, A, B: (A*k*(λ-λ_min) + y_min)*B
-# parabola = lambda x, a, b, c: a*x**2 + b*x + c
-
-to_np = lambda x: x.flatten().cpu().numpy()
-
-def get_init_params(x, y, norm_A, norm_B):
-    x_ = to_np(x)
-    y_ = to_np(y)
-    x_min = x_.min()
-    
-    func = lambda x, k, y_min: line(x, k, y_min, x_min, norm_A, norm_B)
-    popt, pcov = curve_fit(func, x_, y_, p0=[1e-6, 1e-6])
-    y_pred = func(x_, *popt)
-    
-    return popt, y_pred
-
 line_norms = {
     'F' : (1e6, 1),
     'dx': (1e6, 1e0),
@@ -472,92 +442,54 @@ line_norms = {
     'Jy': (1e6, 1e2),
 }
 
-init_params, y_preds = {}, {}
+# models_dict = {key: LineModel(toy.wvl, line_norms[key]) for key in line_norms.keys() }
+models_dict = {key: PolyModel(toy.wvl, line_norms[key]) for key in line_norms.keys() }
 
-for key, val in line_norms.items():
-    param_val = getattr(toy, key)
-    param_val = param_val.abs() if key in ['F', 'Jx', 'Jy'] else getattr(toy, key)
-    init_params[key], y_pred = get_init_params(toy.wvl, param_val, *val)
-    print(key, init_params[key])
-    y_preds[key] = y_pred
-
-
-slices = {}
-current_index = 0
-
-x0_compressed = []
-for key in inp_dict.keys():
-    if key in init_params:
-        x0_compressed.append(init_params[key][0])
-        x0_compressed.append(init_params[key][1])
-        slices[key] = slice(current_index, current_index+2)
-        current_index += 2
+inp_dict_2 = {}
+for key in transformer.transforms.keys(): 
+    if key == 's_pow':
+        inp_dict_2[key] = torch.zeros([1,1], device=device).float()
     else:
-        x0_compressed.append(inp_dict[key].item())
-        if isinstance(inp_dict[key], torch.Tensor):
-            next_index = current_index + inp_dict[key].numel()
-        else:
-            next_index = current_index + 1
-        slices[key] = slice(current_index, next_index)
-        current_index = next_index
-        
-# x0_compressed = torch.tensor(x0_compressed).float().to(device).unsqueeze(0)
+        param_val = getattr(toy, key).detach().abs() if key in ['F', 'Jx', 'Jy'] else getattr(toy, key).detach().clone()
+    if key in line_norms:
+        inp_dict_2[key] = torch.tensor(models_dict[key].fit(param_val), device=device)
+    else:
+        inp_dict_2[key] = param_val
 
-x0_compressed = torch.tensor([
-    0.2,
-   -0.5,  0.9,
-   -1.0,  0.5,
-    2.0,  1.0,
-    2.0,  1.0,
-    0.0, 
-    0.8, -0.02,
-    0.85, 0.2,
-    0.5,
-]).float().to(device).unsqueeze(0)
+compressor = InputsCompressor(transformer.transforms, models_dict)
+
+x0_compressed = compressor.stack(inp_dict_2).unsqueeze(0) * 0.1
+_ = compressor.stack(inp_dict_2).unsqueeze(0)
+
+x0_compressed_backup = x0_compressed.clone()
+
+#%
+# test_model = PolyModel(toy.wvl, line_norms['Jx'])
+# popt = test_model.fit(toy.Jx)
+# 
+# pred = test_model(popt)
+# 
+# plt.plot(toy.wvl.cpu().numpy().flatten(), toy.Jx.cpu().numpy().flatten())
+# plt.plot(toy.wvl.cpu().numpy().flatten(), pred.cpu().numpy().flatten())
 
 
 #%
-def depack_line(x_compressed):
-    decomposed = {}
-    for key, sl in slices.items():
-        if key in init_params:
-            y_pred = line(toy.wvl.squeeze(), x_compressed[:,sl][:,0], x_compressed[:,sl][:,1], toy.wvl.min(), *line_norms[key])
-            decomposed[key] = y_pred.squeeze(-1) if sl.stop-sl.start<2 else y_pred
-        else:
-            val = transformer.transforms[key].backward(x_compressed[:, sl])
-            decomposed[key] = val.squeeze(-1) if sl.stop-sl.start<2 else val # expects the TipTorch's conventions about the tensors dimensions
-    return decomposed
-
-# decomposed = depack_line(x0_compressed)
-#%%
-line_norms = {
-    'F' : (1e6, 1),
-    'dx': (1e6, 1e0),
-    'dy': (1e6, 1e-1),
-    'bg': (1e6, 1e-6),
-    'Jx': (1e6, 1e2),
-    'Jy': (1e6, 1e2),
-}
-
-models_dict = {key: LineModel(toy.wvl, line_norms[key]) for key in line_norms.keys() }
-
-inp_dict = {}
-for key in transformer.transforms.keys(): 
-    param_val = getattr(toy, key).abs() if key in ['F', 'Jx', 'Jy'] else getattr(toy, key) 
-    if key in line_norms:
-        inp_dict[key] = torch.tensor(models_dict[key].fit(param_val), device=device)
-    else:
-        inp_dict[key] = param_val
-        
-compressor = InputsCompressor(transformer.transforms, models_dict)
-
-x0_compressed = compressor.stack(inp_dict).unsqueeze(0)
-# destacked_2 = compressor.destack(x0_compressed)
-
-#%%
-def func2(x_):
+def func2(x_, include_list=None):
     x_torch = compressor.destack(x_)
-    return toy(x_torch)
+    
+    if include_sausage and 's_pow' in x_torch:
+        phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
+    else:
+        phase_func = None
+    
+    if include_list is not None:
+        return toy({ key: x_torch[key] for key in include_list }, None, phase_generator=phase_func)
+    else:
+        return toy(x_torch, None, phase_generator=phase_func)
+
+
+x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
+
 
 def loss_MSE2(x_):
     diff = (func2(x_) - PSF_0) #* wvl_weights
@@ -571,16 +503,22 @@ def loss_MAE2(x_):
     return diff.abs().sum() / PSF_0.shape[0] / PSF_0.shape[1]
     # return ( mask*diff.pow(2)*200 + diff.abs() ).flatten().sum() / PSF_0.shape[0] / PSF_0.shape[1]
 
+def loss_fn2(x_):
+    return loss_MSE2(x_) + loss_MAE2(x_) * 0.4
+
 
 #%%
-result = minimize(loss_MSE2, x0_compressed, max_iter=100, tol=1e-3, method='bfgs', disp=2)
-# result = minimize(loss_MAE2, x0_compressed, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+result = minimize(loss_MAE2, x0_compressed, max_iter=100, tol=1e-3, method='bfgs', disp=2)
 x0_compressed = result.x
 
-#%%
-PSF_1 = func2(x0_compressed)
+result = minimize(loss_fn2, x0_compressed, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+x0_compressed = result.x
 
-if many_wvls:
+
+#%%
+PSF_1 = func2(x0_compressed).detach()
+
+if len(toy.wvl[0]) > 1:
     wvl_select = np.s_[0, 6, 12]
 
     draw_PSF_stack( PSF_0.cpu().numpy()[0, wvl_select, ...], PSF_1.cpu().numpy()[0, wvl_select, ...], average=True, crop=120 )
@@ -591,7 +529,7 @@ if many_wvls:
     for i, lmbd in enumerate(wvl_select):
         plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=40,  ax=ax[i] )
     plt.show()
-    
+
 else:
     draw_PSF_stack( PSF_0.cpu().numpy()[:,0,...], PSF_1.cpu().numpy()[:,0,...], average=True, crop=120 )
     
@@ -599,9 +537,38 @@ else:
     plt.show()
 
 #%%
-decomposed = depack_line(x0_compressed)
+# decomposed = depack_line(x0_compressed)
 
+destacked_1 = transformer.destack(x0.clone())
+destacked_2 = compressor.destack(x0_compressed)
 
+Ffs_2 = destacked_2['F'].cpu().flatten()
+bgs_2 = destacked_2['bg'].cpu().flatten()
+Jxs_2 = destacked_2['Jx'].cpu().flatten()
+Jys_2 = destacked_2['Jy'].cpu().flatten()
+
+Jxs_1 = destacked_1['Jx'].cpu().flatten()
+Jys_1 = destacked_1['Jy'].cpu().flatten()
+
+if Jxs_1.numel() == 1:
+    Jxs_1 = Jxs_1.repeat(N_wvl)
+    Jys_1 = Jys_1.repeat(N_wvl)
+
+plt.plot(toy.wvl.cpu().numpy().flatten(), Ffs_2)
+plt.plot(toy.wvl.cpu().numpy().flatten(), destacked_1['F'].cpu().numpy().flatten())
+plt.show()
+
+plt.plot(toy.wvl.cpu().numpy().flatten(), bgs_2)
+plt.plot(toy.wvl.cpu().numpy().flatten(), destacked_1['bg'].cpu().numpy().flatten())
+plt.show()
+
+plt.plot(toy.wvl.cpu().numpy().flatten(), Jxs_2)
+plt.plot(toy.wvl.cpu().numpy().flatten(), Jxs_1)
+plt.show()
+
+# plt.plot(toy.wvl.cpu().numpy().flatten(), Jys)
+# plt.plot(toy.wvl.cpu().numpy().flatten(), destacked_1['Jy'].cpu().numpy().flatten())
+# plt.show()
 
 
 #%%

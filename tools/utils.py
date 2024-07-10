@@ -17,6 +17,7 @@ from photutils.profiles import RadialProfile
 from astropy.modeling import models, fitting
 from astropy.nddata import Cutout2D
 from photutils.centroids import centroid_2dg, centroid_com, centroid_quadratic
+import torchvision.transforms.functional as TF
 
 rad2mas  = 3600 * 180 * 1000 / np.pi
 rad2arc  = rad2mas / 1000
@@ -235,6 +236,37 @@ class LWE_basis():
     def __call__(self, *args):
         return self.forward(*args)
 
+class SausageFeature:
+    def __init__(self, model) -> None:
+        from torch.nn.functional import interpolate
+        from scipy.io import loadmat
+        from project_globals import MUSE_DATA_FOLDER
+
+        self.model = model
+        # with fits.open(MUSE_DATA_FOLDER+'..\AOF\Sausage tests\DMdiff_4LGS-3LGS.fits') as hdul:
+        #     DM_diff = hdul[0].data.byteswap().newbyteorder()
+        
+        # Load phase map obtained with calibration
+        DF_diff = loadmat(MUSE_DATA_FOLDER+'..\AOF\Sausage tests\DelatRS2Phase.mat')['aa']
+        
+        # 1.6 comes from the max of the influence func
+        # 35 = SPARTA units per micron, 2 factor is due to WF reflection from the DM
+        self.OPD_map = torch.tensor(DF_diff).float().to(self.model.device) * 35*2 / 1.6 / 1e6 # [m
+        self.OPD_map = interpolate(self.OPD_map[None,None,...], size=(self.model.pupil.shape), mode='bilinear', align_corners=False)
+
+    def forward(self, coef):
+        angle_rot = self.model.pupil_angle - 45.0
+
+        OPD = self.OPD_map.repeat(coef.shape[0], 1, 1, 1)
+        OPD = TF.rotate(OPD, angle_rot, interpolation=TF.InterpolationMode.BILINEAR)
+
+        wvls  = self.model.wvl.view(1, -1, 1, 1)
+        pupil = self.model.pupil.view(1, 1, *self.model.pupil.shape)
+        return pupil * torch.exp(2j*np.pi/wvls*OPD*coef.view(-1, 1, 1, 1))
+
+    def __call__(self, *args):
+        return self.forward(*args)
+    
 
 def save_GIF(array, duration=1e3, scale=1, path='test.gif', colormap=cm.viridis):
     from PIL import Image

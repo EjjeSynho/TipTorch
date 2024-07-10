@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from skimage.restoration import inpaint
 from tools.utils import GetROIaroundMax, wavelength_to_rgb
-from project_globals import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER
+from project_globals import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER, LIFT_PATH
 from datetime import datetime
 import datetime
 import dlt
@@ -23,7 +23,7 @@ from astropy.time import Time
 import requests
 from io import StringIO
 from photutils.centroids import centroid_2dg, centroid_com, centroid_quadratic
-
+from photutils.background import Background2D, MedianBackground
 
 UT4_coords = ('24d37min37.36s', '-70d24m14.25s', 2635.43)
 UT4_location = EarthLocation.from_geodetic(lat=UT4_coords[0], lon=UT4_coords[1], height=UT4_coords[2]*u.m)
@@ -149,12 +149,26 @@ def time_from_str(timestamp_strs):
     else:
         return [datetime.datetime.strptime(time_str, '%Y-%m-%dT%H:%M:%S.%f') for time_str in timestamp_strs]
 
-#------------------------ IRLOS realm ------------------------------------------------
+
+#-------------------------------- IRLOS realm ------------------------------------------------
+def get_background(img, sigmas=1):
+    bkg_estimator = MedianBackground()
+    bkg = Background2D(img, (5,)*2, filter_size=(3,), bkg_estimator=bkg_estimator)
+
+    background = bkg.background
+    background_rms = bkg.background_rms
+
+    threshold = sigmas * background_rms
+    mask = img > (background + threshold)
+    
+    return background, background_rms, mask
+
+
 # Get 2x2 images from the IRLOS cube
 def GetIRLOScube(hdul_raw):
     if 'SPARTA_TT_CUBE' in hdul_raw:
         IRLOS_cube = hdul_raw['SPARTA_TT_CUBE'].data.transpose(1,2,0)
-        win_size = 20 
+        win_size = IRLOS_cube.shape[0] // 2 
 
         # Removing the frame of zeros around the cube
         quadrant_1 = np.s_[1:win_size-1,  1:win_size-1, ...]
@@ -167,12 +181,16 @@ def GetIRLOScube(hdul_raw):
             np.hstack([IRLOS_cube[quadrant_3], IRLOS_cube[quadrant_4]]), # 3 4
         ])
 
-        IRLOS_cube = IRLOS_cube_ - 200
+        IRLOS_cube = IRLOS_cube_ - 200 # Minus constant ADU shift
+        
+        background, background_rms, mask = get_background(IRLOS_cube.mean(axis=-1), 1)
+        IRLOS_cube *= mask[..., None] # Remove background pixels
+        return IRLOS_cube, win_size # [ADU], [pix]
+        
     else:
         print('No IRLOS cubes found')
-        IRLOS_cube = None
+        return None, None
 
-    return IRLOS_cube
 
 
 # Get IR loop parameters
@@ -247,6 +265,11 @@ def GetIRLOSphotons(flux_ADU, LO_gain, LO_freq, convert_factor): #, [ADU], [1], 
     return flux_ADU / QE * convert_factor / LO_gain * LO_freq / M1_area * transmission # [photons/s/m^2]
 
 
+def GetJmag(N_ph):
+    J_zero_point = 1.9e12
+    return -2.5 * np.log10(368 * N_ph / J_zero_point)
+
+
 def GetIRLOSdata(hdul_raw, start_time, IRLOS_cube):
     # Read NGS loop parameters
     IRLOS_data_df = GetIRLoopData(hdul_raw, start_time, verbose=False)
@@ -254,28 +277,32 @@ def GetIRLOSdata(hdul_raw, start_time, IRLOS_cube):
     # Read NGS flux values
     try:
         #[ADU/frame/sub aperture] * 4 sub apertures if 2x2 mode
-        IRLOS_flux_ADU = sum([hdul_cube[0].header[f'{h}AOS NGS{i+1} FLUX'] for i in range(4)]) * 4 # [ADU/frame]
-        IRLOS_data_df['ADUs (header)']   = IRLOS_flux_ADU
+        IRLOS_flux_ADU_h = sum([hdul_cube[0].header[f'{h}AOS NGS{i+1} FLUX'] for i in range(4)]) * 4 # [ADU/frame]
+        IRLOS_data_df['ADUs (header)'] = IRLOS_flux_ADU_h
             
         LO_gain    = IRLOS_data_df['gain'].item()
         LO_freq    = IRLOS_data_df['frequency'].item()
         conversion = IRLOS_data_df['conversion, [e-/ADU]'].item()
 
-        IRLOS_flux = GetIRLOSphotons(IRLOS_flux_ADU, LO_gain, LO_freq, conversion) # [photons/s/m^2]
+        IRLOS_flux = GetIRLOSphotons(IRLOS_flux_ADU_h, LO_gain, LO_freq, conversion) # [photons/s/m^2]
         IRLOS_data_df['IRLOS photons, [photons/s/m^2]'] = np.round(IRLOS_flux).astype('uint32')
-
-        J_zero_point = 1.9e12
-        nPhotons_my = IRLOS_data_df.iloc[0]['IRLOS photons, [photons/s/m^2]']
-        mag_NGS = -2.5 * np.log10(368 * nPhotons_my / J_zero_point)
-        IRLOS_data_df['NGS mag (from ph.)'] = mag_NGS
+        IRLOS_data_df['NGS mag (from ph.)'] = GetJmag(IRLOS_data_df.iloc[0]['IRLOS photons, [photons/s/m^2]'])
 
     except KeyError:
-        IRLOS_flux_ADU = None
         IRLOS_data_df['ADUs (header)'] = None
         IRLOS_data_df['IRLOS photons, [photons/s/m^2]'] = None
         IRLOS_data_df['NGS mag (from ph.)'] = None
 
-    IRLOS_data_df['ADUs (from 2x2)'] = IRLOS_cube.mean(axis=0).sum() if IRLOS_cube is not None else None
+    if IRLOS_cube is not None:
+        IRLOS_flux_ADU_cube = IRLOS_cube.mean(axis=0).sum() # [ADU/frame]
+        IRLOS_data_df['ADUs (from 2x2)'] = IRLOS_flux_ADU_cube
+        IRLOS_flux_cube = GetIRLOSphotons(IRLOS_flux_ADU_cube, LO_gain, LO_freq, conversion) # [photons/s/m^2]
+        IRLOS_data_df['IRLOS photons (cube), [photons/s/m^2]'] = IRLOS_flux_cube
+        IRLOS_data_df['NGS mag (from 2x2)'] = GetJmag(IRLOS_flux_cube)
+    else:
+        IRLOS_data_df['ADUs (from 2x2)'] = None
+        IRLOS_data_df['NGS mag (from 2x2)'] = None
+        IRLOS_data_df['IRLOS photons (cube), [photons/s/m^2]'] = None
 
     if f'{h}SEQ NGS MAG' in hdul_cube[0].header:
         IRLOS_data_df['NGS mag (header)'] = hdul_cube[0].header[f'{h}SEQ NGS MAG']
@@ -349,7 +376,7 @@ def range_overlap(v_min, v_max, h_min, h_max):
     if start_of_overlap > end_of_overlap:
         return 0.0
     else:
-        return (end_of_overlap - start_of_overlap) / (v_max - v_min)
+        return (end_of_overlap-start_of_overlap) / (v_max-v_min)
 
 
 def GetImageSpectrumHeader(hdul_cube, show_plots=True):
@@ -531,6 +558,18 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
     print( coord_science.separation(coord_NGS).degree )
     '''
 
+    parang = (hdul_cube[0].header[h+'TEL PARANG END' ] + hdul_cube[0].header[h+'TEL PARANG START']) * 0.5
+    alt    = hdul_cube[0].header[h+'TEL ALT']
+
+    try:
+        if h+'INS DROT START' in hdul_cube[0].header:
+            derot_ang = (hdul_cube[0].header[h+'INS DROT START'] + hdul_cube[0].header[h+'INS DROT END']) * 0.5
+        else:
+            derot_ang = hdul_cube[0].header[h+'INS DROT END']
+    except:
+        derot_ang = -0.5 * (parang + alt)
+
+
     if h+'SEQ NGS MAG' in hdul_cube[0].header:
         NGS_mag = hdul_cube[0].header[h+'SEQ NGS MAG']
     else:
@@ -539,10 +578,12 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
     observation = {
         'Date-obs':      hdul_cube[0].header['DATE-OBS'], # UTC
         'Exp. time':     hdul_cube[0].header['EXPTIME'],
-        'Tel. altitude': hdul_cube[0].header[h+'TEL ALT'],
+        'Tel. altitude': alt,
         'Tel. azimuth':  hdul_cube[0].header[h+'TEL AZ'],
+        'Par. angle':    parang,
+        'Derot. angle':  derot_ang, # [deg], = -0.5*(par + alt)
     }
-
+    
     science_target = {
         'Science target': hdul_cube[0].header[h+'OBS TARG NAME'],
         'RA (science)':   hdul_cube[0].header['RA'],
@@ -836,6 +877,121 @@ def create_flat_dataframe(df):
     return pd.DataFrame([flat_data])
 
 
+def get_PSF_rotation(MUSE_images, derot_angle):
+    from scipy.ndimage import rotate
+    from tools.utils import cropper
+    from scipy.ndimage import rotate
+    from skimage.restoration import inpaint_biharmonic
+    from scipy.ndimage import gaussian_filter
+    from tools.utils import mask_circle
+    from photutils.profiles import RadialProfile
+    from tools.utils import safe_centroid
+    from scipy.interpolate import interp1d
+    from PIL import Image, ImageDraw
+
+
+    PSF_0 = np.copy(MUSE_images['cube'])
+    PSF_0 = PSF_0 / PSF_0.sum(axis=(-2,-1))[:,None,None]
+    PSF_0 = PSF_0.mean(axis=0)[1:,1:]
+
+    PSF_1 = np.load(MUSE_DATA_FOLDER + 'PSF_default.npy').mean(axis=0)
+    PSF_1 = PSF_1[cropper(PSF_1, PSF_0.shape[-1])]
+
+    # Get streaks mask
+    line_wid = 15
+    width, height = PSF_1.shape
+    image = Image.new('L', (width, height), 0)
+    draw = ImageDraw.Draw(image)
+    draw.line([(0, 20), (90, 90)], fill=1, width=line_wid)
+    draw.line([(width, 20), (width-90, 90)], fill=1, width=line_wid)
+    draw.line([(width, height-20), (width-90, height-90)], fill=1, width=line_wid)
+    draw.line([(0, height-20), (85, height-90)], fill=1, width=line_wid)
+    mask_streaks = np.array(image)
+
+    angle_init = derot_angle * 2 + 165 - 45 # The magic formula to get the initial angle
+    angle_init += 360 if angle_init <= 180 else -360
+    
+    mask_rot  = (1-mask_circle(PSF_0.shape[0], 25)) * mask_circle(PSF_0.shape[0], 80)
+
+    def subtract_radial_avg(img):
+        xycen = safe_centroid(img)
+        edge_radii = np.arange(img.shape[-1]//2)
+        rp = RadialProfile(img, xycen, edge_radii)
+
+        size  = img.shape[0]
+        radii = np.arange(0, len(rp.profile))
+
+        x = np.linspace(-size//2, size//2, size)+1
+        y = np.linspace(-size//2, size//2, size)+1
+        X, Y = np.meshgrid(x, y)
+
+        R = np.sqrt(X**2 + Y**2)
+
+        interp_func = interp1d(radii, rp.profile, bounds_error=False, fill_value=0)
+        return interp_func(R)
+
+
+    PSF_0_rad = subtract_radial_avg(PSF_0)
+    PSF_1_rad = subtract_radial_avg(PSF_1)
+
+    PSF_0_diff = mask_rot*(PSF_0-PSF_0_rad)
+    PSF_0_diff = PSF_0_diff / PSF_0_diff.sum()
+
+    PSF_1_diff = mask_rot*(PSF_1-PSF_1_rad)
+    PSF_1_diff = PSF_1_diff / PSF_1_diff.sum() / 3
+
+
+    search_limits = 15
+
+    def angle_search(PSF_0, PSF_1, angle_0):
+
+        angles = np.linspace(-search_limits, search_limits, search_limits*2+1)
+
+        losses = []
+        # for angle in tqdm(angles):
+        for angle in angles:
+            rot_0 = gaussian_filter(np.copy(PSF_0), 2)
+            rot_1 = gaussian_filter(np.copy(PSF_1), 2)
+            
+            mask_rot = rotate(mask_streaks, angle+angle_0, reshape=False)
+            rot_1_ = rotate(rot_1, angle+angle_0, reshape=False)
+
+            loss = np.abs(rot_1_-rot_0*mask_rot).sum()
+
+            # plt.imshow(np.abs(rot_1_-rot_0)*mask_rot)
+            # plt.title(f'Angle: {angle}')
+            # plt.show()
+
+            losses.append(loss.copy())
+            
+        # plt.plot(angles, losses)
+        # plt.show()
+        
+        optimal_angle = angles[np.argmin(losses)]
+        
+        return 0.0 if np.abs(optimal_angle) == search_limits else optimal_angle
+
+    corrective_ang = angle_search(PSF_0_diff, PSF_1_diff, angle_init)
+    return angle_init, corrective_ang
+
+
+def get_IRLOS_phase(cube):
+    try:
+        # Add dependencies to the path
+        for path in ['', 'DIP', 'LIFT', 'LIFT/modules', 'experimental']:
+            path_new = f'{LIFT_PATH}{path}/..'
+            if path_new not in sys.path:
+                sys.path.append(path_new)
+                
+        from LIFT_full.experimental.IRLOS_2x2_function import estimate_2x2    
+
+        return estimate_2x2(cube)      
+        
+    except Exception as e:
+        print(f'Error: {e}')
+        return None
+
+
 #%%
 bad_ids = []
 
@@ -847,8 +1003,13 @@ bad_ids = []
 #     files_bad[i] = int(files_bad[i])
 
 # for file_id in tqdm(files_bad):
-# for file_id in tqdm(range(0, len(files_matches))):
-for file_id in tqdm([409, 410, 411]):
+
+# bad_IRLOS_ids = [68, 242, 316, 390]
+
+# list_ids = [411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335]
+
+for file_id in tqdm(range(0, len(files_matches))):
+# for file_id in tqdm(list_ids):
     print(f'>>>>>>>>>>>>>> Processing file {file_id}...')
     try:
         hdul_raw  = fits.open(os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ]))
@@ -859,15 +1020,40 @@ for file_id in tqdm([409, 410, 411]):
         start_time = pd.to_datetime(time_from_str(hdul_cube[0].header['DATE-OBS'])).tz_localize('UTC')
         end_time   = pd.to_datetime(start_time + datetime.timedelta(seconds=hdul_cube[0].header['EXPTIME']))
 
-        IRLOS_cube    = GetIRLOScube(hdul_raw)
-        IRLOS_data_df = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
-        LGS_data_df   = GetLGSdata(hdul_cube, cube_name, start_time)
+        IRLOS_cube, win = GetIRLOScube(hdul_raw)
+        IRLOS_data_df   = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
+        LGS_data_df     = GetLGSdata(hdul_cube, cube_name, start_time)
+        
+        if win is not None:
+            IRLOS_data_df['window'] = win
+        
         MUSE_images, MUSE_data_df, spectral_info = GetImageSpectrumHeader(hdul_cube, show_plots=False)
         Cn2_data_df, atm_data_df, asm_data_df    = GetRawHeaderData(hdul_raw)
         asm_df, massdimm_df, dimm_df, slodar_df  = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
 
         hdul_cube.close()
         hdul_raw.close()
+
+        # Try to detect the rotation of the PSF with diffracive features, work only for good PSFs
+        derot_ang = MUSE_data_df['Derot. angle'].item()
+        derot_ang += 360 if derot_ang < -180 else -360
+        pupil_angle, angle_delta = get_PSF_rotation(MUSE_images, derot_ang)
+        MUSE_data_df['Pupil angle'] = pupil_angle + angle_delta
+
+        # Estimate the IRLOS phasecube from 2x2 PSFs
+        OPD_subap, OPD_aperture, PSF_estim = (None,)*3
+        if IRLOS_cube is not None:
+            if (res := get_IRLOS_phase(IRLOS_cube)) is not None:
+                OPD_subap, OPD_aperture, PSF_estim = res
+                OPD_subap = OPD_subap.astype(np.float32)
+                OPD_aperture = OPD_aperture.astype(np.float32)
+                PSF_estim = PSF_estim.astype(np.float32)
+
+        IRLOS_phase_data = {
+            'OPD per subap': OPD_subap,
+            'OPD aperture':  OPD_aperture,
+            'PSF estimated': PSF_estim
+        }
 
         # Create a flat DataFrame with temporal dimension compressed
         all_df = pd.concat([
@@ -885,6 +1071,7 @@ for file_id in tqdm([409, 410, 411]):
         data_store = {
             'images': MUSE_images,
             'IRLOS data': IRLOS_data_df,
+            'IRLOS phases': IRLOS_phase_data,
             'LGS data': LGS_data_df,
             'MUSE header data': MUSE_data_df,
             'Raw Cn2 data': Cn2_data_df,
@@ -909,12 +1096,78 @@ for file_id in tqdm([409, 410, 411]):
         print(f'Error with file {file_id}: {e}')
         bad_ids.append(file_id)
         continue
-        
-# Save the list of bad files
 
+
+#%% Render the dataset
+for file in tqdm(os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')):
+
+    with open(MUSE_RAW_FOLDER+'../DATA_reduced/'+file, 'rb') as f:
+        data = pickle.load(f)
+
+    white = np.log10(1+np.abs(data['images']['white']))
+    white -= white.min()
+    white /= white.max()
+
+    # from scipy.ndimage import rotate
+    # pupil_ang = data['MUSE header data']['Pupil angle'].item() - 45
+    # if pupil_ang < -180: pupil_ang += 360
+    # if pupil_ang > 180:  pupil_ang -= 360
+    # white_rot = rotate(white, pupil_ang, reshape=False)
+
+    if data['images']['IRLOS cube'] is not None:
+        IRLOS_img = np.log10(1+np.abs(data['images']['IRLOS cube'].mean(axis=-1)))
+        IRLOS_img = data['images']['IRLOS cube'].mean(axis=-1)
+    else:
+        IRLOS_img = np.zeros_like(white)
+
+    title = file.replace('.pickle', '')
+    fig, ax = plt.subplots(1,2, figsize=(14, 7.5))
+
+    ax[0].set_title(title)
+    ax[1].set_title('IRLOS (2x2)')
+    ax[0].imshow(white, cmap='gray')
+    ax[1].imshow(IRLOS_img, cmap='hot')
+    ax[0].set_axis_off()
+    ax[1].set_axis_off()
+    plt.tight_layout()
+    
+    plt.show()
+    plt.savefig(MUSE_RAW_FOLDER+'../MUSE_images/' + title + '.png')
 
 #%%
-%matplotlib agg  # Temporarily use the 'agg' backend to suppress inline display
+# Load labels information
+all_labels = []
+labels_df  = { 'ID': [], 'Filename': [] }
+
+if os.path.exists(MUSE_DATA_FOLDER+'labels.txt'):
+    with open(MUSE_DATA_FOLDER+'labels.txt', 'r') as f:
+        for line in f:
+            filename, labels = line.strip().split(': ')
+
+            ID = filename.split('_')[0]
+            pure_filename = filename.replace(ID+'_', '').replace('.png', '')
+
+            labels_df['ID'].append(int(ID))
+            labels_df['Filename'].append(pure_filename)
+            all_labels.append(labels.split(', '))
+else:
+    raise ValueError('Labels file does not exist!')
+
+labels_list = list(set( [x for xs in all_labels for x in xs] ))
+labels_list.sort()
+
+for i in range(len(labels_list)):
+    labels_df[labels_list[i]] = []
+
+for i in range(len(all_labels)):
+    for label in labels_list:
+        labels_df[label].append(label in all_labels[i])
+
+labels_df = pd.DataFrame(labels_df)
+labels_df.set_index('ID', inplace=True)
+
+
+# Read flattened DataFrames and concatenate them
 dfs = []
 files = os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')
 
@@ -929,14 +1182,250 @@ dfs = pd.concat(dfs)
 dfs.set_index('ID', inplace=True)
 dfs.sort_index(inplace=True)
 
-%matplotlib inline  # Switch back to the 'inline' backend
+dfs = dfs.join(labels_df)
+
+# Save as pickle
+with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'wb') as handle:
+    pickle.dump(dfs, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
 
 #%%
-# Check columns with all NaN values
-nan_cols = dfs.columns[dfs.isna().all()]
+with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'rb') as handle:
+    dfs = pickle.load(handle)
+
+
+def plot_data_filling(df):
+    # Convert DataFrame to a boolean matrix: True for non-NaN values, False for NaN values
+    data_filling = ~df.isna()
+    
+    # Plotting
+    plt.figure(figsize=(20, 20))
+    plt.imshow(data_filling, cmap='Greens', interpolation='none', aspect=6./35)
+    plt.title('Data Filling Plot')
+    plt.xlabel('Columns')
+    plt.ylabel('Rows')
+    # plt.colorbar(label='Data Presence (1: non-NaN, 0: NaN)', ticks=[0, 1])
+    plt.xticks(ticks=np.arange(len(df.columns)), labels=df.columns, fontsize=7, rotation=90)
+    # plt.grid(axis='x', color='black', linestyle='-', linewidth=0.5)
+    for x in np.arange(-0.5, len(df.columns.values), 1):
+        plt.axvline(x=x, color='black', linestyle='-', linewidth=0.5)
+    
+    plt.tight_layout()
+    plt.show()
+
+plot_data_filling(dfs)
+
+# %% Dataset cleaning
+df_new = dfs.copy()
+
+df_new['LGS_R0']         = df_new[['LGS1_R0', 'LGS2_R0', 'LGS3_R0', 'LGS4_R0']].mean(axis=1)
+df_new['LGS_L0']         = df_new[['LGS1_L0', 'LGS2_L0', 'LGS3_L0', 'LGS4_L0']].mean(axis=1)
+df_new['LGS_SEEING']     = df_new[['LGS1_SEEING', 'LGS2_SEEING', 'LGS3_SEEING', 'LGS4_SEEING']].mean(axis=1)
+df_new['LGS_STREHL']     = df_new[['LGS1_SEEING', 'LGS2_SEEING', 'LGS3_SEEING', 'LGS4_SEEING']].mean(axis=1)
+df_new['LGS_TURVAR_RES'] = df_new[['LGS1_TURVAR_RES', 'LGS2_TURVAR_RES', 'LGS3_TURVAR_RES', 'LGS4_TURVAR_RES']].mean(axis=1)
+df_new['LGS_TURVAR_TOT'] = df_new[['LGS1_TURVAR_TOT', 'LGS2_TURVAR_TOT', 'LGS3_TURVAR_TOT', 'LGS4_TURVAR_TOT']].mean(axis=1)
+df_new['LGS_TUR_ALT']    = df_new[['LGS1_TUR_ALT', 'LGS2_TUR_ALT', 'LGS3_TUR_ALT', 'LGS4_TUR_ALT']].mean(axis=1)
+df_new['LGS_TUR_GND']    = df_new[['LGS1_TUR_GND', 'LGS2_TUR_GND', 'LGS3_TUR_GND', 'LGS4_TUR_GND']].mean(axis=1)
+df_new['LGS_FWHM_GAIN']  = df_new[['LGS1_FWHM_GAIN', 'LGS2_FWHM_GAIN', 'LGS3_FWHM_GAIN', 'LGS4_FWHM_GAIN']].mean(axis=1)
+
+for i in range(1, 5):
+    df_new[f'AOS.LGS{i}.SLOPERMS'] = (df_new[f'AOS.LGS{i}.SLOPERMSX']**2 + df_new[f'AOS.LGS{i}.SLOPERMSY']**2)**0.5
+    df_new[f'LGS{i}_SLOPERMS']     = (df_new[f'LGS{i}_SLOPERMSX']**2 + df_new[f'LGS{i}_SLOPERMSY']**2)**0.5
+
+df_new['AOS.LGS.SLOPERMS'] = df_new[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].mean(axis=1)
+df_new['LGS_SLOPERMS']     = df_new[[f'LGS{i}_SLOPERMS' for i in range(1, 5)]].mean(axis=1) 
+df_new['MASS_TURB']        = df_new[[f'MASS_TURB{i}' for i in range(0, 7)]].sum(axis=1)
+
+df_new[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].mean(axis=1)
+
+GL_fracs = []
+GL_frac_SLODAR = []
+h_GL = 2000
+
+for j in range(len(df_new)):
+    Cn2_weights = np.array([df_new.iloc[j][f'CN2_FRAC_ALT{i}'] for i in range(1, 9)])
+    
+    if not np.isnan(Cn2_weights).all():
+        altitudes   = np.array([df_new.iloc[j][f'ALT{i}'] for i in range(1, 9)])*100 # in meters
+
+        Cn2_weights_GL = Cn2_weights[altitudes < h_GL]
+        altitudes_GL   = altitudes  [altitudes < h_GL]
+
+        GL_frac  = Cn2_weights_GL.sum()  # Ground layer fraction
+        # Cn2_w_GL = np.interp(h_GL, altitudes, Cn2_weights)
+
+        if GL_frac > 1.0 or GL_frac < 0.0:
+            GL_frac = np.nan
+
+        GL_fracs.append(GL_frac)
+    else:
+        GL_fracs.append(np.nan)
+        
+df_new['Cn2 fraction below 2000m'] = GL_fracs
+
+
+droppies = [
+    *[f'LGS{i}_R0' for i in range(1, 5)],
+    *[f'LGS{i}_L0' for i in range(1, 5)],
+    *[f'LGS{i}_SEEING' for i in range(1, 5)],
+    *[f'LGS{i}_STREHL' for i in range(1, 5)],
+    *[f'LGS{i} works'  for i in range(1, 5)],
+    *[f'LGS{i} flux, [ADU/frame]' for i in range(1, 5)],
+    *[f'LGS{i} flux, [ADU/frame]' for i in range(1, 5)],
+    *[f'LGS{i} flux, [ADU/frame]' for i in range(1, 5)],
+    *[f'AOS.LGS{i}.SLOPERMSX' for i in range(1, 5)],
+    *[f'AOS.LGS{i}.SLOPERMSY' for i in range(1, 5)],
+    *[f'AOS.LGS{i}.SLOPERMS'  for i in range(1, 5)],
+    *[f'LGS{i}_SLOPERMSX'  for i in range(1, 5)],
+    *[f'LGS{i}_SLOPERMSY'  for i in range(1, 5)],
+    *[f'LGS{i}_SLOPERMS'   for i in range(1, 5)],
+    *[f'LGS{i}_TURVAR_RES' for i in range(1, 5)],
+    *[f'LGS{i}_TURVAR_TOT' for i in range(1, 5)],
+    *[f'LGS{i}_TUR_ALT'    for i in range(1, 5)],
+    *[f'LGS{i}_TUR_GND'    for i in range(1, 5)],
+    *[f'LGS{i}_FWHM_GAIN'  for i in range(1, 5)],
+    
+    *[f'CN2_FRAC_ALT{i}' for i in range(1, 9)],
+    *[f'CN2_ALT{i}' for i in range(1, 9)],
+    *[f'ALT{i}' for i in range(1, 9)],
+    *[f'L0_ALT{i}' for i in range(1, 9)],
+    *[f'SLODAR_CNSQ{i}' for i in range(2, 9)],
+    *[f'MASS_TURB{i}' for i in range(0, 7)],
+    
+    'SLODAR_TOTAL_CN2',
+    'ADUs (from 2x2)',
+    'Cn2 above UTs [10**(-15)m**(1/3)]',
+    'Cn2 fraction below 300m',
+    'Cn2 fraction below 500m',
+    'Surface layer profile [10**(-15)m**(1/3)]',
+    'Air Temperature at 30m [C]',
+    'Seeing ["]',
+    'NGS mag',
+    'scale',
+    'AIRMASS',
+    'seeingTot',
+    'L0Tot',
+    'r0Tot',
+    'ADUs (header)',
+    'NGS mag (header)'
+]
+
+# Remove columns with specific names
+df_new.drop(columns=droppies, inplace=True)
+
+print('Columns left:', len(df_new.columns.values))
+
+plot_data_filling(df_new)
+
+
+#%% Data imputation
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import IterativeImputer
+from sklearn.linear_model import BayesianRidge
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import StandardScaler
+
+# Clone dataframe
+df_imputed = df_new.copy()
+
+# Delete non-numeric string columns
+df_imputed = df_imputed.select_dtypes(exclude=['object'])
+df_imputed = df_imputed.select_dtypes(exclude=['bool'])
+
+droppies_for_imputter = [
+    'time',
+    # 'RA (science)',
+    # 'DEC (science)',
+    # 'Tel. altitude',
+    # 'Tel. azimuth',
+    # 'NGS RA',
+    # 'NGS DEC',
+    'Strehl (header)',
+    'NGS mag (from ph.)' # delete to restore later
+]
+
+# Change scaling
+# for i in range(1, 5):
+#     df_imputed[f'LGS{i} photons, [photons/m^2/s]'] /= 1e9
+    
+# df_imputed['MASS_TURB'] *= 1e13
+# df_imputed['IRLOS photons, [photons/s/m^2]'] /= 1e4
+# df_imputed['IRLOS photons (cube), [photons/s/m^2]'] /= 1e4
+
+df_imputed.drop(columns=droppies_for_imputter, inplace=True)
+df_imputed.replace([np.inf, -np.inf], np.nan, inplace=True)
+df_imputed = df_imputed.map(lambda x: np.nan if pd.isna(x) or abs(x) > np.finfo(np.float64).max else x)
+
+scaler_imputer = StandardScaler()
+df_imputed_data = scaler_imputer.fit_transform(df_imputed)
+df_imputed = pd.DataFrame(df_imputed_data, columns=df_imputed.columns)
+
+# plot_data_filling(df_imputed)
+#%
+# imputer = IterativeImputer(estimator=BayesianRidge(), random_state=0, max_iter=100, verbose=2)
+imputer = IterativeImputer(estimator=RandomForestRegressor(n_estimators=100, n_jobs=16), max_iter=15, random_state=0, verbose=2)
+
+imputed_data = imputer.fit_transform(df_imputed)
+df_imputed = pd.DataFrame(imputed_data, columns=df_imputed.columns)
 
 #%%
+imputed_data = scaler_imputer.inverse_transform(df_imputed)
+df_imputed = pd.DataFrame(imputed_data, columns=df_imputed.columns)
+
+df_new_new = df_new.copy()
+# Copy missing values back to the original DataFrame
+for col in df_imputed.columns:
+    df_new_new[col] = df_imputed[col]
+
+df_new_new['NGS mag (from ph.)'] = GetJmag(df_new_new['IRLOS photons, [photons/s/m^2]'])
+plot_data_filling(df_new_new)
+
+with open(MUSE_RAW_FOLDER+'../muse_df_reduced_imputed.pickle', 'wb') as handle:
+    pickle.dump(df_new_new, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+#%%
+# Replce columns with imputing in df_new
+for col in df_imputed.columns:
+    df_new[col] = df_imputed[col]
+    
+df_new = df_new[df_new['Corrupted'] == False]
+df_new = df_new[df_new['Bad quality'] == False]
+
+plot_data_filling(df_new)
+
+#%% Compute percentage of missing values in each column
+data_filling = np.array(~df_new.isna()).prod(axis=1)
+print(f'Fraction of rows with all data present: {data_filling.sum()/len(data_filling):.2f}')
+
+missing_values = ( df_new.isna().sum() / len(df_new) ).sort_values(ascending=False)
+
+plt.figure(figsize=(20, 7))
+plt.bar(missing_values.index, missing_values.values)
+plt.xticks(rotation=90)
+plt.show()
+
+
+#%%
+# file_id = 173 #103#320 #327# 343
+# file_id = 3 #103#320 #327# 343
+# file_id = 173
+
 file_id = 411
+file_id = 405
+file_id = 146
+file_id = 296
+# file_id = 382
+# file_id = 395
+# file_id = 254
+
+# file_id = 344
+# file_id = 276
+# file_id = 281
+# file_id = 311
+# file_id = 345
+file_id = 170
+
+# config_file['telescope']['PupilAngle']  = 22+5.5
 
 hdul_raw  = fits.open(os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ]))
 hdul_cube = fits.open(os.path.join(MUSE_CUBES_FOLDER, files_matches.iloc[file_id]['cube']))
@@ -946,19 +1435,39 @@ cube_name = files_matches.iloc[file_id]['cube']
 start_time = pd.to_datetime(time_from_str(hdul_cube[0].header['DATE-OBS'])).tz_localize('UTC')
 end_time   = pd.to_datetime(start_time + datetime.timedelta(seconds=hdul_cube[0].header['EXPTIME']))
 
-IRLOS_cube    = GetIRLOScube(hdul_raw)
-IRLOS_data_df = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
-LGS_data_df   = GetLGSdata(hdul_cube, cube_name, start_time)
+IRLOS_cube, win = GetIRLOScube(hdul_raw)
+IRLOS_data_df   = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
+LGS_data_df     = GetLGSdata(hdul_cube, cube_name, start_time)
 
-#%%
+if win is not None:
+    IRLOS_data_df['window'] = win
+
 MUSE_images, MUSE_data_df, misc_info    = GetImageSpectrumHeader(hdul_cube, show_plots=True)
-#%%
 Cn2_data_df, atm_data_df, asm_data_df   = GetRawHeaderData(hdul_raw)
 asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
 
 hdul_cube.close()
 hdul_raw.close()
 
+# Get the angle of PSF rotation if streaks are visible
+derot_ang = MUSE_data_df['Derot. angle'].item()
+derot_ang += 360 if derot_ang < -180 else -360
+pupil_angle, angle_delta = get_PSF_rotation(MUSE_images, derot_ang)
+MUSE_data_df['Pupil angle'] = pupil_angle + angle_delta
+
+# Estimate the IRLOS phasecube from 2x2 PSFs
+OPD_subap, OPD_aperture, PSF_estim = (None,)*3
+if IRLOS_cube is not None:
+    if (res := get_IRLOS_phase(IRLOS_cube)) is not None:
+        OPD_subap, OPD_aperture, PSF_estim = res
+
+IRLOS_phase_data = {
+    'OPD per subap': OPD_subap,
+    'OPD aperture':  OPD_aperture,
+    'PSF estimated': PSF_estim
+}
+
+#%%
 # Create a flat DataFrame with temporal dimension compressed
 all_df = pd.concat([
     IRLOS_data_df, LGS_data_df, MUSE_data_df, Cn2_data_df, atm_data_df,
@@ -969,7 +1478,6 @@ all_df.sort_index(inplace=True)
 flat_df = create_flat_dataframe(all_df)
 flat_df.insert(0, 'time', start_time)
 flat_df.insert(0, 'name', cube_name)
-
 
 #%%
 df = raw_df
@@ -1348,3 +1856,241 @@ ASM_DATA:
 'AZ'
 'AIRMASS'
 'DIMM_SEEING'
+
+#%%
+parang = hdul_cube[0].header[h+'TEL PARANG END' ]*0.5 + hdul_cube[0].header[h+'TEL PARANG START']*0.5
+ALT    = hdul_cube[0].header[h+'TEL ALT']
+
+try:
+    if h+'INS DROT START' in hdul_cube[0].header:
+        derot_ang = hdul_cube[0].header[h+'INS DROT START']*0.5 + hdul_cube[0].header[h+'INS DROT END']*0.5
+    else:
+        derot_ang = hdul_cube[0].header[h+'INS DROT END']
+except:
+    derot_ang = -2*(parang + ALT)
+
+print(f'Parallactic angle: {parang}, altitude: {ALT}, derotator: {derot_ang}')
+
+
+coumns = ['ID', 'Par', 'Alt', 'Derot', 'Image']
+
+datas = [
+    [411,  61.269,  74.639,  -67.835,  27.5],
+    [405, -64.6311, 63.126,    0.687, 154.5],
+    [146, -33.0085, 72.976, -20.3815, 122.0],
+    [296, -60.226,  74.602,   -7.276, 152.0],
+    [382, 149.9915, 67.234, -108.553, -58.0],
+    [395, -63.0235, 73.528, -5.33955, 153.0],
+    [254, -46.5385,  81.99, -17.784,  135.0],
+    # [276,  164.417,  72.376,-298.37+180, 120.0-180],
+    [281, -42.8125,  65.352, -11.2668, 133.0]
+]
+
+ang_df = pd.DataFrame(datas, columns=coumns)
+ang_df.set_index('ID', inplace=True)
+# ang_df.sort_index(inplace=True)
+# -par + 45
+
+testos = ang_df['Image'] - (ang_df['Derot']*2 + 161)
+testos = ang_df['Image'] - (161-ang_df['Par']-ang_df['Alt'])
+print(testos)
+
+V1 = np.array(ang_df['Par'])
+V2 = np.array(ang_df['Alt'])
+one = np.ones_like(V1)
+
+V3 = np.array(ang_df['Derot'])
+V4 = np.array(ang_df['Image'])
+
+ranger = np.arange(-80, 160, 1)
+
+plt.scatter(V4, V3)
+plt.plot(ranger, (ranger-162)/2, 'r')
+plt.xlabel('Image')
+plt.ylabel('Derotator')
+
+# A = np.vstack([V3, one]).T
+A = np.vstack([V1, V2]).T
+
+# Solve the least squares problem
+result = np.linalg.lstsq(A, V3, rcond=None)
+
+# Extract the solution (a, b) from the result
+B = result[0]
+
+# result = np.linalg.lstsq(A, V3, rcond=None)
+print(A@B-V3)
+
+
+#%% ------------------- Sausage predictor --------------------
+
+#%%
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, roc_auc_score, precision_recall_curve, auc
+from sklearn.inspection import plot_partial_dependence
+
+
+spot_df = df_new_new.copy()
+
+spot_df['Non-point'] = (spot_df['Non-point'] > 0.5).astype(int)  # Binary target
+
+spot_df = spot_df.select_dtypes(exclude=['object'])
+spot_df = spot_df.select_dtypes(exclude=['bool'])
+
+spot_df.drop(columns='time', inplace=True)
+spot_df.drop(columns='Strehl (header)', inplace=True)
+
+spot_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+spot_df = spot_df.map(lambda x: np.nan if pd.isna(x) or abs(x) > np.finfo(np.float64).max else x)
+spot_df.dropna(inplace=True)
+
+
+X = spot_df.drop('Non-point', axis=1)
+y = spot_df['Non-point']
+
+# Split the data into training and testing sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
+
+# Standardize the features (optional but recommended)
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_test = scaler.transform(X_test)
+
+# Choose a model
+model = LogisticRegression(class_weight='balanced')
+
+model.fit(X_train, y_train)
+
+# Make predictions
+y_pred = model.predict(X_test)
+y_pred_prob = model.predict_proba(X_test)[:, 1]
+
+# Evaluate the model
+print("Confusion Matrix:")
+print(confusion_matrix(y_test, y_pred))
+
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred))
+
+print("\nAccuracy Score:")
+print(accuracy_score(y_test, y_pred))
+
+print("\nROC AUC Score:")
+print(roc_auc_score(y_test, y_pred_prob))
+
+# Precision-Recall Curve
+precision, recall, _ = precision_recall_curve(y_test, y_pred_prob)
+pr_auc = auc(recall, precision)
+print("\nPrecision-Recall AUC Score:")
+print(pr_auc)
+
+#%%
+
+from imblearn.over_sampling import SMOTE
+from sklearn.model_selection import GridSearchCV
+from sklearn.ensemble import RandomForestClassifier
+
+# Apply SMOTE
+smote = SMOTE(random_state=0)
+X_resampled, y_resampled = smote.fit_resample(X_train, y_train)
+
+# Choose a model and perform hyperparameter tuning
+param_grid = {
+    'n_estimators': [100, 200],
+    'max_depth': [10, 20],
+    'min_samples_split': [2, 5],
+    'min_samples_leaf': [1, 2]
+}
+
+model = RandomForestClassifier(class_weight='balanced', random_state=0)
+grid_search = GridSearchCV(model, param_grid, cv=5, scoring='roc_auc')
+grid_search.fit(X_resampled, y_resampled)
+
+# Evaluate the best model on the test set
+best_model = grid_search.best_estimator_
+y_pred = best_model.predict(X_test)
+y_pred_prob = best_model.predict_proba(X_test)[:, 1]
+
+# Metrics
+print("Confusion Matrix:")
+print(confusion_matrix(y_test, y_pred))
+print("\nClassification Report:")
+print(classification_report(y_test, y_pred))
+print("\nAccuracy Score:")
+print(accuracy_score(y_test, y_pred))
+print("\nROC AUC Score:")
+print(roc_auc_score(y_test, y_pred_prob))
+
+precision, recall, _ = precision_recall_curve(y_test, y_pred_prob)
+pr_auc = auc(recall, precision)
+print("\nPrecision-Recall AUC Score:")
+print(pr_auc)
+
+#%%
+from sklearn.inspection import partial_dependence
+importances = best_model.feature_importances_
+indices = np.argsort(importances)[::-1]
+
+# Plot feature importances
+plt.figure(figsize=(10, 6))
+plt.title("Feature Importances")
+plt.bar(range(X_train.shape[1]), importances[indices], align="center")
+plt.xticks(range(X_train.shape[1]), X.columns[indices], rotation=90)
+plt.xlim([-1, X_train.shape[1]])
+plt.show()
+
+#%%
+from sklearn.inspection import permutation_importance
+
+result = permutation_importance(best_model, X_test, y_test, n_repeats=10, random_state=0)
+
+# Plot the results
+sorted_idx = result.importances_mean.argsort()
+plt.figure(figsize=(10, 6))
+plt.boxplot(result.importances[sorted_idx].T, vert=False, labels=X.columns[sorted_idx])
+plt.title("Permutation Feature Importance")
+plt.show()
+
+#%%
+from sklearn.inspection import partial_dependence
+import seaborn as sns
+
+most_important_feature = 'frequency'
+
+X_train_df = pd.DataFrame(X_train, columns=X.columns)
+
+# Calculate partial dependence
+pdp_results = partial_dependence(best_model, X_train_df, [most_important_feature], grid_resolution=50)
+
+# Extract the partial dependence values and axes
+pdp_values = pdp_results['average']
+pdp_values = pdp_values[0]  # For single feature
+pdp_axis   = pdp_results['values'][0]  # For single feature
+
+# Plot the results
+plt.figure(figsize=(10, 6))
+plt.plot(pdp_axis, pdp_values)
+plt.xlabel(most_important_feature)
+
+plt.ylabel('Partial Dependence')
+plt.title(f'Partial Dependence of {most_important_feature}')
+plt.show()
+
+
+#%%
+import shap
+
+X_test_df = pd.DataFrame(X_test, columns=X.columns)
+
+# Create SHAP explainer
+explainer = shap.TreeExplainer(best_model)
+shap_values = explainer.shap_values(X_test_df)
+
+# SHAP dependence plot
+shap.dependence_plot(most_important_feature, shap_values[1], X_test_df)
+
+#%%
+# Check columns with all NaN values
+nan_cols = dfs.columns[dfs.isna().all()]

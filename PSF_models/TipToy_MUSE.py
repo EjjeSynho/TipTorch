@@ -25,7 +25,7 @@ from os import path
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas
 
 from tools.parameter_parser import ParameterParser
-from data_processing.MUSE_read_preproc_old import MUSEcube
+from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tools.utils import rad2mas, rad2arc, deg2rad, asec2rad, seeing, r0, r0_new
 
 
