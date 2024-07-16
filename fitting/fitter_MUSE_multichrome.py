@@ -11,7 +11,7 @@ import torch
 import numpy as np
 from tools.utils import SR, FitGauss2D, SausageFeature
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID
+from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_globals import MUSE_DATA_FOLDER, MUSE_FITTING_FOLDER, device
 from tools.config_manager import ConfigManager
 from torchmin import minimize
@@ -51,7 +51,6 @@ psf_df = psf_df[psf_df['Corrupted']   == False]
 psf_df = psf_df[psf_df['Bad quality'] == False]
 
 good_ids = psf_df.index.values.tolist()
-
 
 # If no start or end ID is specified, use the first and last good IDs
 if start_id == -1:
@@ -126,17 +125,21 @@ norm_theta = TransformSequence(transforms=[ Uniform(a=-np.pi/2, b=np.pi/2)])
 # To absord the phase feature appearing in the PSF
 norm_sausage_pow = TransformSequence(transforms=[ Uniform(a=0, b=1) ])
 
-Moffat_absorber = False
+Moffat_absorber = True
 include_sausage = True
+derotate_PSF = True
 
-#%%
+#%
 def load_and_fit_sample(id): 
-    # id = 21
-
+    
     sample = LoadMUSEsampleByID(id)
-    PSF_0, var_mask, norms = LoadImages(sample)
-    config_file, PSF_0 = GetConfig(sample, PSF_0)
+    PSF_0, _, norms = LoadImages(sample, device)
+    config_file, PSF_0 = GetConfig(sample, PSF_0, None, device)
     N_wvl = PSF_0.shape[1]
+
+    if derotate_PSF:
+        PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
+        config_file['telescope']['PupilAngle'] = 0
 
     #% Initialize the model
     model = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
@@ -191,8 +194,11 @@ def load_and_fit_sample(id):
         'Jx':  norm_J,
         'Jy':  norm_J,
         'Jxy': norm_Jxy,
-        's_pow': norm_sausage_pow,
     }
+    if include_sausage:
+        transformer_dict.update({
+            's_pow': norm_sausage_pow
+        })
 
     if Moffat_absorber:
         transformer_dict.update({
@@ -205,7 +211,8 @@ def load_and_fit_sample(id):
     transformer = InputsTransformer(transformer_dict)
 
     if include_sausage:
-        model.s_pow = torch.zeros([1,1], device=model.device).float()
+        setattr(model, 's_pow', torch.zeros([1,1], device=model.device).float())
+
 
     _ = transformer.stack({ attr: getattr(model, attr) for attr in transformer_dict }) # to create index mapping
 
@@ -274,8 +281,11 @@ def load_and_fit_sample(id):
 
     x_torch = transformer.destack(x0)
 
-    phase_func = lambda: sausage_absorber(model.s_pow.flatten()) if include_sausage else None
-    PSF_1 = model(x_torch, None, phase_generator=phase_func)
+    if include_sausage:
+        PSF_1 = model(x_torch, None, phase_generator=lambda: sausage_absorber(model.s_pow.flatten()))
+    else:
+        PSF_1 = model(x_torch)
+
 
     #%%
     config_manager = ConfigManager()
@@ -286,6 +296,8 @@ def load_and_fit_sample(id):
     save_data = {
         'comments':      '1st multichrom fitting',
         'config':        config_file,
+        'Moffat':        Moffat_absorber,
+        'Sausage':       include_sausage,
         'bg':            to_store(model.bg),
         'F':             to_store(model.F),
         'dx':            to_store(model.dx),
@@ -296,6 +308,10 @@ def load_and_fit_sample(id):
         'Jx':            to_store(model.Jx),
         'Jy':            to_store(model.Jy),
         'Jxy':           to_store(model.Jxy),
+        'sausage_pow':   to_store(model.s_pow) if include_sausage else None,
+        'amp':           to_store(model.amp)   if Moffat_absorber else None,
+        'b':             to_store(model.b)     if Moffat_absorber else None,
+        'alpha':         to_store(model.alpha) if Moffat_absorber else None,
         'Nph WFS':       to_store(model.WFS_Nph),
         'SR data':       SR(PSF_0, PSF_DL).detach().cpu().numpy(),
         'SR fit':        SR(PSF_1, PSF_DL).detach().cpu().numpy(),
@@ -307,26 +323,30 @@ def load_and_fit_sample(id):
         'Data norms':    to_store(norms),
         'Model norms':   to_store(model.norm_scale),
         'loss':          loss_fn(x0).item(),
-        'Transforms':    df_transforms_store,
+        'Transforms':    df_transforms_store
     }
     return save_data
 
+#%%
 # filename = MUSE_FITTING_FOLDER + str(id) + '.pickle'
 
-# # save_data = load_and_fit_sample(id)
+# save_data = load_and_fit_sample(id)
 # if save_data is not None:
 #     with open(filename, 'wb') as handle:
 #         pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 for id in good_ids:
-    filename = MUSE_FITTING_FOLDER + str(id) + '.pickle'
-    print('>>>>>>>>>>>> Fitting sample', id)
-    save_data = load_and_fit_sample(id)
-    if save_data is not None:
-        with open(filename, 'wb') as handle:
-            pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    try:
+        filename = MUSE_FITTING_FOLDER + str(id) + '.pickle'
+        print('>>>>>>>>>>>> Fitting sample', id)
+        save_data = load_and_fit_sample(id)
+        if save_data is not None:
+            with open(filename, 'wb') as handle:
+                pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
+    except Exception as e:
+        print(' ============= Error fitting sample ===========', id)
+        print(e)
 
 # %%
-

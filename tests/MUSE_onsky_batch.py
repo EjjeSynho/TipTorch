@@ -13,8 +13,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
-from tools.config_manager import GetSPHEREonsky
+from data_processing.MUSE_preproc_utils import GetMUSEonsky
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
 from astropy.stats import sigma_clipped_stats
@@ -23,28 +22,33 @@ from tools.config_manager import ConfigManager
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, PolyModel, InputsCompressor
 from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tqdm import tqdm
+from scipy.ndimage import rotate
+
+from pprint import pprint
+
+from copy import deepcopy
+
+# import sys
+# sys.setrecursionlimit(500)  # Increase the recursion limit; default is usually 1000
+
 
 #%%
 # 411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335
-derotate_PSF = True
-Moffat_absorber = True
-include_sausage = True
+ids = [411, 405, 409, 395, 343]
 
-sample = LoadMUSEsampleByID(411)
-PSF_0, var_mask, norms = LoadImages(sample)
-config_file, PSF_0 = GetConfig(sample, PSF_0)
+PSF_0, merged_config = GetMUSEonsky(ids, device)
+
+N_src = PSF_0.shape[0]
 N_wvl = PSF_0.shape[1]
-
-if derotate_PSF:
-    PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
-    config_file['telescope']['PupilAngle'] = 0
-
 
 #%% Initialize the model
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from tools.utils import SausageFeature
 
-toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+Moffat_absorber = True
+include_sausage = True
+
+toy = TipTorch(merged_config, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 sausage_absorber = SausageFeature(toy)
 sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
 
@@ -59,26 +63,20 @@ toy.to_float()
 # toy.to_double()
 
 inputs_tiptorch = {
-    # 'r0':  torch.tensor([0.09561153075597545], device=toy.device),
-    'F':   torch.tensor([[1.0,]*N_wvl], device=toy.device),
-    # 'L0':  torch.tensor([47.93], device=toy.device),
-    'dx':  torch.tensor([[0.0,]*N_wvl], device=toy.device),
-    'dy':  torch.tensor([[0.0,]*N_wvl], device=toy.device),
-    # 'dx':  torch.tensor([[0.0]], device=toy.device),
-    # 'dy':  torch.tensor([[0.0]], device=toy.device),
-    'bg':  torch.tensor([[1e-06,]*N_wvl], device=toy.device),
-    'dn':  torch.tensor([1.5], device=toy.device),
-    'Jx':  torch.tensor([[10,]*N_wvl], device=toy.device),
-    'Jy':  torch.tensor([[10,]*N_wvl], device=toy.device),
-    # 'Jx':  torch.tensor([[10]], device=toy.device),
-    # 'Jy':  torch.tensor([[10]], device=toy.device),
-    'Jxy': torch.tensor([[45]], device=toy.device)
+    'F':   torch.ones ([N_src, N_wvl], device=toy.device),
+    'dx':  torch.zeros([N_src, N_wvl], device=toy.device),
+    'dy':  torch.zeros([N_src, N_wvl], device=toy.device),
+    'bg':  torch.ones ([N_src, N_wvl], device=toy.device)*1e-6,
+    'dn':  torch.ones (N_src, device=toy.device)*1.5,
+    'Jx':  torch.ones ([N_src, N_wvl], device=toy.device)*10,
+    'Jy':  torch.ones ([N_src, N_wvl], device=toy.device)*10,
+    'Jxy': torch.ones ([N_src, 1], device=toy.device)*45
 }
 
 if Moffat_absorber:
     inputs_psfao = {
-        'amp':   torch.ones (toy.N_src, device=toy.device)*0.0, # Phase PSD Moffat amplitude [rad²]
-        'b':     torch.ones (toy.N_src, device=toy.device)*0.0, # Phase PSD background [rad² m²]
+        'amp':   torch.zeros(toy.N_src, device=toy.device),     # Phase PSD Moffat amplitude [rad²]
+        'b':     torch.zeros(toy.N_src, device=toy.device),     # Phase PSD background [rad² m²]
         'alpha': torch.ones (toy.N_src, device=toy.device)*0.1, # Phase PSD Moffat alpha [1/m]
         'beta':  torch.ones (toy.N_src, device=toy.device)*2,   # Phase PSD Moffat beta power law
         'ratio': torch.ones (toy.N_src, device=toy.device),     # Phase PSD Moffat ellipticity
@@ -106,11 +104,11 @@ PSF_1 = toy(x=inputs)
 # draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80, scale='log')
 
 aa = 0
-plt.imshow(PSF_1[0,aa,...].log10().cpu().numpy())
+plt.imshow(PSF_1[:,aa,...].mean(dim=0).abs().log10().cpu().numpy())
 plt.show()
 # plt.imshow(PSF_1[0,-1,...].log10().cpu().numpy())
 # plt.show()
-plt.imshow(PSF_0[0,aa,...].abs().log10().cpu().numpy())
+plt.imshow(PSF_0[:,aa,...].mean(dim=0).abs().log10().cpu().numpy())
 plt.show()
 # plt.imshow(PSF_0[0,-1,...].abs().log10().cpu().numpy())
 # plt.show()
@@ -140,7 +138,6 @@ def _radial_profiles(PSFs, centers=None):
     return profiles
 
 
-#%
 
 plt.figure(figsize=(10, 8))
 
@@ -217,22 +214,46 @@ plt.plot(w, b_pred, 'o-', color='red')
 #%% PSF fitting (no early-stopping)
 norm_F     = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0) ])
 norm_bg    = TransformSequence(transforms=[ Uniform(a=-5e-6, b=5e-6)])
-norm_r0    = TransformSequence(transforms=[ Uniform(a=0,     b=1)  ])
+norm_r0    = TransformSequence(transforms=[ Uniform(a=0,     b=1)   ])
 norm_dxy   = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
 norm_J     = TransformSequence(transforms=[ Uniform(a=0,     b=50)  ])
 norm_Jxy   = TransformSequence(transforms=[ Uniform(a=-180,  b=180) ])
-norm_dn    = TransformSequence(transforms=[ Uniform(a=0,     b=5)  ])
+norm_dn    = TransformSequence(transforms=[ Uniform(a=0,     b=5)   ])
 
 norm_sausage_pow = TransformSequence(transforms=[ Uniform(a=0, b=1)  ])
-# norm_sausage_ang = TransformSequence(transforms=[ Uniform(a=-30, b=30)  ])
 
-norm_amp   = TransformSequence(transforms=[ Uniform(a=0,     b=10)   ])
-norm_b     = TransformSequence(transforms=[ Uniform(a=0,     b=0.1)   ])
+norm_amp   = TransformSequence(transforms=[ Uniform(a=0,     b=10)  ])
+norm_b     = TransformSequence(transforms=[ Uniform(a=0,     b=0.1) ])
 norm_alpha = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
-norm_beta  = TransformSequence(transforms=[ Uniform(a=0,     b=10)   ])
+norm_beta  = TransformSequence(transforms=[ Uniform(a=0,     b=10)  ])
 norm_ratio = TransformSequence(transforms=[ Uniform(a=0,     b=2)   ])
 norm_theta = TransformSequence(transforms=[ Uniform(a=-np.pi/2, b=np.pi/2)])
 
+transforms_dump = {
+    'F':     norm_F,
+    'bg':    norm_bg,
+    'r0':    norm_r0,
+    'dx':    norm_dxy,
+    'dy':    norm_dxy,
+    'Jx':    norm_J,
+    'Jy':    norm_J,
+    'Jxy':   norm_Jxy,
+    'dn':    norm_dn,
+    's_pow': norm_sausage_pow,
+    'amp':   norm_amp,
+    'b':     norm_b,
+    'alpha': norm_alpha,
+    'beta':  norm_beta,
+    'ratio': norm_ratio,
+    'theta': norm_theta
+}
+
+with open('../data/temp/muse_df_fitted_transforms.pickle', 'wb') as handle:
+    df_transforms_store = {}
+    for entry in transforms_dump:
+        df_transforms_store[entry] = transforms_dump[entry].store()
+    pickle.dump(df_transforms_store, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    
 
 # The order of definition matters here!
 transformer_dict = {
@@ -264,13 +285,12 @@ transformer = InputsTransformer(transformer_dict)
 
 # Loop through the class attributes to get the initial values and their dimensions
 if include_sausage:
-    toy.s_pow = torch.zeros([1,1], device=toy.device).float()
+    toy.s_pow = torch.zeros([toy.N_src,1], device=toy.device).float()
 
 _ = transformer.stack({ attr: getattr(toy, attr) for attr in transformer_dict }) # to create index mapping
 
 #%%
 x0 = [\
-    norm_r0.forward(toy.r0).item(), # r0
     *([1.0,]*N_wvl), # F
     *([0.0,]*N_wvl), # dx
     *([0.0,]*N_wvl), # dy
@@ -299,9 +319,10 @@ if Moffat_absorber:
 if include_sausage:
     x0 += [0.9]
 
-# x0 = transformer.stack(inputs)
-x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
+x0 = torch.tensor(x0).float().to(device).repeat(toy.N_src, 1)
+x0 = torch.hstack([norm_r0.forward(toy.r0).unsqueeze(-1), x0])
 
+#%%
 def func(x_, include_list=None):
     x_torch = transformer.destack(x_)
     
@@ -392,9 +413,9 @@ center = np.array([PSF_0.shape[-2]//2, PSF_0.shape[-1]//2])
 if len(toy.wvl[0]) > 1:
     wvl_select = np.s_[0, 6, 12]
 
-    draw_PSF_stack( PSF_0.cpu().numpy()[0, wvl_select, ...], PSF_1.cpu().numpy()[0, wvl_select, ...], average=True, crop=120 )
+    draw_PSF_stack( PSF_0.cpu().numpy()[:, wvl_select, ...], PSF_1.cpu().numpy()[:, wvl_select, ...], average=True, crop=120 )
     
-    PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
+    PSF_disp = lambda x, w: (x[:,w,...]).cpu().numpy()
 
     fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
     for i, lmbd in enumerate(wvl_select):
@@ -428,6 +449,7 @@ for i in range(N_wvl_):
     plot_radial_profiles_new( A, B,  'Data', 'TipTorch', title=f'{(wvls_[0][i]*1e9):.2f} [nm]')
     plt.savefig(f'C:/Users/akuznets/Desktop/MUSE_fits_new/profiles_{(wvls_[0][i]*1e9):.0f}.png')
 '''
+
 #%%
 # plt.plot(toy.wvl.squeeze().cpu().numpy().flatten()*1e9, (toy.Jy**2+toy.Jx**2).sqrt().cpu().numpy().flatten())
 # plt.plot(toy.wvl.squeeze().cpu().numpy().flatten()*1e9, toy.Jy.detach().cpu().numpy().flatten())

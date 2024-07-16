@@ -31,6 +31,7 @@ class ConfigManager():
                 ['DM', 'OptimizationConditioning'],
                 ['DM', 'OptimizationWeight'],
                 ['sensor_HO', 'Algorithm'],
+                ['sensor_LO', 'Algorithm'],
                 ['sensor_HO', 'Binning'],
                 ['sensor_HO', 'Dispersion'],
                 ['sensor_HO', 'ExcessNoiseFactor'],
@@ -44,6 +45,7 @@ class ConfigManager():
                 ['sensor_HO', 'SizeLenslets'],
                 ['sensor_HO', 'ThresholdWCoG'],
                 ['sensor_HO', 'WfsType'],
+                ['sensor_LO', 'WfsType'],
                 ['sensor_HO', 'WindowRadiusWCoG'],
                 ['sensor_science', 'Binning'],
                 ['sensor_science', 'ExcessNoiseFactor'],
@@ -228,9 +230,15 @@ class ConfigManager():
             
             def convert_value(x):
                 if isinstance(x, torch.Tensor):
-                    return x.clone().to(device).float()
+                    # return x.clone().to(device).float()
+                    return x.to(device).float() if x.device != device else x.float()
+                elif isinstance(x, list) and all(isinstance(i, torch.Tensor) for i in x):
+                    return torch.stack(x).to(device).float()
+                elif isinstance(x, str):
+                    pass #return x
                 else:
                     return torch.tensor(x, device=device).float()
+                            
             
         elif framework.lower() == 'numpy':
             convert_value = lambda x: np.array(x.cpu()) if isinstance(x, torch.Tensor) else np.array(x)
@@ -320,3 +328,7 @@ def GetSPHEREsynth():
         (['sources_science','Wavelength'], ['spectra']            ),
     ]
     return conversion_table, None
+
+
+# def GetMUSEonsky():
+#     conversion_table = [

@@ -79,12 +79,11 @@ class TipTorch(torch.nn.Module):
 
         self.GS_wvl     = self.config['sources_HO']['Wavelength'] #[m]
         self.GS_height  = self.config['sources_HO']['Height'] * self.airmass #[m]
-     
-        self.GS_angle   = torch.tensor(self.config['sources_HO']['Zenith'],  device=self.device) / rad2arc
-        self.GS_azimuth = torch.tensor(self.config['sources_HO']['Azimuth'], device=self.device) * deg2rad
+        self.GS_angle   = self.config['sources_HO']['Zenith']  / rad2arc
+        self.GS_azimuth = self.config['sources_HO']['Azimuth'] * deg2rad
         self.GS_dirs_x  = torch.tan(self.GS_angle) * torch.cos(self.GS_azimuth)
         self.GS_dirs_y  = torch.tan(self.GS_angle) * torch.sin(self.GS_azimuth)
-        self.nGS = self.GS_dirs_y.size(0)
+        self.nGS = self.GS_dirs_y.size(-1)
      
         self.wind_speed  = self.config['atmosphere']['WindSpeed']
         self.wind_dir    = self.config['atmosphere']['WindDirection']
@@ -540,19 +539,19 @@ class TipTorch(torch.nn.Module):
         WFS_wvl = self.GS_wvl
 
         MV = 0
-        
+        # TODO: leave a singleton dimension for nGs in any case
         if WFS_noise_var.shape[1] > 1: # it means that there are several LGS, 0th dim is reserved for the targets
             varNoise = WFS_noise_var.mean(dim=1) # averaging the varience over the LGSs
         else:
             varNoise = WFS_noise_var
         
-        Wn = varNoise / (2*self.kc)**2 #TODO: should it be kc for 500 nm?
+        W_n = pdims(varNoise / (2*self.kc)**2, 2) #TODO: should it be kc for 500 nm?
 
         # TODO: isn't this one should be computed for the WFSing wvl?
 
         self.W_atm = self.VonKarmanSpectrum(r0, L0, self.k2_AO) * self.piston_filter   #TODO: clarify this V
 
-        gPSD = torch.abs(self.SxAv)**2 + torch.abs(self.SyAv)**2 + MV*Wn/self.W_atm / (500e-9/WFS_wvl)**2
+        gPSD = torch.abs(self.SxAv)**2 + torch.abs(self.SyAv)**2 + MV*W_n/self.W_atm / pdims(500e-9/WFS_wvl, 2)**2
         self.Rx = torch.conj(self.SxAv) / gPSD
         self.Ry = torch.conj(self.SyAv) / gPSD
         self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-9 # For numerical stability
@@ -573,8 +572,8 @@ class TipTorch(torch.nn.Module):
 
             delta_h = h*(fx+fy) - delta_T * wind_speed_nGs_nL * freq_t
             '''
-            delta_T  = (1 + self.HOloop_delay) / self.HOloop_rate
-            delta_h  = -delta_T * self.freq_t * self.wind_speed
+            delta_T  = pdims( (1 + self.HOloop_delay) / self.HOloop_rate, 4)
+            delta_h  = -delta_T * self.freq_t * self.wind_speed.view(self.N_src, 1, 1, 1, self.nL)
             P_beta_L = torch.exp(2j*np.pi*delta_h)
 
             proj = P_beta_L - self.P_beta_DM @ self.W_alpha
@@ -599,7 +598,7 @@ class TipTorch(torch.nn.Module):
             else:
                 varNoise = WFS_noise_var
             
-            noisePSD = noisePSD * self.noise_gain * varNoise * self.mask_corrected_AO * self.piston_filter
+            noisePSD = noisePSD * self.noise_gain * pdims(varNoise,2) * self.mask_corrected_AO * self.piston_filter
             
         return noisePSD
 
@@ -607,7 +606,7 @@ class TipTorch(torch.nn.Module):
     def AliasingPSD(self, r0, L0):
         T = self.WFS_det_clock_rate / self.HOloop_rate
         td = pdims(T * self.HOloop_delay, [-1,3]) # [N_combs x N_src x nOtf_AO x n_Otf_AO x nL]
-
+        T = pdims(T, [-1,3])
 
         # Adding 0th dimension for shifted grid pieces
         Rx1 = (2j*np.pi*self.WFS_d_sub * self.Rx).unsqueeze(0)
@@ -689,7 +688,7 @@ class TipTorch(torch.nn.Module):
         WFS_wvl = self.WFS_wvl
         WFS_Nph = self.WFS_Nph.abs().view(self.N_src, self.nGS)
         r0_WFS =  r0_new(r0.view(self.N_src), WFS_wvl, 0.5e-6).abs()
-        WFS_nPix = (self.WFS_FOV / self.WFS_n_sub).view(WFS_Nph.size())
+        WFS_nPix = self.WFS_FOV / self.WFS_n_sub#.repeat(self.N_src, 1)#.view(WFS_Nph.size())
         WFS_pixelScale = self.WFS_psInMas / 1e3 # [arcsec]
        
         # Read-out noise calculation
@@ -697,21 +696,21 @@ class TipTorch(torch.nn.Module):
         # Photon-noise calculation
         nT = torch.maximum( torch.hypot(self.WFS_spot_FWHM.max()/1e3, rad2arc*WFS_wvl/r0_WFS) / WFS_pixelScale, self.make_tensor(1.0) )
 
-        varRON  = np.pi**2/3 * (self.WFS_RON**2/WFS_Nph**2) * (WFS_nPix**2/nD)**2
-        varShot = np.pi**2 / (2*WFS_Nph) * (nT/nD)**2
+        varRON  = np.pi**2/3 * (self.WFS_RON**2/WFS_Nph**2) * (WFS_nPix**2/nD).unsqueeze(-1)**2
+        varShot = np.pi**2 / (2*WFS_Nph) * (nT/nD).unsqueeze(-1)**2
         
         # Noise variance calculation
-        varNoise = self.WFS_excessive_factor * (varRON+varShot) * (500e-9/WFS_wvl)**2
+        varNoise = self.WFS_excessive_factor * (varRON+varShot) * (500e-9/WFS_wvl).unsqueeze(-1)**2
 
         return varNoise
 
 
     def TomographicReconstructors(self, r0, L0, WFS_noise_var, inv_method='lstsq'):
-        h = self.h.view(self.N_src, 1, 1, 1, -1)
+        h = self.h.view(self.N_src, 1, 1, 1, self.nL)
         kx = pdims(self.kx_AO, 2)
         ky = pdims(self.ky_AO, 2)
-        GS_dirs_x = self.GS_dirs_x.view(1, 1, 1, -1, 1)
-        GS_dirs_y = self.GS_dirs_y.view(1, 1, 1, -1, 1)
+        GS_dirs_x = self.GS_dirs_x.view(self.N_src, 1, 1, self.nGS, 1)
+        GS_dirs_y = self.GS_dirs_y.view(self.N_src, 1, 1, self.nGS, 1)
         
         diag_mask = lambda N: torch.eye(N, device=self.device).view(1,1,1,N,N).expand(self.N_src, self.nOtf_AO, self.nOtf_AO, -1, -1)
         
@@ -777,15 +776,15 @@ class TipTorch(torch.nn.Module):
 
         self.W = self.P_opt @ W_tomo
 
-        wDir_x = torch.cos(self.wind_dir * np.pi / 180.0).view(self.N_src, 1, 1, 1, -1)
-        wDir_y = torch.sin(self.wind_dir * np.pi / 180.0).view(self.N_src, 1, 1, 1, -1)
+        wDir_x = torch.cos(self.wind_dir * np.pi / 180.0).view(self.N_src, 1, 1, 1, self.nL)
+        wDir_y = torch.sin(self.wind_dir * np.pi / 180.0).view(self.N_src, 1, 1, 1, self.nL)
 
-        wind_speed = self.wind_speed.view(self.N_src, 1, 1, 1, -1)
+        wind_speed = self.wind_speed.view(self.N_src, 1, 1, 1, self.nL)
 
         self.freq_t = wDir_x*kx + wDir_y*ky
 
         samp_time = 1.0 / self.HOloop_rate
-        www = 2j*torch.pi*pdims(self.k_AO,2) * torch.sinc(samp_time*self.WFS_det_clock_rate*wind_speed*self.freq_t)
+        www = 2j*torch.pi*pdims(self.k_AO,2) * torch.sinc(pdims(samp_time * self.WFS_det_clock_rate,4) * wind_speed * self.freq_t)
 
         # self.www = www
 
@@ -852,7 +851,7 @@ class TipTorch(torch.nn.Module):
 
         if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
             # WFS_wvl = pdims(self.WFS_wvl, 2)
-            WFS_noise_var = (self.dn + self.NoiseVariance(r0)).abs() # [rad^2] at WFSing wavelength TODO: really at this wvl?
+            WFS_noise_var = (self.dn.unsqueeze(-1) + self.NoiseVariance(r0)).abs() # [rad^2] at WFSing wavelength TODO: really at this wvl?
                         
             self.vx = self.wind_speed * torch.cos( torch.deg2rad(self.wind_dir) )
             self.vy = self.wind_speed * torch.sin( torch.deg2rad(self.wind_dir) )

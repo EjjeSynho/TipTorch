@@ -469,7 +469,8 @@ class TransformSequence:
     
     def __len__(self):
         return len(self.transforms)
-    
+
+
 def LoadTransforms(state):
     transforms = []
     for transform in state: #[name, param_1, param_2, ...]
@@ -489,8 +490,8 @@ def LoadTransforms(state):
 
 
 def CreateTransformSequence(entry, df, transforms_list, verbose=True):
-    data = df[entry].values
-    data_init = df[entry].values
+    data      = df[entry].replace([np.inf, -np.inf], np.nan).dropna().values.astype(np.float64)
+    data_init = df[entry].replace([np.inf, -np.inf], np.nan).dropna().values.astype(np.float64)
 
     transforms = []
     for transform in transforms_list:

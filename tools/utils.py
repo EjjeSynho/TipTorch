@@ -247,7 +247,7 @@ class SausageFeature:
         #     DM_diff = hdul[0].data.byteswap().newbyteorder()
         
         # Load phase map obtained with calibration
-        DF_diff = loadmat(MUSE_DATA_FOLDER+'..\AOF\Sausage tests\DelatRS2Phase.mat')['aa']
+        DF_diff = loadmat(MUSE_DATA_FOLDER+'../AOF/Sausage tests/DelatRS2Phase.mat')['aa']
         
         # 1.6 comes from the max of the influence func
         # 35 = SPARTA units per micron, 2 factor is due to WF reflection from the DM
@@ -390,6 +390,12 @@ def GetROIaroundMax(im, win=200):
     ids = CroppedROI(im, max_id, win)
     return im[ids], ids, max_id
 '''
+
+
+def GetJmag(N_ph):
+    J_zero_point = 1.9e12
+    return -2.5 * np.log10(368 * N_ph / J_zero_point)
+
 
 # Adds singleton dimensions to the tensor. If negative, dimensions are added in the beginning, else in the end
 def pdims(x, ns):

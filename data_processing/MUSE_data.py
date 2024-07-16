@@ -10,11 +10,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from skimage.restoration import inpaint
-from tools.utils import GetROIaroundMax, wavelength_to_rgb
+from tools.utils import GetROIaroundMax, wavelength_to_rgb, GetJmag
 from project_globals import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER, LIFT_PATH
 from datetime import datetime
 import datetime
-import dlt
 import pandas as pd
 from astropy.coordinates import SkyCoord, AltAz, EarthLocation
 from astropy.io import fits
@@ -22,8 +21,8 @@ import astropy.units as u
 from astropy.time import Time
 import requests
 from io import StringIO
-from photutils.centroids import centroid_2dg, centroid_com, centroid_quadratic
 from photutils.background import Background2D, MedianBackground
+
 
 UT4_coords = ('24d37min37.36s', '-70d24m14.25s', 2635.43)
 UT4_location = EarthLocation.from_geodetic(lat=UT4_coords[0], lon=UT4_coords[1], height=UT4_coords[2]*u.m)
@@ -263,11 +262,6 @@ def GetIRLOSphotons(flux_ADU, LO_gain, LO_freq, convert_factor): #, [ADU], [1], 
     transmission = 0.4 # [1]
     M1_area = (8-1.12)**2 * np.pi / 4 # [m^2]
     return flux_ADU / QE * convert_factor / LO_gain * LO_freq / M1_area * transmission # [photons/s/m^2]
-
-
-def GetJmag(N_ph):
-    J_zero_point = 1.9e12
-    return -2.5 * np.log10(368 * N_ph / J_zero_point)
 
 
 def GetIRLOSdata(hdul_raw, start_time, IRLOS_cube):
@@ -880,7 +874,6 @@ def create_flat_dataframe(df):
 def get_PSF_rotation(MUSE_images, derot_angle):
     from scipy.ndimage import rotate
     from tools.utils import cropper
-    from scipy.ndimage import rotate
     from skimage.restoration import inpaint_biharmonic
     from scipy.ndimage import gaussian_filter
     from tools.utils import mask_circle
@@ -1133,276 +1126,6 @@ for file in tqdm(os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')):
     
     plt.show()
     plt.savefig(MUSE_RAW_FOLDER+'../MUSE_images/' + title + '.png')
-
-#%%
-# Load labels information
-all_labels = []
-labels_df  = { 'ID': [], 'Filename': [] }
-
-if os.path.exists(MUSE_DATA_FOLDER+'labels.txt'):
-    with open(MUSE_DATA_FOLDER+'labels.txt', 'r') as f:
-        for line in f:
-            filename, labels = line.strip().split(': ')
-
-            ID = filename.split('_')[0]
-            pure_filename = filename.replace(ID+'_', '').replace('.png', '')
-
-            labels_df['ID'].append(int(ID))
-            labels_df['Filename'].append(pure_filename)
-            all_labels.append(labels.split(', '))
-else:
-    raise ValueError('Labels file does not exist!')
-
-labels_list = list(set( [x for xs in all_labels for x in xs] ))
-labels_list.sort()
-
-for i in range(len(labels_list)):
-    labels_df[labels_list[i]] = []
-
-for i in range(len(all_labels)):
-    for label in labels_list:
-        labels_df[label].append(label in all_labels[i])
-
-labels_df = pd.DataFrame(labels_df)
-labels_df.set_index('ID', inplace=True)
-
-
-# Read flattened DataFrames and concatenate them
-dfs = []
-files = os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')
-
-for file in tqdm(files):
-    with open(MUSE_RAW_FOLDER+'../DATA_reduced/'+file, 'rb') as f:
-        data = pickle.load(f)
-        df_ = data['All data']
-        df_['ID'] = int(file.split('_')[0])
-        dfs.append(df_)
-        
-dfs = pd.concat(dfs)
-dfs.set_index('ID', inplace=True)
-dfs.sort_index(inplace=True)
-
-dfs = dfs.join(labels_df)
-
-# Save as pickle
-with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'wb') as handle:
-    pickle.dump(dfs, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-#%%
-with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'rb') as handle:
-    dfs = pickle.load(handle)
-
-
-def plot_data_filling(df):
-    # Convert DataFrame to a boolean matrix: True for non-NaN values, False for NaN values
-    data_filling = ~df.isna()
-    
-    # Plotting
-    plt.figure(figsize=(20, 20))
-    plt.imshow(data_filling, cmap='Greens', interpolation='none', aspect=6./35)
-    plt.title('Data Filling Plot')
-    plt.xlabel('Columns')
-    plt.ylabel('Rows')
-    # plt.colorbar(label='Data Presence (1: non-NaN, 0: NaN)', ticks=[0, 1])
-    plt.xticks(ticks=np.arange(len(df.columns)), labels=df.columns, fontsize=7, rotation=90)
-    # plt.grid(axis='x', color='black', linestyle='-', linewidth=0.5)
-    for x in np.arange(-0.5, len(df.columns.values), 1):
-        plt.axvline(x=x, color='black', linestyle='-', linewidth=0.5)
-    
-    plt.tight_layout()
-    plt.show()
-
-plot_data_filling(dfs)
-
-# %% Dataset cleaning
-df_new = dfs.copy()
-
-df_new['LGS_R0']         = df_new[['LGS1_R0', 'LGS2_R0', 'LGS3_R0', 'LGS4_R0']].mean(axis=1)
-df_new['LGS_L0']         = df_new[['LGS1_L0', 'LGS2_L0', 'LGS3_L0', 'LGS4_L0']].mean(axis=1)
-df_new['LGS_SEEING']     = df_new[['LGS1_SEEING', 'LGS2_SEEING', 'LGS3_SEEING', 'LGS4_SEEING']].mean(axis=1)
-df_new['LGS_STREHL']     = df_new[['LGS1_SEEING', 'LGS2_SEEING', 'LGS3_SEEING', 'LGS4_SEEING']].mean(axis=1)
-df_new['LGS_TURVAR_RES'] = df_new[['LGS1_TURVAR_RES', 'LGS2_TURVAR_RES', 'LGS3_TURVAR_RES', 'LGS4_TURVAR_RES']].mean(axis=1)
-df_new['LGS_TURVAR_TOT'] = df_new[['LGS1_TURVAR_TOT', 'LGS2_TURVAR_TOT', 'LGS3_TURVAR_TOT', 'LGS4_TURVAR_TOT']].mean(axis=1)
-df_new['LGS_TUR_ALT']    = df_new[['LGS1_TUR_ALT', 'LGS2_TUR_ALT', 'LGS3_TUR_ALT', 'LGS4_TUR_ALT']].mean(axis=1)
-df_new['LGS_TUR_GND']    = df_new[['LGS1_TUR_GND', 'LGS2_TUR_GND', 'LGS3_TUR_GND', 'LGS4_TUR_GND']].mean(axis=1)
-df_new['LGS_FWHM_GAIN']  = df_new[['LGS1_FWHM_GAIN', 'LGS2_FWHM_GAIN', 'LGS3_FWHM_GAIN', 'LGS4_FWHM_GAIN']].mean(axis=1)
-
-for i in range(1, 5):
-    df_new[f'AOS.LGS{i}.SLOPERMS'] = (df_new[f'AOS.LGS{i}.SLOPERMSX']**2 + df_new[f'AOS.LGS{i}.SLOPERMSY']**2)**0.5
-    df_new[f'LGS{i}_SLOPERMS']     = (df_new[f'LGS{i}_SLOPERMSX']**2 + df_new[f'LGS{i}_SLOPERMSY']**2)**0.5
-
-df_new['AOS.LGS.SLOPERMS'] = df_new[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].mean(axis=1)
-df_new['LGS_SLOPERMS']     = df_new[[f'LGS{i}_SLOPERMS' for i in range(1, 5)]].mean(axis=1) 
-df_new['MASS_TURB']        = df_new[[f'MASS_TURB{i}' for i in range(0, 7)]].sum(axis=1)
-
-df_new[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].mean(axis=1)
-
-GL_fracs = []
-GL_frac_SLODAR = []
-h_GL = 2000
-
-for j in range(len(df_new)):
-    Cn2_weights = np.array([df_new.iloc[j][f'CN2_FRAC_ALT{i}'] for i in range(1, 9)])
-    
-    if not np.isnan(Cn2_weights).all():
-        altitudes   = np.array([df_new.iloc[j][f'ALT{i}'] for i in range(1, 9)])*100 # in meters
-
-        Cn2_weights_GL = Cn2_weights[altitudes < h_GL]
-        altitudes_GL   = altitudes  [altitudes < h_GL]
-
-        GL_frac  = Cn2_weights_GL.sum()  # Ground layer fraction
-        # Cn2_w_GL = np.interp(h_GL, altitudes, Cn2_weights)
-
-        if GL_frac > 1.0 or GL_frac < 0.0:
-            GL_frac = np.nan
-
-        GL_fracs.append(GL_frac)
-    else:
-        GL_fracs.append(np.nan)
-        
-df_new['Cn2 fraction below 2000m'] = GL_fracs
-
-
-droppies = [
-    *[f'LGS{i}_R0' for i in range(1, 5)],
-    *[f'LGS{i}_L0' for i in range(1, 5)],
-    *[f'LGS{i}_SEEING' for i in range(1, 5)],
-    *[f'LGS{i}_STREHL' for i in range(1, 5)],
-    *[f'LGS{i} works'  for i in range(1, 5)],
-    *[f'LGS{i} flux, [ADU/frame]' for i in range(1, 5)],
-    *[f'LGS{i} flux, [ADU/frame]' for i in range(1, 5)],
-    *[f'LGS{i} flux, [ADU/frame]' for i in range(1, 5)],
-    *[f'AOS.LGS{i}.SLOPERMSX' for i in range(1, 5)],
-    *[f'AOS.LGS{i}.SLOPERMSY' for i in range(1, 5)],
-    *[f'AOS.LGS{i}.SLOPERMS'  for i in range(1, 5)],
-    *[f'LGS{i}_SLOPERMSX'  for i in range(1, 5)],
-    *[f'LGS{i}_SLOPERMSY'  for i in range(1, 5)],
-    *[f'LGS{i}_SLOPERMS'   for i in range(1, 5)],
-    *[f'LGS{i}_TURVAR_RES' for i in range(1, 5)],
-    *[f'LGS{i}_TURVAR_TOT' for i in range(1, 5)],
-    *[f'LGS{i}_TUR_ALT'    for i in range(1, 5)],
-    *[f'LGS{i}_TUR_GND'    for i in range(1, 5)],
-    *[f'LGS{i}_FWHM_GAIN'  for i in range(1, 5)],
-    
-    *[f'CN2_FRAC_ALT{i}' for i in range(1, 9)],
-    *[f'CN2_ALT{i}' for i in range(1, 9)],
-    *[f'ALT{i}' for i in range(1, 9)],
-    *[f'L0_ALT{i}' for i in range(1, 9)],
-    *[f'SLODAR_CNSQ{i}' for i in range(2, 9)],
-    *[f'MASS_TURB{i}' for i in range(0, 7)],
-    
-    'SLODAR_TOTAL_CN2',
-    'ADUs (from 2x2)',
-    'Cn2 above UTs [10**(-15)m**(1/3)]',
-    'Cn2 fraction below 300m',
-    'Cn2 fraction below 500m',
-    'Surface layer profile [10**(-15)m**(1/3)]',
-    'Air Temperature at 30m [C]',
-    'Seeing ["]',
-    'NGS mag',
-    'scale',
-    'AIRMASS',
-    'seeingTot',
-    'L0Tot',
-    'r0Tot',
-    'ADUs (header)',
-    'NGS mag (header)'
-]
-
-# Remove columns with specific names
-df_new.drop(columns=droppies, inplace=True)
-
-print('Columns left:', len(df_new.columns.values))
-
-plot_data_filling(df_new)
-
-
-#%% Data imputation
-from sklearn.experimental import enable_iterative_imputer
-from sklearn.impute import IterativeImputer
-from sklearn.linear_model import BayesianRidge
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.preprocessing import StandardScaler
-
-# Clone dataframe
-df_imputed = df_new.copy()
-
-# Delete non-numeric string columns
-df_imputed = df_imputed.select_dtypes(exclude=['object'])
-df_imputed = df_imputed.select_dtypes(exclude=['bool'])
-
-droppies_for_imputter = [
-    'time',
-    # 'RA (science)',
-    # 'DEC (science)',
-    # 'Tel. altitude',
-    # 'Tel. azimuth',
-    # 'NGS RA',
-    # 'NGS DEC',
-    'Strehl (header)',
-    'NGS mag (from ph.)' # delete to restore later
-]
-
-# Change scaling
-# for i in range(1, 5):
-#     df_imputed[f'LGS{i} photons, [photons/m^2/s]'] /= 1e9
-    
-# df_imputed['MASS_TURB'] *= 1e13
-# df_imputed['IRLOS photons, [photons/s/m^2]'] /= 1e4
-# df_imputed['IRLOS photons (cube), [photons/s/m^2]'] /= 1e4
-
-df_imputed.drop(columns=droppies_for_imputter, inplace=True)
-df_imputed.replace([np.inf, -np.inf], np.nan, inplace=True)
-df_imputed = df_imputed.map(lambda x: np.nan if pd.isna(x) or abs(x) > np.finfo(np.float64).max else x)
-
-scaler_imputer = StandardScaler()
-df_imputed_data = scaler_imputer.fit_transform(df_imputed)
-df_imputed = pd.DataFrame(df_imputed_data, columns=df_imputed.columns)
-
-# plot_data_filling(df_imputed)
-#%
-# imputer = IterativeImputer(estimator=BayesianRidge(), random_state=0, max_iter=100, verbose=2)
-imputer = IterativeImputer(estimator=RandomForestRegressor(n_estimators=100, n_jobs=16), max_iter=15, random_state=0, verbose=2)
-
-imputed_data = imputer.fit_transform(df_imputed)
-df_imputed = pd.DataFrame(imputed_data, columns=df_imputed.columns)
-
-#%%
-imputed_data = scaler_imputer.inverse_transform(df_imputed)
-df_imputed = pd.DataFrame(imputed_data, columns=df_imputed.columns)
-
-df_new_new = df_new.copy()
-# Copy missing values back to the original DataFrame
-for col in df_imputed.columns:
-    df_new_new[col] = df_imputed[col]
-
-df_new_new['NGS mag (from ph.)'] = GetJmag(df_new_new['IRLOS photons, [photons/s/m^2]'])
-plot_data_filling(df_new_new)
-
-with open(MUSE_RAW_FOLDER+'../muse_df_reduced_imputed.pickle', 'wb') as handle:
-    pickle.dump(df_new_new, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-#%%
-# Replce columns with imputing in df_new
-for col in df_imputed.columns:
-    df_new[col] = df_imputed[col]
-    
-df_new = df_new[df_new['Corrupted'] == False]
-df_new = df_new[df_new['Bad quality'] == False]
-
-plot_data_filling(df_new)
-
-#%% Compute percentage of missing values in each column
-data_filling = np.array(~df_new.isna()).prod(axis=1)
-print(f'Fraction of rows with all data present: {data_filling.sum()/len(data_filling):.2f}')
-
-missing_values = ( df_new.isna().sum() / len(df_new) ).sort_values(ascending=False)
-
-plt.figure(figsize=(20, 7))
-plt.bar(missing_values.index, missing_values.values)
-plt.xticks(rotation=90)
-plt.show()
 
 
 #%%
