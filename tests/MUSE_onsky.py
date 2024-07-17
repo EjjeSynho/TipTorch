@@ -25,12 +25,23 @@ from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tqdm import tqdm
 
 #%%
+
+nanana = [21, 60, 103, 148, 167, 240, 302, 319, 349]
 # 411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335
-derotate_PSF = True
+
+# 21 - fits okay
+# 240 - fits okay, but super intense background and blurry
+# 168 - fits okay, but super intense background
+# 349 - fits okay, but blurry
+# 302, 319 - wrong rotation, fits okay
+
+
+
+derotate_PSF    = True
 Moffat_absorber = True
 include_sausage = True
 
-sample = LoadMUSEsampleByID(411)
+sample = LoadMUSEsampleByID(240)
 PSF_0, var_mask, norms = LoadImages(sample)
 config_file, PSF_0 = GetConfig(sample, PSF_0)
 N_wvl = PSF_0.shape[1]

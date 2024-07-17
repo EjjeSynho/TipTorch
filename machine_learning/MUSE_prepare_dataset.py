@@ -25,6 +25,9 @@ with open(MUSE_DATA_FOLDER+'muse_df.pickle', 'rb') as handle:
 # with open('../data/temp/fitted_df_norm.pickle', 'rb') as handle:
 #     fitted_df_norm = pickle.load(handle)
 
+with open(MUSE_DATA_FOLDER+'MUSE_fitted_df.pkl', 'rb') as handle:
+    fitted_df = pickle.load(handle)
+
 with open(MUSE_DATA_FOLDER+'muse_df_norm_imputed.pickle', 'rb') as handle:
     muse_df_norm = pickle.load(handle)
 
@@ -46,6 +49,16 @@ dy_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=
 bg_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
 Jxy_fitted_df = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
 # ---------------------------------------
+
+#%%
+
+
+# fitted_df['dx_df'] = 
+# fitted_df['dy_df']
+
+test = fitted_df['dx_df'].mean(axis=1)
+
+testo = test[test.isna()]
 
 #%% 
 BATCH_SIZE = 4

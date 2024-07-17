@@ -122,22 +122,24 @@ norm_alpha = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
 norm_beta  = TransformSequence(transforms=[ Uniform(a=0,     b=10)  ])
 norm_ratio = TransformSequence(transforms=[ Uniform(a=0,     b=2)   ])
 norm_theta = TransformSequence(transforms=[ Uniform(a=-np.pi/2, b=np.pi/2)])
-# To absord the phase feature appearing in the PSF
+# To absord the phase feature appearing in the PSF (yes, we called it the sausage)
 norm_sausage_pow = TransformSequence(transforms=[ Uniform(a=0, b=1) ])
 
 Moffat_absorber = True
 include_sausage = True
 derotate_PSF = True
 
+better_not_to_derotate_ids = [21, 240, 168, 349, 302, 319]
+
 #%
-def load_and_fit_sample(id): 
+def load_and_fit_sample(id):
     
     sample = LoadMUSEsampleByID(id)
     PSF_0, _, norms = LoadImages(sample, device)
     config_file, PSF_0 = GetConfig(sample, PSF_0, None, device)
     N_wvl = PSF_0.shape[1]
 
-    if derotate_PSF:
+    if derotate_PSF and id not in better_not_to_derotate_ids:
         PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
         config_file['telescope']['PupilAngle'] = 0
 

@@ -104,6 +104,8 @@ def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True)
         Cn2_weights = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
         altitudes   = np.array([sample['All data'][f'ALT{i}'].item() for i in range(1, 9)])*100 # in meters
 
+        Cn2_weights_GL[Cn2_weights_GL > 1] = 0.0
+
         Cn2_weights_GL = Cn2_weights[altitudes < h_GL]
         altitudes_GL   = altitudes  [altitudes < h_GL]
 

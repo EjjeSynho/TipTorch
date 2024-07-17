@@ -40,7 +40,7 @@ with open(MUSE_DATA_FOLDER + 'IRLOS_phases_dict.pkl', 'wb') as handle:
 
 #%%
 # fitted_samples_folder = MUSE_DATA_FOLDER + 'MUSE_fitted_no_S_no_M/'
-fitted_samples_folder = MUSE_DATA_FOLDER + 'MUSE_fitted_yes_S_yes_M/'
+fitted_samples_folder = MUSE_DATA_FOLDER + 'MUSE_fitted_derot/'
 
 files = os.listdir(fitted_samples_folder)
 
@@ -52,8 +52,7 @@ for x in data.keys():
     print(x, end=', ')
 
 df_relevant_entries = [
-    'bg', 'F', 'dx', 'dy', 'r0', 'dn', 'Jx', 'Jy', 'Jxy',
-    'amp', 'b', 'alpha',
+    'bg', 'F', 'dx', 'dy', 'r0', 'dn', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha',
     'SR data', 'SR fit', 'FWHM fit', 'FWHM data',
 ]
 
@@ -116,7 +115,6 @@ def make_polychrome_dataset(data):
     df.sort_index(inplace=True)
     return df
 
-
 singular_df = make_df_from_dict(singular_dict)
 singular_df['r0'] = singular_df['r0'].apply(lambda x: np.abs(x))
 
@@ -162,13 +160,9 @@ from tools.utils import plot_radial_profiles_new
 
 # rand_array = np.random.randint(0, len(ids), 100)
 
-PSF_0 = np.squeeze(np.stack(images_data, axis=0))
+PSF_0 = np.squeeze(np.stack(images_data,   axis=0))
 PSF_1 = np.squeeze(np.stack(images_fitted, axis=0))
 
-# PSF_0 = PSF_0[rand_array,...]
-# PSF_1 = PSF_1[rand_array,...]
-
-#%
 wvl_select = np.s_[0, 6, 12]
 PSF_disp = lambda x, w: (x[:,w,...])
 
@@ -177,5 +171,9 @@ for i, lmbd in enumerate(wvl_select):
     plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=40,  ax=ax[i] )
 plt.show()
 
-
 # %%
+fig = plt.figure(figsize=(10, 6))
+plt.title()
+PSF_avg = lambda x: np.mean(x, axis=1)
+plot_radial_profiles_new( PSF_avg(PSF_0), PSF_avg(PSF_1), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
+plt.show()
