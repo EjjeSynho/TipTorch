@@ -173,7 +173,7 @@ plt.show()
 
 # %%
 fig = plt.figure(figsize=(10, 6))
-plt.title()
+plt.title('Polychromatic PSF')
 PSF_avg = lambda x: np.mean(x, axis=1)
 plot_radial_profiles_new( PSF_avg(PSF_0), PSF_avg(PSF_1), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
 plt.show()

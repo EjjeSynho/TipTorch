@@ -36,29 +36,28 @@ muse_df = muse_df[muse_df['Bad quality'] == False]
 
 muse_df_norm = muse_df_norm.loc[muse_df.index]
 
+valid_ids = (test:=fitted_df['dx_df'].mean(axis=1))[~test.isna()].index
+
+muse_df_norm = muse_df_norm.loc[valid_ids]
+muse_df = muse_df.loc[valid_ids]
+
 #%%
- #------- Fake fitted df for MUSE -------
-PSF_0, merged_config = GetMUSEonsky([100], device=torch.device('cpu'))
+PSF_0, merged_config = GetMUSEonsky([100], derotate_PSF=True, device=torch.device('cpu'))
 wvls = (merged_config['sources_science']['Wavelength'].numpy() * 1e9).round(0).astype(int).flatten()
 
 column_names = wvls.tolist()
 index_names  = muse_df.index.values
 
-dx_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
-dy_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
-bg_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
-Jxy_fitted_df = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
-# ---------------------------------------
+# dx_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
+# dy_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
+# bg_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
+# Jxy_fitted_df = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
 
-#%%
+dx_fitted_df  = fitted_df['dx_df'].loc[valid_ids]
+dy_fitted_df  = fitted_df['dy_df'].loc[valid_ids]
+bg_fitted_df  = fitted_df['bg_df'].loc[valid_ids]
+Jxy_fitted_df = fitted_df['singular_vals_df']['Jxy'].loc[valid_ids]
 
-
-# fitted_df['dx_df'] = 
-# fitted_df['dy_df']
-
-test = fitted_df['dx_df'].mean(axis=1)
-
-testo = test[test.isna()]
 
 #%% 
 BATCH_SIZE = 4
@@ -86,7 +85,7 @@ def batch_get_data_dicts(ids):
         },
         'onsky data':  muse_df_norm.loc[ids].to_dict(orient='list')
     }
-    
+
 
 def batch_get_inp_tensor(ids):
     return { 'NN input': torch.tensor(muse_df_norm[selected_entries_input].loc[ids].to_numpy()) }

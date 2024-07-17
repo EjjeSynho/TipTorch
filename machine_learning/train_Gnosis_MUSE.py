@@ -234,9 +234,6 @@ toy.Update(reinit_grids=True, reinit_pupils=True)
 batch_size = len(batch_init['IDs'])
 
 #%%
-
-groups = [6, 8, 10, 9, 3]
-
 batches_train, batches_val = {}, {}
 train_ids, val_ids = {}, {}
 
@@ -270,9 +267,6 @@ loss_train, loss_val = [], []
        
 net.train()
 
-wvl_L, wvl_R = 1625, 1625
-train_ids = train_ids[wvl_L]
-val_ids   = val_ids[wvl_L]
 
 for epoch in range(epochs):
     print(f'>>>>>>>>> Epoch: {epoch+1}/{epochs}')
@@ -284,7 +278,7 @@ for epoch in range(epochs):
     for i, id in enumerate(train_ids):
         optimizer.zero_grad()
         
-        batch_init = batches_train_all[wvl_L][id]
+        batch_init = batches_train[id]
 
         x0, fixed_inputs, PSF_0, current_config = get_data(batch_init, fixed_entries)
         batch_size = len(batch_init['IDs'])
@@ -306,7 +300,7 @@ for epoch in range(epochs):
     
     for i, id in enumerate(val_ids):
         with torch.no_grad():
-            batch_init = batches_val[wvl_L][id]
+            batch_init = batches_val[id]
             
             x0, fixed_inputs, PSF_0, current_config = get_data(batch_init, fixed_entries)
             toy.config = current_config

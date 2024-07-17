@@ -25,6 +25,7 @@ warnings.filterwarnings("ignore")
 
 default_device = device
 start_id, end_id = -1, -1
+to_float = True
 
 if len(sys.argv) > 1:
     param1 = sys.argv[1]
@@ -42,6 +43,11 @@ else:
 if len(sys.argv) == 4:
     start_id, end_id = int(sys.argv[2]), int(sys.argv[3])
 
+if len(sys.argv) == 5:
+    if sys.argv[4] == '-d':   to_float = False
+    elif sys.argv[4] == '-f': to_float = True
+    else:
+        print("Unknown option. Use -d for double precision and -f for float precision.")
 
 #% Initialize data sample
 with open(MUSE_DATA_FOLDER + 'muse_df.pickle', 'rb') as handle:
@@ -51,6 +57,7 @@ psf_df = psf_df[psf_df['Corrupted']   == False]
 psf_df = psf_df[psf_df['Bad quality'] == False]
 
 good_ids = psf_df.index.values.tolist()
+# [103, 240, 259, 264, 296, 319, 349, 367, 407]
 
 # If no start or end ID is specified, use the first and last good IDs
 if start_id == -1:
@@ -129,18 +136,16 @@ Moffat_absorber = True
 include_sausage = True
 derotate_PSF = True
 
-better_not_to_derotate_ids = [21, 240, 168, 349, 302, 319]
-
-#%
+#%%
 def load_and_fit_sample(id):
-    
+
     sample = LoadMUSEsampleByID(id)
     PSF_0, _, norms = LoadImages(sample, device)
     config_file, PSF_0 = GetConfig(sample, PSF_0, None, device)
     N_wvl = PSF_0.shape[1]
 
-    if derotate_PSF and id not in better_not_to_derotate_ids:
-        PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
+    if derotate_PSF:
+        PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item()) 
         config_file['telescope']['PupilAngle'] = 0
 
     #% Initialize the model
@@ -155,7 +160,10 @@ def load_and_fit_sample(id):
     model.PSD_include['chromatism'] = True
     model.PSD_include['Moffat'] = Moffat_absorber
 
-    model.to_float()
+    if(to_float):
+        model.to_float()
+    else:
+        model.to_double()
 
     inputs_tiptorch = {
         'F':   torch.tensor([[1.0,]*N_wvl], device=model.device),
@@ -272,13 +280,13 @@ def load_and_fit_sample(id):
         return loss_MSE(x_) + loss_MAE(x_) * 0.4
 
 
-    #% PSF fitting
+    #%% PSF fitting
     _ = func(x0)
 
-    result = minimize(loss_MAE, x0, max_iter=100, tol=1e-3, method='bfgs', disp=0)
+    result = minimize(loss_MAE, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
     x0 = result.x
 
-    result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=0)
+    result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
     x0 = result.x
 
     x_torch = transformer.destack(x0)
@@ -336,7 +344,6 @@ def load_and_fit_sample(id):
 # if save_data is not None:
 #     with open(filename, 'wb') as handle:
 #         pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
 
 for id in good_ids:
     try:

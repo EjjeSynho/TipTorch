@@ -104,7 +104,7 @@ def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True)
         Cn2_weights = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
         altitudes   = np.array([sample['All data'][f'ALT{i}'].item() for i in range(1, 9)])*100 # in meters
 
-        Cn2_weights_GL[Cn2_weights_GL > 1] = 0.0
+        Cn2_weights[Cn2_weights > 1] = 0.0
 
         Cn2_weights_GL = Cn2_weights[altitudes < h_GL]
         altitudes_GL   = altitudes  [altitudes < h_GL]
@@ -304,7 +304,7 @@ def rotate_PSF(PSF_0, angle):
     return PSF_0_rot
     
 
-def GetMUSEonsky(ids, device=device):
+def GetMUSEonsky(ids, derotate_PSF=False, device=device):
     def load_sample(id):
         sample = LoadMUSEsampleByID(id)
         PSF_0, var_mask, norms = LoadImages(sample, convert_images=False)
@@ -316,11 +316,14 @@ def GetMUSEonsky(ids, device=device):
     
     for id in ids:
         PSF_0_, _, _, config_file_, sample_ = load_sample(id)
-        PSF_0_rot = rotate_PSF(PSF_0_, -sample_['All data']['Pupil angle'].item())
-        PSF_0.append(PSF_0_rot)
         configs.append(config_file_)
+        if derotate_PSF:
+            PSF_0_rot = rotate_PSF(PSF_0_, -sample_['All data']['Pupil angle'].item())
+            PSF_0.append(PSF_0_rot)
+        else:
+            PSF_0.append(PSF_0_)
 
-    PSF_0 = torch.tensor(np.stack(PSF_0, axis=0)).float().to(device)
+    PSF_0 = torch.tensor(np.vstack(PSF_0)).float().to(device)
 
     config_manager = ConfigManager()
     merged_config  = config_manager.Merge(configs)
@@ -330,7 +333,9 @@ def GetMUSEonsky(ids, device=device):
     merged_config['sources_science']['Wavelength'] = merged_config['sources_science']['Wavelength'][0]
     merged_config['sources_HO']['Height']     = merged_config['sources_HO']['Height'].unsqueeze(-1)
     merged_config['sources_HO']['Wavelength'] = merged_config['sources_HO']['Wavelength'].squeeze()
-    merged_config['telescope']['PupilAngle'] = 0.0
+    
+    if derotate_PSF:
+        merged_config['telescope']['PupilAngle'] = 0.0
 
     return PSF_0, merged_config
 

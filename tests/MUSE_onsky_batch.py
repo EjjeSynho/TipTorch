@@ -33,10 +33,15 @@ from copy import deepcopy
 
 
 #%%
-# 411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335
-ids = [411, 405, 409, 395, 343]
+Moffat_absorber = True
+include_sausage = True
+derotate_PSF = True
 
-PSF_0, merged_config = GetMUSEonsky(ids, device)
+
+# 411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335
+ids = [411, 409, 395, 343]
+
+PSF_0, merged_config = GetMUSEonsky(ids, derotate_PSF, device)
 
 N_src = PSF_0.shape[0]
 N_wvl = PSF_0.shape[1]
@@ -44,9 +49,6 @@ N_wvl = PSF_0.shape[1]
 #%% Initialize the model
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from tools.utils import SausageFeature
-
-Moffat_absorber = True
-include_sausage = True
 
 toy = TipTorch(merged_config, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 sausage_absorber = SausageFeature(toy)
