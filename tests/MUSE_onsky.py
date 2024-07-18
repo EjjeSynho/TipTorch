@@ -11,7 +11,7 @@ import pickle
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle
+from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle, register_hooks
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from tools.config_manager import GetSPHEREonsky
@@ -26,7 +26,7 @@ from tqdm import tqdm
 
 #%%
 
-nanana = [21, 60, 103, 148, 167, 240, 302, 319, 349]
+gave_NaNs = [21, 60, 103, 148, 167, 240, 302, 319, 349]
 # 411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335
 
 # 21 - fits okay
@@ -35,14 +35,12 @@ nanana = [21, 60, 103, 148, 167, 240, 302, 319, 349]
 # 349 - fits okay, but blurry
 # 302, 319 - wrong rotation, fits okay
 
-
-
 derotate_PSF    = True
 Moffat_absorber = True
 include_sausage = True
 
-sample = LoadMUSEsampleByID(240)
-PSF_0, var_mask, norms = LoadImages(sample)
+sample = LoadMUSEsampleByID(343)
+PSF_0, var_mask, norms, bgs = LoadImages(sample)
 config_file, PSF_0 = GetConfig(sample, PSF_0)
 N_wvl = PSF_0.shape[1]
 
@@ -55,7 +53,7 @@ if derotate_PSF:
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from tools.utils import SausageFeature
 
-toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=2)
 sausage_absorber = SausageFeature(toy)
 sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
 
@@ -151,7 +149,6 @@ def _radial_profiles(PSFs, centers=None):
     return profiles
 
 
-#%
 
 plt.figure(figsize=(10, 8))
 
@@ -221,8 +218,6 @@ b_pred = reg.coef_ * w + reg.intercept_
 plt.plot(w, a_pred, 'o-', color='blue')
 # plt.plot(w, b, 'o-', color='red')
 plt.plot(w, b_pred, 'o-', color='red')
-
-
 
 
 #%% PSF fitting (no early-stopping)
@@ -373,7 +368,6 @@ x_torch = transformer.destack(x0)
 phase_func = lambda: sausage_absorber(toy.s_pow.flatten()) if include_sausage else None
 PSF_1 = toy(x_torch, None, phase_generator=phase_func)
 
-
 '''
 else:
     _ = func(x0)
@@ -393,7 +387,6 @@ else:
     phase_func = lambda: sausage_absorber(toy.s_pow.flatten()) if include_sausage else None
     PSF_1 = toy(x_torch, None, phase_generator=phase_func)
 '''
-
 
 #%%
 from tools.utils import plot_radial_profiles_new
@@ -417,8 +410,64 @@ else:
     
     plot_radial_profiles_new( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
     plt.show()
+    
+
+#%%
+from tools.utils import calc_profile
+
+x_torch = transformer.destack(x0)
+_ = toy(x_torch, None, phase_generator=phase_func)
+
+dk = 2*toy.kc / toy.nOtf_AO
+
+PSD_norm = lambda wvl: (dk*wvl*1e9/2/np.pi)**2
+
+PSDs = {entry: (toy.PSDs[entry].clone().squeeze() * PSD_norm(500e-9)) for entry in toy.PSD_entries if toy.PSDs[entry].ndim > 1}
+PSDs['chromatism'] = PSDs['chromatism'].mean(dim=0)
+
+#%
+plt.figure(figsize=(8, 6))
+
+PSD_map  = toy.PSD[0,...].mean(dim=0).real.cpu().numpy()
+k_map    = toy.k[0,...].cpu().numpy()
+k_AO_map = toy.k_AO[0,...].cpu().numpy()
+
+center    = [k_map.shape[0]//2, k_map.shape[1]//2]
+center_AO = [k_AO_map.shape[0]//2, k_AO_map.shape[1]//2]
+
+PSD_prof = calc_profile(PSD_map,  center)
+freqs    = calc_profile(k_map,    center)
+freqs_AO = calc_profile(k_AO_map, center_AO)
+
+freq_cutoff = toy.kc.flatten().item()
+
+profiles = {}
+for entry in PSDs.keys():
+    buf_map = PSDs[entry].abs().cpu().numpy()
+    if entry == 'fitting':
+        buf_prof = calc_profile(buf_map, center)
+    else:
+        buf_prof = calc_profile(buf_map, center_AO)
+    profiles[entry] = buf_prof
+
+#%
+plt.plot(freqs, PSD_prof, label='Total', linewidth=2, linestyle='--', color='black')
+
+for entry, value in profiles.items():
+    if entry == 'fitting':
+        plt.plot(freqs, value, label=entry)
+    else:
+        plt.plot(freqs_AO, value, label=entry)
+
+plt.legend()
+plt.yscale('symlog', linthresh=5e-5)
+plt.xscale('log')
+# plt.vlines(freq_cutoff, PSD_prof.min(), PSD_prof.max(), color='red', linestyle='--')
+plt.grid()
+plt.xlim(freqs.min(), freqs.max())
 
 
+#%%
 '''
 PSF_1 = torch.tensor(PSF_1s_).float().to(device).unsqueeze(0)
 PSF_0 = PSF_0_.clone()
@@ -439,6 +488,21 @@ for i in range(N_wvl_):
     plot_radial_profiles_new( A, B,  'Data', 'TipTorch', title=f'{(wvls_[0][i]*1e9):.2f} [nm]')
     plt.savefig(f'C:/Users/akuznets/Desktop/MUSE_fits_new/profiles_{(wvls_[0][i]*1e9):.0f}.png')
 '''
+
+#%%
+x = x0.clone().detach().requires_grad_(True)
+
+x_torch = transformer.destack(x)
+
+Q = ( toy(x_torch)-PSF_0 ).abs().sum()
+get_dot = register_hooks(Q)
+Q.backward()
+dot = get_dot()
+#dot.save('tmp.dot') # to get .dot
+#dot.render('tmp') # to get SVG
+dot # in Jupyter, you can just render the variable
+
+
 #%%
 # plt.plot(toy.wvl.squeeze().cpu().numpy().flatten()*1e9, (toy.Jy**2+toy.Jx**2).sqrt().cpu().numpy().flatten())
 # plt.plot(toy.wvl.squeeze().cpu().numpy().flatten()*1e9, toy.Jy.detach().cpu().numpy().flatten())
@@ -655,38 +719,5 @@ ax[1,2].set_xlabel('Wavelength [nm]')
 
 plt.tight_layout()
 plt.savefig('C:/Users/akuznets/Desktop/MUSE_fits_new/params.png')
-
-#%%
-# for entry in x0_new:
-#     item_ = x0_new[entry]
-    
-#     if len(item_.shape) == 0:
-#         print(f'{entry}: {item_.item():.3f}')
-#     else:
-#         print(entry, end=': ')
-#         for x in item_.cpu().numpy().tolist():
-#             print(f'{x:.3f}',  end=' ')
-#         print('')
-
-
-#%%
-def GetNewPhotons():
-    WFS_noise_var = toy.dn + toy.NoiseVariance(toy.r0.abs())
-
-    N_ph_0 = toy.WFS_Nph.clone()
-
-    def func_Nph(x):
-        toy.WFS_Nph = x
-        var = toy.NoiseVariance(toy.r0.abs())
-        return (WFS_noise_var-var).flatten().abs().sum()
-
-    result_photons = minimize(func_Nph, N_ph_0, method='bfgs', disp=0)
-    toy.WFS_Nph = N_ph_0.clone()
-
-    return result_photons.x
-
-Nph_new = GetNewPhotons()
-
-print(toy.WFS_Nph.item(), Nph_new.item())
 
 

@@ -39,7 +39,8 @@ derotate_PSF = True
 
 
 # 411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335
-ids = [411, 409, 395, 343]
+# ids = [411, 409, 395, 343]
+ids = [124, 405, 344, 123]
 
 PSF_0, merged_config = GetMUSEonsky(ids, derotate_PSF, device)
 

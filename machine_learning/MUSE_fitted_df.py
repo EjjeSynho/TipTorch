@@ -6,6 +6,7 @@ import os
 import pickle
 from project_globals import MUSE_DATA_FOLDER
 import pandas as pd
+import seaborn as sns
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
@@ -52,7 +53,7 @@ for x in data.keys():
     print(x, end=', ')
 
 df_relevant_entries = [
-    'bg', 'F', 'dx', 'dy', 'r0', 'dn', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha',
+    'bg', 'F', 'dx', 'dy', 'r0', 'dn', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha', 'sausage_pow',
     'SR data', 'SR fit', 'FWHM fit', 'FWHM data',
 ]
 
@@ -84,10 +85,10 @@ with open(MUSE_DATA_FOLDER + 'MUSE_images_data.pkl', 'wb') as handle:
         'ID': ids
     }
     pickle.dump(images_dict, handle)
-    
+
 #%%
 singular_dict = {}
-for key in ['r0', 'dn', 'Jxy', 'amp', 'b', 'alpha']:
+for key in ['r0', 'dn', 'Jxy', 'amp', 'b', 'alpha', 'sausage_pow']:
     singular_dict[key] = np.squeeze(np.array(fitted_dict_raw[key])).tolist()
 
 Jx_dict = np.squeeze(np.array(fitted_dict_raw['Jx']))
@@ -116,7 +117,6 @@ def make_polychrome_dataset(data):
     return df
 
 singular_df = make_df_from_dict(singular_dict)
-singular_df['r0'] = singular_df['r0'].apply(lambda x: np.abs(x))
 
 Jx_df = make_polychrome_dataset(np.squeeze(np.stack(fitted_dict_raw['Jx'])))
 Jy_df = make_polychrome_dataset(np.squeeze(np.stack(fitted_dict_raw['Jy'])))
@@ -131,11 +131,20 @@ FWHM_fit_y  = make_polychrome_dataset(np.squeeze(np.stack(fitted_dict_raw['FWHM 
 FWHM_data_x = make_polychrome_dataset(np.squeeze(np.stack(fitted_dict_raw['FWHM data'])[...,0]))
 FWHM_data_y = make_polychrome_dataset(np.squeeze(np.stack(fitted_dict_raw['FWHM data'])[...,1]))
 
-FWHM_fit_df  = FWHM_fit_x.apply(lambda x: x**2) + FWHM_fit_y.apply(lambda x: x**2)
+FWHM_fit_df  = FWHM_fit_x.apply(lambda x: x**2)  + FWHM_fit_y.apply(lambda x: x**2)
 FWHM_data_df = FWHM_data_x.apply(lambda x: x**2) + FWHM_data_y.apply(lambda x: x**2)
 
 FWHM_fit_df  = FWHM_fit_df.apply(np.sqrt)
 FWHM_data_df = FWHM_data_df.apply(np.sqrt)
+
+#%%
+# Postprocess dataset
+Jx_df = Jx_df.abs()
+Jy_df = Jy_df.abs()
+singular_df['alpha'] = singular_df['alpha'].apply(lambda x: np.abs(x))
+singular_df['r0']    = singular_df['r0'].apply(lambda x: np.abs(x))
+
+singular_df[singular_df['r0'] > 1] = np.nan
 
 #%%
 # Store dataframes
@@ -177,3 +186,5 @@ plt.title('Polychromatic PSF')
 PSF_avg = lambda x: np.mean(x, axis=1)
 plot_radial_profiles_new( PSF_avg(PSF_0), PSF_avg(PSF_1), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
 plt.show()
+
+# %%

@@ -20,19 +20,21 @@ def LoadMUSEsampleByID(id): # searches for the sample with the specified ID in
     return data_sample
 
 
+def GetRadialBackround(img):
+    from tools.utils import safe_centroid
+    from photutils.profiles import RadialProfile
+    xycen = safe_centroid(img)
+    edge_radii = np.arange(img.shape[-1]//2)
+    rp = RadialProfile(img, xycen, edge_radii)
+    return rp.profile.min()
+
+
 def LoadImages(sample, device=device, convert_images=True):
 
-    def get_bg(img):
-        from tools.utils import safe_centroid
-        from photutils.profiles import RadialProfile
-        xycen = safe_centroid(img)
-        edge_radii = np.arange(img.shape[-1]//2)
-        rp = RadialProfile(img, xycen, edge_radii)
-        return rp.profile.min()
+    PSF_data = np.copy(sample['images']['cube'][:,1:,1:])    
+    bgs = np.array([ GetRadialBackround(PSF_data[i,:,:]) for i in range(PSF_data.shape[0]) ])[:,None,None]
+    PSF_data -= bgs
 
-    PSF_data = np.copy(sample['images']['cube'][:,1:,1:])
-    # bgs = np.array([get_bg(PSF_0_[i,...]) for i in range(PSF_0_.shape[0])])
-    # PSF_0_ = PSF_0_ - bgs[:,None,None]
     norms = PSF_data.sum(axis=(-1,-2), keepdims=True)
     PSF_data /= norms
     
@@ -50,7 +52,7 @@ def LoadImages(sample, device=device, convert_images=True):
     else:
         var_mask = var_mask.astype(np.float32)[None,...]
 
-    return PSF_data, var_mask, norms
+    return PSF_data, var_mask, norms, bgs
 
 
 # 'images'
@@ -105,6 +107,7 @@ def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True)
         altitudes   = np.array([sample['All data'][f'ALT{i}'].item() for i in range(1, 9)])*100 # in meters
 
         Cn2_weights[Cn2_weights > 1] = 0.0
+        Cn2_weights[Cn2_weights < 0] = 0.0
 
         Cn2_weights_GL = Cn2_weights[altitudes < h_GL]
         altitudes_GL   = altitudes  [altitudes < h_GL]
@@ -208,6 +211,9 @@ def GetConfigSolo(sample, PSF_data, wvl_id=None, device=device, convert_config=T
         Cn2_weights = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
         altitudes   = np.array([sample['All data'][f'ALT{i}'].item() for i in range(1, 9)])*100 # in meters
 
+        Cn2_weights[Cn2_weights > 1] = 0.0
+        Cn2_weights[Cn2_weights < 0] = 0.0
+        
         Cn2_weights_GL = Cn2_weights[altitudes < h_GL]
         altitudes_GL   = altitudes  [altitudes < h_GL]
 
@@ -307,15 +313,15 @@ def rotate_PSF(PSF_0, angle):
 def GetMUSEonsky(ids, derotate_PSF=False, device=device):
     def load_sample(id):
         sample = LoadMUSEsampleByID(id)
-        PSF_0, var_mask, norms = LoadImages(sample, convert_images=False)
+        PSF_0, var_mask, norms, bgs = LoadImages(sample, convert_images=False)
         config_file, PSF_0 = GetConfigSolo(sample, PSF_0, convert_config=False)
-        return PSF_0, var_mask, norms, config_file, sample
+        return PSF_0, var_mask, norms, bgs, config_file, sample
 
     PSF_0 = []
     configs = []
     
     for id in ids:
-        PSF_0_, _, _, config_file_, sample_ = load_sample(id)
+        PSF_0_, _, _, _, config_file_, sample_ = load_sample(id)
         configs.append(config_file_)
         if derotate_PSF:
             PSF_0_rot = rotate_PSF(PSF_0_, -sample_['All data']['Pupil angle'].item())
@@ -333,6 +339,7 @@ def GetMUSEonsky(ids, derotate_PSF=False, device=device):
     merged_config['sources_science']['Wavelength'] = merged_config['sources_science']['Wavelength'][0]
     merged_config['sources_HO']['Height']     = merged_config['sources_HO']['Height'].unsqueeze(-1)
     merged_config['sources_HO']['Wavelength'] = merged_config['sources_HO']['Wavelength'].squeeze()
+    merged_config['NumberSources'] = len(ids)
     
     if derotate_PSF:
         merged_config['telescope']['PupilAngle'] = 0.0

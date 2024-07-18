@@ -972,6 +972,13 @@ def render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambd
         plt.plot(x, func(profile_m), color=color, label=label, linestyle=linestyle, linewidth=linewidth)
 
 
+def calc_profile(data, xycen=None):
+    xycen = safe_centroid(data) if xycen is None else xycen
+    edge_radii = np.arange(data.shape[-1]//2)
+    rp = RadialProfile(data, xycen, edge_radii)
+    return rp.profile
+
+    
 def plot_radial_profiles_new(PSF_0,
                              PSF_1,
                              label_0 = 'PSFs #1',
@@ -987,12 +994,6 @@ def plot_radial_profiles_new(PSF_0,
                              y_min = 1e-2,
                              suppress_plot = False):
             
-    def calc_profile(data, xycen=None):
-        xycen = safe_centroid(data) if xycen is None else xycen
-        edge_radii = np.arange(data.shape[-1]//2)
-        rp = RadialProfile(data, xycen, edge_radii)
-        return rp.profile
-
     def _radial_profiles(PSFs, centers=None):
         listify_PSF = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
         PSFs = listify_PSF(PSFs)

@@ -36,10 +36,18 @@ muse_df = muse_df[muse_df['Bad quality'] == False]
 
 muse_df_norm = muse_df_norm.loc[muse_df.index]
 
-valid_ids = (test:=fitted_df['dx_df'].mean(axis=1))[~test.isna()].index
+dx_df = fitted_df['dx_df']
+
+valid_ids = (dx_df)[~dx_df.isna()].index.values.tolist()
+exclude_ids = [103, 240, 259, 264, 296, 319, 349, 367, 407]
+
+for id in exclude_ids:
+    if id in valid_ids:
+        valid_ids.remove(id)
 
 muse_df_norm = muse_df_norm.loc[valid_ids]
 muse_df = muse_df.loc[valid_ids]
+
 
 #%%
 PSF_0, merged_config = GetMUSEonsky([100], derotate_PSF=True, device=torch.device('cpu'))
@@ -48,16 +56,20 @@ wvls = (merged_config['sources_science']['Wavelength'].numpy() * 1e9).round(0).a
 column_names = wvls.tolist()
 index_names  = muse_df.index.values
 
-# dx_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
-# dy_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
-# bg_fitted_df  = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
-# Jxy_fitted_df = pd.DataFrame(np.zeros([len(muse_df.index), len(wvls)]), columns=column_names, index=index_names)
+F_fitted_df  = fitted_df['F_df'].loc[valid_ids]
+dx_fitted_df = fitted_df['dx_df'].loc[valid_ids]
+dy_fitted_df = fitted_df['dy_df'].loc[valid_ids]
+bg_fitted_df = fitted_df['bg_df'].loc[valid_ids]
+Jx_fitted_df = fitted_df['Jx_df'].loc[valid_ids]
+Jy_fitted_df = fitted_df['Jy_df'].loc[valid_ids]
 
-dx_fitted_df  = fitted_df['dx_df'].loc[valid_ids]
-dy_fitted_df  = fitted_df['dy_df'].loc[valid_ids]
-bg_fitted_df  = fitted_df['bg_df'].loc[valid_ids]
-Jxy_fitted_df = fitted_df['singular_vals_df']['Jxy'].loc[valid_ids]
-
+r0_fitted_df    = fitted_df['singular_vals_df']['r0'].loc[valid_ids]
+Jxy_fitted_df   = fitted_df['singular_vals_df']['Jxy'].loc[valid_ids]
+dn_fitted_df    = fitted_df['singular_vals_df']['dn'].loc[valid_ids]
+amp_fitted_df   = fitted_df['singular_vals_df']['amp'].loc[valid_ids]
+b_fitted_df     = fitted_df['singular_vals_df']['b'].loc[valid_ids]
+alpha_fitted_df = fitted_df['singular_vals_df']['alpha'].loc[valid_ids]
+s_pow_fitted_df = fitted_df['singular_vals_df']['sausage_pow'].loc[valid_ids]
 
 #%% 
 BATCH_SIZE = 4
@@ -78,10 +90,19 @@ def batch_config_and_images(ids):
 def batch_get_data_dicts(ids):
     return { 
         'fitted data': {
-            'Jxy': torch.from_numpy(dx_fitted_df.loc[ids].to_numpy()).float(),
-            'dx':  torch.from_numpy(dx_fitted_df.loc[ids].to_numpy()).float(),
-            'dy':  torch.from_numpy(dy_fitted_df.loc[ids].to_numpy()).float(), 
-            'bg':  torch.from_numpy(bg_fitted_df.loc[ids].to_numpy()).float()   
+            'r0':    torch.from_numpy(r0_fitted_df.loc[ids].to_numpy()).float(),
+            'F':     torch.from_numpy(F_fitted_df.loc[ids].to_numpy()).float(),
+            'dx':    torch.from_numpy(dx_fitted_df.loc[ids].to_numpy()).float(),
+            'dy':    torch.from_numpy(dy_fitted_df.loc[ids].to_numpy()).float(), 
+            'bg':    torch.from_numpy(bg_fitted_df.loc[ids].to_numpy()).float(),
+            'dn':    torch.from_numpy(dn_fitted_df.loc[ids].to_numpy()).float(),
+            'Jx':    torch.from_numpy(Jx_fitted_df.loc[ids].to_numpy()).float(),
+            'Jy':    torch.from_numpy(Jy_fitted_df.loc[ids].to_numpy()).float(),
+            'Jxy':   torch.from_numpy(dx_fitted_df.loc[ids].to_numpy()).float(),
+            'amp':   torch.from_numpy(amp_fitted_df.loc[ids].to_numpy()).float(),
+            'b':     torch.from_numpy(b_fitted_df.loc[ids].to_numpy()).float(),
+            'alpha': torch.from_numpy(alpha_fitted_df.loc[ids].to_numpy()).float(),
+            's_pow': torch.from_numpy(s_pow_fitted_df.loc[ids].to_numpy()).float(),
         },
         'onsky data':  muse_df_norm.loc[ids].to_dict(orient='list')
     }

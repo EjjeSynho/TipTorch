@@ -2,16 +2,16 @@
 # %reload_ext autoreload
 # %autoreload 2
 
-import os
 import sys
 sys.path.insert(0, '..')
 
+import os
 import pickle
 import torch
 import numpy as np
 from tools.utils import SR, FitGauss2D, SausageFeature
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
+from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF, GetRadialBackround
 from project_globals import MUSE_DATA_FOLDER, MUSE_FITTING_FOLDER, device
 from tools.config_manager import ConfigManager
 from torchmin import minimize
@@ -40,11 +40,11 @@ else:
     device = default_device
     print("No device specified, using default device.")
 
-if len(sys.argv) == 4:
+if len(sys.argv) > 2:
     start_id, end_id = int(sys.argv[2]), int(sys.argv[3])
 
-if len(sys.argv) == 5:
-    if sys.argv[4] == '-d':   to_float = False
+if len(sys.argv) > 4:
+    if sys.argv[4]   == '-d': to_float = False
     elif sys.argv[4] == '-f': to_float = True
     else:
         print("Unknown option. Use -d for double precision and -f for float precision.")
@@ -57,7 +57,7 @@ psf_df = psf_df[psf_df['Corrupted']   == False]
 psf_df = psf_df[psf_df['Bad quality'] == False]
 
 good_ids = psf_df.index.values.tolist()
-# [103, 240, 259, 264, 296, 319, 349, 367, 407]
+# good_ids = [103, 240, 259, 264, 296, 319, 349, 367, 407]
 
 # If no start or end ID is specified, use the first and last good IDs
 if start_id == -1:
@@ -138,9 +138,10 @@ derotate_PSF = True
 
 #%%
 def load_and_fit_sample(id):
-
+    # id = 240
+    
     sample = LoadMUSEsampleByID(id)
-    PSF_0, _, norms = LoadImages(sample, device)
+    PSF_0, _, norms, bgs = LoadImages(sample, device)
     config_file, PSF_0 = GetConfig(sample, PSF_0, None, device)
     N_wvl = PSF_0.shape[1]
 
@@ -223,9 +224,7 @@ def load_and_fit_sample(id):
     if include_sausage:
         setattr(model, 's_pow', torch.zeros([1,1], device=model.device).float())
 
-
     _ = transformer.stack({ attr: getattr(model, attr) for attr in transformer_dict }) # to create index mapping
-
 
     x0 = [\
         norm_r0.forward(model.r0).item(), # r0
@@ -238,17 +237,16 @@ def load_and_fit_sample(id):
         *([-0.9,]*N_wvl), # Jy
         0.0,              # Jxy
     ]
-
     # PSFAO realm
     if Moffat_absorber:
         x0 += [\
-            *([ 1.0,]*N_wvl),
+            *([ -0.9,]*N_wvl),
             *([-0.5,]*N_wvl),
-            *([ 0.3,]*N_wvl),
+            *([ -0.9,]*N_wvl),
         ]
-
+    # If sausage absorber enabled
     if include_sausage:
-        x0 += [0.9]
+        x0 += [0.5]
 
     x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 
@@ -280,13 +278,13 @@ def load_and_fit_sample(id):
         return loss_MSE(x_) + loss_MAE(x_) * 0.4
 
 
-    #%% PSF fitting
+    #% PSF fitting
     _ = func(x0)
 
-    result = minimize(loss_MAE, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+    result = minimize(loss_MAE, x0, max_iter=100, tol=1e-3, method='bfgs', disp=0)
     x0 = result.x
 
-    result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+    result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=0)
     x0 = result.x
 
     x_torch = transformer.destack(x0)
@@ -297,7 +295,7 @@ def load_and_fit_sample(id):
         PSF_1 = model(x_torch)
 
 
-    #%%
+    #%
     config_manager = ConfigManager()
     config_manager.Convert(config_file, framework='numpy')
 
@@ -338,12 +336,6 @@ def load_and_fit_sample(id):
     return save_data
 
 #%%
-# filename = MUSE_FITTING_FOLDER + str(id) + '.pickle'
-
-# save_data = load_and_fit_sample(id)
-# if save_data is not None:
-#     with open(filename, 'wb') as handle:
-#         pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 for id in good_ids:
     try:
