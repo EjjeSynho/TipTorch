@@ -737,25 +737,25 @@ class TipTorch(torch.nn.Module):
         # self.kernel = kernel
         self.C_phi = pdims(kernel, 2) * fix_dims(self.Cn2_weights, self.nL)
 
-        Tikhonov_reg = True
+        # Tikhonov_reg = False
 
         if inv_method == 'standart':
             W_tomo = (self.C_phi @ MP_t) @ torch.linalg.pinv(MP @ self.C_phi @ MP_t + self.C_b, rcond=1e-2)
 
         elif inv_method == 'lstsq':
-            if Tikhonov_reg:
-                lambda_reg = 1e-6  # Ridge Regression regularization parameter
-                A = (MP @ self.C_phi @ MP_t + self.C_b).transpose(-2, -1)
-                I_mat = torch.eye(A.size(-1), device=A.device, dtype=A.dtype)
-                A_reg = A.transpose(-2, -1) @ A + lambda_reg * I_mat # Regularized A matrix
-                B = (self.C_phi @ MP_t).transpose(-2, -1)
-                W_tomo = torch.linalg.lstsq(A_reg, A.transpose(-2, -1) @ B).solution.transpose(-2, -1)
+            # if Tikhonov_reg:
+            #     lambda_reg = 1e-6  # Ridge Regression regularization parameter
+            #     A = (MP @ self.C_phi @ MP_t + self.C_b).transpose(-2, -1)
+            #     I_mat = torch.eye(A.size(-1), device=A.device, dtype=A.dtype)
+            #     A_reg = A.transpose(-2, -1) @ A + lambda_reg * I_mat # Regularized A matrix
+            #     B = (self.C_phi @ MP_t).transpose(-2, -1)
+            #     W_tomo = torch.linalg.lstsq(A_reg, A.transpose(-2, -1) @ B).solution.transpose(-2, -1)
                 
-            else:
-                A = (MP @ self.C_phi @ MP_t + self.C_b).transpose(-2, -1)
-                B = (self.C_phi @ MP_t).transpose(-2, -1)
-                # Solve the least squares problem for W^T, since we deal with W*A = B
-                W_tomo = torch.linalg.lstsq(A, B).solution.transpose(-2, -1)           
+            # else:
+            A = (MP @ self.C_phi @ MP_t + self.C_b).transpose(-2, -1)
+            B = (self.C_phi @ MP_t).transpose(-2, -1)
+            # Solve the least squares problem for W^T, since we deal with W*A = B
+            W_tomo = torch.linalg.lstsq(A, B).solution.transpose(-2, -1)           
         else:
             raise ValueError('Unknown inversion method specified.') 
         
@@ -975,6 +975,8 @@ class TipTorch(torch.nn.Module):
 
         PSF_out = self.OTF2PSF(self.OTF)
         self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)
+        
+        torch.cuda.empty_cache()
         
         return (PSF_out / self.norm_scale) * F + bg
 

@@ -10,13 +10,16 @@ from scipy.ndimage import rotate
 #%% My new process
 def LoadMUSEsampleByID(id): # searches for the sample with the specified ID in
     with open(MUSE_DATA_FOLDER+'muse_df.pickle', 'rb') as handle:
-        request_df = pickle.load(handle)
+        muse_df = pickle.load(handle)
 
-    file = request_df.loc[request_df.index == id]['Filename'].values[0]
+    file = muse_df.loc[muse_df.index == id]['Filename'].values[0]
     full_filename = MUSE_DATA_FOLDER + f'DATA_reduced/{id}_{file}.pickle'
 
     with open(full_filename, 'rb') as handle:
-        data_sample = pickle.load(handle)   
+        data_sample = pickle.load(handle)
+    
+    data_sample['All data']['Pupil angle'] = muse_df.loc[id]['Pupil angle']
+    
     return data_sample
 
 

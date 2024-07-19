@@ -1148,7 +1148,6 @@ file_id = 296
 # file_id = 345
 file_id = 170
 
-# config_file['telescope']['PupilAngle']  = 22+5.5
 
 hdul_raw  = fits.open(os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ]))
 hdul_cube = fits.open(os.path.join(MUSE_CUBES_FOLDER, files_matches.iloc[file_id]['cube']))

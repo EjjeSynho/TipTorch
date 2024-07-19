@@ -486,21 +486,22 @@ with torch.no_grad():
         PSFs_1_val.append(func(x0, batch, fixed_inputs).cpu())
 
         # # ------------------------- Validate direct -------------------------
-        # inputs = {
-        #     'F':   torch.ones([1, 2]),
-        #     'Jx':  torch.ones([1])*33.0,
-        #     'Jy':  torch.ones([1])*33.0,
-        #     'Jxy': torch.zeros([1]),
-        #     'dn':  torch.zeros([1]),
-        #     # 'basis_coefs': torch.zeros([1, 12])
-        # }
+        inputs = {
+            'F':   torch.ones([1, N_wvl]),
+            'Jx':  torch.ones([1, N_wvl])*33.0,
+            'Jy':  torch.ones([1, N_wvl])*33.0,
+            'Jxy': torch.zeros([1]),
+            'dn':  torch.zeros([1]),
+            'amp': torch.zeros([1])
+            # 'basis_coefs': torch.zeros([1, 12])
+        }
         
-        # current_batch_size = len(batch['IDs'])
+        current_batch_size = len(batch['IDs'])
 
-        # for key, value in inputs.items():
-        #     inputs[key] = value.float().to(device).repeat(current_batch_size, 1).squeeze()
+        for key, value in inputs.items():
+            inputs[key] = value.float().to(device).repeat(current_batch_size, 1).squeeze()
         
-        # PSFs_2_val.append(run_model(toy, batch, inputs).cpu())
+        PSFs_2_val.append(run_model(toy, batch, inputs).cpu())
 
         # # ------------------------- Validate fitted -------------------------
         # fitted_dict = get_fixed_inputs(batch, fitted_entries)
@@ -513,14 +514,15 @@ with torch.no_grad():
     
     PSFs_0_val = torch.cat(PSFs_0_val, dim=0).mean(axis=1).numpy()
     PSFs_1_val = torch.cat(PSFs_1_val, dim=0).mean(axis=1).numpy()
+    PSFs_2_val = torch.cat(PSFs_2_val, dim=0).mean(axis=1).numpy()
     
     # PSFs_2_val = torch.cat(PSFs_2_val, dim=0)[:,0,...].numpy()
     # PSFs_3_val = torch.cat(PSFs_3_val, dim=0)[:,0,...].numpy()
 
     # fig, ax = plt.subplots(1, 1, figsize=(10, 4))
     fig = plt.figure(figsize=(10, 4))
-    # plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction', ax=ax[0])
-    plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction')
+    plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction')
+    # plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction')
     # plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[2])
     plt.tight_layout()
     # plt.show()

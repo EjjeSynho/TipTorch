@@ -68,6 +68,28 @@ for i in range(len(all_labels)):
 
 labels_df = pd.DataFrame(labels_df)
 labels_df.set_index('ID', inplace=True)
+labels_df.sort_index(inplace=True)
+
+#%%
+angles_df  = { 'ID': [], 'Filename': [], 'Pupil angle': [] }
+
+if os.path.exists(MUSE_DATA_FOLDER+'angles.txt'):
+    with open(MUSE_DATA_FOLDER+'angles.txt', 'r') as f:
+        for line in f:
+            filename, angle = line.strip().split(': ')
+
+            ID = filename.split('_')[0]
+            pure_filename = filename.replace(ID+'_', '').replace('.pickle', '')
+
+            angles_df['ID'].append(int(ID))
+            angles_df['Filename'].append(pure_filename)
+            angles_df['Pupil angle'].append(float(angle))
+else:
+    raise ValueError('Angles file does not exist!')
+
+angles_df = pd.DataFrame(angles_df)
+angles_df.set_index('ID', inplace=True)
+angles_df.sort_index(inplace=True)
 
 
 # Read flattened DataFrames and concatenate them
@@ -84,9 +106,13 @@ for file in tqdm(files):
 muse_df = pd.concat(muse_df)
 muse_df.set_index('ID', inplace=True)
 muse_df.sort_index(inplace=True)
-
 muse_df = muse_df.join(labels_df)
 
+for i in angles_df.index:
+    muse_df.loc[i, 'Pupil angle'] = angles_df.loc[i, 'Pupil angle']
+    
+
+#%%
 # Save as pickle
 with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'wb') as handle:
     pickle.dump(muse_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -181,7 +207,6 @@ muse_df_reduced.loc[muse_df_reduced['MASS_TURB'] < 1e-16, 'MASS_TURB'] = np.nan
 
 
 muse_df_reduced['Pupil angle'] = muse_df_reduced['Pupil angle'].map(lambda x: x % 360)
-muse_df_reduced['Pupil angle'] = muse_df_reduced['Pupil angle'].map(lambda x: x if x < 180 else x - 360)
 
 
 muse_df_reduced[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].mean(axis=1)

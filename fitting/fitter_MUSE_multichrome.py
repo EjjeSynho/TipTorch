@@ -226,27 +226,36 @@ def load_and_fit_sample(id):
 
     _ = transformer.stack({ attr: getattr(model, attr) for attr in transformer_dict }) # to create index mapping
 
+    # TipTorch realm
     x0 = [\
         norm_r0.forward(model.r0).item(), # r0
-        *([1.0,]*N_wvl),  # F
-        *([0.0,]*N_wvl),  # dx
-        *([0.0,]*N_wvl),  # dy
-        *([0.0,]*N_wvl),  # bg
-        0.7,              # dn
+        *([1.0,]*N_wvl), # F
+        *([0.0,]*N_wvl), # dx
+        *([0.0,]*N_wvl), # dy
+        # 0.0,
+        # 0.0,
+        *([0.0,]*N_wvl), # bg
+        -0.9, # dn
+        # -0.9,
+        # -0.9,
         *([-0.9,]*N_wvl), # Jx
         *([-0.9,]*N_wvl), # Jy
-        0.0,              # Jxy
+        0.0, # Jxy
     ]
     # PSFAO realm
     if Moffat_absorber:
         x0 += [\
-            *([ -0.9,]*N_wvl),
-            *([-0.5,]*N_wvl),
-            *([ -0.9,]*N_wvl),
+            -1,
+            -1,
+            0.3,
+            # *([ 1.0,]*N_wvl),
+            # *([ 0.0,]*N_wvl),
+            # *([ 0.3,]*N_wvl)
         ]
-    # If sausage absorber enabled
+    # The sausage absorber
     if include_sausage:
-        x0 += [0.5]
+        x0 += [0.9]
+    
 
     x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 

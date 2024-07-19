@@ -2,8 +2,6 @@
 %reload_ext autoreload
 %autoreload 2
 
-import os
-from os import path
 import sys
 sys.path.insert(0, '..')
 
@@ -11,7 +9,7 @@ import pickle
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle, register_hooks
+from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle#, register_hooks
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from tools.config_manager import GetSPHEREonsky
@@ -23,8 +21,11 @@ from tools.config_manager import ConfigManager
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, PolyModel, InputsCompressor
 from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tqdm import tqdm
+from project_globals import MUSE_RAW_FOLDER
 
 #%%
+with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'rb') as handle:
+    muse_df = pickle.load(handle)
 
 gave_NaNs = [21, 60, 103, 148, 167, 240, 302, 319, 349]
 # 411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335
@@ -39,7 +40,7 @@ derotate_PSF    = True
 Moffat_absorber = True
 include_sausage = True
 
-sample = LoadMUSEsampleByID(343)
+sample = LoadMUSEsampleByID(103)
 PSF_0, var_mask, norms, bgs = LoadImages(sample)
 config_file, PSF_0 = GetConfig(sample, PSF_0)
 N_wvl = PSF_0.shape[1]
@@ -53,7 +54,7 @@ if derotate_PSF:
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from tools.utils import SausageFeature
 
-toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=2)
+toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 sausage_absorber = SausageFeature(toy)
 sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
 
@@ -124,6 +125,8 @@ plt.show()
 # plt.imshow(PSF_0[0,-1,...].abs().log10().cpu().numpy())
 # plt.show()
 
+
+# torch.cuda.empty_cache()
 #%%
 from tools.utils import safe_centroid, RadialProfile, wavelength_to_rgb
 
@@ -251,10 +254,13 @@ transformer_dict = {
     'Jx':  norm_J,
     'Jy':  norm_J,
     'Jxy': norm_Jxy,
-    's_pow': norm_sausage_pow,
     # 's_ang': norm_sausage_ang
 }
 
+if include_sausage:
+    transformer_dict['s_pow'] = norm_sausage_pow
+    
+    
 if Moffat_absorber:
     transformer_dict.update({
         'amp'  : norm_amp,
@@ -270,7 +276,8 @@ transformer = InputsTransformer(transformer_dict)
 
 # Loop through the class attributes to get the initial values and their dimensions
 if include_sausage:
-    toy.s_pow = torch.zeros([1,1], device=toy.device).float()
+    setattr(toy, 's_pow', torch.zeros([1,1], device=toy.device).float())
+
 
 _ = transformer.stack({ attr: getattr(toy, attr) for attr in transformer_dict }) # to create index mapping
 
@@ -283,7 +290,7 @@ x0 = [\
     # 0.0,
     # 0.0,
     *([0.0,]*N_wvl), # bg
-    0.7, # dn
+    -0.9, # dn
     # -0.9,
     # -0.9,
     *([-0.9,]*N_wvl), # Jx
@@ -294,8 +301,8 @@ x0 = [\
 if Moffat_absorber:
     x0 += [\
         # PSFAO realm
-         1.0,
-        -0.5,
+        -1,
+        -1,
          0.3,
         # *([ 1.0,]*N_wvl),
         # *([ 0.0,]*N_wvl),
@@ -365,7 +372,11 @@ x0 = result.x
 
 x_torch = transformer.destack(x0)
 
-phase_func = lambda: sausage_absorber(toy.s_pow.flatten()) if include_sausage else None
+if include_sausage:
+    phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
+else:
+    phase_func = None
+
 PSF_1 = toy(x_torch, None, phase_generator=phase_func)
 
 '''
@@ -402,7 +413,7 @@ if len(toy.wvl[0]) > 1:
 
     fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
     for i, lmbd in enumerate(wvl_select):
-        plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=60,  ax=ax[i] )
+        plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
     plt.show()
 
 else:
