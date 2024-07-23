@@ -41,7 +41,8 @@ with open(MUSE_DATA_FOLDER + 'IRLOS_phases_dict.pkl', 'wb') as handle:
 
 #%%
 # fitted_samples_folder = MUSE_DATA_FOLDER + 'MUSE_fitted_no_S_no_M/'
-fitted_samples_folder = MUSE_DATA_FOLDER + 'MUSE_fitted_derot/'
+# fitted_samples_folder = MUSE_DATA_FOLDER + 'MUSE_fitted_derot/'
+fitted_samples_folder = MUSE_DATA_FOLDER + 'MUSE_fitted_new_norm/'
 
 files = os.listdir(fitted_samples_folder)
 
@@ -187,4 +188,92 @@ PSF_avg = lambda x: np.mean(x, axis=1)
 plot_radial_profiles_new( PSF_avg(PSF_0), PSF_avg(PSF_1), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
 plt.show()
 
-# %%
+
+# %% -------------------- Cross check with TipTorch --------------------
+from tools.utils import SausageFeature
+from PSF_models.TipToy_MUSE_multisrc import TipTorch
+from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
+from project_globals import device
+import torch
+
+Moffat_absorber = True
+
+id = 310
+
+sample = LoadMUSEsampleByID(id)
+PSF_0, _, norms, bgs = LoadImages(sample, device)
+config_file, PSF_0 = GetConfig(sample, PSF_0, None, device)
+N_wvl = PSF_0.shape[1]
+
+PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item()) 
+config_file['telescope']['PupilAngle'] = 0
+
+#%%
+#% Initialize the model
+model = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+sausage_absorber = SausageFeature(model)
+sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
+
+model.PSD_include['fitting'] = True
+model.PSD_include['WFS noise'] = True
+model.PSD_include['spatio-temporal'] = True
+model.PSD_include['aliasing'] = False
+model.PSD_include['chromatism'] = True
+model.PSD_include['Moffat'] = Moffat_absorber
+
+model.to_float()
+
+# inputs_tiptorch = {
+#     'F':   torch.tensor([[1.0,]*N_wvl], device=model.device),
+#     'dx':  torch.tensor([[0.0,]*N_wvl], device=model.device),
+#     'dy':  torch.tensor([[0.0,]*N_wvl], device=model.device),
+#     'bg':  torch.tensor([[1e-06,]*N_wvl], device=model.device),
+#     'dn':  torch.tensor([1.5], device=model.device),
+#     'Jx':  torch.tensor([[10,]*N_wvl], device=model.device),
+#     'Jy':  torch.tensor([[10,]*N_wvl], device=model.device),
+#     'Jxy': torch.tensor([[45]], device=model.device)
+# }
+
+inputs_tiptorch = {
+    'F':   torch.tensor([ F_df.loc[id].to_numpy()], device=model.device),
+    'dx':  torch.tensor([dx_df.loc[id].to_numpy()], device=model.device),
+    'dy':  torch.tensor([dy_df.loc[id].to_numpy()], device=model.device),
+    'bg':  torch.tensor([bg_df.loc[id].to_numpy()], device=model.device),
+    'Jx':  torch.tensor([Jx_df.loc[id].to_numpy()], device=model.device),
+    'Jy':  torch.tensor([Jy_df.loc[id].to_numpy()], device=model.device),
+    'dn':  torch.tensor([singular_df.loc[id, 'dn']], device=model.device),
+    'Jxy': torch.tensor([singular_df.loc[id,'Jxy']], device=model.device)
+}
+
+if Moffat_absorber:
+    inputs_psfao = {
+        'amp':   torch.tensor([singular_df.loc[id,'amp']], device=model.device),
+        'b':     torch.tensor([singular_df.loc[id,'b']], device=model.device),
+        'alpha': torch.tensor([singular_df.loc[id,'alpha']], device=model.device),
+        'beta':  torch.ones (model.N_src, device=model.device)*2,
+        'ratio': torch.ones (model.N_src, device=model.device),
+        'theta': torch.zeros(model.N_src, device=model.device)
+    }
+else:
+    inputs_psfao = {}
+
+setattr(model, 's_pow', torch.tensor([singular_df.loc[id,'amp']], device=model.device))
+
+PSF_1 = model(x = inputs_tiptorch | inputs_psfao)
+
+#%%
+from tools.utils import plot_radial_profiles_new, draw_PSF_stack
+
+center = np.array([PSF_0.shape[-2]//2, PSF_0.shape[-1]//2])
+
+if len(model.wvl[0]) > 1:
+    wvl_select = np.s_[0, 6, 12]
+
+    draw_PSF_stack( PSF_0.cpu().numpy()[0, wvl_select, ...], PSF_1.cpu().numpy()[0, wvl_select, ...], average=True, crop=120 )
+    
+    PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
+
+    fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
+    for i, lmbd in enumerate(wvl_select):
+        plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+    plt.show()

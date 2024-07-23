@@ -40,7 +40,7 @@ derotate_PSF    = True
 Moffat_absorber = True
 include_sausage = True
 
-sample = LoadMUSEsampleByID(103)
+sample = LoadMUSEsampleByID(305)
 PSF_0, var_mask, norms, bgs = LoadImages(sample)
 config_file, PSF_0 = GetConfig(sample, PSF_0)
 N_wvl = PSF_0.shape[1]

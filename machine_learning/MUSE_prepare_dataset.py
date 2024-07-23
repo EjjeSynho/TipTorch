@@ -39,11 +39,10 @@ muse_df_norm = muse_df_norm.loc[muse_df.index]
 dx_df = fitted_df['dx_df']
 
 valid_ids = (dx_df)[~dx_df.isna()].index.values.tolist()
-exclude_ids = [103, 240, 259, 264, 296, 319, 349, 367, 407]
 
-for id in exclude_ids:
-    if id in valid_ids:
-        valid_ids.remove(id)
+# for id in [103, 240, 259, 264, 296, 319, 349, 367, 407]:
+#     if id in valid_ids:
+#         valid_ids.remove(id)
 
 muse_df_norm = muse_df_norm.loc[valid_ids]
 muse_df = muse_df.loc[valid_ids]
@@ -72,12 +71,12 @@ alpha_fitted_df = fitted_df['singular_vals_df']['alpha'].loc[valid_ids]
 s_pow_fitted_df = fitted_df['singular_vals_df']['sausage_pow'].loc[valid_ids]
 
 #%% 
-BATCH_SIZE = 4
+BATCH_SIZE = 16
 selected_entries_input = muse_df_norm.columns.values.tolist()
 
 def batch_config_and_images(ids):
     data_dict = {}
-    PSF_0, merged_config = GetMUSEonsky(ids, device=torch.device('cpu'))
+    PSF_0, merged_config = GetMUSEonsky(ids, derotate_PSF=True, device=torch.device('cpu'))
         
     data_dict['PSF_0']   = PSF_0
     data_dict['configs'] = merged_config

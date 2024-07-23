@@ -1056,7 +1056,7 @@ def plot_radial_profiles_new(PSF_0,
             ax.set_ylim(y_min, y_lim)
         else:
             x_max = cutoff
-            ax.ylim(0, y_lim)
+            ax.set_ylim(0, y_lim)
 
         ax.set_title(title)
         ax.legend()
