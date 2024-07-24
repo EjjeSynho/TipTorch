@@ -40,7 +40,7 @@ derotate_PSF    = True
 Moffat_absorber = True
 include_sausage = True
 
-sample = LoadMUSEsampleByID(305)
+sample = LoadMUSEsampleByID(310)
 PSF_0, var_mask, norms, bgs = LoadImages(sample)
 config_file, PSF_0 = GetConfig(sample, PSF_0)
 N_wvl = PSF_0.shape[1]
@@ -421,9 +421,81 @@ else:
     
     plot_radial_profiles_new( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
     plt.show()
-    
+   
+#%% ======================================================================================================
+   
+#% Initialize the model
+model = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=True, oversampling=1)
+sausage_absorber = SausageFeature(model)
+sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
+
+model.PSD_include['fitting'] = True
+model.PSD_include['WFS noise'] = True
+model.PSD_include['spatio-temporal'] = True
+model.PSD_include['aliasing'] = False
+model.PSD_include['chromatism'] = True
+model.PSD_include['Moffat'] = True
+
+model.to_float()
+
+F_df     =  toy.F.cpu().numpy()
+dx_df    = toy.dx.cpu().numpy()
+dy_df    = toy.dy.cpu().numpy()
+bg_df    = toy.bg.cpu().numpy()
+Jx_df    = toy.Jx.cpu().numpy()
+Jy_df    = toy.Jy.cpu().numpy()
+r0_df    = toy.r0.cpu().numpy()
+dn_df    = toy.dn.cpu().numpy()
+Jxy_df   = toy.Jxy.cpu().numpy()
+amp_df   = toy.amp.cpu().numpy()
+b_df     = toy.b.cpu().numpy()
+alpha_df = toy.alpha.cpu().numpy()
+beta_df  = toy.beta.cpu().numpy()
+ratio_df = toy.ratio.cpu().numpy()
+theta_df = toy.theta.cpu().numpy()
+
+s_pow_df = toy.s_pow.cpu().numpy()
+
+
+inputs_tiptorch = {
+    'F':     torch.tensor(F_df    , device=model.device),
+    'dx':    torch.tensor(dx_df   , device=model.device),
+    'dy':    torch.tensor(dy_df   , device=model.device),
+    'bg':    torch.tensor(bg_df   , device=model.device),
+    'Jx':    torch.tensor(Jx_df   , device=model.device),
+    'Jy':    torch.tensor(Jy_df   , device=model.device),
+    'r0':    torch.tensor(r0_df   , device=model.device),
+    'dn':    torch.tensor(dn_df   , device=model.device),
+    'Jxy':   torch.tensor(Jxy_df  , device=model.device),
+    'amp':   torch.tensor(amp_df  , device=model.device),
+    'b':     torch.tensor(b_df    , device=model.device),
+    'alpha': torch.tensor(alpha_df, device=model.device),
+    'beta':  torch.tensor(beta_df , device=model.device),
+    'ratio': torch.tensor(ratio_df, device=model.device),
+    'theta': torch.tensor(theta_df, device=model.device)
+}
+setattr(model, 's_pow', torch.tensor(s_pow_df, device=model.device))
+
+PSF_1_ = model(inputs_tiptorch, None, lambda: sausage_absorber(toy.s_pow.flatten()))
+
 
 #%%
+draw_PSF_stack( PSF_0.cpu().numpy()[0, wvl_select, ...], PSF_1_.cpu().numpy()[0, wvl_select, ...], average=True, crop=120 )
+draw_PSF_stack( PSF_0.cpu().numpy()[0, wvl_select, ...], PSF_1.cpu().numpy()[0, wvl_select, ...], average=True, crop=120 )
+
+PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
+
+fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
+for i, lmbd in enumerate(wvl_select):
+    plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1_, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+plt.show()
+
+fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
+for i, lmbd in enumerate(wvl_select):
+    plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+plt.show()
+
+#%% ======================================================================================================
 from tools.utils import calc_profile
 
 x_torch = transformer.destack(x0)
@@ -436,7 +508,7 @@ PSD_norm = lambda wvl: (dk*wvl*1e9/2/np.pi)**2
 PSDs = {entry: (toy.PSDs[entry].clone().squeeze() * PSD_norm(500e-9)) for entry in toy.PSD_entries if toy.PSDs[entry].ndim > 1}
 PSDs['chromatism'] = PSDs['chromatism'].mean(dim=0)
 
-#%
+
 plt.figure(figsize=(8, 6))
 
 PSD_map  = toy.PSD[0,...].mean(dim=0).real.cpu().numpy()
@@ -461,7 +533,7 @@ for entry in PSDs.keys():
         buf_prof = calc_profile(buf_map, center_AO)
     profiles[entry] = buf_prof
 
-#%
+
 plt.plot(freqs, PSD_prof, label='Total', linewidth=2, linestyle='--', color='black')
 
 for entry, value in profiles.items():
@@ -478,7 +550,6 @@ plt.grid()
 plt.xlim(freqs.min(), freqs.max())
 
 
-#%%
 '''
 PSF_1 = torch.tensor(PSF_1s_).float().to(device).unsqueeze(0)
 PSF_0 = PSF_0_.clone()

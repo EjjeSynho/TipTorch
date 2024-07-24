@@ -67,46 +67,16 @@ sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
 
 toy.PSD_include['fitting'] = True
 toy.PSD_include['WFS noise'] = True
-toy.PSD_include['spatio-temporal'] = False
+toy.PSD_include['spatio-temporal'] = True
 toy.PSD_include['aliasing'] = False
-toy.PSD_include['chromatism'] = False
+toy.PSD_include['chromatism'] = True
 toy.PSD_include['Moffat'] = True
 
 toy.to_float()
-# toy.to_double()
 _ = toy()
 toy.s_pow = torch.zeros([toy.N_src,1], device=toy.device).float()
 
 #%%
-'''
-x0 = [
-    0.0, #r0
-    *([1.0,]*N_wvl), # F
-    # *([0.0,]*N_wvl), # dx
-    # *([0.0,]*N_wvl), # dy
-    # 0.0,
-    # 0.0,
-    # *([0.0,]*N_wvl), # bg
-    -1, # dn
-    # -0.9,
-    # -0.9,
-    *([-0.9,]*N_wvl), # Jx
-    *([-0.9,]*N_wvl), # Jy
-    # 0.0, # Jxy
-
-    -1, # s_pow
-    
-    # PSFAO realm
-    -1,
-    -1,
-    -1
-    # *([ 1.0,]*N_wvl),
-    # *([ 0.0,]*N_wvl),
-    # *([ 0.3,]*N_wvl)
-]
-
-x0 = torch.tensor(x0).float().to(device).repeat(toy.N_src, 1)
-'''
 
 transforms = {
     'r0':    df_transforms_fitted['r0'],
@@ -129,7 +99,7 @@ transforms = {
 
 fixed_entries      = ['dx', 'dy', 'Jxy', 'bg']
 # additional_params  = ['amp', 'b', 'alpha']
-predicted_entries  = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow']
+predicted_entries  = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow', 'amp', 'b', 'alpha']
 
 
 transformer = InputsTransformer({ entry: transforms[entry] for entry in predicted_entries })
@@ -138,9 +108,9 @@ transformer = InputsTransformer({ entry: transforms[entry] for entry in predicte
 inp_dict = {
     'r0':    torch.ones ( toy.N_src, device=toy.device)*0.1,
     'F':     torch.ones ([toy.N_src, N_wvl], device=toy.device),
-    'dn':    torch.ones ( toy.N_src, device=toy.device)*1.5,
     'Jx':    torch.ones ([toy.N_src, N_wvl], device=toy.device)*10,
     'Jy':    torch.ones ([toy.N_src, N_wvl], device=toy.device)*10,
+    'dn':    torch.ones (toy.N_src, device=toy.device)*1.5,
     's_pow': torch.zeros(toy.N_src, device=toy.device),
     'amp':   torch.zeros(toy.N_src, device=toy.device),
     'b':     torch.zeros(toy.N_src, device=toy.device),
@@ -190,12 +160,12 @@ class Gnosis(nn.Module):
         return x
     
 # Initialize the network, loss function and optimizer
-net = Gnosis(batch_init['NN input'].shape[1], transformer.get_packed_size(), 200, 0.1)#0.25)
+net = Gnosis(batch_init['NN input'].shape[1], transformer.get_packed_size(), 200, 0.2)#0.25)
 net.to(device)
 net.float()
 
 # net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v1.dict'))
-net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v1_13wvls_no_Moffat.dict'))
+# net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v1_13wvls_no_Moffat.dict'))
 
 #%%
 crop_all    = cropper(PSF_0_init, 91)
@@ -217,8 +187,7 @@ def img_punish(A, B):
 
 
 #%%
-def get_fixed_inputs(batch, entries): #=['dx', 'dy', 'Jxy', 'bg']):
-    # return { entry: batch['fitted data'][entry].to(device) for entry in entries }
+def get_fixed_inputs(batch, entries):
     return {
         entry: \
             batch['fitted data'][entry][:,ids_wavelength_selected].to(device) \
@@ -262,7 +231,6 @@ def run_model(model, batch, predicted_inputs, fixed_inputs={}):
 
 
 def func(x_, batch, fixed_inputs):
-    # y_pred = torch.clamp(net(x_), min=-5.0, max=5.0)
     y_pred = net(x_)
     pred_inputs = transformer.destack(y_pred)
     return run_model(toy, batch, pred_inputs, fixed_inputs)
@@ -301,16 +269,15 @@ for file in tqdm(val_files):
 train_ids = np.arange(len(batches_train)).tolist()
 val_ids   = np.arange(len(batches_val)).tolist()
 
-#%%
-batch = batches_train[id]
+#%
+# batch = batches_train[id]
 
-x, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
-batch_size = len(batch['IDs'])
+# x, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
+# batch_size = len(batch['IDs'])
 
-y_pred = net(x)
-pred_inputs = transformer.destack(y_pred)
-PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
-
+# y_pred = net(x)
+# pred_inputs = transformer.destack(y_pred)
+# PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
 
 #%%
 optimizer = optim.Adam(net.parameters(), lr=0.00001)
@@ -456,28 +423,26 @@ plt.plot(loss_stats_train)
 plt.show()
 
 #%%
-batch = batches_train[id]
+# batch = batches_train[id]
 
-x, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
-batch_size = len(batch['IDs'])
+# x, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
+# batch_size = len(batch['IDs'])
 
-# print(x.norm())
-
-y_pred = net(x)
-pred_inputs = transformer.destack(y_pred)
-PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
+# y_pred = net(x)
+# pred_inputs = transformer.destack(y_pred)
+# PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
 
 
-
-#%%
-
-np.save('../data/temp/loss_stats_val.npy', loss_stats_val)
-np.save('../data/temp/loss_stats_train.npy', loss_stats_train)
+#%
+# np.save('../data/temp/loss_stats_val.npy', loss_stats_val)
+# np.save('../data/temp/loss_stats_train.npy', loss_stats_train)
 
 
-#%%
-
-all_entries = ['dx', 'dy', 'Jxy', 'bg', 'amp', 'b', 'alpha', 'r0', 'F', 'dn', 'Jx', 'Jy', 's_pow']
+#%
+all_entries = [\
+    'r0', 'F', 'dn', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 's_pow',
+    'amp', 'b', 'alpha', 'beta', 'ratio', 'theta'
+]
 
 PSFs_0_val, PSFs_1_val, PSFs_2_val, PSFs_3_val = [], [], [], []
 net.eval()
@@ -486,15 +451,17 @@ ids_0 = []
 
 with torch.no_grad():
     for i in tqdm(val_ids):
+    # for i in tqdm(train_ids):
         
         toy.PSD_include['fitting'] = True
         toy.PSD_include['WFS noise'] = True
-        toy.PSD_include['spatio-temporal'] = False
+        toy.PSD_include['spatio-temporal'] = True
         toy.PSD_include['aliasing'] = False
-        toy.PSD_include['chromatism'] = False
+        toy.PSD_include['chromatism'] = True
         toy.PSD_include['Moffat'] = True
         
         batch = batches_val[i]
+        # batch = batches_train[i]
         x0, fixed_inputs, PSF_0, config = get_data(batch, fixed_entries)
         PSFs_0_val.append(PSF_0.cpu())
         current_batch_size = len(batch['IDs'])
@@ -526,14 +493,6 @@ with torch.no_grad():
         # ------------------------- Validate fitted -------------------------
         _, all_inputs, _, config = get_data(batch, all_entries)
         
-        all_inputs.update(
-            {
-                'beta':  torch.ones (toy.N_src, device=toy.device)*2,
-                'ratio': torch.ones (toy.N_src, device=toy.device),
-                'theta': torch.zeros(toy.N_src, device=toy.device)
-            }
-        )
-        
         toy.config = config
         
         toy.PSD_include['fitting'] = True
@@ -553,13 +512,15 @@ PSFs_2_val = torch.cat(PSFs_2_val, dim=0).mean(axis=1).numpy()
 PSFs_3_val = torch.cat(PSFs_3_val, dim=0).mean(axis=1).numpy()
 
 #%%
-fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+# fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+
+fig = plt.figure(figsize=(9, 4))
 
 cutoff = 40
 
-plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff, ax=ax[0])
-plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff, ax=ax[1])
-plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff, ax=ax[2])
+# plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff, ax=ax[0])
+# plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff, ax=ax[1])
+plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
 plt.tight_layout()
 plt.show()
 # plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
@@ -583,3 +544,172 @@ for ii in range(PSFs_0_val.shape[0]):
     plt.axis('off')
     plt.show()
     # plt.savefig(f'C:/Users/akuznets/Desktop/didgereedo/MUSE/PSF_val_{ii}.png', dpi=400)
+
+
+#%% ====================================================================================================
+from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
+
+_, all_inputs, _, config = get_data(batch_init, all_entries)
+
+id_local = 1
+
+toy.config = config
+
+toy.PSD_include['fitting'] = True
+toy.PSD_include['WFS noise'] = True
+toy.PSD_include['spatio-temporal'] = True
+toy.PSD_include['aliasing'] = False
+toy.PSD_include['chromatism'] = True
+toy.PSD_include['Moffat'] = True
+
+toy.Update(reinit_grids=True, reinit_pupils=True)
+PSFs_1 = run_model(toy, batch_init, {}, all_inputs)
+
+#%
+PSF_0, _, _, _ = LoadImages(sample := LoadMUSEsampleByID(batch_init['IDs'][id_local]))
+config_file, PSF_0 = GetConfig(sample, PSF_0)
+# PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
+config_file['telescope']['PupilAngle'] = 0
+
+model = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=True, oversampling=1)
+
+model.PSD_include['fitting'] = True
+model.PSD_include['WFS noise'] = True
+model.PSD_include['spatio-temporal'] = True
+model.PSD_include['aliasing'] = False
+model.PSD_include['chromatism'] = True
+model.PSD_include['Moffat'] = True
+
+model.to_float()
+setattr(model, 's_pow', 0.0)
+
+phytos_dfos = batch_init['fitted data']
+
+inputs_tiptorch = {
+    'F':     phytos_dfos['F' ][id_local,...].unsqueeze(0).to(model.device),
+    'dx':    phytos_dfos['dx'][id_local,...].unsqueeze(0).to(model.device),
+    'dy':    phytos_dfos['dy'][id_local,...].unsqueeze(0).to(model.device),
+    'bg':    phytos_dfos['bg'][id_local,...].unsqueeze(0).to(model.device),
+    'Jx':    phytos_dfos['Jx'][id_local,...].unsqueeze(0).to(model.device),
+    'Jy':    phytos_dfos['Jy'][id_local,...].unsqueeze(0).to(model.device),
+    
+    'r0':    phytos_dfos['r0'   ][id_local].to(model.device),
+    'dn':    phytos_dfos['dn'   ][id_local].to(model.device),
+    'Jxy':   phytos_dfos['Jxy'  ][id_local].to(model.device),
+    'amp':   phytos_dfos['amp'  ][id_local].to(model.device),
+    'b':     phytos_dfos['b'    ][id_local].to(model.device),
+    'alpha': phytos_dfos['alpha'][id_local].to(model.device),
+    'beta':  phytos_dfos['beta' ][id_local].to(model.device),
+    'ratio': phytos_dfos['ratio'][id_local].to(model.device),
+    'theta': phytos_dfos['theta'][id_local].to(model.device),
+    's_pow': phytos_dfos['s_pow'][id_local].to(model.device)
+}
+
+PSF_1 = model(inputs_tiptorch, None, lambda: sausage_absorber(model.s_pow.flatten()))
+#%
+for entry in ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'chromatism', 'Moffat']:
+    try:
+        A = toy.PSDs[entry][id_local, ...]
+        B = model.PSDs[entry][0, ...]
+        print( entry, (A-B).abs().sum().item() )
+    except:
+        continue
+
+print((toy.dx[id_local, ...] - model.dx[0, ...]).sum().item())
+print((toy.dy[id_local, ...] - model.dy[0, ...]).sum().item())
+print((toy.F [id_local, ...] - model.F [0, ...]).sum().item())
+print((toy.bg[id_local, ...] - model.bg[0, ...]).sum().item())
+print((toy.Jx[id_local, ...] - model.Jx[0, ...]).sum().item())
+print((toy.Jy[id_local, ...] - model.Jy[0, ...]).sum().item())
+
+print((toy.dn[id_local, ...] - model.dn).item())
+print((toy.s_pow[id_local]   - model.s_pow).item())
+print((toy.r0[id_local]      - model.r0).item())
+print((toy.Jxy[id_local]     - model.Jxy).item())
+
+print((toy.amp[id_local]     - model.amp).item())
+print((toy.b[id_local]       - model.b).item())
+print((toy.alpha[id_local]   - model.alpha).item())
+print((toy.beta[id_local]    - model.beta).item())
+print((toy.ratio[id_local]   - model.ratio).item())
+print((toy.theta[id_local]   - model.theta).item())
+
+
+#%%
+A = toy.OTF[id_local,0,...]
+B = model.OTF[0,0,...]
+print(f'PSF error: {(A-B).abs().sum().item() / A.sum().item() * 100:.2f}%' )
+
+plt.imshow(A.abs().log10().cpu().numpy())
+plt.show()
+plt.imshow(B.abs().log10().cpu().numpy())
+plt.show()
+plt.imshow((A-B).abs().log10().cpu().numpy())
+plt.show()
+
+#%%
+A = toy.OTF_static_standart[0,0,...]
+B = model.OTF_static_standart[0,0,...]
+print(f'PSF error: {(A-B).abs().sum().item() / A.sum().item() * 100:.2f}%' )
+
+plt.imshow(A.abs().log10().cpu().numpy())
+plt.show()
+plt.imshow(B.abs().log10().cpu().numpy())
+plt.show()
+plt.imshow((A-B).abs().log10().cpu().numpy())
+plt.show()
+
+#%%
+id_wvl = 5
+
+A = sausage_absorber(model.s_pow.flatten())#[0,0,...]
+B = sausage_absorber(toy.s_pow.flatten())#[id_local,0,...]
+
+AA = model.Phase2OTF(A, 2)[0,id_wvl,...]
+BB = toy.Phase2OTF(B, 2)[id_local,id_wvl,...]
+#%
+
+# C1 = fftAutoCorr(AA)[0, id_wvl,...]
+# C2 = fftAutoCorr(BB)[id_local, id_wvl,...]
+# print( (C1-C2).abs().sum().item() )
+
+print( (AA-BB).abs().sum().item() )
+
+# print(AA.sum())
+
+#%%
+
+# plt.imshow(AA.abs().log10().cpu().numpy())
+# plt.show()
+# plt.imshow(BB.abs().log10().cpu().numpy())
+# plt.show()
+# plt.imshow((AA-BB).abs().log10().cpu().numpy())
+# plt.show()
+
+
+# plt.imshow(A.imag.cpu().numpy())
+# plt.show()
+# plt.imshow(B.imag.cpu().numpy())
+# plt.show()
+# plt.imshow((A-B).imag.cpu().numpy())
+
+
+#%%
+A = PSFs_1[id_local,0,...]
+B = PSF_1[0,0,...]
+print(f'PSF error: {(A-B).abs().sum().item() / A.sum().item() * 100:.2f}%' )
+
+plt.imshow(A.abs().log10().cpu().numpy())
+plt.show()
+plt.imshow(B.abs().log10().cpu().numpy())
+plt.show()
+plt.imshow((A-B).abs().log10().cpu().numpy())
+plt.show()
+#%%
+center = np.array([PSF_0.shape[-2]//2, PSF_0.shape[-1]//2])
+
+plot_radial_profiles_new(
+    PSFs_1[id_local,0,...].cpu().numpy(),
+    PSF_1[0,0,...].cpu().numpy(),
+    'Batch', 'Single', title='Fitted', cutoff=cutoff, centers=center)#, ax=ax[2])
+

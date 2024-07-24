@@ -139,7 +139,8 @@ class TipTorch(torch.nn.Module):
 
     def _fftAutoCorr(self, x):
         # return fft.fftshift( fft.ifft2( torch.abs(fft.fft2(x, norm='forward')**2) ) )
-        return fft.fftshift( fft.ifft2(fft.fft2(x).abs()**2) ) / x.shape[-2] / x.shape[-1]
+        # return fft.fftshift( fft.ifft2(fft.fft2(x).abs()**2) ) / x.shape[-2] / x.shape[-1]
+        return fft.fftshift( fft.ifft2(fft.fft2(x, dim=(-2,-1)).abs()**2, dim=(-2,-1)), dim=(-2,-1) ) / x.shape[-2] / x.shape[-1]
 
 
     def _gen_grid(self, N):
@@ -363,7 +364,7 @@ class TipTorch(torch.nn.Module):
             
         # PyTorch doesn't support interpolation of complex tensors yet
         OTF_ = interp(OTF.real) + interp(OTF.imag)*1j
-        return OTF_ / OTF_.abs().max()
+        return OTF_ / OTF_.abs().amax(dim=(-2,-1), keepdim=True)
     
     
     def StandartStaticOTF(self):
@@ -957,21 +958,22 @@ class TipTorch(torch.nn.Module):
         # Computing OTF from PSD, real is to remove the imaginary part that appears due to numerical errors
         cov = fft.fftshift(fft.fft2(fft.ifftshift(PSD, dim=(-2,-1))), dim=(-2,-1)) # FFT axes are -2,-1 #TODO: real FFT?
      
-        # self.cov = cov
+        self.cov = cov
   
         # Computing the Structure Function from the covariance
         SF = 2*(cov.abs().amax(dim=(-2,-1), keepdim=True) - cov).real
-        # self.SF = SF
+        self.SF = SF
         # Phasor to shift the PSF with the subpixel accuracy
         fftPhasor = torch.exp( -np.pi*1j * pdims(self.sampling_factor,2) * (self.U.unsqueeze(1)*dx + self.V.unsqueeze(1)*dy) )
         OTF_turb  = torch.exp( -0.5 * SF * pdims(2*np.pi*1e-9/self.wvl,2)**2 )
-        # self.OTF_turb = OTF_turb
+        self.OTF_turb = OTF_turb
         
         # Compute the residual tip/tilt kernel
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         # Resulting combined OTF
         self.OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
-        # self.OTF_jitter = OTF_jitter
+        self.fftPhasor = fftPhasor
+        self.OTF_jitter = OTF_jitter
 
         PSF_out = self.OTF2PSF(self.OTF)
         self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)
