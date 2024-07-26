@@ -35,6 +35,9 @@ with open(MUSE_DATA_FOLDER+'muse_df_norm_imputed.pickle', 'rb') as handle:
 
 config_manager = ConfigManager()
 
+predict_Moffat = True
+# predict_Moffat = False
+
 #%%
 with open(MUSE_DATASET_FOLDER + 'batch_test.pkl', 'rb') as handle:
     batch_init = pickle.load(handle)
@@ -43,21 +46,17 @@ init_config = batch_init['configs']
 wavelength  = batch_init['Wvls']
 
 wavelength_selected = wavelength # For now, the same wvl span is used
-ids_wavelength_selected = [i for i, wvl in enumerate(wavelength) if wvl in wavelength_selected]
-# ids_wavelength_selected = np.arange(0, len(wavelength), 2)
+# ids_wavelength_selected = [i for i, wvl in enumerate(wavelength) if wvl in wavelength_selected]
+ids_wavelength_selected = np.arange(0, len(wavelength), 2)
+# ids_wavelength_selected = [11,12]
 
-#%%
 N_wvl = len(ids_wavelength_selected)
 
-# init_config['sources_science']['Wavelength'] = init_config['sources_science']['Wavelength'][:, ids_wavelength_selected]
-
 PSF_0_init = batch_init['PSF_0'][:, ids_wavelength_selected, ...]
-
 config_manager.Convert(init_config, framework='pytorch', device=device)
-
-# AAA = init_config['sources_science']['Wavelength'].clone().detach().cpu().numpy()
-# AAA = torch.tensor(AAA[:, ids_wavelength_selected]).to(device)
-# init_config['sources_science']['Wavelength'] = AAA
+AAA = init_config['sources_science']['Wavelength'].clone().detach().cpu().numpy()
+AAA = torch.tensor(AAA[:, ids_wavelength_selected]).to(device)
+init_config['sources_science']['Wavelength'] = AAA
 
 
 #%%
@@ -65,19 +64,18 @@ toy = TipTorch(init_config, 'sum', device, TipTop=True, PSFAO=True, oversampling
 sausage_absorber = SausageFeature(toy)
 sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
 
-toy.PSD_include['fitting'] = True
-toy.PSD_include['WFS noise'] = True
+toy.PSD_include['fitting']         = True
+toy.PSD_include['WFS noise']       = True
 toy.PSD_include['spatio-temporal'] = True
-toy.PSD_include['aliasing'] = False
-toy.PSD_include['chromatism'] = True
-toy.PSD_include['Moffat'] = True
+toy.PSD_include['aliasing']        = False
+toy.PSD_include['chromatism']      = True
+toy.PSD_include['Moffat']          = predict_Moffat
 
 toy.to_float()
 _ = toy()
 toy.s_pow = torch.zeros([toy.N_src,1], device=toy.device).float()
 
 #%%
-
 transforms = {
     'r0':    df_transforms_fitted['r0'],
     'F':     df_transforms_fitted['F'],
@@ -99,7 +97,11 @@ transforms = {
 
 fixed_entries      = ['dx', 'dy', 'Jxy', 'bg']
 # additional_params  = ['amp', 'b', 'alpha']
-predicted_entries  = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow', 'amp', 'b', 'alpha']
+# predicted_entries  = ['r0', 'F', 'dn', 'Jx', 'Jy', 'amp', 'b', 'alpha', 's_pow']
+predicted_entries  = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow']
+
+if predict_Moffat:
+    predicted_entries += ['amp', 'b', 'alpha']
 
 
 transformer = InputsTransformer({ entry: transforms[entry] for entry in predicted_entries })
@@ -160,17 +162,18 @@ class Gnosis(nn.Module):
         return x
     
 # Initialize the network, loss function and optimizer
-net = Gnosis(batch_init['NN input'].shape[1], transformer.get_packed_size(), 200, 0.2)#0.25)
+net = Gnosis(batch_init['NN input'].shape[1], transformer.get_packed_size(), 200, 0.1)#0.25)
 net.to(device)
 net.float()
 
 # net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v1.dict'))
-# net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v1_13wvls_no_Moffat.dict'))
+# net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_some_real_good_weights.dict'))
+net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict'))
 
 #%%
 crop_all    = cropper(PSF_0_init, 91)
-crop_center = cropper(PSF_0_init, 7)
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) * 2
+crop_center = cropper(PSF_0_init, 25)
+wvl_weights = torch.linspace(1.0, 0.5, 13)[ids_wavelength_selected].to(device).view(1, N_wvl, 1, 1) * 2
 
 def loss_MSE(A, B):
     diff = (A-B) * wvl_weights
@@ -183,7 +186,8 @@ def loss_MAE(A, B):
 
 
 def img_punish(A, B): 
-    return loss_MSE(A, B) + loss_MAE(A, B) * 0.4
+    return loss_MSE(A, B) + loss_MAE(A, B)
+    # return loss_MAE(A, B)# * 0.4
 
 
 #%%
@@ -349,11 +353,14 @@ plt.show()
 
 
 #%%
-optimizer = optim.Adam(net.parameters(), lr=0.00001)
+# optimizer = optim.Adam(net.parameters(), lr=5e-6)
+optimizer = optim.Adam(net.parameters(), lr=1e-3)
 loss_train, loss_val = [], []
 loss_stats_train, loss_stats_val = [], []
 
-epochs = 50
+# scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
+
+epochs = 100
 net.train()
 
 for epoch in range(epochs):
@@ -369,7 +376,7 @@ for epoch in range(epochs):
         batch = batches_train[id]
 
         x, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
-        batch_size = len(batch['IDs'])
+        batch_size = len(batch['IDs']) / N_wvl
         
         y_pred = net(x)
         pred_inputs = transformer.destack(y_pred)
@@ -383,6 +390,7 @@ for epoch in range(epochs):
         loss.backward()
         
         optimizer.step()
+        # scheduler.step()
 
         loss_train.append(loss.item()/batch_size)
         epoch_train_loss.append(loss.item()/batch_size)
@@ -401,7 +409,7 @@ for epoch in range(epochs):
             
             x0, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
 
-            batch_size = len(batch['IDs'])
+            batch_size = len(batch['IDs']) / N_wvl
 
             loss = loss_fn(x0, PSF_0, batch)
             loss_val.append(loss.item()/batch_size)
@@ -437,12 +445,26 @@ plt.show()
 # np.save('../data/temp/loss_stats_val.npy', loss_stats_val)
 # np.save('../data/temp/loss_stats_train.npy', loss_stats_train)
 
+torch.save(net.state_dict(), f'../data/weights/gnosis_MUSE_current.dict')
 
 #%
 all_entries = [\
     'r0', 'F', 'dn', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 's_pow',
     'amp', 'b', 'alpha', 'beta', 'ratio', 'theta'
 ]
+
+base_J = [3.2, 3.1, 3.2, 3.7, 4.4, 5.2, 4.9, 6, 7.7, 8.9, 10, 11.8, 13]
+jitter = [base_J[i] for i in ids_wavelength_selected]
+
+inputs_direct = {
+    'F':   torch.ones([1, N_wvl]) * 0.8,
+    'Jx':  torch.tensor(jitter)*5,
+    'Jy':  torch.tensor(jitter)*5,
+    'Jxy': torch.zeros([1]),
+    'dn':  torch.ones([1]) * 2.8 * 2,
+    'amp': torch.zeros([1])
+}
+
 
 PSFs_0_val, PSFs_1_val, PSFs_2_val, PSFs_3_val = [], [], [], []
 net.eval()
@@ -452,13 +474,13 @@ ids_0 = []
 with torch.no_grad():
     for i in tqdm(val_ids):
     # for i in tqdm(train_ids):
-        
-        toy.PSD_include['fitting'] = True
-        toy.PSD_include['WFS noise'] = True
+        # ------------------------- Validate calibrated -------------------------
+        toy.PSD_include['fitting']         = True
+        toy.PSD_include['WFS noise']       = True
         toy.PSD_include['spatio-temporal'] = True
-        toy.PSD_include['aliasing'] = False
-        toy.PSD_include['chromatism'] = True
-        toy.PSD_include['Moffat'] = True
+        toy.PSD_include['aliasing']        = False
+        toy.PSD_include['chromatism']      = True
+        toy.PSD_include['Moffat']          = predict_Moffat
         
         batch = batches_val[i]
         # batch = batches_train[i]
@@ -467,40 +489,39 @@ with torch.no_grad():
         current_batch_size = len(batch['IDs'])
         ids_0.append(batch['IDs'])
         
-        # ------------------------- Validate calibrated -------------------------
         toy.config = config
         toy.Update(reinit_grids=True, reinit_pupils=True)
         PSFs_1_val.append(func(x0, batch, fixed_inputs).cpu())
            
         # # ------------------------- Validate direct -------------------------
-        # x0, fixed_inputs, PSF_0, config = get_data(batch, fixed_entries)
-        # toy.config = config
-        # toy.Update(reinit_grids=True, reinit_pupils=True)
-        inputs = {
-            'F':   torch.ones([1, N_wvl]) * 0.8,
-            'Jx':  torch.tensor([3.2, 3.1, 3.2, 3.7, 4.4, 5.2, 4.9, 6, 7.7, 8.9, 10, 11.8, 13])*5,
-            'Jy':  torch.tensor([3.2, 3.1, 3.2, 3.7, 4.4, 5.2, 4.9, 6, 7.7, 8.9, 10, 11.8, 13])*5,  
-            'Jxy': torch.zeros([1]),
-            'dn':  torch.ones([1]) * 2.8 * 2,
-            'amp': torch.zeros([1])
+        _, _, _, config = get_data(batch, fixed_entries)
+        toy.config = config
+        
+        toy.PSD_include['fitting']         = True
+        toy.PSD_include['WFS noise']       = True
+        toy.PSD_include['spatio-temporal'] = True
+        toy.PSD_include['aliasing']        = False
+        toy.PSD_include['chromatism']      = True
+        toy.PSD_include['Moffat']          = False
+
+        toy.Update(reinit_grids=True, reinit_pupils=True)
+        
+        inputs_direct_ = { 
+            key: value.float().to(device).repeat(current_batch_size, 1).squeeze() for key, value in inputs_direct.items()
         }
         
-        for key, value in inputs.items():
-            inputs[key] = value.float().to(device).repeat(current_batch_size, 1).squeeze()
-        
-        PSFs_2_val.append(run_model(toy, batch, inputs).cpu())
+        PSFs_2_val.append(run_model(toy, batch, inputs_direct_).cpu())
         
         # ------------------------- Validate fitted -------------------------
         _, all_inputs, _, config = get_data(batch, all_entries)
-        
         toy.config = config
         
-        toy.PSD_include['fitting'] = True
-        toy.PSD_include['WFS noise'] = True
+        toy.PSD_include['fitting']         = True
+        toy.PSD_include['WFS noise']       = True
         toy.PSD_include['spatio-temporal'] = True
-        toy.PSD_include['aliasing'] = False
-        toy.PSD_include['chromatism'] = True
-        toy.PSD_include['Moffat'] = True
+        toy.PSD_include['aliasing']        = False
+        toy.PSD_include['chromatism']      = True
+        toy.PSD_include['Moffat']          = True
         
         toy.Update(reinit_grids=True, reinit_pupils=True)
         PSFs_3_val.append(run_model(toy, batch, {}, all_inputs).cpu())
@@ -518,12 +539,12 @@ fig = plt.figure(figsize=(9, 4))
 
 cutoff = 40
 
-# plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff, ax=ax[0])
+plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
 # plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff, ax=ax[1])
-plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
+# plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff, ax=ax[2])
 plt.tight_layout()
-plt.show()
-# plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
+# plt.show()
+# plt.savefig(f'../data/temp/PSFs_current.pdf', dpi=200)
 
 #%%
 ids_all = []
@@ -539,7 +560,7 @@ for ii in range(PSFs_0_val.shape[0]):
     C = np.abs(d_PSF[ii,...])
 
     plt.title(ids_all[ii])
-    plt.imshow(np.log10( np.maximum(np.hstack([A, B, C]), 2e-7) ))
+    plt.imshow(np.log10( np.maximum(np.hstack([A, B, C]), 5e-7) ))
     plt.tight_layout()
     plt.axis('off')
     plt.show()
