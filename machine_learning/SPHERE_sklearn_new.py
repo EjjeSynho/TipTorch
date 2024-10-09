@@ -34,7 +34,7 @@ from matplotlib.colors import LogNorm
 from project_globals import WEIGHTS_FOLDER
 
 
-def AnalyseImpurities(model, feature_names, X_test=None, y_test=None):
+def AnalyseImpurities(model, feature_names, X_test=None, y_test=None, save_dir=None):
     # Compute MDI (Mean Decrease in Impurity) feature importances
     importances = model.feature_importances_
     forest_importances_MDI_std = np.std([tree[0].feature_importances_ for tree in model.estimators_], axis=0)
@@ -47,7 +47,11 @@ def AnalyseImpurities(model, feature_names, X_test=None, y_test=None):
     ax.set_ylabel("Mean decrease in impurity")
     ax.set_xticklabels(feature_names, rotation=40, ha='right')
     fig.tight_layout()
-    plt.show()
+    
+    if save_dir is None:
+        plt.show()
+    else:
+        plt.savefig(save_dir+'_MDI_importances.pdf', dpi=300)
 
     forest_importances_perm, forest_importances_perm_std = None, None
     
@@ -63,7 +67,11 @@ def AnalyseImpurities(model, feature_names, X_test=None, y_test=None):
         ax.set_ylabel("Mean accuracy decrease")
         ax.set_xticklabels(feature_names, rotation=40, ha='right')
         fig.tight_layout()
-        plt.show()
+        
+        if save_dir is None:
+            plt.show()
+        else:
+            plt.savefig(save_dir+'_PI_importances.pdf', dpi=300)
     
     return forest_importances_MDI, forest_importances_MDI_std, forest_importances_perm, forest_importances_perm_std
 
@@ -171,8 +179,8 @@ test_df = pd.DataFrame({
     'SR from data': df_transforms_onsky['Strehl'].backward(y_test.flatten()),
 })
 corr_plot(test_df, 'SR predicted', 'SR from data')
-
-_ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
+# plt.savefig('C:/Users/akuznets/Desktop/thesis_results/SPHERE/SR_pred/SR_corr_plot.pdf', dpi=300)
+_ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test) #, save_dir='C:/Users/akuznets/Desktop/thesis_results/SPHERE/SR_pred/SR_corr')
 
 #%% ================================== Predict all ==================================
 # =======================================================================================
@@ -222,7 +230,8 @@ test_df = pd.DataFrame({
 })
 corr_plot(test_df, 'LWE predicted', 'LWE from fitted', lims=[0, 200])
 
-_ = AnalyseImpurities(gbr_LWE, selected_entries_X, X_test, y_test)
+# plt.savefig('C:/Users/akuznets/Desktop/thesis_results/SPHERE/LWE_pred/LWE_corr_plot.pdf', dpi=300)
+_ = AnalyseImpurities(gbr_LWE, selected_entries_X, X_test, y_test) #, 'C:/Users/akuznets/Desktop/thesis_results/SPHERE/LWE_pred/LWE_corr')
 
 #%%
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, explained_variance_score, median_absolute_error

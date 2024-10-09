@@ -431,6 +431,60 @@ plt.plot(loss_stats_train)
 plt.show()
 
 #%%
+
+#%%
+def NoiseVarianceIRLOS(r0, WFS_nPix, WFS_Nph, WFS_psInMas, WFS_RON):
+    from tools.utils import rad2arc, r0_new
+    WFS_wvl = (1.215e-6 + 1.625e-6) / 2
+    WFS_excessive_factor = 1
+    WFS_d_sub = 4 # D / 2 subaps.
+    r0_WFS =  r0_new(r0, WFS_wvl, 0.5e-6)
+    WFS_pixelScale = WFS_psInMas / 1e3 # [arcsec]
+    
+    # Read-out noise calculation
+    nD = np.maximum(rad2arc*WFS_wvl/WFS_d_sub/WFS_pixelScale, 1.0)
+    # Photon-noise calculation
+    nT = np.maximum(rad2arc*WFS_wvl/r0_WFS / WFS_pixelScale, 1.0)
+
+    varRON  = np.pi**2/3 * (WFS_RON**2/WFS_Nph**2) * (WFS_nPix**2/nD)**2
+    varShot = np.pi**2 / (2*WFS_Nph) * (nT/nD)**2
+    # Noise variance calculation
+    varNoise = WFS_excessive_factor * (varRON+varShot) * (500e-9/WFS_wvl)**2
+
+    return varNoise
+
+
+def get_TT_jitter(r0, WFS_nPix, WFS_Nph, WFS_psInMas, WFS_RON):
+    from tools.utils import rad2mas
+    TT_var = NoiseVarianceIRLOS(r0, WFS_nPix, WFS_Nph, WFS_psInMas, WFS_RON)
+
+    TT_OPD = np.sqrt(TT_var) * 0.5e-6 / 2 / np.pi # [nm]
+
+    TT_max = 1.9665198 # Value at the edge of tip/tilt mode
+    jitter_STD = lambda TT_WFE: np.arctan(2*TT_max/toy.D * TT_WFE) * rad2mas # [mas], TT_WFE in [m]
+
+    return jitter_STD(TT_OPD) # [mas]
+
+
+def get_jitter_from_ids(ids):
+    from tools.utils import r0 as r0_from_seeing
+    get_entry = lambda entry, ids: np.array( df_transforms_onsky[entry].backward(muse_df_norm[entry].loc[ids]).tolist() )
+
+    r0      = r0_from_seeing(get_entry('Seeing (header)', ids), 500e-9)
+    IR_ph   = get_entry('IRLOS photons, [photons/s/m^2]', ids)
+    IR_win  = get_entry('window', ids)
+    IR_freq = get_entry('frequency', ids)
+    IR_pix  = get_entry('plate scale, [mas/pix]', ids)
+    IR_RON  = get_entry('RON, [e-]', ids)
+
+    M1_area = (8-1.12)**2 * np.pi / 4
+
+    IR_ph = IR_ph / IR_freq * M1_area # [photons/frame/aperture]
+
+    return get_TT_jitter(r0, IR_win, IR_ph, IR_pix, IR_RON)
+
+
+#%%
 # batch = batches_train[id]
 
 # x, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
@@ -445,7 +499,7 @@ plt.show()
 # np.save('../data/temp/loss_stats_val.npy', loss_stats_val)
 # np.save('../data/temp/loss_stats_train.npy', loss_stats_train)
 
-torch.save(net.state_dict(), f'../data/weights/gnosis_MUSE_current.dict')
+# torch.save(net.state_dict(), f'../data/weights/gnosis_MUSE_current.dict')
 
 #%
 all_entries = [\
@@ -456,20 +510,32 @@ all_entries = [\
 base_J = [3.2, 3.1, 3.2, 3.7, 4.4, 5.2, 4.9, 6, 7.7, 8.9, 10, 11.8, 13]
 jitter = [base_J[i] for i in ids_wavelength_selected]
 
-inputs_direct = {
-    'F':   torch.ones([1, N_wvl]) * 0.8,
-    'Jx':  torch.tensor(jitter)*5,
-    'Jy':  torch.tensor(jitter)*5,
-    'Jxy': torch.zeros([1]),
-    'dn':  torch.ones([1]) * 2.8 * 2,
-    'amp': torch.zeros([1])
-}
+ids, norms, bgs = [], [], []
+
+direct_tuned = True
+
+if direct_tuned:
+    inputs_direct = {
+        'F':   torch.ones([1, N_wvl]) * 0.8,
+        'Jx':  torch.tensor(jitter)*5,
+        'Jy':  torch.tensor(jitter)*5,
+        'Jxy': torch.zeros([1]),
+        'dn':  torch.ones([1]) * 2.8 * 2,
+        'amp': torch.zeros([1])
+    }
+else:
+    inputs_direct = {
+        'F':   torch.ones([1, N_wvl]),
+        'Jx':  torch.zeros([1]),
+        'Jy':  torch.zeros([1]),
+        'Jxy': torch.zeros([1]),
+        'dn':  torch.zeros([1]),
+        'amp': torch.zeros([1])
+    }
 
 
-PSFs_0_val, PSFs_1_val, PSFs_2_val, PSFs_3_val = [], [], [], []
+PSFs_0_val_poly, PSFs_1_val_poly, PSFs_2_val_poly, PSFs_3_val_poly = [], [], [], []
 net.eval()
-
-ids_0 = []
 
 with torch.no_grad():
     for i in tqdm(val_ids):
@@ -483,17 +549,21 @@ with torch.no_grad():
         toy.PSD_include['Moffat']          = predict_Moffat
         
         batch = batches_val[i]
+        
+        ids.append(batch['IDs'])
+        bgs.append(batch['bgs'].squeeze()[:, ids_wavelength_selected].numpy())
+        norms.append(batch['norms'].squeeze()[:, ids_wavelength_selected].numpy())
+        
         # batch = batches_train[i]
         x0, fixed_inputs, PSF_0, config = get_data(batch, fixed_entries)
-        PSFs_0_val.append(PSF_0.cpu())
+        PSFs_0_val_poly.append(PSF_0.cpu())
         current_batch_size = len(batch['IDs'])
-        ids_0.append(batch['IDs'])
         
         toy.config = config
         toy.Update(reinit_grids=True, reinit_pupils=True)
-        PSFs_1_val.append(func(x0, batch, fixed_inputs).cpu())
+        PSFs_1_val_poly.append(func(x0, batch, fixed_inputs).cpu())
            
-        # # ------------------------- Validate direct -------------------------
+        # ------------------------- Validate direct -------------------------
         _, _, _, config = get_data(batch, fixed_entries)
         toy.config = config
         
@@ -510,7 +580,12 @@ with torch.no_grad():
             key: value.float().to(device).repeat(current_batch_size, 1).squeeze() for key, value in inputs_direct.items()
         }
         
-        PSFs_2_val.append(run_model(toy, batch, inputs_direct_).cpu())
+        if not direct_tuned:
+            TT_analytical = get_jitter_from_ids(batch['IDs'])
+            inputs_direct_['Jx'] = torch.tensor(TT_analytical).float().to(device).squeeze()
+            inputs_direct_['Jy'] = torch.tensor(TT_analytical).float().to(device).squeeze()
+        
+        PSFs_2_val_poly.append(run_model(toy, batch, inputs_direct_).cpu())
         
         # ------------------------- Validate fitted -------------------------
         _, all_inputs, _, config = get_data(batch, all_entries)
@@ -524,47 +599,215 @@ with torch.no_grad():
         toy.PSD_include['Moffat']          = True
         
         toy.Update(reinit_grids=True, reinit_pupils=True)
-        PSFs_3_val.append(run_model(toy, batch, {}, all_inputs).cpu())
+        PSFs_3_val_poly.append(run_model(toy, batch, {}, all_inputs).cpu())
 
 
-PSFs_0_val = torch.cat(PSFs_0_val, dim=0).mean(axis=1).numpy()
-PSFs_1_val = torch.cat(PSFs_1_val, dim=0).mean(axis=1).numpy()
-PSFs_2_val = torch.cat(PSFs_2_val, dim=0).mean(axis=1).numpy()
-PSFs_3_val = torch.cat(PSFs_3_val, dim=0).mean(axis=1).numpy()
+PSFs_0_val_poly = torch.cat(PSFs_0_val_poly, dim=0).numpy()
+PSFs_1_val_poly = torch.cat(PSFs_1_val_poly, dim=0).numpy()
+PSFs_2_val_poly = torch.cat(PSFs_2_val_poly, dim=0).numpy()
+PSFs_3_val_poly = torch.cat(PSFs_3_val_poly, dim=0).numpy()
+
+ids = np.hstack(ids)
+bgs = np.vstack(bgs)[..., np.newaxis, np.newaxis]
+norms = np.vstack(norms)[..., np.newaxis, np.newaxis]
+
+#%
+# Restore initial spectrum
+# PSFs_0_val_white = np.mean(PSFs_0_val_poly * norms + bgs, axis=1)
+# PSFs_1_val_white = np.mean(PSFs_1_val_poly * norms + bgs, axis=1)
+# PSFs_2_val_white = np.mean(PSFs_2_val_poly * norms + bgs, axis=1)
+# PSFs_3_val_white = np.mean(PSFs_3_val_poly * norms + bgs, axis=1)
+
+# # Normalize white PSF to sum of 1
+# PSFs_0_val_white /= PSFs_0_val_white.sum(axis=(1,2), keepdims=True)
+# PSFs_1_val_white /= PSFs_1_val_white.sum(axis=(1,2), keepdims=True)
+# PSFs_2_val_white /= PSFs_2_val_white.sum(axis=(1,2), keepdims=True)
+# PSFs_3_val_white /= PSFs_3_val_white.sum(axis=(1,2), keepdims=True)
+
+PSFs_0_val_white = np.mean(PSFs_0_val_poly, axis=1)
+PSFs_1_val_white = np.mean(PSFs_1_val_poly, axis=1)
+PSFs_2_val_white = np.mean(PSFs_2_val_poly, axis=1)
+PSFs_3_val_white = np.mean(PSFs_3_val_poly, axis=1)
+
 
 #%%
 # fig, ax = plt.subplots(1, 3, figsize=(12, 4))
+# plt.tight_layout()
 
 fig = plt.figure(figsize=(9, 4))
 
+draw_calibrated = True
+draw_direct     = False
+draw_fitted     = False
+save_profiles   = False
+draw_white      = True
+
 cutoff = 40
 
-plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
-# plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff, ax=ax[1])
-# plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff, ax=ax[2])
-plt.tight_layout()
-# plt.show()
-# plt.savefig(f'../data/temp/PSFs_current.pdf', dpi=200)
+save_dir = '/home/akuznets/Projects/TipTorch/data/temp/plots/'
+
+if draw_white:
+    # White profiles
+    if draw_calibrated:
+        plot_radial_profiles_new(PSFs_0_val_white, PSFs_1_val_white, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
+        if save_profiles:
+            plt.savefig(save_dir+'PSFs_calibrated.pdf', dpi=300)
+
+    if draw_direct:
+        plot_radial_profiles_new(PSFs_0_val_white, PSFs_2_val_white, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
+        if save_profiles:
+            postfix = '_tuned' if direct_tuned else '_raw'
+            plt.savefig(save_dir+f'PSFs_direct_{postfix}.pdf', dpi=300)
+
+    if draw_fitted:
+        plot_radial_profiles_new(PSFs_0_val_white, PSFs_3_val_white, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
+        if save_profiles:
+            plt.savefig(save_dir+'PSFs_fitted.pdf', dpi=300)
+
+else:
+    # Polychromatic profiles
+    for i, wvl in tqdm(enumerate(wavelength_selected[ids_wavelength_selected].tolist())):
+        if draw_calibrated:
+            plot_radial_profiles_new(PSFs_0_val_poly[:,i,...], PSFs_1_val_poly[:,i,...], 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
+            if save_profiles:
+                plt.savefig(save_dir+f'PSFs_calibrated_{wvl}.pdf', dpi=300)
+                
+        if draw_direct:
+            plot_radial_profiles_new(PSFs_0_val_poly[:,i,...], PSFs_2_val_poly[:,i,...], 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
+            if save_profiles:
+                postfix = '_tuned' if direct_tuned else '_raw'
+                plt.savefig(save_dir+f'PSFs_direct_{postfix}_{wvl}.pdf', dpi=300)
+        
+        if draw_fitted:
+            plot_radial_profiles_new(PSFs_0_val_poly[:,i,...], PSFs_3_val_poly[:,i,...], 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
+            if save_profiles:
+                plt.savefig(save_dir+f'PSFs_fitted_{wvl}.pdf', dpi=300)
+
 
 #%%
-ids_all = []
-for id_turp in ids_0:
-    ids_all.extend(id_turp)
 
 # ii = np.random.randint(0, PSFs_0_val.shape[0])
 
-for ii in range(PSFs_0_val.shape[0]):
-    d_PSF = PSFs_1_val - PSFs_0_val
-    A = np.abs(PSFs_0_val[ii,...])
-    B = np.abs(PSFs_1_val[ii,...])
-    C = np.abs(d_PSF[ii,...])
+for ii in range(PSFs_0_val_poly.shape[0]):
+    d_PSF = PSFs_1_val_white - PSFs_0_val_white
+    A = np.abs(PSFs_0_val_white[ii,...])
+    
+    data_max = A.max()
+    A = A / data_max * 100
+    B = np.abs(PSFs_1_val_white[ii,...]) / data_max * 100
+    C = np.abs(d_PSF[ii,...]) / data_max * 100
 
-    plt.title(ids_all[ii])
-    plt.imshow(np.log10( np.maximum(np.hstack([A, B, C]), 5e-7) ))
+    plt.title(str(ids[ii]) + f', max. err {C.max():.1f}%')
+    plt.imshow(np.log10( np.maximum(np.hstack([A, B, C]), 5e-7) ), cmap='gray')
     plt.tight_layout()
     plt.axis('off')
     plt.show()
     # plt.savefig(f'C:/Users/akuznets/Desktop/didgereedo/MUSE/PSF_val_{ii}.png', dpi=400)
+
+#%%
+from matplotlib.colors import LogNorm
+from matplotlib import cm
+from matplotlib.gridspec import GridSpec
+import matplotlib as mpl
+
+with open(MUSE_DATA_FOLDER+'muse_df.pickle', 'rb') as handle:
+    muse_df = pickle.load(handle)
+
+
+def plot_MUSE_PSF(id, save_dir=None):
+    
+    ii = np.where(ids == id)[0][0]
+    
+    cmap = mpl.colormaps.get_cmap('inferno')  # viridis is the default colormap for imshow
+    cmap.set_bad(color='black')
+
+    temp_0 = PSFs_0_val_white[ii,...].copy() # Data
+    temp_1 = PSFs_1_val_white[ii,...].copy() # Calibrted
+    temp_2 = PSFs_2_val_white[ii,...].copy() # Direct
+
+    v_min_thresh = 2e-6
+
+    temp_0  = np.abs(np.maximum(temp_0, v_min_thresh))
+    temp_1  = np.abs(np.maximum(temp_1, v_min_thresh))
+    temp_d1 = np.maximum(np.abs(temp_1-temp_0), v_min_thresh)
+    temp_d2 = np.maximum(np.abs(temp_2-temp_0), v_min_thresh)
+
+    vmax = np.max( [temp_0.max(), temp_1.max(), temp_2.max()] )
+
+    temp_0  = temp_0  / vmax * 100
+    temp_1  = temp_1  / vmax * 100
+    temp_2  = temp_2  / vmax * 100
+    temp_d1 = temp_d1 / vmax * 100
+    temp_d2 = temp_d2 / vmax * 100
+
+    temp_d1_max = temp_d1.max()
+    temp_d2_max = temp_d2.max()
+
+    norm = LogNorm(vmin=7e-4, vmax=100)
+
+    fig = plt.figure(figsize=(9, 5.5))
+    gs = GridSpec(2, 4, width_ratios=[1.25, 1.25, 1.25, 0.15])
+
+    ax0  = fig.add_subplot(gs[0,0])
+    ax1  = fig.add_subplot(gs[0,1])
+    ax2  = fig.add_subplot(gs[0,2])
+    cax1 = fig.add_subplot(gs[0,3])
+
+    ax3  = fig.add_subplot(gs[1,0])
+    ax4  = fig.add_subplot(gs[1,1])
+    ax5  = fig.add_subplot(gs[1,2])
+    cax2 = fig.add_subplot(gs[1,3])
+
+    # Calibrated
+    ax0.imshow(temp_0, norm=norm, cmap=cmap)
+    ax0.set_title('On-sky PSF')
+    ax0.axis('off')
+
+    ax1.imshow(temp_1, norm=norm, cmap=cmap)
+    ax1.set_title('Calibrated')
+    ax1.axis('off')
+
+    img1 = ax2.imshow(temp_d1, norm=norm, cmap=cmap)
+    ax2.set_title('Abs. difference')
+    ax2.axis('off')
+
+    ax2.text(100, 180, f'Max. {temp_d1_max:.1f}%', color='white', fontsize=12, ha='center', va='center')
+
+    cbar1 = fig.colorbar(img1, cax=cax1, orientation='vertical')
+    cbar1.set_label('Relative intensity [%]')
+
+    # Direct
+    ax3.imshow(temp_0, norm=norm, cmap=cmap)
+    ax3.set_title('On-sky PSF')
+    ax3.axis('off')
+
+    ax4.imshow(temp_2, norm=norm, cmap=cmap)
+    ax4.set_title('Direct (tuned)')
+    ax4.axis('off')
+
+    img2 = ax5.imshow(temp_d2, norm=norm, cmap=cmap)
+    ax5.set_title('Abs. difference')
+    ax5.axis('off')
+
+    ax5.text(100, 180, f'Max. {temp_d2_max:.1f}%', color='white', fontsize=12, ha='center', va='center')
+
+    cbar2 = fig.colorbar(img2, cax=cax2, orientation='vertical')
+    cbar2.set_label('Relative intensity [%]')
+
+
+    plt.suptitle(muse_df.loc[ids[ii], 'name'])
+    # plt.suptitle(f'ID: {}')
+    # plt.tight_layout()
+    if save_dir is not None:
+        plt.savefig(save_dir+f'PSF_{ids[ii]}.pdf', dpi=300)
+    else:
+        plt.show()
+
+
+good_ids = [123, 298, 94, 180, 110, 86, 292, 125, 100]
+
+for id in tqdm(good_ids):
+    plot_MUSE_PSF(id, save_dir='/home/akuznets/Projects/TipTorch/data/temp/plots/MUSE_PSFs/')
 
 
 #%% ====================================================================================================
@@ -655,8 +898,6 @@ print((toy.beta[id_local]    - model.beta).item())
 print((toy.ratio[id_local]   - model.ratio).item())
 print((toy.theta[id_local]   - model.theta).item())
 
-
-#%%
 A = toy.OTF[id_local,0,...]
 B = model.OTF[0,0,...]
 print(f'PSF error: {(A-B).abs().sum().item() / A.sum().item() * 100:.2f}%' )
@@ -667,70 +908,4 @@ plt.imshow(B.abs().log10().cpu().numpy())
 plt.show()
 plt.imshow((A-B).abs().log10().cpu().numpy())
 plt.show()
-
-#%%
-A = toy.OTF_static_standart[0,0,...]
-B = model.OTF_static_standart[0,0,...]
-print(f'PSF error: {(A-B).abs().sum().item() / A.sum().item() * 100:.2f}%' )
-
-plt.imshow(A.abs().log10().cpu().numpy())
-plt.show()
-plt.imshow(B.abs().log10().cpu().numpy())
-plt.show()
-plt.imshow((A-B).abs().log10().cpu().numpy())
-plt.show()
-
-#%%
-id_wvl = 5
-
-A = sausage_absorber(model.s_pow.flatten())#[0,0,...]
-B = sausage_absorber(toy.s_pow.flatten())#[id_local,0,...]
-
-AA = model.Phase2OTF(A, 2)[0,id_wvl,...]
-BB = toy.Phase2OTF(B, 2)[id_local,id_wvl,...]
-#%
-
-# C1 = fftAutoCorr(AA)[0, id_wvl,...]
-# C2 = fftAutoCorr(BB)[id_local, id_wvl,...]
-# print( (C1-C2).abs().sum().item() )
-
-print( (AA-BB).abs().sum().item() )
-
-# print(AA.sum())
-
-#%%
-
-# plt.imshow(AA.abs().log10().cpu().numpy())
-# plt.show()
-# plt.imshow(BB.abs().log10().cpu().numpy())
-# plt.show()
-# plt.imshow((AA-BB).abs().log10().cpu().numpy())
-# plt.show()
-
-
-# plt.imshow(A.imag.cpu().numpy())
-# plt.show()
-# plt.imshow(B.imag.cpu().numpy())
-# plt.show()
-# plt.imshow((A-B).imag.cpu().numpy())
-
-
-#%%
-A = PSFs_1[id_local,0,...]
-B = PSF_1[0,0,...]
-print(f'PSF error: {(A-B).abs().sum().item() / A.sum().item() * 100:.2f}%' )
-
-plt.imshow(A.abs().log10().cpu().numpy())
-plt.show()
-plt.imshow(B.abs().log10().cpu().numpy())
-plt.show()
-plt.imshow((A-B).abs().log10().cpu().numpy())
-plt.show()
-#%%
-center = np.array([PSF_0.shape[-2]//2, PSF_0.shape[-1]//2])
-
-plot_radial_profiles_new(
-    PSFs_1[id_local,0,...].cpu().numpy(),
-    PSF_1[0,0,...].cpu().numpy(),
-    'Batch', 'Single', title='Fitted', cutoff=cutoff, centers=center)#, ax=ax[2])
 

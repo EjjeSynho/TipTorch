@@ -315,7 +315,7 @@ def GetLGSphotons(flux_LGS, HO_gain):
     QE = 0.9 # [e-/photons]
     # gain should always = 100 # Laser WFS gain
     num_subapertures = 1240
-    M1_area = (8-1.12)**2 * np.pi / 4 # [m^2]
+    M1_area = (8**2 - 1.12**2) * np.pi / 4 # [m^2]
 
     return flux_LGS * conversion_factor * num_subapertures  \
         / HO_gain / detector_DIT / QE / GALACSI_transmission \
@@ -438,6 +438,7 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
     if show_plots:
         fig_handler = plt.figure(dpi=200)
         plt.imshow(colors, extent=[λs.min(), λs.max(), 0, 120])
+        plt.ylim(0, 120)
         plt.vlines(λ_bins_smart, 0, 120, color='white') #draw bins borders
         plt.plot(λs, spectrum/spectrum.max()*120, linewidth=2.0, color='white')
         plt.plot(λs, spectrum/spectrum.max()*120, linewidth=0.5, color='blue')
@@ -446,6 +447,7 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
         ax = plt.gca()
         # ax.get_yaxis().set_visible(False)
         # plt.show()
+        plt.savefig('C:/Users/akuznets/Desktop/thesis_results/MUSE/MUSE_spectrum.pdf', dpi=300)
 
     _, ROI, _ = GetROIaroundMax(white, win=200)
 
@@ -1133,10 +1135,10 @@ for file in tqdm(os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')):
 # file_id = 3 #103#320 #327# 343
 # file_id = 173
 
-file_id = 411
+# file_id = 411
 file_id = 405
-file_id = 146
-file_id = 296
+# file_id = 146
+# file_id = 296
 # file_id = 382
 # file_id = 395
 # file_id = 254
@@ -1146,11 +1148,14 @@ file_id = 296
 # file_id = 281
 # file_id = 311
 # file_id = 345
-file_id = 170
-
+# file_id = 170
 
 hdul_raw  = fits.open(os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ]))
 hdul_cube = fits.open(os.path.join(MUSE_CUBES_FOLDER, files_matches.iloc[file_id]['cube']))
+
+# plt.imshow(np.log(1+np.abs(hdul_cube['DATA'].data[0,...])), cmap='gray')
+# plt.axis('off')
+# plt.savefig('C:/Users/akuznets/Desktop/thesis_results/MUSE/colored_PSFs_example/unprocessed_PSF_example.pdf', dpi=400)
 
 cube_name = files_matches.iloc[file_id]['cube']
 
@@ -1170,6 +1175,8 @@ asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(start_time, end_ti
 
 hdul_cube.close()
 hdul_raw.close()
+
+# render_spectral_PSF(MUSE_images['cube'][id,...], misc_info['wvls binned'].tolist())
 
 # Get the angle of PSF rotation if streaks are visible
 derot_ang = MUSE_data_df['Derot. angle'].item()

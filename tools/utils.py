@@ -471,6 +471,30 @@ def wavelength_to_rgb(wavelength, gamma=0.8, show_invisible=False):
     return (R,G,B)
 
 
+def render_spectral_PSF(spectral_cube, λs):
+    Rs, Gs, Bs = np.zeros_like(λs), np.zeros_like(λs), np.zeros_like(λs)
+
+    for i,λ in enumerate(λs):
+        Rs[i], Gs[i], Bs[i] = wavelength_to_rgb(λ, show_invisible=True)
+
+    for id in range(0, len(λs)):
+        img = np.log10(50+np.abs(spectral_cube) )
+        img /= img.max()
+
+        spectral_slice_R = img * Rs[None, None, id]
+        spectral_slice_G = img * Gs[None, None, id]
+        spectral_slice_B = img * Bs[None, None, id]
+
+        aa = np.dstack([spectral_slice_R, spectral_slice_G, spectral_slice_B])
+        aa = aa / aa.max()
+
+        plt.imshow(aa)
+        plt.axis('off')
+        plt.title(f'λ = {λs[id]:.2f} nm')
+        
+        # plt.savefig(f'C:/Users/akuznets/Desktop/thesis_results/MUSE/PSFs_examples/{id}.pdf', dpi=300)
+
+
 class Photometry:
     def __init__(self):
         self.__InitPhotometry()
@@ -1068,6 +1092,98 @@ def plot_radial_profiles_new(PSF_0,
 
     if return_profiles:
         return p_0, p_1, p_err
+    
+
+def plot_radial_profiles_relative(PSF_0,
+                                  PSF_1,
+                                #   label_0 = 'PSFs #1',
+                                #   label_1 = 'PSFs #2',
+                                  title   = '',
+                                  scale   = 'log',
+                                  colors  = ['tab:blue', 'tab:orange', 'tab:green'],
+                                  cutoff  = 20,
+                                  centers = None,
+                                  return_profiles = False,
+                                  ax = None,
+                                  linthresh = 5e-1,
+                                  y_min = 1e-2,
+                                  suppress_plot = False):
+            
+    def _radial_profiles(PSFs, centers=None):
+        listify_PSF = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
+        PSFs = listify_PSF(PSFs)
+        if centers is None:
+            centers = [None]*len(PSFs)
+        else:
+            if type(centers) is not list:
+                if centers.size == 2: 
+                    centers = [centers] * len(PSFs)
+                else:
+                    centers = [centers[i,...] for i in range(len(PSFs))]
+
+        profiles = np.vstack( [calc_profile(PSF, center) for PSF, center in zip(PSFs, centers) if not np.all(np.isnan(PSF))] )
+        return profiles
+
+    if PSF_0.ndim == 2:
+        PSF_0 = PSF_0[np.newaxis, ...]
+    
+    if PSF_1.ndim == 2:
+        PSF_1 = PSF_1[np.newaxis, ...]
+    
+    if centers is None:
+        centers = safe_centroid(np.nanmean(PSF_0, axis=0))
+        
+    # profis_0   = _radial_profiles( PSF_0, centers )
+    # profis_1   = _radial_profiles( PSF_1, centers )
+    profis_err = _radial_profiles( PSF_1/PSF_0, centers )
+    
+    # center_0 = safe_centroid(np.abs(np.nanmean(PSF_0, axis=0)))
+    # center_1 = safe_centroid(np.abs(np.nanmean(PSF_1, axis=0)))
+    # center_  = np.mean([center_0, center_1], axis=0)
+    
+    # profis_0 = _radial_profiles( PSF_0, centers )
+    # profis_1 = _radial_profiles( PSF_1, centers )
+    # profis_err = _radial_profiles( PSF_0 - PSF_1, center_ )
+
+    if not suppress_plot:
+        if ax is None:
+            fig = plt.figure(figsize=(6, 4), dpi=300)
+            ax  = fig.gca()
+    
+    # y_max = np.median(profis_0, axis=0).max()
+
+    # p_0 = profis_0 / y_max * 100.0
+    # p_1 = profis_1 / y_max * 100.0
+    p_err = np.abs(profis_err) * 100# / y_max * 100.0)
+
+    if not suppress_plot:
+        # render_profile(p_0,   color=colors[0], label=label_0, linewidth=2, ax=ax)
+        # render_profile(p_1,   color=colors[1], label=label_1, linewidth=2, ax=ax)
+        render_profile(p_err, color=colors[2], label='Error', linestyle='--', ax=ax)
+
+        max_err = np.median(p_err, axis=0).max()
+        ax.axhline(max_err, color='green', linestyle='-', alpha=0.5)
+
+        y_lim = p_err.max()
+        if scale == 'log':
+            x_max = cutoff
+            ax.set_yscale('symlog', linthresh=linthresh)
+            ax.set_ylim(y_min, y_lim)
+        else:
+            x_max = cutoff
+            ax.set_ylim(0, y_lim)
+
+        ax.set_title(title)
+        ax.legend()
+        ax.set_xlim(0, x_max)
+        ax.text(x_max-16, max_err+2.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
+        ax.set_xlabel('Pixels from on-axis, [pix]')
+        ax.set_ylabel('Normalized intensity, [%]')
+        ax.grid()
+
+    if return_profiles:
+        return p_err
+    
 
 
 def CircPupil(samples, D=8.0, centralObstruction=1.12):

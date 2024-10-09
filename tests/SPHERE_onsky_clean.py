@@ -98,7 +98,7 @@ PSF_var  = PSF_data[0]['PSF (var)'].unsqueeze(0)
 PSF_mask = PSF_data[0]['mask (mean)'].unsqueeze(0)
 norms    = PSF_data[0]['norm (mean)']
 del PSF_data
-
+merged_config['sensor_science']['FieldOfView'] = 255
 # if psf_df.loc[sample_id]['Nph WFS'] < 10:
 PSF_mask   = PSF_mask * 0 + 1
 # LWE_flag   = psf_df.loc[sample_id]['LWE']
@@ -110,7 +110,7 @@ wings_flag = True#psf_df.loc[sample_id]['Wings']
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from tools.utils import LWE_basis
 
-toy = TipTorch(merged_config, None, device)
+toy = TipTorch(merged_config, None, device, oversampling=1)
 
 _ = toy()
 
@@ -125,7 +125,154 @@ PSF_1 = toy()
 #print(toy.EndTimer())
 PSF_DL = toy.DLPSF()
 
+#%%
+from tools.utils import safe_centroid, RadialProfile, wavelength_to_rgb
 
+def calc_profile(data, xycen=None):
+    xycen = safe_centroid(data) if xycen is None else xycen
+    edge_radii = np.arange(data.shape[-1]//2)
+    rp = RadialProfile(data, xycen, edge_radii)
+    return rp.profile
+
+
+dk = 2*toy.kc / toy.nOtf_AO
+
+PSD_norm = lambda wvl: (dk*wvl*1e9/2/np.pi)**2
+
+PSDs = {entry: (toy.PSDs[entry].clone().squeeze() * PSD_norm(500e-9)) for entry in toy.PSD_entries if toy.PSDs[entry].ndim > 1}
+PSDs['chromatism'] = PSDs['chromatism'].mean(dim=0)
+
+plt.figure(figsize=(8, 6))
+
+PSD_map  = toy.PSD[0,...].mean(dim=0).real.cpu().numpy()
+k_map    = toy.k[0,...].cpu().numpy()
+k_AO_map = toy.k_AO[0,...].cpu().numpy()
+
+center    = [k_map.shape[0]//2, k_map.shape[1]//2]
+center_AO = [k_AO_map.shape[0]//2, k_AO_map.shape[1]//2]
+
+PSD_prof = calc_profile(PSD_map,  center)
+freqs    = calc_profile(k_map,    center)
+freqs_AO = calc_profile(k_AO_map, center_AO)
+
+freq_cutoff = toy.kc
+
+profiles = {}
+for entry in PSDs.keys():
+    buf_map = PSDs[entry].abs().cpu().numpy()
+    if entry == 'fitting':
+        buf_prof = calc_profile(buf_map, center)
+    else:
+        buf_prof = calc_profile(buf_map, center_AO)
+    profiles[entry] = buf_prof
+
+
+plt.plot(freqs, PSD_prof, label='Total', linewidth=2, linestyle='--', color='black')
+
+for entry, value in profiles.items():
+    if entry == 'fitting':
+        plt.plot(freqs, value, label=entry)
+    else:
+        plt.plot(freqs_AO, value, label=entry)
+
+plt.legend()
+plt.yscale('symlog', linthresh=5e-5)
+plt.xscale('log')
+# plt.vlines(freq_cutoff, PSD_prof.min(), PSD_prof.max(), color='red', linestyle='--')
+plt.grid()
+plt.xlim(freqs.min(), freqs.max())
+
+# plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/profiles.pdf", dpi=300)
+
+# C:\Users\akuznets\Desktop\thesis_results\MUSE\PSDs
+
+#%%
+from matplotlib.colors import LogNorm
+import matplotlib as mpl
+
+vmins = {
+    'fitting': 1e-2,
+    'WFS noise': 0.05,
+    'spatio-temporal': 0.001,
+    'aliasing': 4e-2,
+    'chromatism': 1e-5,
+}
+
+
+cmap = mpl.colormaps.get_cmap('inferno')  # viridis is the default colormap for imshow
+cmap.set_bad(color=(0,0,0,0))
+    
+for entry in PSDs.keys():
+    fig = plt.figure(figsize=(8,)*2)
+    A = PSDs[entry].cpu().numpy().real
+    A -= np.nanmin(A)
+    A = np.abs(A)
+    
+    
+    # if entry == 'Moffat' or entry == 'chromatism':
+    if entry != 'fitting':
+        A += 1e-7
+        A = A * toy.mask_corrected_AO.squeeze().cpu().numpy()
+    
+    # if entry == 'Moffat':
+        A = A * toy.piston_filter.squeeze().cpu().numpy()
+    
+    norm = LogNorm(vmin=vmins[entry], vmax=np.nanmax(A)*2)
+    plt.imshow(A, norm=norm, cmap=cmap)
+    plt.title(entry)
+    plt.axis('off')
+    plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/{entry}.pdf", dpi=300)
+    plt.show()
+    
+#%%
+
+A = toy.PSD[0,1,...].log().cpu().numpy()
+
+# norm = LogNorm(vmin=A.min(), vmax=A.max()*2)
+plt.imshow(A, cmap='inferno')
+plt.title('Total PSD')
+plt.axis('off')
+plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/total.pdf", dpi=300)
+# plt.show()
+
+#%%
+# plt.imshow((toy.cov[0,0,...].abs()+1).log10().cpu().numpy(), cmap='inferno')
+plt.imshow(toy.SF[0,0,...].abs().cpu().numpy(), cmap=cmap)
+plt.axis('off')
+plt.colorbar()
+plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/SF.pdf", dpi=300)
+
+#%%
+
+plt.imshow(toy.OTF[0,0,...].abs().cpu().numpy(), cmap='gray')
+plt.axis('off')
+plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/OTF_total.pdf", dpi=300)
+
+plt.imshow(toy.OTF_turb[0,0,...].abs().cpu().numpy(), cmap='gray')
+plt.axis('off')
+plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/OTF_turb.pdf", dpi=300)
+
+plt.imshow(toy.OTF_static[0,0,...].abs().cpu().numpy(), cmap='gray')
+plt.axis('off')
+plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/OTF_stat.pdf", dpi=300)
+
+#%%
+plt.imshow(toy.SF[0,0,...].abs().cpu().numpy(), cmap='inferno')
+plt.axis('off')
+plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/SF.pdf", dpi=300)
+
+#%%
+
+plt.imshow(toy.pupil.cpu().numpy(), cmap='gray')
+plt.axis('off')
+plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/pupil.pdf", dpi=300)
+
+plt.imshow(toy.apodizer.cpu().numpy(), cmap='viridis')
+plt.axis('off')
+plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/apodizer.pdf", dpi=300)
+
+
+#%%
 draw_PSF_stack(PSF_0*PSF_mask, PSF_1, average=True, crop=80, scale='log')
 # mask_in  = toy.mask_rim_in.unsqueeze(1).float()
 # mask_out = toy.mask_rim_out.unsqueeze(1).float()
@@ -295,6 +442,15 @@ x0 = transformer.stack(x0_new)
 plt.imshow((LWE_OPD-PPT_OPD).cpu().numpy()[0,...])
 plt.colorbar()
 
+
+'''
+for i in range(basis.modal_basis.shape[0]):
+    a = basis.modal_basis[i,...].cpu()
+    plt.imshow(a, vmax=4.25, vmin=-4.25)
+    # plt.colorbar()
+    plt.axis('off')
+    plt.savefig(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/modal_basis/LWE_mode_{i}.pdf', dpi=300)
+'''
 #%%
 with torch.no_grad():
     PSF_1 = func(x0)

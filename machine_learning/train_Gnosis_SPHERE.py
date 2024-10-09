@@ -271,20 +271,21 @@ plt.show()
 
 #%%
 '''
-Grouping data by wavelengths...
-         Count  λ left (nm)  λ right (nm)
-λ group                                  
-6          842         1625          1625
-8          781         1667          1593
-10         588         2251          2110
-9          488         2182          2182
-3          266         1245          1245
-4           79         1273          1190
-0           30         1043          1043
-5           14         1573          1573
-1           12         1076          1022
-2           11         1213          1213
+Grouping data by wavelengths:
+| λ group | Count |  λ left, (nm) | λ, right (nm) | Filter name  |
+------------------------------------------------------------------
+|   6     |  842  |     1625      |     1625      |    B_H       |
+|   8     |  781  |     1593      |     1667      |    D_ND-H23  |
+|   10    |  588  |     2110      |     2251      |    D_K12     |
+|   9     |  488  |     2182      |     2182      |    B_Ks      |
+|   3     |  266  |     1245      |     1245      |    B_J       |
+|   4     |   79  |     1190      |     1273      |    D_J23     |
+|   0     |   30  |     1043      |     1043      |    B_YB_Y    |
+|   5     |   14  |     1573      |     1573      |    N_CntH    |
+|   1     |   12  |     1022      |     1076      |    D_Y23     |
+|   2     |   11  |     1213      |     1213      |    N_CntJ    |
 '''
+
 
 groups = [6, 8, 10, 9, 3]
 
@@ -580,15 +581,22 @@ PSFs_1_val_all = {}
 PSFs_2_val_all = {}
 PSFs_3_val_all = {}
 
+batches_ids = []
+
 fitted_entries = [
     'F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R',
     'Wind dir', 'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'LWE coefs'
 ]
 
+# Output options
+L_or_R_str = 'L'
+fitted_or_pred = 'pred'
+
+L_or_R = 0 if L_or_R_str == 'L' else 1
+
 net.eval()
 with torch.no_grad():
-    for wvl in [1625]: #wvls_L_all:
-        # wvl = 1625
+    for wvl in wvls_L_all:
         
         PSFs_0_val, PSFs_1_val, PSFs_2_val, PSFs_3_val = [], [], [], []
         val_ids = val_ids_all[wvl]
@@ -602,6 +610,7 @@ with torch.no_grad():
             toy.Update(reinit_grids=True, reinit_pupils=True)
 
             batch_size = len(batch_data['IDs'])
+            batches_ids += batch_data['IDs'].tolist()
             
             fixed_inputs['Jxy'] *= 0
             
@@ -613,8 +622,8 @@ with torch.no_grad():
             # ------------------------- Validate direct -------------------------
             inputs = {
                 'F':   torch.ones([1, 2]),
-                'Jx':  torch.ones([1])*33.0,
-                'Jy':  torch.ones([1])*33.0,
+                'Jx':  torch.ones([1])*0, #33.0,
+                'Jy':  torch.ones([1])*0, #33.0,
                 'Jxy': torch.zeros([1]),
                 'dn':  torch.zeros([1]),
                 'basis_coefs': torch.zeros([1, 12])
@@ -632,26 +641,53 @@ with torch.no_grad():
 
             PSFs_3_val.append(run_model(toy, batch_data, {}, fixed_inputs=fitted_dict).cpu())
 
-
-        PSFs_0_val = torch.cat(PSFs_0_val, dim=0)[:,0,...].numpy()
-        PSFs_1_val = torch.cat(PSFs_1_val, dim=0)[:,0,...].numpy()
-        PSFs_2_val = torch.cat(PSFs_2_val, dim=0)[:,0,...].numpy()
-        PSFs_3_val = torch.cat(PSFs_3_val, dim=0)[:,0,...].numpy()
+        PSFs_0_val = torch.cat(PSFs_0_val, dim=0)[:,L_or_R,...].numpy()
+        PSFs_1_val = torch.cat(PSFs_1_val, dim=0)[:,L_or_R,...].numpy()
+        PSFs_2_val = torch.cat(PSFs_2_val, dim=0)[:,L_or_R,...].numpy()
+        PSFs_3_val = torch.cat(PSFs_3_val, dim=0)[:,L_or_R,...].numpy()
 
         PSFs_0_val_all[wvl] = PSFs_0_val.copy()
         PSFs_1_val_all[wvl] = PSFs_1_val.copy()
         PSFs_2_val_all[wvl] = PSFs_2_val.copy()
         PSFs_3_val_all[wvl] = PSFs_3_val.copy()
 
+        # Plot the results
         fig, ax = plt.subplots(1, 2, figsize=(10, 4))
         plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
-        plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
-        # plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[2])
+        if fitted_or_pred == 'pred':
+            plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
+        elif fitted_or_pred == 'fitted':
+            plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[1])
+            
         fig.suptitle(f'λ = {wvl} [nm]')
         plt.tight_layout()
         # plt.show()
-        plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
-        
+        # plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
+        plt.savefig(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/profiles/SPHERE_{fitted_or_pred}_{wvl}_{L_or_R_str}.pdf', dpi=200)
+
+
+#%%
+# Polychromatic profiles
+get_PSF_cube = lambda PSF_dict: np.concatenate([PSF_dict[key] for key in PSF_dict], axis=0)
+
+PSFs_0_val_poly = get_PSF_cube(PSFs_0_val_all)
+PSFs_1_val_poly = get_PSF_cube(PSFs_1_val_all)
+PSFs_2_val_poly = get_PSF_cube(PSFs_2_val_all)
+PSFs_3_val_poly = get_PSF_cube(PSFs_3_val_all)
+
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+plot_radial_profiles_new(PSFs_0_val_poly, PSFs_2_val_poly, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
+if fitted_or_pred == 'pred':
+    plot_radial_profiles_new(PSFs_0_val_poly, PSFs_1_val_poly, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
+elif fitted_or_pred == 'fitted':
+    plot_radial_profiles_new(PSFs_0_val_poly, PSFs_3_val_poly, 'Data', 'TipTorch', title='Fitted', ax=ax[1])
+
+fig.suptitle(f'Polychromatic')
+plt.tight_layout()
+
+plt.savefig(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/profiles/SPHERE_{fitted_or_pred}_poly_{L_or_R_str}.pdf', dpi=200)
+
+
 #%%
 # wvl = np.random.choice(wvls_L_all)
 wvl = 1625
@@ -878,37 +914,207 @@ plt.suptitle(f'{rand_id}')
 # plt.show()
 
 #%%
-ids_example = [120, 97, 173, 144, 152, 103, 18, 29, 133, 66, 42, 124]
 
-def save_PSF_img(PSF_, filename, norm, size=2.5):
-    fig, ax = plt.subplots(1,1, figsize=(size, size))
-    ax.imshow(np.abs(PSF_.copy()), cmap='viridis', norm=norm)
-    ax.axis('off')  # Remove axes
+def save_PSF_img_calib(id, wvl_render, save=True):
+    from matplotlib.colors import LogNorm
+    from matplotlib import cm
+    from matplotlib.gridspec import GridSpec
 
-    extent = ax.get_window_extent().transformed(fig.dpi_scale_trans.inverted())
-    fig.savefig(f'C:/Users/akuznets/Desktop/didgereedo/PSF_examples/{filename}.png', bbox_inches=extent, pad_inches=0)
+    crop = cropper(PSFs_0_val_all[wvl_render][0,...], 60)
 
+    temp_0 = PSFs_0_val_all[wvl_render][id,...][crop].copy() # Data
+    temp_1 = PSFs_1_val_all[wvl_render][id,...][crop].copy() # Calibrted
+
+    pupil = toy.pupil.cpu().numpy()
+    pupil[pupil < 0.5] = np.nan
+
+    coefs_fitted = fitted_df_norm.loc[batches_ids[id], 'LWE coefs']
+    coefs_fitted = df_transforms_fitted['LWE coefs'].backward(coefs_fitted)
+    coefs_fitted = torch.tensor(coefs_fitted, device=device).float().unsqueeze(0)
+
+    coefs_pred = predict_LWE([batches_ids[id]])
+
+    LWE_screen_pred   = torch.einsum('mn,nwh->mwh', coefs_pred,   basis.modal_basis).cpu().numpy()[0,...]
+    LWE_screen_fitted = torch.einsum('mn,nwh->mwh', coefs_fitted, basis.modal_basis).cpu().numpy()[0,...]
+
+    WFE = np.std( (LWE_screen_fitted-LWE_screen_pred)[pupil > 0.5] )
+
+    v_lim_LWE = np.max([np.abs(LWE_screen_pred).max(), np.abs(LWE_screen_fitted).max()])
+    
+    v_min_thresh = 2e-6
+
+    temp_0 = np.abs(np.maximum(temp_0, v_min_thresh))
+    temp_1 = np.abs(np.maximum(temp_1, v_min_thresh))
+    temp_d = np.maximum(np.abs(temp_1-temp_0), v_min_thresh)
+
+    vmax = np.max( [temp_0.max(), temp_1.max()] )
+
+    temp_0 = temp_0 / vmax * 100
+    temp_1 = temp_1 / vmax * 100
+    temp_d = temp_d / vmax * 100
+
+    temp_d_max = temp_d.max()
+
+    norm = LogNorm(vmin=2.5e-3, vmax=100)
+
+    fig = plt.figure(figsize=(7, 5))
+    gs = GridSpec(2, 4, width_ratios=[1, 1, 1, 0.15])
+
+    ax0  = fig.add_subplot(gs[0,0])
+    ax1  = fig.add_subplot(gs[0,1])
+    ax2  = fig.add_subplot(gs[0,2])
+    cax1 = fig.add_subplot(gs[0,3])
+
+    ax3  = fig.add_subplot(gs[1,0])
+    ax4  = fig.add_subplot(gs[1,1])
+    ax5  = fig.add_subplot(gs[1,2])
+    cax2 = fig.add_subplot(gs[1,3])
+
+    # PSFs
+    ax0.imshow(temp_0, norm=norm)
+    ax0.set_title('On-sky PSF')
+    ax0.axis('off')
+
+    ax1.imshow(temp_1, norm=norm)
+    ax1.set_title('Predicted PSF')
+    ax1.axis('off')
+
+    img1 = ax2.imshow(temp_d, norm=norm)
+    ax2.set_title('Abs. difference')
+    ax2.axis('off')
+
+    ax2.text(30, 6, f'Max. {temp_d_max:.1f}%', color='white', fontsize=12, ha='center', va='center')
+
+    cbar1 = fig.colorbar(img1, cax=cax1, orientation='vertical')
+    cbar1.set_label('Relative intensity [%]')
+
+    LWE_color = 'seismic'
+
+    #LWE screens
+    ax3.imshow(LWE_screen_pred*pupil, vmin= -v_lim_LWE, vmax=v_lim_LWE, cmap=LWE_color)
+    ax3.set_title('Fitted LWE')
+    ax3.axis('off')
+
+    ax4.imshow(LWE_screen_fitted*pupil, vmin= -v_lim_LWE, vmax=v_lim_LWE, cmap=LWE_color)
+    ax4.set_title('Predicted LWE')
+    ax4.axis('off')
+
+    img2 = ax5.imshow((LWE_screen_fitted-LWE_screen_pred)*pupil, vmin= -v_lim_LWE, vmax=v_lim_LWE, cmap=LWE_color)
+    ax5.set_title(f'Difference ({WFE:.0f} nm)')
+    ax5.axis('off')
+
+    cbar2 = fig.colorbar(img2, cax=cax2, orientation='vertical')
+    cbar2.set_label('LWE OPD [nm RMS]')
+
+    plt.suptitle(psf_df_norm.loc[batches_ids[id], 'Filename'])
     plt.tight_layout()
-    plt.close(fig)
-
-
-for id in ids_example:
-    crop = cropper(PSFs_0_val_all[1625][0,...], 60)
     
-    temp_0 = PSFs_0_val_all[1625][id,...][crop].copy()
-    temp_1 = PSFs_1_val_all[1625][id,...][crop].copy() + 1.25e-5
-    temp_2 = PSFs_2_val_all[1625][id,...][crop].copy()
-        
-    vmin = np.min( [temp_0.min(), temp_1.min(), temp_2.min()] )
+    if save:
+        fig.savefig(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSFs/{batches_ids[id]}_calib.pdf', pad_inches=0)
+
+
+# ids_example = [28, 32, 78, 67, 144, 120, 97, 173, 144, 152, 103, 18, 29, 133, 66, 42, 124]
+ids_example = [28, 78, 144, 97, 173, 144, 29, 133, 66, 124]
+
+wvl_render = 1625
+
+for id in tqdm(ids_example):
+    save_PSF_img_calib(id, 1625)
+
+
+#%%
+
+
+def save_PSF_img_direct(id, wvl_render, save=True):
+    from matplotlib.colors import LogNorm
+    from matplotlib import cm
+    from matplotlib.gridspec import GridSpec
+
+    crop = cropper(PSFs_0_val_all[wvl_render][0,...], 60)
+
+    temp_0 = PSFs_0_val_all[wvl_render][id,...][crop].copy() # Data
+    temp_1 = PSFs_1_val_all[wvl_render][id,...][crop].copy() # Calibrted
+    temp_2 = PSFs_2_val_all[wvl_render][id,...][crop].copy() # Direct
+
+    v_min_thresh = 2e-6
+
+    temp_0  = np.abs(np.maximum(temp_0, v_min_thresh))
+    temp_1  = np.abs(np.maximum(temp_1, v_min_thresh))
+    temp_d1 = np.maximum(np.abs(temp_1-temp_0), v_min_thresh)
+    temp_d2 = np.maximum(np.abs(temp_2-temp_0), v_min_thresh)
+
     vmax = np.max( [temp_0.max(), temp_1.max(), temp_2.max()] )
-    norm = LogNorm(vmin=vmin, vmax=vmax)
-        
-    save_PSF_img(temp_0, f'{id}_data',   norm, size=2.5)
-    save_PSF_img(temp_1, f'{id}_calib',  norm, size=2.5)
-    save_PSF_img(temp_2, f'{id}_direct', norm, size=2.5)
+
+    temp_0  = temp_0  / vmax * 100
+    temp_1  = temp_1  / vmax * 100
+    temp_2  = temp_2  / vmax * 100
+    temp_d1 = temp_d1 / vmax * 100
+    temp_d2 = temp_d2 / vmax * 100
+
+    temp_d1_max = temp_d1.max()
+    temp_d2_max = temp_d2.max()
+
+    norm = LogNorm(vmin=2.5e-3, vmax=100)
+
+    fig = plt.figure(figsize=(7, 5))
+    gs = GridSpec(2, 4, width_ratios=[1, 1, 1, 0.15])
+
+    ax0  = fig.add_subplot(gs[0,0])
+    ax1  = fig.add_subplot(gs[0,1])
+    ax2  = fig.add_subplot(gs[0,2])
+    cax1 = fig.add_subplot(gs[0,3])
+
+    ax3  = fig.add_subplot(gs[1,0])
+    ax4  = fig.add_subplot(gs[1,1])
+    ax5  = fig.add_subplot(gs[1,2])
+    cax2 = fig.add_subplot(gs[1,3])
+
+    # Calibrated
+    ax0.imshow(temp_0, norm=norm)
+    ax0.set_title('On-sky PSF')
+    ax0.axis('off')
+
+    ax1.imshow(temp_1, norm=norm)
+    ax1.set_title('Calibrated')
+    ax1.axis('off')
+
+    img1 = ax2.imshow(temp_d1, norm=norm)
+    ax2.set_title('Abs. difference')
+    ax2.axis('off')
+
+    ax2.text(30, 6, f'Max. {temp_d1_max:.1f}%', color='white', fontsize=12, ha='center', va='center')
+
+    cbar1 = fig.colorbar(img1, cax=cax1, orientation='vertical')
+    cbar1.set_label('Relative intensity [%]')
+
+    # Direct
+    ax3.imshow(temp_0, norm=norm)
+    ax3.set_title('On-sky PSF')
+    ax3.axis('off')
+
+    ax4.imshow(temp_2, norm=norm)
+    ax4.set_title('Direct')
+    ax4.axis('off')
+
+    img2 = ax5.imshow(temp_d2, norm=norm)
+    ax5.set_title('Abs. difference')
+    ax5.axis('off')
+
+    ax5.text(30, 6, f'Max. {temp_d2_max:.1f}%', color='white', fontsize=12, ha='center', va='center')
+
+    cbar2 = fig.colorbar(img2, cax=cax2, orientation='vertical')
+    cbar2.set_label('Relative intensity [%]')
+
+
+    plt.suptitle(psf_df_norm.loc[batches_ids[id], 'Filename'])
+    plt.tight_layout()
     
-    save_PSF_img(np.abs(temp_0-temp_2), f'{id}_diff_direct',   norm, size=2.5)
-    save_PSF_img(np.abs(temp_0-temp_1), f'{id}_diff_calib',   norm, size=2.5)
+    if save:
+        fig.savefig(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSFs/{batches_ids[id]}_direct.pdf', pad_inches=0)
+
+
+for id in tqdm(ids_example):
+    save_PSF_img_direct(id, 1625)
 
 
 #%%

@@ -74,6 +74,36 @@ def GetFilesList():
 
 files_L, files_R = GetFilesList()
 
+
+'''
+import PIL
+
+raw_fits_L = fits.open(files_L[1000])
+raw_fits_R = fits.open(files_R[1000])
+
+for i in range(10):
+    A = np.log10(np.abs(20+raw_fits_L[0].data[i]))
+    A -= np.nanmin(A)
+    A /= np.nanmax(A)
+
+    # Save PIL image as png 16 bit
+    im = PIL.Image.fromarray((A*65535).astype('uint16'))
+    # Stote on disk
+    im.save(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSFs_example/exposure_{i}_L.png')
+
+    A = np.log10(np.abs(20+raw_fits_R[0].data[i]))
+    A -= np.nanmin(A)
+    A /= np.nanmax(A)
+
+    # Save PIL image as png 16 bit
+    im = PIL.Image.fromarray((A*65535).astype('uint16'))
+    # Stote on disk
+    im.save(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSFs_example/exposure_{i}_R.png')
+
+raw_fits_L.close()
+raw_fits_R.close()
+'''
+
 #%%
 class SPHERE_loader():
     
@@ -608,18 +638,19 @@ def plot_sample(id):
     ROI = (slice(128-32, 128+32), slice(128-32, 128+32))
 
     fig, axs = plt.subplots(1, 2, figsize=(6, 3))
-    axs[0].imshow(np.log(np.abs(PSF_L_0[ROI])), origin='lower')
-    axs[1].imshow(np.log(np.abs(PSF_R_0[ROI])), origin='lower')
+    axs[0].imshow(np.log(np.abs(PSF_L_0[ROI])), origin='lower', cmap='gray')
+    axs[1].imshow(np.log(np.abs(PSF_R_0[ROI])), origin='lower', cmap='gray')
     axs[0].set_title(str(np.round(samp['spectra'][0]*1e9).astype('uint'))+' [nm]')
     axs[1].set_title(str(np.round(samp['spectra'][1]*1e9).astype('uint'))+' [nm]')
     for ax in axs: ax.axis('off')
     fig.suptitle(id)
     fig.tight_layout()
     plt.show()
-    
+    # plt.savefig('C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSFs_example/exposures_processed.pdf', dpi=400)
     return samp
 
 # sample = plot_sample(1632)
+# sample = plot_sample(1000)
 
 #%%
 def ReduceIRDISData():

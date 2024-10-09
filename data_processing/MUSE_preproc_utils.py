@@ -320,19 +320,23 @@ def GetMUSEonsky(ids, derotate_PSF=False, device=device):
         config_file, PSF_0 = GetConfigSolo(sample, PSF_0, convert_config=False)
         return PSF_0, var_mask, norms, bgs, config_file, sample
 
-    PSF_0 = []
-    configs = []
+    PSF_0, configs, norms, bgs = [], [], [], []
     
     for id in ids:
-        PSF_0_, _, _, _, config_file_, sample_ = load_sample(id)
+        PSF_0_, _, norm, bg, config_file_, sample_ = load_sample(id)
         configs.append(config_file_)
         if derotate_PSF:
             PSF_0_rot = rotate_PSF(PSF_0_, -sample_['All data']['Pupil angle'].item())
             PSF_0.append(PSF_0_rot)
         else:
             PSF_0.append(PSF_0_)
+            
+        norms.append(norm)
+        bgs.append(bg)
 
     PSF_0 = torch.tensor(np.vstack(PSF_0)).float().to(device)
+    norms = torch.tensor(norms).float().to(device)
+    bgs   = torch.tensor(bgs).float().to(device)
 
     config_manager = ConfigManager()
     merged_config  = config_manager.Merge(configs)
@@ -340,14 +344,14 @@ def GetMUSEonsky(ids, derotate_PSF=False, device=device):
     config_manager.Convert(merged_config, framework='pytorch', device=device)
 
     merged_config['sources_science']['Wavelength'] = merged_config['sources_science']['Wavelength'][0]
-    merged_config['sources_HO']['Height']     = merged_config['sources_HO']['Height'].unsqueeze(-1)
-    merged_config['sources_HO']['Wavelength'] = merged_config['sources_HO']['Wavelength'].squeeze()
+    merged_config['sources_HO']['Height']          = merged_config['sources_HO']['Height'].unsqueeze(-1)
+    merged_config['sources_HO']['Wavelength']      = merged_config['sources_HO']['Wavelength'].squeeze()
     merged_config['NumberSources'] = len(ids)
     
     if derotate_PSF:
         merged_config['telescope']['PupilAngle'] = 0.0
 
-    return PSF_0, merged_config
+    return PSF_0, norms, bgs, merged_config
 
 
 

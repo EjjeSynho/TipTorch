@@ -492,16 +492,16 @@ class TipTorch(torch.nn.Module):
         kx = self.kx_AO.unsqueeze(-1) # add atmo layers dimension: [N_src x nOtf_AO x nOtf_AO x nL]
         ky = self.ky_AO.unsqueeze(-1) # add atmo layers dimension: [N_src x nOtf_AO x nOtf_AO x nL]
         
-        Ts = 1.0 / self.HOloop_rate # samplingTime
-        delay = self.HOloop_delay #latency
+        Ts = 1.0 / self.HOloop_rate  # sampling time
+        delay    = self.HOloop_delay # latency between the measurement and the correction
         loopGain = self.HOloop_gain
 
         def TransferFunctions(freq, Ts, delay, loopGain):
             z = torch.exp(2j*np.pi*freq*Ts) # no minus according to Sanchit
             hInt = loopGain / self._stabilize(1.0 - 1.0/z, 1e-12)
-            rtfInt = 1. / self._stabilize(1+hInt*z**(-delay), 1e-12)
-            atfInt = self._stabilize(hInt * z**(-delay) * rtfInt)
-            ntfInt = self._stabilize(atfInt / z, 1e-12)
+            rtfInt = 1. / self._stabilize(1+hInt*z**(-delay), 1e-12) # Rejection transfer function
+            atfInt = self._stabilize(hInt * z**(-delay) * rtfInt)    # Aliasing transfer function
+            ntfInt = self._stabilize(atfInt / z, 1e-12)              # Noise transfer function
             # ntfInt = self._stabilize(hInt * z**(-delay-1)) # according to Sanchit, but it maybe wrong
             return hInt, rtfInt, atfInt, ntfInt
 
@@ -515,7 +515,7 @@ class TipTorch(torch.nn.Module):
         self.noise_gain = pdims( torch.trapz(torch.abs(ntfInt)**2, f, dim=1)*2*Ts, 2 )
         
         thetaWind = self.make_tensor(0.0) #torch.linspace(0, 2*np.pi-2*np.pi/nTh, nTh)
-        costh = torch.cos(thetaWind) #TODO: what is thetaWind?
+        costh = torch.cos(thetaWind) # stays for the uncertainty in the wind diirection
 
         fi = (-vx*kx - vy*ky)*costh # [N_src x nOtf_AO x nOtf_AO x nL]
 
@@ -527,7 +527,7 @@ class TipTorch(torch.nn.Module):
         self.h2 = idim(self.Cn2_weights) * atfInt.abs()**2 #/nTh
         self.hn = idim(self.Cn2_weights) * ntfInt.abs()**2 #/nTh
 
-        self.h1 = self.h1.sum(axis=-1) #sum over the atmospheric layers
+        self.h1 = self.h1.sum(axis=-1) # sum over the atmospheric layers
         self.h2 = self.h2.sum(axis=-1) 
         self.hn = self.hn.sum(axis=-1) 
 
@@ -567,6 +567,7 @@ class TipTorch(torch.nn.Module):
             
         elif self.AO_type == 'LTAO':
             '''
+            TODO: unblock for off-axis correction
             Beta = [self.ao.src.direction[0,s], self.ao.src.direction[1,s]]
             fx = Beta[0]*kx_AO
             fy = Beta[1]*ky_AO
@@ -605,9 +606,9 @@ class TipTorch(torch.nn.Module):
 
 
     def AliasingPSD(self, r0, L0):
-        T = self.WFS_det_clock_rate / self.HOloop_rate
+        T  = self.WFS_det_clock_rate / self.HOloop_rate
         td = pdims(T * self.HOloop_delay, [-1,3]) # [N_combs x N_src x nOtf_AO x n_Otf_AO x nL]
-        T = pdims(T, [-1,3])
+        T  = pdims(T, [-1,3])
 
         # Adding 0th dimension for shifted grid pieces
         Rx1 = (2j*np.pi*self.WFS_d_sub * self.Rx).unsqueeze(0)
@@ -740,6 +741,7 @@ class TipTorch(torch.nn.Module):
 
         # Tikhonov_reg = False
 
+        # Inversion happens relative to the last two dimensions of the these tensors
         if inv_method == 'standart':
             W_tomo = (self.C_phi @ MP_t) @ torch.linalg.pinv(MP @ self.C_phi @ MP_t + self.C_b, rcond=1e-2)
 
@@ -962,7 +964,7 @@ class TipTorch(torch.nn.Module):
   
         # Computing the Structure Function from the covariance
         SF = 2*(cov.abs().amax(dim=(-2,-1), keepdim=True) - cov).real
-        self.SF = SF
+        # self.SF = SF
         # Phasor to shift the PSF with the subpixel accuracy
         fftPhasor = torch.exp( -np.pi*1j * pdims(self.sampling_factor,2) * (self.U.unsqueeze(1)*dx + self.V.unsqueeze(1)*dy) )
         OTF_turb  = torch.exp( -0.5 * SF * pdims(2*np.pi*1e-9/self.wvl,2)**2 )

@@ -199,7 +199,7 @@ class TipTorch(torch.nn.Module):
             self._stabilize(self.ky2)
 
         # Compute the frequency mask for the AO corrected and uncorrected frequency regions
-        rim_width = 0.1
+        rim_width = 0.1*0
         self.mask_corrected = torch.zeros_like(self.k2).int()
         self.mask_rim_in    = torch.zeros_like(self.k2).int() # masks to select the regions close to the corrected/uncorrected freqs split
         self.mask_rim_out   = torch.zeros_like(self.k2).int()
@@ -682,6 +682,12 @@ class TipTorch(torch.nn.Module):
         OTF_jitter = self.JitterCore(Jx.abs(), Jy.abs(), Jxy.abs())
         # Resulting combined OTF
         self.OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
+
+        self.SF = SF
+        self.cov = cov
+        self.fftPhasor = fftPhasor
+        self.OTF_static = OTF_static
+        self.OTF_turb = OTF_turb
 
         PSF_out = self.OTF2PSF(self.OTF)
 

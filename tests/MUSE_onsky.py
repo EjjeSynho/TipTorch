@@ -9,7 +9,7 @@ import pickle
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle#, register_hooks
+from tools.utils import plot_radial_profiles_new, plot_radial_profiles_relative, SR, draw_PSF_stack, rad2mas, mask_circle#, register_hooks
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from tools.config_manager import GetSPHEREonsky
@@ -21,10 +21,10 @@ from tools.config_manager import ConfigManager
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, PolyModel, InputsCompressor
 from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tqdm import tqdm
-from project_globals import MUSE_RAW_FOLDER
+from project_globals import MUSE_DATA_FOLDER
 
 #%%
-with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'rb') as handle:
+with open(MUSE_DATA_FOLDER+'/muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
 
 gave_NaNs = [21, 60, 103, 148, 167, 240, 302, 319, 349]
@@ -40,7 +40,7 @@ derotate_PSF    = True
 Moffat_absorber = True
 include_sausage = True
 
-sample = LoadMUSEsampleByID(310)
+sample = LoadMUSEsampleByID(402)
 PSF_0, var_mask, norms, bgs = LoadImages(sample)
 config_file, PSF_0 = GetConfig(sample, PSF_0)
 N_wvl = PSF_0.shape[1]
@@ -49,6 +49,16 @@ if derotate_PSF:
     PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
     config_file['telescope']['PupilAngle'] = 0
 
+'''
+from scipy.io import loadmat
+
+AA = loadmat(MUSE_DATA_FOLDER+'../AOF/Sausage tests/DelatRS2Phase.mat')['aa']
+
+plt.imshow(AA)
+plt.axis('off')
+plt.colorbar()
+plt.savefig('C:/Users/akuznets/Desktop/thesis_results/MUSE/sausage_feature.pdf', dpi=300)
+'''
 
 #%% Initialize the model
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
@@ -421,6 +431,29 @@ else:
     
     plot_radial_profiles_new( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
     plt.show()
+    
+#%%
+
+if len(toy.wvl[0]) > 1:
+    wvl_select = np.s_[0, 6, 12]
+
+    draw_PSF_stack( PSF_0.cpu().numpy()[0, wvl_select, ...], PSF_1.cpu().numpy()[0, wvl_select, ...], average=True, crop=120 )
+    
+    PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
+
+    fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
+    for i, lmbd in enumerate(wvl_select):
+        plot_radial_profiles_relative( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+    plt.show()
+
+else:
+    draw_PSF_stack( PSF_0.cpu().numpy()[:,0,...], PSF_1.cpu().numpy()[:,0,...], average=True, crop=120 )
+    
+    plot_radial_profiles_relative( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
+    plt.show()
+
+    
+
    
 #%% ======================================================================================================
    
@@ -549,6 +582,8 @@ plt.xscale('log')
 plt.grid()
 plt.xlim(freqs.min(), freqs.max())
 
+plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/MUSE/PSDs/profiles.pdf", dpi=300)
+
 
 '''
 PSF_1 = torch.tensor(PSF_1s_).float().to(device).unsqueeze(0)
@@ -571,6 +606,38 @@ for i in range(N_wvl_):
     plt.savefig(f'C:/Users/akuznets/Desktop/MUSE_fits_new/profiles_{(wvls_[0][i]*1e9):.0f}.png')
 '''
 
+#%%
+from matplotlib.colors import LogNorm
+import matplotlib as mpl
+
+vmins = {
+    'fitting': 1e-4,
+    'WFS noise': 0.1,
+    'spatio-temporal': 0.02,
+    'chromatism': 1e-5,
+    'Moffat': 1e-3
+}
+
+cmap = mpl.colormaps.get_cmap('inferno')  # viridis is the default colormap for imshow
+cmap.set_bad(color=(0,0,0,0))
+    
+for entry in PSDs.keys():
+    fig = plt.figure(figsize=(8,)*2)
+    A = PSDs[entry].cpu().numpy().real
+    A -= np.nanmin(A)
+    A = np.abs(A)
+    
+    if entry != 'fitting':
+        A += 1e-7
+        A = A * toy.mask_corrected_AO.squeeze().cpu().numpy() * toy.piston_filter.squeeze().cpu().numpy()
+    
+    norm = LogNorm(vmin=vmins[entry], vmax=np.nanmax(A)*2)
+    plt.imshow(A, norm=norm, cmap=cmap)
+    plt.title(entry)
+    plt.axis('off')
+    plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/MUSE/PSDs/{entry}.pdf", dpi=300)
+    plt.show()
+    
 #%%
 x = x0.clone().detach().requires_grad_(True)
 
