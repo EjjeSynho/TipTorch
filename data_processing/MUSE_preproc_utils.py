@@ -32,14 +32,22 @@ def GetRadialBackround(img):
     return rp.profile.min()
 
 
-def LoadImages(sample, device=device, convert_images=True):
+def LoadImages(sample, device=device, subtract_background=True, normalize=True, convert_images=True):
+    # PSF_data = np.copy(sample['images']['cube'][:,1:,1:]) 
+    PSF_data = np.copy(sample['images']['cube']) 
+    
+    if subtract_background:
+        bgs = np.array([ GetRadialBackround(PSF_data[i,:,:]) for i in range(PSF_data.shape[0]) ])[:,None,None]
+        PSF_data -= bgs
+        
+    else:
+        bgs = np.zeros(PSF_data.shape[0])[:,None,None]
 
-    PSF_data = np.copy(sample['images']['cube'][:,1:,1:])    
-    bgs = np.array([ GetRadialBackround(PSF_data[i,:,:]) for i in range(PSF_data.shape[0]) ])[:,None,None]
-    PSF_data -= bgs
-
-    norms = PSF_data.sum(axis=(-1,-2), keepdims=True)
-    PSF_data /= norms
+    if normalize:
+        norms = PSF_data.sum(axis=(-1,-2), keepdims=True)
+        PSF_data /= norms
+    else:
+        norms = np.ones(PSF_data.shape[0])[:,None,None]
     
     if convert_images:
         PSF_data = torch.tensor(PSF_data).float().unsqueeze(0).to(device)

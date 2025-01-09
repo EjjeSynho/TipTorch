@@ -810,102 +810,73 @@ for id in tqdm(good_ids):
     plot_MUSE_PSF(id, save_dir='/home/akuznets/Projects/TipTorch/data/temp/plots/MUSE_PSFs/')
 
 
-#%% ====================================================================================================
-from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 
-_, all_inputs, _, config = get_data(batch_init, all_entries)
+#%%
+from tools.utils import FWHM_fitter, FitMoffat2D_astropy, FitGauss2D_astropy
 
-id_local = 1
+FWHM_data       = FWHM_fitter(PSFs_0_val_poly, verbose=True)
+FWHM_calibrated = FWHM_fitter(PSFs_1_val_poly, verbose=True)
+FWHM_direct     = FWHM_fitter(PSFs_2_val_poly, verbose=True)
 
-toy.config = config
+#%%
+ROI_ = np.s_[np.random.randint(0,77), 0, 199//2-25:199//2+25, 199//2-25:199//2+25]
 
-toy.PSD_include['fitting'] = True
-toy.PSD_include['WFS noise'] = True
-toy.PSD_include['spatio-temporal'] = True
-toy.PSD_include['aliasing'] = False
-toy.PSD_include['chromatism'] = True
-toy.PSD_include['Moffat'] = True
+A = PSFs_0_val_poly[ROI_]
+B = PSFs_1_val_poly[ROI_]
 
-toy.Update(reinit_grids=True, reinit_pupils=True)
-PSFs_1 = run_model(toy, batch_init, {}, all_inputs)
+F_x_A, F_y_A, A_fit, A_ = FitMoffat2D_astropy(A)
+F_x_B, F_y_B, B_fit, B_ = FitMoffat2D_astropy(B)
+
+max_point = np.unravel_index(np.argmax(A_), A_.shape)
+
+F_A = np.sqrt(F_x_A**2 + F_y_A**2)
+F_B = np.sqrt(F_x_B**2 + F_y_B**2)
 
 #%
-PSF_0, _, _, _ = LoadImages(sample := LoadMUSEsampleByID(batch_init['IDs'][id_local]))
-config_file, PSF_0 = GetConfig(sample, PSF_0)
-# PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
-config_file['telescope']['PupilAngle'] = 0
-
-model = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=True, oversampling=1)
-
-model.PSD_include['fitting'] = True
-model.PSD_include['WFS noise'] = True
-model.PSD_include['spatio-temporal'] = True
-model.PSD_include['aliasing'] = False
-model.PSD_include['chromatism'] = True
-model.PSD_include['Moffat'] = True
-
-model.to_float()
-setattr(model, 's_pow', 0.0)
-
-phytos_dfos = batch_init['fitted data']
-
-inputs_tiptorch = {
-    'F':     phytos_dfos['F' ][id_local,...].unsqueeze(0).to(model.device),
-    'dx':    phytos_dfos['dx'][id_local,...].unsqueeze(0).to(model.device),
-    'dy':    phytos_dfos['dy'][id_local,...].unsqueeze(0).to(model.device),
-    'bg':    phytos_dfos['bg'][id_local,...].unsqueeze(0).to(model.device),
-    'Jx':    phytos_dfos['Jx'][id_local,...].unsqueeze(0).to(model.device),
-    'Jy':    phytos_dfos['Jy'][id_local,...].unsqueeze(0).to(model.device),
-    
-    'r0':    phytos_dfos['r0'   ][id_local].to(model.device),
-    'dn':    phytos_dfos['dn'   ][id_local].to(model.device),
-    'Jxy':   phytos_dfos['Jxy'  ][id_local].to(model.device),
-    'amp':   phytos_dfos['amp'  ][id_local].to(model.device),
-    'b':     phytos_dfos['b'    ][id_local].to(model.device),
-    'alpha': phytos_dfos['alpha'][id_local].to(model.device),
-    'beta':  phytos_dfos['beta' ][id_local].to(model.device),
-    'ratio': phytos_dfos['ratio'][id_local].to(model.device),
-    'theta': phytos_dfos['theta'][id_local].to(model.device),
-    's_pow': phytos_dfos['s_pow'][id_local].to(model.device)
-}
-
-PSF_1 = model(inputs_tiptorch, None, lambda: sausage_absorber(model.s_pow.flatten()))
-#%
-for entry in ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'chromatism', 'Moffat']:
-    try:
-        A = toy.PSDs[entry][id_local, ...]
-        B = model.PSDs[entry][0, ...]
-        print( entry, (A-B).abs().sum().item() )
-    except:
-        continue
-
-print((toy.dx[id_local, ...] - model.dx[0, ...]).sum().item())
-print((toy.dy[id_local, ...] - model.dy[0, ...]).sum().item())
-print((toy.F [id_local, ...] - model.F [0, ...]).sum().item())
-print((toy.bg[id_local, ...] - model.bg[0, ...]).sum().item())
-print((toy.Jx[id_local, ...] - model.Jx[0, ...]).sum().item())
-print((toy.Jy[id_local, ...] - model.Jy[0, ...]).sum().item())
-
-print((toy.dn[id_local, ...] - model.dn).item())
-print((toy.s_pow[id_local]   - model.s_pow).item())
-print((toy.r0[id_local]      - model.r0).item())
-print((toy.Jxy[id_local]     - model.Jxy).item())
-
-print((toy.amp[id_local]     - model.amp).item())
-print((toy.b[id_local]       - model.b).item())
-print((toy.alpha[id_local]   - model.alpha).item())
-print((toy.beta[id_local]    - model.beta).item())
-print((toy.ratio[id_local]   - model.ratio).item())
-print((toy.theta[id_local]   - model.theta).item())
-
-A = toy.OTF[id_local,0,...]
-B = model.OTF[0,0,...]
-print(f'PSF error: {(A-B).abs().sum().item() / A.sum().item() * 100:.2f}%' )
-
-plt.imshow(A.abs().log10().cpu().numpy())
+plt.title(f'FWHM: {F_A:.2f} -> {F_B:.2f}, rel. diff. {np.abs(F_A-F_B)/F_A*100:.1f}%')
+plt.legend(['Data', 'Calibrated'])
+plt.plot(A_[max_point[0],...], color='blue')
+plt.plot(B_[max_point[0],...], color='red')
+plt.plot(A_fit[max_point[0],...], color='blue', linestyle='--')
+plt.plot(B_fit[max_point[0],...], color='red', linestyle='--')
 plt.show()
-plt.imshow(B.abs().log10().cpu().numpy())
-plt.show()
-plt.imshow((A-B).abs().log10().cpu().numpy())
+# plt.yscale('log')
+# Plot FWHM
+# plt.plot([25, 25], [0, 1], 'k--')
+# plt.plot([25+2*F_x_A, 25+2*F_x_A], [0, 1], 'b--')
+# plt.plot([25+2*F_x_B, 25+2*F_x_B], [0, 1], 'r--')
+
+# plt.plot(np.abs(A_.cpu().numpy())[8,...])
+# plt.plot(np.abs(testo.cpu().detach().numpy())[8,...])
+
+# plt.imshow(np.log10(A_.cpu().numpy()), cmap='gray')
+# plt.show()
+# plt.imshow(np.log10(testo.cpu().detach().numpy()), cmap='gray')
+
+#%%
+FWHMy = lambda FWHM, l: np.sqrt(FWHM[:,l,0]**2 + FWHM[:,l,1]**2)
+
+FWHMy_white = lambda FWHM: np.mean(np.array([FWHMy(FWHM, l) for l in range(FWHM.shape[1])]), axis=0)
+
+# l_id = -7
+
+x = FWHMy_white(FWHM_data)
+y = FWHMy_white(FWHM_calibrated)
+
+# x = FWHMy(FWHM_data, l_id)
+# y = FWHMy(FWHM_calibrated, l_id)
+
+plt.plot(np.linspace(0, x.max(), 100), np.linspace(0, x.max(), 100), 'k--')
+plt.scatter(x, y)
+plt.ylabel('Direct')
+plt.xlabel('Data')
+plt.xlim([0, 10])
+plt.ylim([0, 10])
+plt.axis('equal')
 plt.show()
 
+# Compute relative FWHM error
+relative_err = np.median(np.abs(x-y) / x)*100
+absolute_err = np.median(np.abs(x-y) * 25)
+print(f'Median relative FWHM error: {relative_err:.1f}%')
+print(f'Median absolute FWHM error: {absolute_err:.1f} [mas]')

@@ -3,7 +3,6 @@ import torch
 from torch.distributions.normal import Normal
 from project_globals import device
 import numpy as np
-
 from scipy import stats
 from scipy.stats import boxcox, yeojohnson, norm
 from scipy.optimize import curve_fit
@@ -83,9 +82,6 @@ class LineModel:
     def __call__(self, params):
         return self.line(self.x, *params, self.x_min, *self.norms)
 
-
-import numpy as np
-from scipy.optimize import curve_fit
 
 class PolyModel:
     def __init__(self, x, norms):

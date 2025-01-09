@@ -40,24 +40,40 @@ IRLOS_upgrade_date = pd.to_datetime('2021-03-20T00:00:00').tz_localize('UTC')
 #%% ------------------ Create/read a matching table between the raw files and reduced cubes -------------------------
 if not os.path.exists(MUSE_RAW_FOLDER+'../files_matches.csv'):
 
-    cubes_files = os.listdir(MUSE_CUBES_FOLDER)
-    raw_files   = os.listdir(MUSE_RAW_FOLDER)
+    include_dirs_cubes = [
+        MUSE_CUBES_FOLDER,
+        MUSE_DATA_FOLDER+'wide_field/cubes/'
+    ]
+
+    include_dirs_raw = [
+        MUSE_RAW_FOLDER,
+        MUSE_DATA_FOLDER+'wide_field/raw/'
+    ]    
+
+    dirs_obs_types = ['Calib. on-axis', 'Science, globular']
 
     cubes_obs_date_table = {}
     raw_obs_date_table   = {}
     exposure_times       = {}
+    obs_types            = {}
 
-    print('Scanning the cubes files...')
-    for file in tqdm(cubes_files):
-        with fits.open(os.path.join(MUSE_CUBES_FOLDER, file)) as hdul_cube:
-            cubes_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
-            exposure_times[file] = (hdul_cube[0].header['DATE-OBS'], hdul_cube[0].header['EXPTIME'])
+    for folder_cubes, folder_raw in zip(include_dirs_cubes, include_dirs_raw):
+        cube_files = os.listdir(folder_cubes)
+        raw_files  = os.listdir(folder_raw)
 
-    print('Scanning the raw files...')
-    for file in tqdm(raw_files):
-        with fits.open(os.path.join(MUSE_RAW_FOLDER, file)) as hdul_cube:
-            raw_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
+        print(f'Scanning the cubes files in \"{folder_cubes}\"...')
+        for file in tqdm(cube_files):
+            with fits.open(os.path.join(folder_cubes, file)) as hdul_cube:
+                cubes_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
+                exposure_times[file] = (hdul_cube[0].header['DATE-OBS'], hdul_cube[0].header['EXPTIME'])
+                obs_types[file] = dirs_obs_types[include_dirs_cubes.index(folder_cubes)]
 
+        print(f'Scanning the raw files in \"{folder_raw}\"...')
+        for file in tqdm(raw_files):
+            with fits.open(os.path.join(folder_raw, file)) as hdul_cube:
+                raw_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
+
+        print('-'*20)
 
     df1 = pd.DataFrame(cubes_obs_date_table.items(), columns=['cube', 'date'])
     df2 = pd.DataFrame(raw_obs_date_table.items(),   columns=['raw',  'date'])
@@ -68,8 +84,8 @@ if not os.path.exists(MUSE_RAW_FOLDER+'../files_matches.csv'):
 
     df1.set_index('date', inplace=True)
     df2.set_index('date', inplace=True)
-
-    files_matches = pd.concat([df1, df2], axis=1).dropna()
+   
+    files_matches = pd.merge(df1, df2, left_index=True, right_index=True, how='inner')
 
     #% Save files_matches
     files_matches.to_csv(MUSE_RAW_FOLDER+'../files_matches.csv')
@@ -80,7 +96,7 @@ else:
 
 
 # ------------------ Create/read the dataset with exposure times ---------------------------------------
-if not os.path.exists(MUSE_RAW_FOLDER+'../exposure_times.csv'):
+if not os.path.exists( exp_folder:=(MUSE_RAW_FOLDER+'../exposure_times.csv') ):
     df3 = pd.DataFrame(exposure_times.items(), columns=['filename', 'obs_time'])
 
     df3['exposure_start'] = pd.to_datetime(df3['obs_time'].apply(lambda x: x[0]))
@@ -91,13 +107,37 @@ if not os.path.exists(MUSE_RAW_FOLDER+'../exposure_times.csv'):
     df3.set_index('filename', inplace=True)
     df3['exposure_start'] = df3['exposure_start'].dt.tz_localize('UTC')
     df3['exposure_end'] = df3['exposure_end'].dt.tz_localize('UTC')
-    df3.to_csv(MUSE_RAW_FOLDER+'../exposure_times.csv')
+    
+    try:
+        df3.to_csv(exp_folder)
+    except Exception as e:
+        print(f'Error: {e}')
+    else:
+        print(f'Exposure times tables is saved at: {exp_folder}')
     
 else:
     df3 = pd.read_csv(MUSE_RAW_FOLDER+'../exposure_times.csv')
     df3.set_index('filename', inplace=True)
+    
+    
+# ------------------ Create/read the dataset with the samples observation type ---------------------------------------
+if not os.path.exists( obs_type_folder:=(MUSE_RAW_FOLDER+'../obs_types.csv') ):
+    obs_types_df = pd.DataFrame(obs_types.items(), columns=['filename', 'obs_type'])
+    obs_types_df.set_index('filename', inplace=True)
+    
+    try:
+        obs_types_df.to_csv(obs_type_folder)
+    except Exception as e:
+        print(f'Error: {e}')
+    else:
+        print(f'Observation types table is saved at: {obs_type_folder}')
+        
+else:
+    obs_types_df = pd.read_csv(obs_type_folder)
+    obs_types_df.set_index('filename', inplace=True)
 
 
+#%%
 # ----------------- Read the dataset with IRLOS data ---------------------------------------
 IRLOS_cmds = pd.read_csv(MUSE_RAW_FOLDER+'../IRLOS_commands.csv')
 IRLOS_cmds.drop(columns=['Unnamed: 0'], inplace=True)
@@ -116,18 +156,17 @@ IRLOS_cmds = IRLOS_cmds[IRLOS_cmds['command'].str.contains(pattern, regex=True)]
 pattern = r'(?P<window>\d+x\d+)(?:_(?P<scale>SmallScale))?(?:_(?P<frequency>\d+Hz))?(?:_(?P<gain>\w+Gain))?'
 IRLOS_df = IRLOS_cmds['command'].str.extract(pattern)
 
-IRLOS_df['window'] = IRLOS_df['window'].apply(lambda x: int(x.split('x')[0]))
+IRLOS_df['window']    = IRLOS_df['window'].apply(lambda x: int(x.split('x')[0]))
 IRLOS_df['frequency'] = IRLOS_df['frequency'].apply(lambda x: int(x[:-2]) if pd.notna(x) else x)
-IRLOS_df['gain'] = IRLOS_df['gain'].apply(lambda x: 68 if x == 'HighGain' else 1 if x == 'LowGain' else x)
-IRLOS_df['scale'] = IRLOS_df['scale'].apply(lambda x: x.replace('Scale','') if pd.notna(x) else x)  
-IRLOS_df['scale'] = IRLOS_df['scale'].fillna('Small')
+IRLOS_df['gain']      = IRLOS_df['gain'].apply(lambda x: 68 if x == 'HighGain' else 1 if x == 'LowGain' else x)
+IRLOS_df['scale']     = IRLOS_df['scale'].apply(lambda x: x.replace('Scale','') if pd.notna(x) else x)  
+IRLOS_df['scale']     = IRLOS_df['scale'].fillna('Small')
 
 IRLOS_df['plate scale, [mas/pix]'] = IRLOS_df.apply(lambda row: 60  if row.name > IRLOS_upgrade_date and row['scale'] == 'Small' else 242 if row.name > IRLOS_upgrade_date and row['scale'] == 'Large' else 78 if row['scale'] == 'Small' else 324, axis=1)
 IRLOS_df['conversion, [e-/ADU]']   = IRLOS_df.apply(lambda row: 9.8 if row.name > IRLOS_upgrade_date else 3, axis=1)
 
 IRLOS_df['gain'] = IRLOS_df['gain'].fillna(1).astype('int')
 IRLOS_df['frequency'] = IRLOS_df['frequency'].fillna(200).astype('int')
-
 
 # ----------------- Read the dataset with the LGS WFSs data ---------------------------------------
 LGS_flux_df   = pd.read_csv(MUSE_RAW_FOLDER + '../LGS_flux.csv',   index_col=0)
@@ -147,7 +186,6 @@ def time_from_str(timestamp_strs):
         return datetime.datetime.strptime(timestamp_strs, '%Y-%m-%dT%H:%M:%S.%f')
     else:
         return [datetime.datetime.strptime(time_str, '%Y-%m-%dT%H:%M:%S.%f') for time_str in timestamp_strs]
-
 
 #-------------------------------- IRLOS realm ------------------------------------------------
 def get_background(img, sigmas=1):
@@ -183,7 +221,7 @@ def GetIRLOScube(hdul_raw):
         IRLOS_cube = IRLOS_cube_ - 200 # Minus constant ADU shift
         
         background, background_rms, mask = get_background(IRLOS_cube.mean(axis=-1), 1)
-        IRLOS_cube *= mask[..., None] # Remove background pixels
+        IRLOS_cube *= mask[..., None] # Remove noisy background pixels
         return IRLOS_cube, win_size # [ADU], [pix]
         
     else:
@@ -366,14 +404,10 @@ def GetSpectrum(white, radius=5):
 
 def range_overlap(v_min, v_max, h_min, h_max):
     start_of_overlap, end_of_overlap = max(v_min, h_min), min(v_max, h_max)
-    
-    if start_of_overlap > end_of_overlap:
-        return 0.0
-    else:
-        return (end_of_overlap-start_of_overlap) / (v_max-v_min)
+    return 0.0 if start_of_overlap > end_of_overlap else (end_of_overlap-start_of_overlap) / (v_max-v_min)
 
 
-def GetImageSpectrumHeader(hdul_cube, show_plots=True):
+def GetImageSpectrumHeader(hdul_cube, show_plots=True, crop_cube=True):
     find_closest = lambda λ, λs: np.argmin(np.abs(λs-λ)).astype('int')
 
     # Extract spectral range information
@@ -435,7 +469,7 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
     colors = np.dstack([np.vstack([Rs, Gs, Bs])]*600).transpose(2,1,0)
 
     fig_handler = None
-    if show_plots:
+    if show_plots and crop_cube:
         fig_handler = plt.figure(dpi=200)
         plt.imshow(colors, extent=[λs.min(), λs.max(), 0, 120])
         plt.ylim(0, 120)
@@ -447,9 +481,14 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
         ax = plt.gca()
         # ax.get_yaxis().set_visible(False)
         # plt.show()
-        plt.savefig('C:/Users/akuznets/Desktop/thesis_results/MUSE/MUSE_spectrum.pdf', dpi=300)
+        # plt.savefig('C:/Users/akuznets/Desktop/thesis_results/MUSE/MUSE_spectrum.pdf', dpi=300)
 
-    _, ROI, _ = GetROIaroundMax(white, win=200)
+    if isinstance(crop_cube, tuple):
+        ROI = crop_cube
+    elif crop_cube:
+        _, ROI, _ = GetROIaroundMax(white, win=200)
+    else:
+        ROI = (slice(0, white.shape[0]), slice(0, white.shape[1]))
 
     # Generate reduced cubes
     data_reduced = np.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
@@ -459,8 +498,7 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
     flux         = np.zeros(len(λ_bins_smart)-1)
 
     bad_layers = [] # list of spectral layers that are corrupted (excluding the sodium filter)
-
-    bins_to_ignore = []
+    bins_to_ignore = [] # list of bins that are corrupted (including the sodium filter)
 
     for bin in tqdm( range(len(bins_smart)-1) ):
         chunk = hdul_cube[1].data[ bins_smart[bin]:bins_smart[bin+1], ROI[0], ROI[1] ]
@@ -480,9 +518,15 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
                 flux_chunck[i] = np.nan
                 continue
             else:
+                # l_std = layer.flatten().std()
                 mask_inpaint = np.zeros_like(layer, dtype=np.int8)
                 mask_inpaint[np.where(np.isnan(layer))] = 1
-                chunk[i,:,:] = inpaint.inpaint_biharmonic(layer, mask_inpaint)  # Fix bad pixels per spectral slice
+                # mask_inpaint[np.where(layer < -l_std)] = 1
+                mask_inpaint[np.where(layer < -1e3)] = 1
+                # mask_inpaint[np.where(np.abs(layer) < 1e-9)] = 1
+                # mask_inpaint[np.where(layer >  5*l_std)] = 1
+                
+                chunk[i,:,:] = inpaint.inpaint_biharmonic(layer, mask_inpaint)  # Inpaint bad pixels per spectral slice
 
         data_reduced[bin,:,:] = np.nansum(chunk, axis=0)
         std_reduced [bin,:,:] = np.nanstd(chunk, axis=0)
@@ -499,13 +543,13 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True):
     # Collect the telemetry from the header
     spectral_info = {
         'spectrum (full)': (λs, spectrum),
-        'wvl range':     [λ_min, λ_max, Δλ], # From header
-        'filtered wvls': bad_wvls,
-        'flux units':    units,
-        'wvl bins':      λ_bins_smart, # Wavelength bins
-        'wvls binned':   wavelengths,
-        'flux binned':   flux,
-        'spectrum fig':  fig_handler
+        'wvl range':       [λ_min, λ_max, Δλ], # From header
+        'filtered wvls':   bad_wvls,
+        'flux units':      units,
+        'wvl bins':        λ_bins_smart, # Wavelength bins
+        'wvls binned':     wavelengths,
+        'flux binned':     flux,
+        'spectrum fig':    fig_handler
     }
 
     def convert_to_dms(angle):
@@ -884,7 +928,6 @@ def get_PSF_rotation(MUSE_images, derot_angle):
     from scipy.interpolate import interp1d
     from PIL import Image, ImageDraw
 
-
     PSF_0 = np.copy(MUSE_images['cube'])
     PSF_0 = PSF_0 / PSF_0.sum(axis=(-2,-1))[:,None,None]
     PSF_0 = PSF_0.mean(axis=0)[1:,1:]
@@ -1099,7 +1142,7 @@ for file in tqdm(os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')):
     with open(MUSE_RAW_FOLDER+'../DATA_reduced/'+file, 'rb') as f:
         data = pickle.load(f)
 
-    white = np.log10(1+np.abs(data['images']['white']))
+    white =  np.log10(1+np.abs(data['images']['white']))
     white -= white.min()
     white /= white.max()
 
@@ -1136,14 +1179,18 @@ for file in tqdm(os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')):
 # file_id = 173
 
 # file_id = 411
-file_id = 405
+# file_id = 405
+# file_id = 401
 # file_id = 146
 # file_id = 296
 # file_id = 382
 # file_id = 395
 # file_id = 254
 
-# file_id = 344
+# These two have the same target: CD-38 10980
+file_id = 344
+# file_id = 405
+
 # file_id = 276
 # file_id = 281
 # file_id = 311
@@ -1152,6 +1199,22 @@ file_id = 405
 
 hdul_raw  = fits.open(os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ]))
 hdul_cube = fits.open(os.path.join(MUSE_CUBES_FOLDER, files_matches.iloc[file_id]['cube']))
+
+#%%
+
+# from astroquery.eso import Eso
+# eso = Eso()
+# eso.login(username='akuznets')
+
+# result_table = eso.query_instrument('muse', column_fil ters={'target': 'NGC 6754'})
+
+
+# stime = night + 'T19:00:00.00'
+# etime = (Time(night).to_datetime()+timedelta(days=1)).date().isoformat() + 'T14:00:00.00'
+# eso_query_dict = {'stime':stime,'etime':etime,'dp_cat':'SCIENCE','dp_type':'OBJECT,AO'}
+
+# print(eso_query_dict)
+
 
 # plt.imshow(np.log(1+np.abs(hdul_cube['DATA'].data[0,...])), cmap='gray')
 # plt.axis('off')
@@ -1195,6 +1258,97 @@ IRLOS_phase_data = {
     'OPD aperture':  OPD_aperture,
     'PSF estimated': PSF_estim
 }
+
+
+#%%
+data_offaxis = 'F:/ESO/Data/MUSE/wide_field/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits'
+hdul_cube = fits.open(data_offaxis)
+
+#%%
+def convert_to_dms(angle):
+    is_negative = angle < 0
+    angle = abs(angle)
+    degrees = int(angle // 10000)
+    minutes = int((angle % 10000) // 100)
+    seconds = angle % 100
+    if is_negative:
+        degrees = -degrees
+    return degrees, minutes, seconds
+
+def format_dms(degrees, minutes, seconds):
+    return f"{degrees:+03}d{minutes:02}m{seconds:06.3f}s"
+
+# Convert numerical format to [hms] and [dms] string formats
+alpha_hms = lambda alpha: f"{int(alpha // 10000):02}h{int((alpha % 10000) // 100):02}m{alpha % 100:06.3f}s"
+delta_dms = lambda delta: format_dms(*convert_to_dms(delta))
+
+#%%
+NGS_alpha = hdul_cube[0].header[h+'AOS NGS ALPHA'] # Alpha coordinate for the NGS, [hms]
+NGS_delta = hdul_cube[0].header[h+'AOS NGS DELTA'] # Delta coordinate for the NGS, [dms]
+
+coord_NGS = SkyCoord(alpha_hms(NGS_alpha), delta_dms(NGS_delta), frame='icrs')
+
+ra_NGS, dec_NGS = (coord_NGS.ra.deg, coord_NGS.dec.deg)
+
+#%
+targ_alpha = hdul_cube[0].header[h+'TEL TARG ALPHA']
+# = 162333.83 / Alpha coordinate for the target 
+# 162333.83
+
+# 162509.77717      
+targ_delta = hdul_cube[0].header[h+'TEL TARG DELTA']
+# = -391346.1 / Delta coordinate for the target
+# -391346.1
+
+# -391700.69955
+ 
+coord_targ = SkyCoord(alpha_hms(targ_alpha), delta_dms(targ_delta), frame='fk4', equinox='J2000', obstime=start_time, location=UT4_location)
+coord_targ = SkyCoord(alpha_hms(targ_alpha), delta_dms(targ_delta), frame='gcrs', obstime=start_time, location=UT4_location)
+
+# coord_targ_dummy = SkyCoord(alpha_hms(targ_alpha), '-40d13m46.100s', frame='icrs')
+
+
+# print( coord_targ.separation(coord_targ_dummy).degree )
+
+#%%
+# ra_targ  = hdul_cube[0].header['RA']
+# dec_targ = hdul_cube[0].header['DEC']
+
+'''
+RA  = 245.892843 / [deg]  16:23:34.2 RA  (J2000) pointing           
+DEC =  -39.23000 / [deg] -39:13:48.0 DEC (J2000) pointing  
+'''
+# coord_targ = SkyCoord(ra=ra_targ*u.deg, dec=dec_targ*u.deg, frame='icrs')
+
+# #%
+tel_alt = hdul_cube[0].header[h+'TEL ALT']
+tel_az  = hdul_cube[0].header[h+'TEL AZ']
+
+altaz = AltAz(alt=tel_alt*u.deg, az=tel_az*u.deg, location=UT4_location, obstime=start_time)
+
+# coord_VLT = SkyCoord(altaz, frame='altaz', obstime=start_time)
+coord_VLT = SkyCoord(altaz, frame='altaz', obstime=start_time)
+
+#%
+
+tel_delta = hdul_cube[0].header[h+'INS ADC1 DEC']
+# = -391700.69955 / [deg] Telescope declination         
+tel_alpha = hdul_cube[0].header[h+'INS ADC1 RA']
+# = 162509.77717 / [deg] Telescope right ascension 
+coord_tel = SkyCoord(alpha_hms(tel_alpha), delta_dms(tel_delta), frame='icrs')
+
+# coord_VLT = coord_tel
+
+
+#%
+# Extract RA and Dec in degrees
+ra_VLT  = coord_VLT.icrs.ra.deg
+dec_VLT = coord_VLT.icrs.dec.deg
+
+print( coord_VLT.separation(coord_targ).degree )
+print( coord_VLT.separation(coord_NGS).degree )
+print( coord_targ.separation(coord_NGS).degree )
+
 
 #%%
 # Create a flat DataFrame with temporal dimension compressed
@@ -1246,6 +1400,88 @@ extent = np.array([-data.shape[0]/2, data.shape[0]/2, -data.shape[1]/2, data.sha
 plt.imshow(data, extent=extent.tolist(), origin='lower')
 plt.colorbar()
 plt.show()
+
+#%% ============================================================================================
+
+# Reducing the full-frame data
+fname_cube_multi = obs_types_df.loc[obs_types_df['obs_type'] == 'Science, globular']['obs_type'].index[0]
+fname_raw_multi  = files_matches['raw'].loc[files_matches['cube'] == fname_cube_multi].values[0]
+
+hdul_raw  = fits.open(os.path.join(MUSE_DATA_FOLDER+'wide_field/raw/',   fname_raw_multi ))
+hdul_cube = fits.open(os.path.join(MUSE_DATA_FOLDER+'wide_field/cubes/', fname_cube_multi))
+
+start_time = pd.to_datetime(time_from_str(hdul_cube[0].header['DATE-OBS'])).tz_localize('UTC')
+end_time   = pd.to_datetime(start_time + datetime.timedelta(seconds=hdul_cube[0].header['EXPTIME']))
+
+IRLOS_cube, win = GetIRLOScube(hdul_raw)
+IRLOS_data_df   = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
+LGS_data_df     = GetLGSdata(hdul_cube, fname_cube_multi, start_time)
+
+if win is not None:
+    IRLOS_data_df['window'] = win
+
+#%%
+MUSE_images, MUSE_data_df, misc_info    = GetImageSpectrumHeader(hdul_cube, show_plots=True, crop_cube=False)
+#%%
+Cn2_data_df, atm_data_df, asm_data_df   = GetRawHeaderData(hdul_raw)
+asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
+
+hdul_cube.close()
+hdul_raw.close()
+
+# Estimate the IRLOS phasecube from 2x2 PSFs
+OPD_subap, OPD_aperture, PSF_estim = (None,)*3
+if IRLOS_cube is not None:
+    if (res := get_IRLOS_phase(IRLOS_cube)) is not None:
+        OPD_subap, OPD_aperture, PSF_estim = res
+        OPD_subap = OPD_subap.astype(np.float32)
+        OPD_aperture = OPD_aperture.astype(np.float32)
+        PSF_estim = PSF_estim.astype(np.float32)
+
+IRLOS_phase_data = {
+    'OPD per subap': OPD_subap,
+    'OPD aperture':  OPD_aperture,
+    'PSF estimated': PSF_estim
+}
+
+# Create a flat DataFrame with temporal dimension compressed
+all_df = pd.concat([
+    IRLOS_data_df, LGS_data_df, MUSE_data_df, Cn2_data_df, atm_data_df,
+    asm_data_df, asm_df, massdimm_df, dimm_df, slodar_df
+])
+all_df.sort_index(inplace=True)
+
+flat_df = create_flat_dataframe(all_df)
+flat_df.insert(0, 'time', start_time)
+flat_df.insert(0, 'name', fname_cube_multi)
+
+#%%
+MUSE_images['IRLOS cube'] = IRLOS_cube
+
+data_store = {
+    'images': MUSE_images,
+    'IRLOS data': IRLOS_data_df,
+    'IRLOS phases': IRLOS_phase_data,
+    'LGS data': LGS_data_df,
+    'MUSE header data': MUSE_data_df,
+    'Raw Cn2 data': Cn2_data_df,
+    'Raw atm data': atm_data_df,
+    'Raw ASM data': asm_data_df,
+    'ASM data': asm_df,
+    'MASS-DIMM data': massdimm_df,
+    'DIMM data': dimm_df,
+    'SLODAR data': slodar_df,
+    'All data': flat_df,
+    'spectral data': misc_info,
+}
+
+path_new = fname_cube_multi.split('.fits')[0] + '.pickle'
+path_new = path_new.replace(':','-')
+path_new = MUSE_DATA_FOLDER+'wide_field/reduced/' + path_new
+
+with open(path_new, 'wb') as handle:
+    pickle.dump(data_store, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
 
 #%%
 # wmfsgw

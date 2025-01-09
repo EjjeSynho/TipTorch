@@ -410,6 +410,7 @@ def pdims(x, ns):
 
 min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
 
+
 # Computes Strehl ratio
 def SR(PSF, PSF_DL):
     ratio = torch.amax(PSF.abs(), dim=(-2,-1)) / torch.amax(PSF_DL, dim=(-2,-1)) * PSF_DL.sum(dim=(-2,-1)) / PSF.abs().sum(dim=(-2,-1)) 
@@ -478,7 +479,7 @@ def render_spectral_PSF(spectral_cube, λs):
         Rs[i], Gs[i], Bs[i] = wavelength_to_rgb(λ, show_invisible=True)
 
     for id in range(0, len(λs)):
-        img = np.log10(50+np.abs(spectral_cube) )
+        img = np.log10( 50+np.abs(spectral_cube) )
         img /= img.max()
 
         spectral_slice_R = img * Rs[None, None, id]
@@ -840,6 +841,7 @@ def draw_PSF_stack(
             plt.show()
 
 
+'''
 def FitGauss2D(PSF):
     nPix_crop = 16
     crop = slice(PSF.shape[0]//2-nPix_crop//2, PSF.shape[0]//2+nPix_crop//2)
@@ -868,7 +870,145 @@ def FitGauss2D(PSF):
     FWHM = lambda x: 2*np.sqrt(2*np.log(2)) * np.abs(x)
 
     return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
+'''
 
+def FitMoffat2D_astropy(PSF):
+    nPix_crop = 22  # Can be even or odd
+    N = PSF.shape[0]
+    center = N // 2
+
+    # Determine start and end indices for cropping
+    half_crop = nPix_crop // 2
+    if nPix_crop % 2 == 0:
+        # Even number of pixels
+        start = center - half_crop
+        end = center + half_crop
+    else:
+        # Odd number of pixels
+        start = center - half_crop
+        end = center + half_crop + 1
+
+    # Use np.s_ for slicing
+    crop = np.s_[start:end, start:end]
+
+    PSF_cropped = PSF[crop]
+    PSF_cropped = PSF_cropped / PSF_cropped.max()
+
+    # Create coordinate grids
+    y, x = np.indices(PSF_cropped.shape)
+
+    # Estimate initial parameters from data
+    A_init = PSF_cropped.max()
+    total = PSF_cropped.sum()
+    x0_init = (x * PSF_cropped).sum() / total
+    y0_init = (y * PSF_cropped).sum() / total
+    sx_init = np.sqrt(((x - x0_init)**2 * PSF_cropped).sum() / total)
+    sy_init = np.sqrt(((y - y0_init)**2 * PSF_cropped).sum() / total)
+    offset_init = PSF_cropped.min()
+
+    # For Moffat, we need gamma and alpha.
+    # gamma ~ a scale radius. We'll pick something related to the average of sx and sy.
+    gamma_init = 0.5 * (sx_init + sy_init)
+    alpha_init = 2.5  # A reasonable default; adjust as needed.
+
+    # Initial model: Moffat + constant offset
+    moffat_init = models.Moffat2D(amplitude=A_init, x_0=x0_init, y_0=y0_init,
+                                  gamma=gamma_init, alpha=alpha_init) \
+                 + models.Const2D(offset_init)
+
+    # Fit the model
+    fitter = fitting.LevMarLSQFitter()
+    fitted_model = fitter(moffat_init, x, y, PSF_cropped)
+
+    # Extract fitted parameters for Moffat
+    gamma_fit = fitted_model.gamma_0.value
+    alpha_fit = fitted_model.alpha_0.value
+
+    # Compute FWHM from Moffat parameters
+    # FWHM = 2 * gamma * sqrt(2^(1/alpha) - 1)
+    def moffat_FWHM(gamma, alpha):
+        return 2 * gamma * np.sqrt(2**(1/alpha) - 1)
+
+    FWHM_x = moffat_FWHM(gamma_fit, alpha_fit)
+    # For a perfectly circular Moffat, FWHM doesn't differ in x and y.
+    # If needed, one could attempt to get direction-dependent measures
+    # but Moffat2D is symmetric in x and y by definition.
+    FWHM_y = FWHM_x
+
+    return FWHM_x, FWHM_y, fitted_model(x, y), PSF_cropped
+
+
+def FitGauss2D_astropy(PSF):
+    nPix_crop = 21  # Can be even or odd
+    N = PSF.shape[0]
+    center = N // 2
+
+    # Determine start and end indices for cropping
+    half_crop = nPix_crop // 2
+    if nPix_crop % 2 == 0:
+        # Even number of pixels
+        start = center - half_crop
+        end = center + half_crop
+    else:
+        # Odd number of pixels
+        start = center - half_crop
+        end = center + half_crop + 1
+
+    # Use np.s_ for slicing
+    crop = np.s_[start:end, start:end]
+
+    PSF_cropped = PSF[crop]
+    PSF_cropped = PSF_cropped / PSF_cropped.max()
+
+    # Create coordinate grids
+    y, x = np.indices(PSF_cropped.shape)
+
+    # Estimate initial parameters from data
+    A_init = PSF_cropped.max()
+    total = PSF_cropped.sum()
+    x0_init = (x * PSF_cropped).sum() / total
+    y0_init = (y * PSF_cropped).sum() / total
+    sx_init = np.sqrt(((x - x0_init)**2 * PSF_cropped).sum() / total)
+    sy_init = np.sqrt(((y - y0_init)**2 * PSF_cropped).sum() / total)
+    offset_init = PSF_cropped.min()
+
+    # Initial model: Gaussian + constant offset
+    gauss_init = models.Gaussian2D(amplitude=A_init, x_mean=x0_init, y_mean=y0_init,
+                                   x_stddev=sx_init, y_stddev=sy_init) \
+                 + models.Const2D(offset_init)
+
+    # Fit the model
+    fitter = fitting.LevMarLSQFitter()
+    fitted_model = fitter(gauss_init, x, y, PSF_cropped)
+
+    # Extract fitted parameters
+    sx_fit = fitted_model.x_stddev_0.value
+    sy_fit = fitted_model.y_stddev_0.value
+
+    # Compute FWHM from the standard deviations
+    FWHM = lambda sigma: 2 * np.sqrt(2 * np.log(2)) * np.abs(sigma)
+
+    return FWHM(sx_fit), FWHM(sy_fit), fitted_model(x, y), PSF_cropped
+
+
+def FWHM_fitter(PSF_stack, function='Moffat', verbose=False):
+    if verbose:
+        from tqdm import tqdm
+    else:
+        tqdm = lambda x: x
+        
+    if function == 'Moffat':
+        func_ = FitMoffat2D_astropy
+    else:
+        func_ = FitGauss2D_astropy
+        
+    FWHMs = np.zeros([PSF_stack.shape[0], PSF_stack.shape[1], 2])
+    for i in tqdm(range(PSF_stack.shape[0])):
+        for l in range(PSF_stack.shape[1]):
+            f_x, f_y, _, _ = func_(PSF_stack[i,l,:,:])
+            FWHMs[i,l,0] = f_x.item()
+            FWHMs[i,l,1] = f_y.item()
+    return FWHMs
 
 
 '''
@@ -1195,23 +1335,29 @@ def CircPupil(samples, D=8.0, centralObstruction=1.12):
     return pupil * obs
 
 
-def PupilVLT(samples, vangle=[0,0], rotation_angle=0, secondary_diameter=1.12, spider_width=0.039, petal_modes=False):
+def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pixel_pad=True):
+    secondary_diameter = 1.12
     pupil_diameter = 8.0
+    spider_width = 0.039
     alpha = 101.4
 
     # Calculate shift of the obscuration
-    rad_vangle = np.deg2rad(vangle[0]/60)
-    shx = np.cos(np.deg2rad(vangle[1])) * 101.4 * np.tan(rad_vangle)
-    shy = np.sin(np.deg2rad(vangle[1])) * 101.4 * np.tan(rad_vangle)
+    rad_vangle = np.deg2rad(vangle[0] / 60) # Convert arcmin to radians
+    sh_x = np.cos(np.deg2rad(vangle[1])) * 101.4 * np.tan(rad_vangle)
+    sh_y = np.sin(np.deg2rad(vangle[1])) * 101.4 * np.tan(rad_vangle)
+
+    grid_spacing = pupil_diameter / (samples-1)  # Calculate grid spacing
+    effective_spider_width = max(spider_width, grid_spacing*1.25)  # Ensure at least one pixel width
 
     # Create coordinate matrices
-    delta = pupil_diameter / samples
-    ext = 2 * np.max(np.abs([shx, shy])) + 1
-    grid_range = np.arange(-(pupil_diameter + ext - 2 * delta) / 2, (pupil_diameter + ext) / 2 + delta, delta)
-    x, y = np.meshgrid(grid_range, grid_range)
+    scale_factor = 1 - 1/samples * float(not one_pixel_pad)
+    grid_range_x = np.linspace(-pupil_diameter/2, pupil_diameter/2, samples)*scale_factor + sh_x # [m]
+    grid_range_y = np.linspace(-pupil_diameter/2, pupil_diameter/2, samples)*scale_factor + sh_y # [m]
+
+    x, y = np.meshgrid(grid_range_x, grid_range_y)
 
     # Mask for pupil and central obstruction
-    mask = (np.sqrt((x-shx)**2 + (y-shy)**2) <= pupil_diameter / 2) & (np.sqrt(x**2+y**2) >= secondary_diameter*1.1 / 2)
+    mask = (np.sqrt((x-sh_x)**2 + (y-sh_y)**2) <= pupil_diameter / 2) & (np.sqrt(x**2+y**2) >= secondary_diameter*1.1 / 2)
 
     # Rotation function
     def rotate(x, y, angle):
@@ -1232,69 +1378,44 @@ def PupilVLT(samples, vangle=[0,0], rotation_angle=0, secondary_diameter=1.12, s
     # Calculate spider petals with rotation
     alpha_rad = np.deg2rad(alpha)
     slope = np.tan(alpha_rad / 2)
-    
+
     petal_conditions = [
         np.where(
-            (( -y_rot > spider_width/2 + slope*(-x_rot - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x_rot<0)  & (y_rot<=0)) | \
-            (( -y_rot > spider_width/2 + slope*( x_rot - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x_rot>=0) & (y_rot<=0))
+            ((-y_rot > effective_spider_width / 2 + slope * (-x_rot - secondary_diameter / 2) + effective_spider_width / np.sin(alpha_rad / 2) / 2) & (x_rot < 0) & (y_rot <= 0)) | \
+            ((-y_rot > effective_spider_width / 2 + slope * ( x_rot - secondary_diameter / 2) + effective_spider_width / np.sin(alpha_rad / 2) / 2) & (x_rot >= 0) & (y_rot <= 0))
         ),
         np.where(
-            (( -y_rot < spider_width/2 + slope*( x_rot - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x_rot>0) & (y_rot<=0)) | \
-            ((  y_rot < spider_width/2 + slope*( x_rot - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x_rot>0) & (y_rot>0))
+            ((-y_rot < effective_spider_width / 2 + slope * ( x_rot - secondary_diameter / 2) - effective_spider_width / np.sin(alpha_rad / 2) / 2) & (x_rot > 0) & (y_rot <= 0)) | \
+            (( y_rot < effective_spider_width / 2 + slope * ( x_rot - secondary_diameter / 2) - effective_spider_width / np.sin(alpha_rad / 2) / 2) & (x_rot > 0) & (y_rot > 0))
         ),
         np.where(
-            ((  y_rot > spider_width/2 + slope*(-x_rot - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x_rot<=0) & (y_rot>0)) | \
-            ((  y_rot > spider_width/2 + slope*( x_rot - secondary_diameter/2 ) + spider_width/np.sin( alpha_rad/2 )/2) & (x_rot>0)  & (y_rot>0))
+            (( y_rot > effective_spider_width / 2 + slope * (-x_rot - secondary_diameter / 2) + effective_spider_width / np.sin(alpha_rad / 2) / 2) & (x_rot <= 0) & (y_rot > 0)) | \
+            (( y_rot > effective_spider_width / 2 + slope * ( x_rot - secondary_diameter / 2) + effective_spider_width / np.sin(alpha_rad / 2) / 2) & (x_rot > 0) & (y_rot > 0))
         ),
         np.where(
-            (( -y_rot < spider_width/2 + slope*(-x_rot - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x_rot<0) & (y_rot<0)) |\
-            ((  y_rot < spider_width/2 + slope*(-x_rot - secondary_diameter/2 ) - spider_width/np.sin( alpha_rad/2 )/2) & (x_rot<0) & (y_rot>=0))
+            ((-y_rot < effective_spider_width / 2 + slope * (-x_rot - secondary_diameter / 2) - effective_spider_width / np.sin(alpha_rad / 2) / 2) & (x_rot < 0) & (y_rot < 0)) | \
+            (( y_rot < effective_spider_width / 2 + slope * (-x_rot - secondary_diameter / 2) - effective_spider_width / np.sin(alpha_rad / 2) / 2) & (x_rot < 0) & (y_rot >= 0))
         )
     ]
     petals = [create_petal(condition) for condition in petal_conditions]
 
-    # Resize petals
-    lim_x = [(np.fix((shy + ext / 2) / delta)).astype(int), (-np.fix((-shy + ext / 2) / delta)).astype(int)]
-    lim_y = [(np.fix((shx + ext / 2) / delta)).astype(int), (-np.fix((-shx + ext / 2) / delta)).astype(int)]
-    resized_petals = [resize(petal[lim_x[0]:lim_x[1], lim_y[0]:lim_y[1]], (samples, samples), anti_aliasing=False) for petal in petals]
+    mask_spiders = sum(petals)
 
     if petal_modes:
-        limits = [(( -0.5,  0.5 ),  (-0.25, 0.75)),
-                  (( -0.75, 0.25),  (-0.5,  0.5 )),
-                  (( -0.5,  0.5 ),  (-0.75, 0.25)),
-                  (( -0.25, 0.75),  (-0.5,  0.5 ))]
+        x_rot_norm = x_rot / x_rot[np.where(mask_spiders > 0.5)].std()
+        y_rot_norm = y_rot / y_rot[np.where(mask_spiders > 0.5)].std()
 
-        def normalize_petal_mode(petal, coord):
-            mode = petal.astype('double') * coord
-            mode -= mode.min()
-            mode /= (mode.max() + mode.min())
-            mode -= 0.5
-            mode[np.where(petal==False)] = 0.0
-            mode[np.where(petal==True)] -= mode[np.where(petal==True)].mean()
-            mode /= mode[np.where(petal==True)].std()
-            return mode
+        def make_island_TT_mode(X, petal, normalize=True):
+            mode = X - X[np.where(petal > 0.5)].mean()
+            if normalize:
+                mode /= mode[np.where(petal > 0.5)].std()
+            return mode * petal
 
-        tips, tilts  = [], []
+        tips  = [make_island_TT_mode(y_rot_norm, petal, False) for petal in petals]
+        tilts = [make_island_TT_mode(x_rot_norm, petal, False) for petal in petals]
 
-        for i in range(4):
-            xx, yy = np.meshgrid(np.linspace(*limits[i][0],  samples), np.linspace(*limits[i][1], samples))
-            xx_rot, yy_rot = rotate(xx, yy, rotation_angle)
-            tips.append(  normalize_petal_mode(resized_petals[i], yy_rot) )
-            tilts.append( normalize_petal_mode(resized_petals[i], xx_rot) )
-
-        return np.dstack([*resized_petals, *tips, *tilts])
-
+        petal_modes = np.dstack([*petals, *tips, *tilts])
+        return petal_modes
     else:
-        return sum(resized_petals)
-
-
-def VLTpupilArea(instrument='SPHERE'): # [m2]
-    if instrument == 'SPHERE':
-        pupil = fits.getdata('C:/Users/akuznets/Projects/TIPTOP/P3/aoSystem/data/VLT_CALIBRATION\VLT_PUPIL/ALC2LyotStop_measured.fits').astype('float')
-    else:
-        raise NotImplementedError
-    relative_area = pupil.sum() / (np.pi*(pupil.shape[0]//2-6.5)**2)
-    true_area = np.pi * 8**2 * relative_area
-    return true_area
-
-# %%
+        return mask_spiders
+    

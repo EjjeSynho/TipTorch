@@ -17,6 +17,8 @@ from astropy.stats import sigma_clipped_stats
 from photutils.background import Background2D, MedianBackground
 import warnings
 from skimage.restoration import inpaint
+from skimage.morphology import binary_dilation, disk, binary_erosion, square
+
 
 # delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
 # frame_delay = lambda r: r/1e3 * 2.3  if (r/1e3*2.3) > 1.0 else 1.0 # delay of 2.3 frames for 1000 Hz loop rate
@@ -79,6 +81,22 @@ def SamplesFromDITs(init_sample):
         sample['PSF R'] = init_sample['PSF R'][i,...][None,...]
 
     return data_samples1
+
+
+def process_mask(mask):
+    mask_modified = np.zeros_like(mask.cpu().numpy())
+    N_src, N_wvl = mask.shape[0], mask.shape[1]
+
+    for i in range(N_src):
+        for j in range(N_wvl):
+            mask_layer = mask[i,j,...].cpu().numpy()
+            mask_layer = binary_dilation(
+                binary_erosion(mask_layer, square(3)),
+                disk(3)
+            )
+            mask_modified[i,j,...] = mask_layer
+            
+    return torch.tensor(mask_modified).to(mask.device)
 
 
 def separate_background(img, mask=None):

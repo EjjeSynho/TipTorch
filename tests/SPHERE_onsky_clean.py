@@ -79,7 +79,7 @@ from data_processing.SPHERE_preproc_utils import LoadSPHEREsampleByID
 # 2726, 3121, 3613, 3651, 3706, 3875, 3882, 3886, 3906, 3909, 4002, 405]
 # 1296
 # 444
-sample_id = 637 #1296 #305 #471    427
+sample_id = 4087 #637 #1296 #305 #471    427
 #2818 #2112 #1921 #3909
 
 # LWE_flag = psf_df.loc[sample_id]['LWE']
@@ -98,7 +98,7 @@ PSF_var  = PSF_data[0]['PSF (var)'].unsqueeze(0)
 PSF_mask = PSF_data[0]['mask (mean)'].unsqueeze(0)
 norms    = PSF_data[0]['norm (mean)']
 del PSF_data
-merged_config['sensor_science']['FieldOfView'] = 255
+merged_config['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
 # if psf_df.loc[sample_id]['Nph WFS'] < 10:
 PSF_mask   = PSF_mask * 0 + 1
 # LWE_flag   = psf_df.loc[sample_id]['LWE']
@@ -124,6 +124,20 @@ basis = LWE_basis(toy)
 PSF_1 = toy()
 #print(toy.EndTimer())
 PSF_DL = toy.DLPSF()
+
+
+#%%
+
+
+plt.imshow(PSF_1[0,0,...].log10().cpu().numpy())
+plt.show()
+plt.imshow(PSF_1[0,1,...].log10().cpu().numpy())
+plt.show()
+
+plt.imshow(PSF_0[0,0,...].abs().log10().cpu().numpy())
+plt.show()
+plt.imshow(PSF_0[0,1,...].abs().log10().cpu().numpy())
+plt.show()
 
 #%%
 from tools.utils import safe_centroid, RadialProfile, wavelength_to_rgb

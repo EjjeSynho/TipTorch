@@ -80,7 +80,6 @@ selected_entries_input = muse_df_norm.columns.values.tolist()
 def batch_config_and_images(ids):
     data_dict = {}
     PSF_0, norms, bgs, merged_config = GetMUSEonsky(ids, derotate_PSF=True, device=torch.device('cpu'))
-    # PSF_0, merged_config
         
     data_dict['PSF_0']   = PSF_0
     data_dict['norms']   = norms
