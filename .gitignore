@@ -11,3 +11,4 @@ data/*.npy
 data/*.json
 data/*.predictor
 data/*.txt
+tests/runs/
