@@ -2,6 +2,7 @@
 %reload_ext autoreload
 %autoreload 2
 
+import os
 import sys
 sys.path.append('..')
 
@@ -25,962 +26,535 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
-import os
-from tools.utils import seeing
-
+from tools.utils import seeing, corr_plot
+from astropy.io import fits
+from data_processing.normalizers import CreateTransformSequenceFromFile
+from sklearn.inspection import permutation_importance
+from matplotlib.colors import LogNorm
 from project_globals import WEIGHTS_FOLDER
+
+
+def AnalyseImpurities(model, feature_names, X_test=None, y_test=None, save_dir=None):
+    # Compute MDI (Mean Decrease in Impurity) feature importances
+    importances = model.feature_importances_
+    forest_importances_MDI_std = np.std([tree[0].feature_importances_ for tree in model.estimators_], axis=0)
+
+    forest_importances_MDI = pd.Series(importances, index=feature_names)
+
+    fig, ax = plt.subplots()
+    forest_importances_MDI.plot.bar(yerr=forest_importances_MDI_std, ax=ax)
+    ax.set_title("Feature importances using mean decrease in impurity")
+    ax.set_ylabel("Mean decrease in impurity")
+    ax.set_xticklabels(feature_names, rotation=40, ha='right')
+    fig.tight_layout()
+    
+    if save_dir is None:
+        plt.show()
+    else:
+        plt.savefig(save_dir+'_MDI_importances.pdf', dpi=300)
+
+    forest_importances_perm, forest_importances_perm_std = None, None
+    
+    if X_test is not None and y_test is not None:
+        result = permutation_importance(model, X_test, y_test, n_repeats=10, random_state=42, n_jobs=-1)
+
+        forest_importances_perm = pd.Series(result.importances_mean, index=feature_names)
+        forest_importances_perm_std = result.importances_std
+
+        fig, ax = plt.subplots()
+        forest_importances_perm.plot.bar(yerr=result.importances_std, ax=ax)
+        ax.set_title("Feature importances using permutation on full model")
+        ax.set_ylabel("Mean accuracy decrease")
+        ax.set_xticklabels(feature_names, rotation=40, ha='right')
+        fig.tight_layout()
+        
+        if save_dir is None:
+            plt.show()
+        else:
+            plt.savefig(save_dir+'_PI_importances.pdf', dpi=300)
+    
+    return forest_importances_MDI, forest_importances_MDI_std, forest_importances_perm, forest_importances_perm_std
 
 #%% Initialize data sample
 with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
-try:
-    with open(SPHERE_DATA_FOLDER+'fitted_df.pickle', 'rb') as handle:
-        fitted_df = pickle.load(handle)
-except:
-    print('No fitted data found')
+with open(SPHERE_DATA_FOLDER+'fitted_df.pickle', 'rb') as handle:
+    fitted_df = pickle.load(handle)
 
-psf_df = psf_df[psf_df['Low quality'] == False]
-psf_df = psf_df[psf_df['LWE'] == False]
-psf_df = psf_df[psf_df['Multiples'] == False]
-psf_df = psf_df[psf_df['Corrupted'] == False]
-psf_df = psf_df[~pd.isnull(psf_df['r0 (SPARTA)'])]
-psf_df = psf_df[~pd.isnull(psf_df['Nph WFS'])]
-psf_df = psf_df[~pd.isnull(psf_df['Strehl'])]
-psf_df = psf_df[~pd.isnull(psf_df['FWHM'])]
-psf_df = psf_df[psf_df['Nph WFS'] < 5000]
-# psf_df = psf_df[psf_df['λ left (nm)'] == 1625]
-psf_df = psf_df[psf_df['λ left (nm)'] < 1626]
-psf_df = psf_df[psf_df['λ left (nm)'] > 1624]
-psf_df['Seeing (SPARTA)'] = seeing(psf_df['r0 (SPARTA)'], 500e-9)
+with open('../data/temp/fitted_df_norm.pickle', 'rb') as handle:
+    fitted_df_norm = pickle.load(handle)
 
-psf_df['Wind direction (200 mbar)'].fillna(psf_df['Wind direction (header)'], inplace=True)
-psf_df['Wind speed (200 mbar)'].fillna(psf_df['Wind speed (header)'], inplace=True)
-psf_df.rename(columns={'Filter WFS': 'λ WFS (nm)'}, inplace=True)
-psf_df.rename(columns={'Nph WFS': 'Nph WFS (data)'}, inplace=True)
-psf_df.rename(columns={'r0 (SPARTA)': 'r0 (data)'}, inplace=True)
+with open('../data/temp/psf_df_norm.pickle', 'rb') as handle:
+    psf_df_norm = pickle.load(handle)
 
+with open(SPHERE_DATA_FOLDER+'images_df.pickle', 'rb') as handle:
+    images_df = pickle.load(handle)
 
-#%%
-# good_fits_folder = 'E:/ESO/Data/SPHERE/good_fits_TipTorch/'
-# files = os.listdir(good_fits_folder)
-# good_ids = [int(file.split('.')[0]) for file in files]
-# psf_df = psf_df.loc[good_ids]
+SPHERE_pupil = fits.getdata('../data/calibrations/VLT_CALIBRATION/VLT_PUPIL/ALC2LyotStop_measured.fits')
+LWE_basis = np.load('../data/LWE_basis_SPHERE.npy')
 
-fitted_ids = list( set( fitted_df.index.values.tolist() ).intersection( set(psf_df.index.values.tolist()) ) )
-fitted_df = fitted_df[fitted_df.index.isin(fitted_ids)]
+df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/psf_df_norm_transforms.pickle')
+df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/fitted_df_norm_transforms.pickle')
 
-# Absolutize positive-only values
-for entry in ['r0','Jx','Jy','Jxy']: #,'F (left)','F (right)']:
-    fitted_df[entry] = fitted_df[entry].abs()
-fitted_df.sort_index(inplace=True)
+get_ids = lambda df: set( df.index.values.tolist() )
 
-fitted_df['dn'] = fitted_df['dn'].abs()
-fitted_df['n']  = fitted_df['n'].abs()
-fitted_df['Rec. noise'] = np.sqrt((fitted_df['n']+fitted_df['dn']).abs())*psf_df['λ WFS (nm)']/2/np.pi * 1e9
-fitted_df.rename(columns={'r0': 'r0 (fit)'}, inplace=True)
-fitted_df.rename(columns={'Nph WFS': 'Nph WFS (fit)'}, inplace=True)
-fitted_df['SR fit']  = 0.5 * (fitted_df['SR fit (left)'] + fitted_df['SR fit (right)'])
-fitted_df['SR data'] = 0.5 * (fitted_df['SR data (left)'] + fitted_df['SR data (right)'])
-fitted_df['J']       = np.sqrt(fitted_df['Jx'].pow(2) + fitted_df['Jy'].pow(2))
-fitted_df['F']       = 0.5 * (fitted_df['F (left)'] + fitted_df['F (right)'])
+ids_0 = get_ids(fitted_df)
+ids_1 = get_ids(psf_df)
+ids_2 = get_ids(fitted_df_norm)
+ids_3 = get_ids(psf_df_norm)
+ids   = list( ids_0.intersection(ids_1).intersection(ids_2).intersection(ids_3) )
 
-ids = fitted_df.index.intersection(psf_df.index)
+print('Final number of good samples:', len(ids))
+
+psf_df = psf_df.loc[ids]
 fitted_df = fitted_df.loc[ids]
-synth_df = psf_df.loc[ids]
+psf_df_norm = psf_df_norm.loc[ids]
+fitted_df_norm = fitted_df_norm.loc[ids]
 
-df = pd.concat([synth_df, fitted_df], axis=1).fillna(0)
-
-#%% Compute data transformations
-from data_processing.normalizers import Uniform, TransformSequence
-
-transforms_input = {}
-transforms_input['Airmass']                   = TransformSequence( transforms = [ Uniform(a=1.0, b=2.2) ])
-transforms_input['r0 (data)']                 = TransformSequence( transforms = [ Uniform(a=0.05, b=0.45) ])
-transforms_input['Seeing (MASSDIMM)']         = TransformSequence( transforms = [ Uniform(a=0.3, b=1.5) ])
-transforms_input['Wind direction (header)']   = TransformSequence( transforms = [ Uniform(a=0, b=360) ])
-transforms_input['Wind speed (header)']       = TransformSequence( transforms = [ Uniform(a=0.0, b=17.5) ])
-transforms_input['Wind direction (MASSDIMM)'] = TransformSequence( transforms = [ Uniform(a=0, b=360) ])
-transforms_input['Wind speed (MASSDIMM)']     = TransformSequence( transforms = [ Uniform(a=0.0, b=17.5) ])
-transforms_input['Tau0 (header)']             = TransformSequence( transforms = [ Uniform(a=0.0, b=0.025) ])
-transforms_input['Tau0 (MASSDIMM)']           = TransformSequence( transforms = [ Uniform(a=0.0, b=0.02) ])
-transforms_input['λ left (nm)']               = TransformSequence( transforms = [ Uniform(a=psf_df['λ left (nm)'].min(), b=psf_df['λ left (nm)'].max()) ])
-transforms_input['λ right (nm)']              = TransformSequence( transforms = [ Uniform(a=psf_df['λ right (nm)'].min(), b=psf_df['λ right (nm)'].max()) ])
-transforms_input['Rate']                      = TransformSequence( transforms = [ Uniform(a=psf_df['Rate'].min(), b=psf_df['Rate'].max()) ])
-transforms_input['FWHM']                      = TransformSequence( transforms = [ Uniform(a=0.5, b=3.0) ])
-transforms_input['Nph WFS (data)']            = TransformSequence( transforms = [ Uniform(a=0, b=200) ])
-transforms_input['Flux WFS']                  = TransformSequence( transforms = [ Uniform(a=0,   b=2000)] )
-transforms_input['Strehl']                    = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ])
-transforms_input['Jitter X']                  = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
-transforms_input['Jitter Y']                  = TransformSequence( transforms = [ Uniform(a=0.0, b=60.0) ])
-transforms_input['Turb. speed']               = TransformSequence( transforms = [ Uniform(a=0.0, b=25.0) ])
-transforms_input['Humidity']                  = TransformSequence( transforms = [ Uniform(a=3.0, b=51.0) ])
-transforms_input['Pressure']                  = TransformSequence( transforms = [ Uniform(a=740, b=750) ])
-transforms_input['Temperature']               = TransformSequence( transforms = [ Uniform(a=0, b=25) ])
-transforms_input['ITTM pos (std)']            = TransformSequence( transforms = [ Uniform(a=0, b=0.25) ])
-transforms_input['Focus']                     = TransformSequence( transforms = [ Uniform(a=-1, b=1.5) ])
-transforms_input['DM pos (std)']              = TransformSequence( transforms = [ Uniform(a=0.125, b=0.275) ])
-transforms_input['ITTM pos (avg)']            = TransformSequence( transforms = [ Uniform(a=-0.1, b=0.1) ])
-transforms_input['DM pos (avg)']              = TransformSequence( transforms = [ Uniform(a=-0.025, b=0.025) ])
-transforms_input['Seeing (SPARTA)']           = TransformSequence( transforms = [ Uniform(a=0.2, b=1.1) ])
-
-input_df = psf_df.copy()
-for entry in transforms_input:
-    input_df[entry] = transforms_input[entry].forward(input_df[entry])
-
-transforms_output = {}
-transforms_output['dx']              = TransformSequence( transforms = [ Uniform(a=-0.5, b=0.5) ] )
-transforms_output['dy']              = TransformSequence( transforms = [ Uniform(a=-0.5, b=0.5) ] )
-transforms_output['r0 (fit)']        = TransformSequence( transforms = [ Uniform(a=0.0,  b=1.0) ] )
-transforms_output['n']               = TransformSequence( transforms = [ Uniform(a=0.0,  b=17.0 ) ] )
-transforms_output['dn']              = TransformSequence( transforms = [ Uniform(a=0, b=50) ] )
-transforms_output['Rec. noise']      = TransformSequence( transforms = [ Uniform(a=0, b=1250) ] )
-transforms_output['J']               = TransformSequence( transforms = [ Uniform(a=0, b=40) ] )
-transforms_output['Jx']              = TransformSequence( transforms = [ Uniform(a=0, b=40) ] )
-transforms_output['Jy']              = TransformSequence( transforms = [ Uniform(a=0, b=40) ] )
-transforms_output['Jxy']             = TransformSequence( transforms = [ Uniform(a=0, b=300) ] )
-transforms_output['Nph WFS (fit)']   = TransformSequence( transforms = [ Uniform(a=0, b=300) ] )
-transforms_output['F']               = TransformSequence( transforms = [ Uniform(a=0, b=1.5) ] )
-transforms_output['F (left)']        = TransformSequence( transforms = [ Uniform(a=0, b=1.5) ] )
-transforms_output['F (right)']       = TransformSequence( transforms = [ Uniform(a=0, b=1.5) ] )
-transforms_output['bg (left)']       = TransformSequence( transforms = [ Uniform(a=-1e-5, b=1e-5) ] )
-transforms_output['bg (right)']      = TransformSequence( transforms = [ Uniform(a=-1e-5, b=1e-5) ] )
-transforms_output['SR data']         = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
-transforms_output['SR fit']          = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
-transforms_output['SR data (left)']  = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
-transforms_output['SR data (right)'] = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
-transforms_output['SR fit (left)']   = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
-transforms_output['SR fit (right)']  = TransformSequence( transforms = [ Uniform(a=0.0, b=1.0) ] )
-
-try:
-    output_df = fitted_df.copy()
-    for entry in transforms_output:
-        output_df[entry] = transforms_output[entry].forward(output_df[entry])
-except:
-    print('No fitted data found')
-
-# rows_with_nan = output_df.index[output_df.isna().any(axis=1)].values.tolist()
-# rows_with_nan += fitted_df.index[fitted_df['F (right)'] > 2].values.tolist()
-# rows_with_nan += fitted_df.index[fitted_df['Jxy'] > 300].values.tolist()
-# rows_with_nan += fitted_df.index[fitted_df['Jx'] > 70].values.tolist()
-# rows_with_nan += fitted_df.index[fitted_df['Jy'] > 70].values.tolist()
-# psf_df.drop(rows_with_nan, inplace=True)
-# input_df.drop(rows_with_nan, inplace=True)
-# fitted_df.drop(rows_with_nan, inplace=True)
-# output_df.drop(rows_with_nan, inplace=True)
-
-# good_ids = psf_df.index.values.tolist()
-# print(len(good_ids), 'samples are in the dataset')
-
-def corr_plot(data, entry_x, entry_y, lims=None):
-    j = sns.jointplot(data=data, x=entry_x, y=entry_y, kind="kde", space=0, alpha = 0.8, fill=True, colormap='royalblue' )
-    i = sns.scatterplot(data=data, x=entry_x, y=entry_y, alpha=0.5, ax=j.ax_joint, color = 'black', s=10)
-    sns.set_style("darkgrid")
-    
-    j.ax_joint.set_aspect('equal')
-    lims = [np.min([j.ax_joint.get_xlim(), j.ax_joint.get_ylim()]),
-            np.max([j.ax_joint.get_xlim(), j.ax_joint.get_ylim()])]
-
-    j.ax_joint.set_xlim(lims)
-    j.ax_joint.set_ylim(lims)
-    j.ax_joint.plot([lims[0], lims[1]], [lims[0], lims[1]], 'gray', linewidth=1.5, linestyle='--')
-    
-    # plt.grid()
-    plt.show()
+for entry in ['r0', 'Jx', 'Jy', 'Jxy']: #,'F L','F R']:
+    fitted_df[entry] = fitted_df[entry].abs()
+    fitted_df_norm[entry] = fitted_df_norm[entry].abs()
 
 
-#%%
-transforms = {**transforms_input, **transforms_output}
+#%% ================================== Predict Strehl ==================================
+# =======================================================================================
+df_norm = pd.concat([psf_df_norm, fitted_df_norm], axis=1)#.fillna(0)
 
-trans_df = df.copy()
-for entry in transforms:
-    trans_df[entry] = transforms[entry].forward(trans_df[entry])
-
-selected_X = ['r0 (data)',
-              'Rate',
-              'Nph WFS (data)',
-              'Wind speed (header)',
-              'Wind direction (header)',
-            #   'Flux WFS',
-              'Wind speed (200 mbar)',
-              'Wind direction (200 mbar)']
-
-selected_Y = [
-    'Rec. noise',
-    'Jx',
-    'Jy',
-    'F (left)',
-    'F (right)']
-
-
-X_df = trans_df[selected_X].fillna(0)
-Y_df = trans_df[selected_Y].fillna(0)
-
-NN2in  = lambda X: { selected: transforms[selected].backward(X[:,i]) for i,selected in enumerate(selected_X) }
-NN2fit = lambda Y: { selected: transforms[selected].backward(Y[:,i]) for i,selected in enumerate(selected_Y) }
-in2NN  = lambda inp: torch.from_numpy(( np.stack([transforms[a].forward(inp[a].values) for a in selected_X]))).T
-fit2NN = lambda out: torch.from_numpy(( np.stack([transforms[a].forward(out[a].values) for a in selected_Y]))).T
-
-for entry in selected_X:
-    trans_df = trans_df[trans_df[entry].abs() < 3]
-    # print(trans_df[entry].abs() < 3)
-
-for entry in selected_Y:
-    trans_df = trans_df[trans_df[entry].abs() < 3]
-
-ids = X_df.index.intersection(Y_df.index)
-X_df = X_df.loc[ids]
-Y_df = Y_df.loc[ids]
-
-X_df_train, X_df_test, y_df_train, y_df_test = train_test_split(X_df, Y_df, test_size=0.2, random_state=42)
-
-class ParamPredictor(nn.Module):
-    def __init__(self, in_size, out_size, hidden_size=100, dropout_p=0.0):
-        super(ParamPredictor, self).__init__()
-        self.fc1 = nn.Linear(in_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, out_size)
-        
-        self.dropout1 = nn.Dropout(dropout_p)
-        self.dropout2 = nn.Dropout(dropout_p)
-        self.dropout3 = nn.Dropout(dropout_p)
-
-    def forward(self, x):
-        x = torch.tanh(self.fc1(x))
-        x = self.dropout1(x)
-        x = torch.tanh(self.fc2(x))
-        x = self.dropout2(x)
-        x = torch.tanh(self.fc3(x))
-        return x
-
-net = ParamPredictor(len(selected_X), len(selected_Y), 100, 0.05)
-net = net.to(device)
-
-optimizer = optim.Adam(net.parameters(), lr=0.0001)
-
-X_train = torch.from_numpy(X_df_train.to_numpy()).to(device).float()
-Y_train = torch.from_numpy(y_df_train.to_numpy()).to(device).float()
-X_val   = torch.from_numpy(X_df_test.to_numpy()).to(device).float()
-Y_val   = torch.from_numpy(y_df_test.to_numpy()).to(device).float()
-
-loss_fn = nn.MSELoss()
-
-weights_name = WEIGHTS_FOLDER/f'param_predictor_{len(selected_X)}x{len(selected_Y)}_real.pth'
-
-if not os.path.exists(weights_name):
-    num_iters = 30000
-    for iter in range(num_iters):
-        optimizer.zero_grad()
-        loss_train = loss_fn(net(X_train), Y_train)
-        loss_train.backward()
-        optimizer.step()
-        
-        with torch.no_grad():
-            loss_val = loss_fn(net(X_val), Y_val)
-        print('({:d}/{:d}) train, valid: {:.2f}, {:.2f}'.format(iter+1, num_iters, loss_train.item()*100, loss_val.item()*100), end='\r')
-
-    torch.save(net, weights_name)
-else:
-    net = torch.load(weights_name)
-
-y_pred = net(X_val).cpu().detach().numpy()
-
-del X_train, Y_train, X_val, Y_val
-torch.cuda.empty_cache()
-
-y_pred_df = pd.DataFrame(y_pred, index=X_df_test.index, columns=y_df_test.columns)
-
-#%% ================ Telemetry SR from telemetry ===================
-#% Select the entries to be used in training
 selected_entries_X = [
-        # 'Airmass',
-        # 'Seeing (MASSDIMM)',
-        # 'FWHM',
-        # 'Wind direction (MASSDIMM)',
-        # 'Wind speed (MASSDIMM)',
-        # 'Tau0 (MASSDIMM)',
-        # 'Seeing (SPARTA)',
-        'Wind direction (header)',
-        'Wind speed (header)',
-        'Tau0 (header)',
-        'r0 (SPARTA)',
-        'Nph WFS',
-        'Rate',
-        'λ left (nm)',
-        'λ right (nm)',
-        # 'Jitter X',
-        # 'Jitter Y',
-        # 'Turb. speed',
-        # 'Pressure',
-        # 'Humidity'
-        # 'Temperature'
-        # 'ITTM pos (std)',
-        # 'Focus',
-        # 'DM pos (std)'
-    ]
+    'Airmass',
+    'r0 (SPARTA)',
+    'Azimuth',
+    'Altitude',
+    # 'Seeing (SPARTA)',
+    # 'FWHM',
+    'Wind direction (header)',
+    # 'Wind direction (MASSDIMM)',
+    'Wind speed (header)',
+    'Wind speed (SPARTA)',
+    # 'Wind speed (MASSDIMM)',
+    'Tau0 (header)',
+    'Tau0 (SPARTA)',
+    # 'Jitter X', 'Jitter Y',
+    'Focus',
+    'ITTM pos (avg)',
+    'ITTM pos (std)',
+    'DM pos (avg)',
+    'DM pos (std)',
+    'Pressure',
+    # 'Humidity',
+    # 'Temperature',
+    'Nph WFS',
+    # 'Flux WFS',
+    'Rate',
+    # 'DIT Time',
+    'Sequence time',
+    'λ left (nm)',  'λ right (nm)',
+    # 'Δλ left (nm)', 'Δλ right (nm)',
+    # 'mag V', 'mag R', 'mag G', 'mag J', 'mag H', 'mag K'
+#--------------------------------------------------------------------------------------------------------
+]
 
 selected_entries_Y = ['Strehl']
 
-X_df = input_df[selected_entries_X]
-Y_df = input_df[selected_entries_Y]
+for entry in selected_entries_Y:
+    if entry in selected_entries_X:
+        selected_entries_X.pop(selected_entries_X.index(entry))
 
-X = X_df.to_numpy()
-Y = Y_df.to_numpy()[:,0]
+    if entry not in df_norm.columns.values:
+        selected_entries_X.pop(selected_entries_X.index(entry))
 
-# Split the dataset into a training set and a test set
+X = df_norm[selected_entries_X].to_numpy()
+Y = df_norm[selected_entries_Y].to_numpy()
+
+#%%
 X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-#%
+
 gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-reg = LinearRegression()
-reg.fit(X_train, y_train)
 gbr.fit(X_train, y_train)
 y_pred = gbr.predict(X_test)
-y_pred_reg = reg.predict(X_test)
-
-# y_pred = y_pred_reg
-
-err = np.abs(y_test-y_pred) * 100
-print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
-print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
-print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
-print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
-print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
 
 test_df = pd.DataFrame({
-    'SR predicted': transforms_input['Strehl'].backward(y_pred),
-    'SR from data': transforms_input['Strehl'].backward(y_test),
+    'SR predicted': df_transforms_onsky['Strehl'].backward(y_pred),
+    'SR from data': df_transforms_onsky['Strehl'].backward(y_test.flatten()),
 })
-
 corr_plot(test_df, 'SR predicted', 'SR from data')
+# plt.savefig('C:/Users/akuznets/Desktop/thesis_results/SPHERE/SR_pred/SR_corr_plot.pdf', dpi=300)
+_ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test) #, save_dir='C:/Users/akuznets/Desktop/thesis_results/SPHERE/SR_pred/SR_corr')
 
-#%% ================ Fitted SR from telemetry ===================
-#% Select the entries to be used in training
-selected_entries_X = [
-        'Airmass',
-        'r0 (SPARTA)',
-        # 'Seeing (MASSDIMM)',
-        # 'FWHM',
-        # 'Wind direction (MASSDIMM)',
-        # 'Wind speed (MASSDIMM)',
-        'Wind direction (header)',
-        'Wind speed (header)',
-        'Tau0 (header)',
-        # 'Tau0 (MASSDIMM)',
-        'Nph WFS',
-        'Rate',
-    #   'Jitter X',
-    #   'Jitter Y',
-        'λ left (nm)',
-        'λ right (nm)',
-    #   'Turb. speed',
-    #   'Pressure',
-    #   'Humidity',
-    #   'Temperature'
-    ]
+#%% ================================== Predict all ==================================
+# =======================================================================================
 
-selected_entries_Y = ['SR fit']
+selected_entries_Y = ['r0', 'dn', 'Jx', 'Jy', 'Jxy', 'F L', 'F R']
 
-X_df = input_df[selected_entries_X]
-Y_df = output_df[selected_entries_Y]
+X = df_norm[selected_entries_X].to_numpy()
+Y = df_norm[selected_entries_Y].to_numpy()
 
-X = X_df.to_numpy()
-Y = Y_df.to_numpy()[:,0]
-
-# Split the dataset into a training set and a test set
-X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-#%
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-reg = LinearRegression()
-reg.fit(X_train, y_train)
-gbr.fit(X_train, y_train)
-y_pred = gbr.predict(X_test)
-y_pred_reg = reg.predict(X_test)
-
-# y_pred = y_pred_reg
-
-err = np.abs(y_test-y_pred) * 100
-print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
-print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
-print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
-print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
-print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
-
-test_df = pd.DataFrame({
-    'SR predicted': transforms_input['Strehl'].backward(y_pred),
-    'SR from data': transforms_input['Strehl'].backward(y_test),
-})
-
-corr_plot(test_df, 'SR predicted', 'SR from data')
-#%% ================ Fitted parameters (J,F) from telemetry ===================
-#% Select the entries to be used in training
-selected_entries_X = [
-        'Airmass',
-        'r0 (SPARTA)',
-        # 'Seeing (MASSDIMM)',
-        # 'FWHM',
-        # 'Wind direction (MASSDIMM)',
-        # 'Wind speed (MASSDIMM)',
-        'Wind direction (header)',
-        'Wind speed (header)',
-        'Tau0 (header)',
-        # 'Tau0 (MASSDIMM)',
-        'Nph WFS',
-        'Rate',
-    #   'Jitter X',
-    #   'Jitter Y',
-        'λ left (nm)',
-        'λ right (nm)',
-    #   'Turb. speed',
-    #   'Pressure',
-    #   'Humidity',
-    #   'Temperature'
-    ]
-
-selected_entries_Y = ['J']
-
-X_df = input_df[selected_entries_X]
-Y_df = output_df[selected_entries_Y]
-
-X = X_df.to_numpy()
-Y = Y_df.to_numpy()[:,0]
-
-# Split the dataset into a training set and a test set
-X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-#%
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-reg = LinearRegression()
-reg.fit(X_train, y_train)
-gbr.fit(X_train, y_train)
-y_pred = gbr.predict(X_test)
-y_pred_reg = reg.predict(X_test)
-
-# y_pred = y_pred_reg
-
-err = np.abs(y_test-y_pred) * 100
-print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
-print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
-print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
-print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
-print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
-
-test_df = pd.DataFrame({
-    'J predicted': transforms_output['J'].backward(y_pred),
-    'J test': transforms_output['J'].backward(y_test),
-})
-
-corr_plot(test_df, 'J predicted', 'J test')
-
-#%%
-# Split the dataset into a training set and a test set
-X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-#%
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-reg = LinearRegression()
-reg.fit(X_train, y_train)
-gbr.fit(X_train, y_train)
-y_pred = gbr.predict(X_test)
-y_pred_reg = reg.predict(X_test)
-
-# y_pred = y_pred_reg
-
-err = np.abs(y_test-y_pred) * 100
-print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
-print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
-print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
-print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
-print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
-
-
-test_df = pd.DataFrame({
-    'J predicted': transforms_output_synth['Jx'].backward(y_pred),
-    'J test': transforms_output_synth['Jx'].backward(y_test),
-})
-
-corr_plot(test_df, 'J predicted', 'J test')
-
-
-#%%
-with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
-    synth_psf_df = pickle.load(handle)
-    selected_ids = list( set( synth_df.index.values.tolist() ).intersection( set(synth_df.index.values.tolist()) ) )
-    synth_psf_df = synth_psf_df.loc[selected_ids]
-
-synth_input_df = pd.DataFrame( {a: transforms_input[a].forward(synth_df[a].values) for a in transforms_input.keys()} )
-synth_input_df.index = synth_df.index
-
-synth_output_df = pd.DataFrame( {a: transforms_output[a].forward(synth_fitted_df[a].values) for a in transforms_output.keys()} )
-synth_output_df.index = synth_fitted_df.index
-
-#%%
-rows_with_nan = synth_output_df.index[synth_output_df.isna().any(axis=1)].values.tolist()
-rows_with_nan += synth_fitted_df.index[synth_fitted_df['F (right)'] > 2].values.tolist()
-rows_with_nan += synth_fitted_df.index[synth_fitted_df['Jxy'] > 300].values.tolist()
-rows_with_nan += synth_fitted_df.index[synth_fitted_df['Jx'] > 70].values.tolist()
-rows_with_nan += synth_fitted_df.index[synth_fitted_df['Jy'] > 70].values.tolist()
-
-synth_psf_df.drop(rows_with_nan, inplace=True)
-synth_input_df.drop(rows_with_nan, inplace=True)
-synth_fitted_df.drop(rows_with_nan, inplace=True)
-synth_output_df.drop(rows_with_nan, inplace=True)
-
-#%%
-#% Select the entries to be used in training
-selected_entries_X = [
-        'Airmass',
-        'r0 (SPARTA)',
-        # 'Seeing (MASSDIMM)',
-        # 'FWHM',
-        # 'Wind direction (MASSDIMM)',
-        # 'Wind speed (MASSDIMM)',
-        'Wind direction (header)',
-        'Wind speed (header)',
-        'Tau0 (header)',
-        # 'Tau0 (MASSDIMM)',
-        'Nph WFS',
-        'Rate',
-    #   'Jitter X',
-    #   'Jitter Y',
-        'λ left (nm)',
-        'λ right (nm)',
-    #   'Turb. speed',
-    #   'Pressure',
-    #   'Humidity',
-    #   'Temperature'
-    ]
-
-selected_entries_Y = ['SR fit']
-
-X_df = synth_input_df[selected_entries_X]
-Y_df = synth_output_df[selected_entries_Y]
-
-X = X_df.to_numpy()
-Y = Y_df.to_numpy()[:,0]
-
-# Split the dataset into a training set and a test set
-X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-#%
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-reg = LinearRegression()
-reg.fit(X_train, y_train)
-gbr.fit(X_train, y_train)
-y_pred = gbr.predict(X_test)
-y_pred_reg = reg.predict(X_test)
-
-# y_pred = y_pred_reg
-
-err = np.abs(y_test-y_pred) * 100
-print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
-print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
-print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
-print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
-print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
-
-test_df = pd.DataFrame({
-    'SR predicted': transforms_output['SR fit'].backward(y_pred),
-    'SR test': transforms_output['SR fit'].backward(y_test),
-})
-
-corr_plot(test_df, 'SR predicted', 'SR test')
-
-
-
-#%% ========================= AAAAAAAAAAA ==============================
-maximum_oulier = y_test[np.where(err == err.max())[0].item()]
-outlier_sample = X_df.iloc[Y.tolist().index(maximum_oulier)]
-outlier_input = psf_df.loc[outlier_sample.name]
-
-#%% 
-#% Select the entries to be used in training
-
-merged_df = pd.concat([input_df, output_df], axis=1)
-
-selected_entries_X = [
-    'SR fit',
-    'r0',
-    'Rate',
-    'Tau0 (header)',
-    'Wind speed (header)'
-    ]
-    # 'Wind direction (header)',
-
-# selected_entries_Y = ['SR fit']
-selected_entries_Y = ['J']
-
-X_df = merged_df[selected_entries_X]
-Y_df = merged_df[selected_entries_Y]
-
-X = X_df.to_numpy()
-Y = Y_df.to_numpy()[:,0]
-
-# Split the dataset into a training set and a test set
 X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
 
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-reg = LinearRegression()
-
-gbr.fit(X_train, y_train)
-reg.fit(X_train, y_train)
-
-y_pred = gbr.predict(X_test)
-y_pred_reg = reg.predict(X_test)
-
-# y_pred = y_pred_reg
-
-err = np.abs(
-    transforms_output[selected_entries_Y[0]].backward(y_test) - 
-    transforms_output[selected_entries_Y[0]].backward(y_pred))
-
-print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()))
-print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)))
-print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()))
-print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()))
-print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()))
-
-test_df = pd.DataFrame({
-    'Test': transforms_output['Jy'].backward(y_test),
-    'Pred': transforms_output['Jy'].backward(y_pred),
-})
-
-corr_plot(test_df, 'Test', 'Pred')
+mlp = MLPRegressor(hidden_layer_sizes=(50,50,), max_iter=2000, random_state=42)
+mlp.fit(X_train, y_train)
+y_pred = mlp.predict(X_test)
 
 #%%
-test_df = {
-    'F pred': transforms_output['F (left)'].backward(y_pred),
-    'F test': transforms_output['F (left)'].backward(y_test),
-    # 'SR fit': fitted_df['SR fit'],
+param_to_plot = 'F R'
+id = selected_entries_Y.index(param_to_plot)
+
+test_df = pd.DataFrame({
+    param_to_plot+' predicted':   df_transforms_fitted[param_to_plot].backward(y_pred[:,id].flatten()),
+    param_to_plot+' from fitted': df_transforms_fitted[param_to_plot].backward(y_test[:,id].flatten()),
+})
+corr_plot(test_df, param_to_plot+' predicted', param_to_plot+' from fitted')
+
+# _ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
+
+
+
+#%% ================================== Predict LWE WFE ==================================
+# =======================================================================================
+
+# df_norm = df_norm[df_norm['LWE'] == True]
+X = df_norm[selected_entries_X].to_numpy()
+Y = df_norm['LWE coefs'].apply(lambda x: np.linalg.norm(x, ord=2)) # Just calculate the normalized LWE WFE
+
+X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
+
+gbr_LWE = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
+gbr_LWE.fit(X_train, y_train)
+y_pred = gbr_LWE.predict(X_test)
+
+#%%
+test_df = pd.DataFrame({
+    'LWE predicted':   df_transforms_fitted['LWE coefs'].backward(y_pred),
+    'LWE from fitted': df_transforms_fitted['LWE coefs'].backward(y_test),
+})
+corr_plot(test_df, 'LWE predicted', 'LWE from fitted', lims=[0, 200])
+
+# plt.savefig('C:/Users/akuznets/Desktop/thesis_results/SPHERE/LWE_pred/LWE_corr_plot.pdf', dpi=300)
+_ = AnalyseImpurities(gbr_LWE, selected_entries_X, X_test, y_test) #, 'C:/Users/akuznets/Desktop/thesis_results/SPHERE/LWE_pred/LWE_corr')
+
+#%%
+from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, explained_variance_score, median_absolute_error
+
+MAPE  = mean_absolute_percentage_error(y_test, y_pred)
+EVP   = explained_variance_score(y_test, y_pred) # 1.0 is the best
+MedAE = median_absolute_error(y_test, y_pred)
+
+print( 'Mean absolute percentage error (MAPE): {:.3f}'.format(MAPE) )
+print( 'Explained Variance Score (EVP) {:.3f}'.format(EVP) )
+print( 'Median absolute error (MedAE) {:.3f}'.format(MedAE) )
+
+
+#%% ============================ Predict LWE coefficients ============================
+# ====================================================================================
+
+from sklearn.decomposition import PCA
+
+LWE_coefs = np.array([x for x in df_norm['LWE coefs'].to_numpy()])
+
+pca = PCA(n_components=8)
+pca.fit(LWE_coefs)
+
+plt.title('PCA of LWE coefs')
+plt.scatter(LWE_coefs[:,0], pca.inverse_transform(pca.transform(LWE_coefs))[:,0], label='Train')
+plt.xlabel('Original')
+plt.ylabel('Reconstructed')
+
+Y_pca = pca.transform(LWE_coefs)
+
+#%%
+# Make dataframes from the PCA results
+X_train, X_test, y_train_pca, y_test_pca = train_test_split(X, Y_pca, test_size=0.2, random_state=42)
+
+gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
+mor = MultiOutputRegressor(gbr, n_jobs=-1)
+mor.fit(X_train, y_train_pca)
+y_pred_pca = mor.predict(X_test)
+
+y_pred  = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_pred_pca))
+y_test  = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_test_pca))
+y_train = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_train_pca))
+
+#%%
+from joblib import dump, load
+
+store_dict = {
+    'PCA': pca,
+    'inputs': selected_entries_X,
+    'LWE WFE predictor': mor,
+    'LWE coefs predictor': gbr_LWE,
 }
+dump(store_dict, '../data/LWE.predictor')
 
-test_df = pd.DataFrame(test_df)
+# IDs = [456, 1112, 1610, 579]
 
-sns.jointplot(data=test_df, x='F pred', y='F test', kind="kde", space=0, fill=True)
-# sns.kdeplot(data=test_df, x='F pred', y='F test', fill=True, palette='viridis')
-# plt.axes().set_aspect('equal')
+# def run_predictor(IDs):
+#     X_inp = df_norm.loc[IDs][selected_entries_X].to_numpy()
+#     LWE_WFE_pred = df_transforms_fitted['LWE coefs'].backward(gbr_LWE.predict(X_inp))
+#     LWE_coefs_pred_pca = mor.predict(X_inp)
+#     LWE_coefs_pred = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(LWE_coefs_pred_pca))
+#     return LWE_coefs_pred
 
 #%%
-import numpy as np
-from scipy.stats import (multivariate_normal as mvn, norm)
-from scipy.stats._multivariate import _squeeze_output
-from scipy.optimize import minimize
+WFE_pred_pow = df_transforms_fitted['LWE coefs'].backward(gbr_LWE.predict(X_test))
+
+WFE_pred = np.linalg.norm(y_pred, ord=2, axis=1)
+
+y_pred_norm = y_pred / WFE_pred[:,None]
+y_pred_norm *= WFE_pred_pow[:,None]
+
+WFE_pred = np.linalg.norm(y_pred_norm, ord=2, axis=1)
+WFE_test = np.linalg.norm(y_test, ord=2, axis=1)
+
+plt.scatter(WFE_test, WFE_pred, s=2)
+# plt.scatter(WFE_pred, WFE_pred_pow, s=2)
+
+# plt.xlim(0, 200)
+# plt.ylim(0, 200)
+y_pred = y_pred_norm
+
+#%%
+names = ['Piston',]*4 + ['Tip',]*4 + ['Tilt',]*4
+
+for i in range(0, 4):
+    names[i]   += f' {i+1}'
+    names[i+4] += f' {i+1}'
+    names[i+8] += f' {i+1}'
+# names.pop(0)
+
+MDIs, MDI_stds, PIs, PI_stds = [], [], [], []
+
+for i in tqdm(range(0, 11)):
+    test_df = pd.DataFrame({
+        names[i]+' predicted [nm RMS]': df_transforms_fitted['LWE coefs'].backward(y_pred[:,i]),
+        names[i]+' from data [nm RMS]': df_transforms_fitted['LWE coefs'].backward(y_test[:,i]),
+    })
+    corr_plot(test_df, names[i]+' predicted [nm RMS]', names[i]+' from data [nm RMS]', title=names[i])
+    # plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/LWE/LWE_coefs_corr_plots/LWE_coefs_{i}.png')
+
+    MDI, MDI_std, PI, PI_std = AnalyseImpurities(mor.estimators_[ 0], selected_entries_X, X_test, y_test[:,i])
+
+    MDIs.append(MDI)
+    MDI_stds.append(MDI_std)
+    PIs.append(PI)
+    PI_stds.append(PI_std)
+
+MDIs     = np.stack(MDIs)
+PIs      = np.stack(PIs)
+MDI_stds = np.stack(MDI_stds)
+PI_stds  = np.stack(PI_stds)
+
+#%%
+MDIs_m     = MDIs.mean(axis=0)
+PIs_m      = PIs.mean(axis=0)
+MDI_stds_m = MDI_stds.mean(axis=0)
+PI_stds_m  = PI_stds.mean(axis=0)
+
+fig, ax = plt.subplots(1, 2, figsize=(15, 5))
+
+ax[0].bar(selected_entries_X, MDIs_m, yerr=MDI_stds_m)
+ax[0].set_title("Mean decrease in impurity")
+ax[0].set_ylabel("Mean decrease in impurity")
+ax[0].set_xticklabels(selected_entries_X, rotation=40, ha='right')
+
+ax[1].bar(selected_entries_X, PIs_m, yerr=PI_stds_m)
+ax[1].set_title("Permutation importance")
+ax[1].set_ylabel("Mean accuracy decrease")
+ax[1].set_xticklabels(selected_entries_X, rotation=40, ha='right')
+
+fig.tight_layout()
+plt.savefig('C:/Users/akuznets/Desktop/presa_buf/LWE/LWE_coefs_importances.png')
+
+#%%
+phase_pred  = np.dot(y_pred, LWE_basis.reshape(12,-1))
+phase_pred  = phase_pred.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
+
+phase_test  = np.dot(y_test, LWE_basis.reshape(12,-1))
+phase_test  = phase_test.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
+
+phase_train = np.dot(y_train, LWE_basis.reshape(12,-1))
+phase_train = phase_train.reshape(-1, LWE_basis.shape[1], LWE_basis.shape[2])
 
 
-class multivariate_skewnorm:
-    def __init__(self, shape, cov=None):
-        self.dim   = len(shape)
-        self.shape = np.asarray(shape)
-        self.mean  = np.zeros(self.dim)
-        self.cov   = np.eye(self.dim) if cov is None else np.asarray(cov)
+flipped_ids = []
 
-    def pdf(self, x):
-        return np.exp(self.logpdf(x))
-        
-    def logpdf(self, x):
-        x    = mvn._process_quantiles(x, self.dim)
-        pdf  = mvn(self.mean, self.cov).logpdf(x)
-        cdf  = norm(0, 1).logcdf(np.dot(x, self.shape))
-        return _squeeze_output(np.log(2) + pdf + cdf)
+for i in range(0, phase_pred.shape[0]):
+    A, B = phase_test[i,...], phase_pred[i,...]
 
-    def rvs_slow(self, size=1):
-        std_mvn = mvn(np.zeros(self.dim), np.eye(self.dim))
-        x       = np.empty((size, self.dim))
-        
-        # Apply rejection sampling.
-        n_samples = 0
-        while n_samples < size:
-            z = std_mvn.rvs(size=1)
-            u = np.random.uniform(0, 2*std_mvn.pdf(z))
-            if not u > self.pdf(z):
-                x[n_samples] = z
-                n_samples += 1
-        
-        # Rescale based on correlation matrix.
-        chol = np.linalg.cholesky(self.cov)
-        x = (chol @ x.T).T
-        return x
+    MSE_1 = np.mean( (A-B)**2 )
+    MSE_2 = np.mean( (A+B)**2 )
+
+    if MSE_1 > MSE_2:
+        phase_pred[i,...] *= -1
+        flipped_ids.append(i)
+
+flipped_id = np.array(flipped_ids) 
+
+
+diff = phase_test - phase_pred
+
+def calc_WFEs(cube):
     
-    def rvs_fast(self, size=1):
-        aCa      = self.shape @ self.cov @ self.shape
-        delta    = (1 / np.sqrt(1 + aCa)) * self.cov @ self.shape
-        cov_star = np.block([[np.ones(1),     delta],
-                             [delta[:, None], self.cov]])
+    if cube.ndim == 2:
+        cube = cube[None,...]
+    
+    WFEs = np.zeros(cube.shape[0])
+
+    for i in range(cube.shape[0]):
+        WFEs[i] = np.std(cube[i,...][SPHERE_pupil>0])
         
-        x        = mvn(np.zeros(self.dim+1), cov_star).rvs(size)
-        x0, x1   = x[:, 0], x[:, 1:]
-        inds     = x0 <= 0
-        x1[inds] = -1 * x1[inds]
-        return x1
+    return np.squeeze(WFEs)
 
-        
-# Assuming your multivariate_skewnorm class is defined above as we have discussed
+WFE_test = calc_WFEs(phase_test)
+WFE_pred = calc_WFEs(phase_pred)
+dWFE     = calc_WFEs(diff)
 
-# First, let's create an instance of the multivariate_skewnorm distribution
-shape = np.array([5, 1])
-cov = np.array([[1, 0.9], [0.9, 1.0]])
-skewnorm = multivariate_skewnorm(shape, cov)
+# _ = plt.hist(WFE_test, bins=20, alpha=0.5, label='Test')
+# _ = plt.hist(WFE_pred, bins=20, alpha=0.5, label='Predicted')
+# plt.legend()
 
-# Now let's generate some data from this distribution
-data = skewnorm.rvs_fast(size=1000)
+print(WFE_test.mean(), WFE_pred.mean(), dWFE.mean())
 
-# # Now let's fit the distribution to this data
-# skewnorm.fit(data)
+#%%
+rand_id = np.random.randint(0, phase_pred.shape[0])
 
-sns.kdeplot(x=data[:,0], y=data[:,1], fill=True)
+A = phase_test[rand_id,...]
+B = phase_pred[rand_id,...]
+C = diff      [rand_id,...]
 
-# Now the shape and cov attributes of skewnorm should be close to the original parameters
-# print(skewnorm.shape)
-# print(skewnorm.cov)
+# A /= calc_WFEs(A)
+# B /= calc_WFEs(B)
+# C = A - B
 
+fig, ax = plt.subplots(1, 3, figsize=(8, 4))
 
+c_lim = np.array([50, np.abs(A.max()), np.abs(B.max())]).max()
 
-#%% ====================================================================================================
-#% Select the entries to be used in training
-selected_entries_X = [
-                      'Airmass',
-                      'r0 (SPARTA)',
-                      'FWHM',
-                      'Wind direction (header)',
-                      'Wind speed (header)',
-                      'Tau0 (header)',
-                      'Nph WFS',
-                      'Rate',
-                      'Jitter X',
-                      'Jitter Y',
-                      'λ left (nm)',
-                      'λ right (nm)',
-                    #   'Turb. speed',
-                    #   'Pressure',
-                    #   'Humidity',
-                    #   'Temperature'
-                      ]
+ax[0].imshow(A, vmin=-c_lim, vmax=c_lim, cmap='viridis')
+ax[0].set_title('Fitted LWE')
+ax[0].grid(False)
+ax[0].axis('off')
 
-selected_entries_Y = ['Jx', 'Jy', 'Jxy', 'F (left)', 'F (right)']
+ax[1].imshow(B, vmin=-c_lim, vmax=c_lim, cmap='viridis')
+ax[1].set_title('Predicted LWE')
+ax[1].grid(False)
+ax[1].axis('off')
 
-X_df = input_df[selected_entries_X]
-Y_df = output_df[selected_entries_Y]
-# choice = 'F (left)'
-choice = 'Jx'
+ax[2].imshow(C, vmin=-c_lim, vmax=c_lim, cmap='viridis')
+ax[2].set_title('Difference')
+ax[2].grid(False)
+ax[2].axis('off')
 
-# X = X_df.to_numpy()
-# Y = Y_df[choice].to_numpy()
-# Split the dataset into a training set and a test set
-# X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-X_train_df, X_test_df, y_train_df, y_test_df = train_test_split(X_df, Y_df, test_size=0.2, random_state=42)
+PCM=ax[2].get_children()[0] #get the mappable, the 1st and the 2nd are the x and y axes
+plt.colorbar(PCM, ax=ax, anchor=(2.2,0.0))
 
-X_train = X_train_df.to_numpy()
-X_test  = X_test_df.to_numpy()
-y_train = y_train_df[choice].to_numpy()
-y_test  = y_test_df[choice].to_numpy()
+plt.tight_layout()
+# plt.show()
+# plt.savefig(f'../data/temp/LWE_shapes/LWE_{rand_id}.png')
+
+#%%
+
+phase_all = np.concatenate([phase_train, phase_test], axis=0)
+#%%
+rand_id = np.random.randint(0, phase_all.shape[0])
+# phase_all -= phase_all.mean(axis=0)[None,...]
 
 #%
-model_choice = 'gbr'
+plt.imshow(phase_all[rand_id,...], cmap='viridis')
+plt.grid(False)
+plt.colorbar()
+plt.axis('off')
 
-if model_choice == 'gbr':
-    # Create a gradient boosting regressor
-    gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-    # Train the model
-    gbr.fit(X_train, y_train)
-    # Make predictions using the test set
-    y_pred = gbr.predict(X_test)
-    
-elif model_choice == 'rf':
-    rf = RandomForestRegressor(n_estimators=300, max_depth=7, random_state=42)
-    # Train the model
-    rf.fit(X_train, y_train)
-    # Make predictions using the test set
-    y_pred = rf.predict(X_test)
-    
-elif model_choice == 'svr':
-    svr = SVR(kernel='rbf', C=100, gamma=0.1, epsilon=.1)
-    # Train the model
-    svr.fit(X_train, y_train)
-    # Make predictions using the test set
-    y_pred = svr.predict(X_test)
-    
-elif model_choice == 'mlp':
-    # Create an MLPRegressor object
-    mlp = MLPRegressor(hidden_layer_sizes=(50,50,), max_iter=2000, random_state=42)
-    # Train the MLPRegressor
-    mlp.fit(X_train, y_train)
-    # Make predictions with the MLPRegressor
-    y_pred = mlp.predict(X_test)
+#%% =================================================================================================
+im_data = np.abs( images_df[rand_id][0][0,0,...] )
+im_fit  = np.abs( images_df[rand_id][1][0,0,...] )
 
-#%
-y_test_1 = transforms_output[choice].backward(y_test)
-y_pred_1 = transforms_output[choice].backward(y_pred)
+norm = LogNorm(vmin=np.maximum(im_data.min(), 1), vmax=np.minimum(im_data.max(), 1e16))
+fig2, ax2 = plt.subplots(1, 2)
 
-if choice == 'Jx' or choice == 'Jy' or choice == 'Jxy':
-    err = np.abs(y_test_1-y_pred_1)
-    print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "[mas]")
-    print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "[mas]")
-    print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "[mas]")
-    print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "[mas]")
-    print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "[mas]")
-    
-elif choice == 'F (left)' or choice == 'F (right)':
-    err = np.abs(y_test_1-y_pred_1) * 100
-    print("The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), "%")
-    print("The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), "%")
-    print("The std absolute error (MAE) on test set: {:.4f}".format(err.std()), "%")
-    print("The max absolute error (MAE) on test set: {:.4f}".format(err.max()), "%")
-    print("The min absolute error (MAE) on test set: {:.4f}".format(err.min()), "%")
+ax2[0].imshow(im_data, cmap='viridis', norm=norm)
+ax2[0].set_title('Data')
+ax2[0].grid(False)
+ax2[0].axis('off')
 
+ax2[1].imshow(im_fit, cmap='viridis', norm=norm)
+ax2[1].set_title('Fitted')
+ax2[1].grid(False)
+ax2[1].axis('off')
+plt.tight_layout()
 
-
-#%% ====================================================================================================
-# dict2vec = lambda Y: np.stack([transforms_output[a].forward(Y[a].values) for a in selected_entries_Y]).T
-vec2dict = lambda Y: { selected_entries_Y[i]: transforms_output[selected_entries_Y[i]].backward(Y[:,i]) for i in range(len(selected_entries_Y)) }
-
-X_df = input_df[selected_entries_X]
-# X_df = psf_df[selected_entries_X]
-Y_df = output_df[selected_entries_Y]
-
-X_train_df, X_test_df, y_train_df, y_test_df = train_test_split(X_df, Y_df, test_size=0.2, random_state=42)
-
-X_train = X_train_df.to_numpy()
-X_test  = X_test_df.to_numpy()
-y_train = y_train_df.to_numpy()
-y_test  = y_test_df.to_numpy()
-
-model_choice = 'mlp'
-
-if model_choice == 'gbr':
-    # Create a gradient boosting regressor
-    gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-    # Make it a multi-output regressor
-    mor = MultiOutputRegressor(gbr, n_jobs=-1)
-    # Train the MultiOutputRegressor
-    mor.fit(X_train, y_train)
-    # Make predictions with the MultiOutputRegressor
-    y_pred = mor.predict(X_test)
-
-elif model_choice == 'mlp':
-    # Create an MLPRegressor object
-    mlp = MLPRegressor(hidden_layer_sizes=(50,50,), max_iter=2000, random_state=42)
-    # Train the MLPRegressor
-    mlp.fit(X_train, y_train)
-    # Make predictions with the MLPRegressor
-    y_pred = mlp.predict(X_test)
-
+# plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/LWE/LWE_{rand_id}.png', dpi=300)
 
 #%%
-y_pred_1 = pd.DataFrame(vec2dict(y_pred))
-y_test_1 = pd.DataFrame(vec2dict(y_test))
-delta = y_pred_1 - y_test_1
-
-def print_err(err, name, a):
-    if a == "%": err *= 100	
-    print(name + ":")
-    print("\t The mean absolute error (MAE) on test set: {:.4f}".format(err.mean()), a)
-    print("\t The median absolute error (MAE) on test set: {:.4f}".format(np.median(err)), a)
-    print("\t The std absolute error (MAE) on test set: {:.4f}".format(err.std()), a)
-    print("\t The max absolute error (MAE) on test set: {:.4f}".format(err.max()), a)
-    print("\t The min absolute error (MAE) on test set: {:.4f}".format(err.min()), a)
-    print()
-
-print_err(delta['Jx'].abs(),        'Jx', "[mas]")
-print_err(delta['Jy'].abs(),        'Jy', "[mas]")
-print_err(delta['Jxy'].abs(),       'Jxy', "[mas]")
-print_err(delta['F (left)'].abs(),  'F (left)', "%")
-print_err(delta['F (right)'].abs(), 'F (right)', "%")
+test_df = pd.DataFrame({
+    'Photons (data)'  : psf_df['Nph WFS'].apply(lambda x: np.abs(x.real)),
+    'Photons (fitted)': fitted_df['Nph WFS (new)'].apply(lambda x: np.abs(x.real)),
+    'IDs'             : fitted_df.index.values
+})
+test_df['Ratio'] = test_df['Photons (data)'] / test_df['Photons (fitted)']
+test_df.set_index('IDs', inplace=True)
 
 #%%
-from project_globals import device
-import torch.nn as nn
-import torch.optim as optim
+test_df_1 = test_df[(  test_df['Ratio'] >= 1.1) | (test_df['Ratio'] <= 0.9)]
+test_df_1 = test_df_1[(1/test_df_1['Ratio'] <  0.1)]
+test_df_1 = test_df_1[ (test_df_1['Photons (data)']   >= 55) & (test_df_1['Photons (data)']   <= 65)]
+test_df_1 = test_df_1[ (test_df_1['Photons (fitted)'] >= 5)  & (test_df_1['Photons (fitted)'] <= 7) ]
 
-# Define the network architecture
-class Gnosis(nn.Module):
-    def __init__(self, in_size, out_size, hidden_size=50, dropout_p=0.0):
-        super(Gnosis, self).__init__()
-        self.fc1 = nn.Linear(in_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, hidden_size)
-        self.fc3 = nn.Linear(hidden_size, out_size)
-        
-        self.dropout1 = nn.Dropout(dropout_p)
-        self.dropout2 = nn.Dropout(dropout_p)
-        self.dropout3 = nn.Dropout(dropout_p)
+test_df_2 = test_df[(  test_df['Ratio'] >= 1.1) | (test_df['Ratio'] <= 0.9)]
+test_df_2 = test_df_2[ (test_df_2['Photons (data)'] < 1000) ]
+test_df_2 = test_df_2[ (test_df_2['Photons (fitted)'] > 200) ]
+test_df_2 = test_df_2[ (test_df_2['Photons (fitted)'] < 500) ]
 
-    def forward(self, x):
-        x = torch.tanh(self.fc1(x))
-        x = self.dropout1(x)
-        x = torch.tanh(self.fc2(x))
-        x = self.dropout2(x)
-        x = torch.tanh(self.fc3(x))
-        x = self.dropout3(x)
-        return x
-    
-# Initialize the network, loss function and optimizer
-net = Gnosis(X_train.shape[1], y_train.shape[1], 50)
 #%%
-import torchbnn as bnn
+from tools.utils import draw_PSF_stack
 
-net = nn.Sequential(
-    bnn.BayesLinear(prior_mu=0, prior_sigma=0.1, in_features=X_train.shape[1], out_features=50),
-    nn.Tanh(),
-    bnn.BayesLinear(prior_mu=0, prior_sigma=0.1, in_features=50, out_features=50),
-    nn.Tanh(),
-    bnn.BayesLinear(prior_mu=0, prior_sigma=0.1, in_features=50, out_features=y_train.shape[1]),
-    nn.Tanh(),
-)
+ids_strange_low = [1265, 1418, 1425, 1914, 2857, 2859, 2873, 3661, 3722, 3732, 3733, 3734, 3979]
 
-ce_loss = nn.MSELoss()
-kl_loss = bnn.BKLLoss(reduction='mean', last_layer_only=False)
-kl_weight = 0.1
-#%
-net.double().to(device)
+ids_strange_high = [114, 549, 811, 816, 1176, 1192, 1304, 1573, 2146, 2726, 3121,
+                    3613, 3651, 3706, 3875, 3882, 3886, 3906, 3909, 4002, 405]
 
-optimizer = optim.Adam(net.parameters(), lr=0.0001)
+rand_id = np.random.choice(ids_strange_low)
+rand_id = np.random.choice(ids_strange_high)
 
-X_train_torch = torch.from_numpy(X_train).double().to(device)
-y_train_torch = torch.from_numpy(y_train).double().to(device)
+print(psf_df.loc[rand_id]['Nph WFS'].real)
+print(fitted_df.loc[rand_id]['Nph WFS (new)'])
 
-num_iters = 20000
-for iter in range(num_iters):  # number of epochs
-    optimizer.zero_grad()   # zero the gradient buffers
-    ce = ce_loss(net(X_train_torch), y_train_torch)
-    kl = kl_loss(net)
-    cost = ce + kl_weight*kl
-    cost.backward()
-    print('({:d}/{:d}) current loss: {:.2f}'.format(iter+1, num_iters, cost.item()), end='\r')
-    # loss = loss_fn(net(X_train_torch), y_train_torch)  # compute loss
-    # loss.backward()  # backpropagation
-    optimizer.step()  # update weights
+PSF_0 = torch.tensor(images_df[rand_id][0])
+PSF_1 = torch.tensor(images_df[rand_id][1])
 
-torch.save(net, WEIGHTS_FOLDER/'GnosisBNN.pth')
+draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)
+
 #%%
-# y_pred_torch = net(torch.from_numpy(X_test).double().to(device)).cpu().detach().numpy()
-y_test_1 = pd.DataFrame(vec2dict(y_test))
+test_df_2 = test_df
 
-dfs = []
-# y_preds_torch = []
-for i in range(200):
-    y_pred_torch = net(torch.from_numpy(X_test).double().to(device)).cpu().detach().numpy()
-    y_pred_torch_1 = pd.DataFrame(vec2dict(y_pred_torch))
-    delta_torch = y_pred_torch_1 - y_test_1
-    dfs.append(delta_torch.abs())
+# Do linear fit
+X = test_df_2['Photons (data)'].values.reshape(-1, 1)
+Y = test_df_2['Photons (fitted)'].values
 
-a = lambda entry: (np.array([df[entry] for df in dfs]).mean(axis=0), np.array([df[entry] for df in dfs]).std(axis=0))
+lr = LinearRegression()
+lr.fit(X, Y)
+Y_pred = lr.predict(X)
 
-def print_err_prob(err, std, name, a):
-    if a == "%": err *= 100	
-    print(name + ":")
-    print("\t The mean absolute error (MAE) on test set: {:.2f}+-{:.2f}".format(err.mean(), std.mean()), a)
-    print("\t The median absolute error (MAE) on test set: {:.2f}+-{:.2f}".format(np.median(err), np.median(std)), a)
-    print("\t The std absolute error (MAE) on test set: {:.2f}+-{:.2f}".format(err.std(), std.std()), a)
-    print("\t The max absolute error (MAE) on test set: {:.2f}+-{:.2f}".format(err.max(), std.max()), a)
-    print("\t The min absolute error (MAE) on test set: {:.2f}+-{:.2f}".format(err.min(), std.min()), a)
-    print()
+print('Slope:', lr.coef_[0])
 
-print_err_prob(*a('Jx'), 'Jx', "[mas]")
-print_err_prob(*a('Jy'), 'Jy', "[mas]")
-print_err_prob(*a('Jxy'), 'Jxy', "[mas]")
-print_err_prob(*a('F (left)'), 'F (left)', "%")
-print_err_prob(*a('F (right)'), 'F (right)', "%")
+# draw linear fit
+# plt.plot(X, Y_pred, color='red')
+plt.plot([0, 10000], [0, 10000], color='red')
+plt.plot([0, 10000], [0, 9000], color='red')
+plt.plot([0, 10000], [0, 1000])
+plt.plot([0, 10000], [0, 1800])
+plt.scatter(X, Y, s=2)
+plt.xlabel('Photons (data)')
+plt.ylabel('Photons (fitted)')
+plt.xlim(0, 2e2)
+plt.ylim(0, 2e2)
+plt.show()
 
-# print_err_prob(delta_torch['Jx'].abs(), y_pred_torch_std[:,0], 'Jx', "[mas]")
-# print_err_prob(delta_torch['Jy'].abs(), y_pred_torch_std[:,1], 'Jy', "[mas]")
-# print_err_prob(delta_torch['Jxy'].abs(), y_pred_torch_std[:,2], 'Jxy', "[mas]")
-# print_err_prob(delta_torch['F (left)'].abs(), y_pred_torch_std[:,3], 'F (left)', "%")
-# print_err_prob(delta_torch['F (right)'].abs(), y_pred_torch_std[:,4], 'F (right)', "%")
+#%%
+sns.scatterplot(data=test_df_2, x='Photons (data)', y='Photons (fitted)', s=2)
+# plt.xlim(0, 4e2)
+# plt.ylim(0, 4e2)
 
-
-# %%
+#%%
+sns.displot(test_df, x='Ratio', bins=1000, kde=True)
+plt.xlim(0, 4)
