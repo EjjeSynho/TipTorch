@@ -581,22 +581,21 @@ PSFs_1_val_all = {}
 PSFs_2_val_all = {}
 PSFs_3_val_all = {}
 
-batches_ids = []
-
 fitted_entries = [
     'F L', 'F R', 'bg L', 'bg R', 'dx L', 'dx R', 'dy L', 'dy R',
     'Wind dir', 'r0', 'Jx', 'Jy', 'Jxy', 'dn', 'LWE coefs'
 ]
 
-# Output options
-L_or_R_str = 'L'
-fitted_or_pred = 'pred'
-
-L_or_R = 0 if L_or_R_str == 'L' else 1
+calculate_plots = False
+save_plots = False
+pred_inputs_stats, fixed_inputs_stats = [], []
+configs = []
 
 net.eval()
 with torch.no_grad():
+    # for wvl in [1625]:
     for wvl in wvls_L_all:
+        # wvl = 1625
         
         PSFs_0_val, PSFs_1_val, PSFs_2_val, PSFs_3_val = [], [], [], []
         val_ids = val_ids_all[wvl]
@@ -609,12 +608,16 @@ with torch.no_grad():
             toy.config = init_config
             toy.Update(reinit_grids=True, reinit_pupils=True)
 
+            configs.append(deepcopy(init_config))
+            pred_inputs_stats.append( deepcopy(transformer.destack(net(x0))) )
+
             batch_size = len(batch_data['IDs'])
-            batches_ids += batch_data['IDs'].tolist()
             
             fixed_inputs['Jxy'] *= 0
             
             fixed_inputs['basis_coefs'] = predict_LWE(batch_data['IDs'])
+            
+            fixed_inputs_stats.append(deepcopy(fixed_inputs))
             
             PSFs_0_val.append(PSF_0.cpu())
             PSFs_1_val.append(func(x0, fixed_inputs).cpu())
@@ -622,8 +625,8 @@ with torch.no_grad():
             # ------------------------- Validate direct -------------------------
             inputs = {
                 'F':   torch.ones([1, 2]),
-                'Jx':  torch.ones([1])*0, #33.0,
-                'Jy':  torch.ones([1])*0, #33.0,
+                'Jx':  torch.ones([1])*33.0,
+                'Jy':  torch.ones([1])*33.0,
                 'Jxy': torch.zeros([1]),
                 'dn':  torch.zeros([1]),
                 'basis_coefs': torch.zeros([1, 12])
@@ -641,30 +644,28 @@ with torch.no_grad():
 
             PSFs_3_val.append(run_model(toy, batch_data, {}, fixed_inputs=fitted_dict).cpu())
 
-        PSFs_0_val = torch.cat(PSFs_0_val, dim=0)[:,L_or_R,...].numpy()
-        PSFs_1_val = torch.cat(PSFs_1_val, dim=0)[:,L_or_R,...].numpy()
-        PSFs_2_val = torch.cat(PSFs_2_val, dim=0)[:,L_or_R,...].numpy()
-        PSFs_3_val = torch.cat(PSFs_3_val, dim=0)[:,L_or_R,...].numpy()
+        PSFs_0_val = torch.cat(PSFs_0_val, dim=0)[:,0,...].numpy()
+        PSFs_1_val = torch.cat(PSFs_1_val, dim=0)[:,0,...].numpy()
+        PSFs_2_val = torch.cat(PSFs_2_val, dim=0)[:,0,...].numpy()
+        PSFs_3_val = torch.cat(PSFs_3_val, dim=0)[:,0,...].numpy()
 
         PSFs_0_val_all[wvl] = PSFs_0_val.copy()
         PSFs_1_val_all[wvl] = PSFs_1_val.copy()
         PSFs_2_val_all[wvl] = PSFs_2_val.copy()
         PSFs_3_val_all[wvl] = PSFs_3_val.copy()
 
-        # Plot the results
-        fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-        plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
-        if fitted_or_pred == 'pred':
+        if calculate_plots:
+            fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+            plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
             plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
-        elif fitted_or_pred == 'fitted':
-            plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[1])
+            # plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[2])
+            fig.suptitle(f'λ = {wvl} [nm]')
+            plt.tight_layout()
+            if save_plots:
+                plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
+            else:
+                plt.show()
             
-        fig.suptitle(f'λ = {wvl} [nm]')
-        plt.tight_layout()
-        # plt.show()
-        # plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/PSF_validation_{wvl}.png', dpi=200)
-        plt.savefig(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/profiles/SPHERE_{fitted_or_pred}_{wvl}_{L_or_R_str}.pdf', dpi=200)
-
 
 #%%
 # Polychromatic profiles
@@ -803,7 +804,6 @@ plt.show()
 
 
 #%%
-
 # A = (PSF_test - PSF_test.min()) / PSF_test.max()
 # B = (PSFs_fitted[index_,...] - PSFs_fitted[index_,...].min()) / PSFs_fitted[index_,...].max()
 A = PSF_test
@@ -1176,38 +1176,153 @@ dPSF_3 = (torch.abs(PSF_cube_fitted - PSF_cube_data).median(dim=0)[0].max() / no
 #%
 print(f"Calib.: {dPSF_1:.2f} \nDirect: {dPSF_2:.2f} \nFitted: {dPSF_3:.2f} \n")
 
-#%% ==========================================================================================
-# df_ultimate = pd.concat([input_df, output_df], axis=1)
-# df_ultimate = pd.concat([psf_df, fitted_df], axis=1)
-df_ultimate = pd.concat([psf_df], axis=1)
-
-columns_to_drop = ['F (right)', 'bg (right)', 'λ right (nm)', 'Strehl']
-
-for column_to_drop in columns_to_drop:
-    if column_to_drop in df_ultimate.columns:
-        df_ultimate = df_ultimate.drop(column_to_drop, axis=1)
-
-df_ultimate = df_ultimate.sort_index(axis=1)
-
-# corr_method = 'pearson'
-# corr_method = 'spearman'
-corr_method = 'kendall'
-
-spearman_corr = df_ultimate.corr(method=corr_method)
-
-# Generate a mask for the upper triangle
-mask = np.triu(np.ones_like(spearman_corr, dtype=bool))
-
-# Set up the matplotlib figure
-f, ax = plt.subplots(figsize=(11, 9))
-ax.set_title("Correlation matrix ({})".format(corr_method))
-# Generate a custom diverging colormap
-cmap = sns.diverging_palette(230, 20, as_cmap=True)
-# Draw the heatmap with the mask and correct aspect ratio
-sns.heatmap(spearman_corr, mask=mask, cmap=cmap, vmax=.3, center=0,
-            square=True, linewidths=.5, cbar_kws={"shrink": .5})
-plt.xticks(rotation=45, ha='right')
-# plt.yticks(rotation=45)
-plt.show()
 
 #%%
+from tools.utils import FWHM_fitter, FitMoffat2D_astropy, FitGauss2D_astropy, hist_thresholded
+
+PSF_0_data   = np.concatenate([PSFs_0_val_all[wvl] for wvl in PSFs_0_val_all.keys()], axis=0)[:,None,...]
+PSF_1_calib  = np.concatenate([PSFs_1_val_all[wvl] for wvl in PSFs_1_val_all.keys()], axis=0)[:,None,...]
+PSF_2_tuned  = np.concatenate([PSFs_2_val_all[wvl] for wvl in PSFs_2_val_all.keys()], axis=0)[:,None,...]
+PSF_3_fitted = np.concatenate([PSFs_3_val_all[wvl] for wvl in PSFs_3_val_all.keys()], axis=0)[:,None,...]
+
+FWHM_data   = FWHM_fitter(PSF_0_data,   verbose=True)
+FWHM_calib  = FWHM_fitter(PSF_1_calib,  verbose=True)
+FWHM_tuned  = FWHM_fitter(PSF_2_tuned,  verbose=True)
+FWHM_fitted = FWHM_fitter(PSF_3_fitted, verbose=True)
+
+FWHMy = lambda FWHM, l: np.sqrt(FWHM[:,l,0]**2 + FWHM[:,l,1]**2)
+FWHMy_white = lambda FWHM: np.mean(np.array([FWHMy(FWHM, l) for l in range(FWHM.shape[1])]), axis=0)
+
+x = FWHMy_white(FWHM_data)
+y = FWHMy_white(FWHM_calib)
+z = FWHMy_white(FWHM_tuned)
+w = FWHMy_white(FWHM_fitted)
+
+#%%
+# plt.plot(np.linspace(0, x.max(), 100), np.linspace(0, x.max(), 100), 'k--')
+# plt.scatter(x, y)
+# plt.ylabel('Direct')
+# plt.xlabel('Data')
+# plt.xlim([0, 10])
+# plt.ylim([0, 10])
+# plt.axis('equal')
+# plt.show()
+
+# Compute relative FWHM error
+relative_err_calib = np.abs(x-y) / x * 100
+absolute_err_calib = np.abs(x-y) * 25
+
+relative_err_tuned = np.abs(x-z) / x * 100
+absolute_err_tuned = np.abs(x-z) * 25
+
+relative_err_fitted = np.abs(x-w) / x * 100
+absolute_err_fitted = np.abs(x-w) * 25
+
+print(f'Median relative FWHM error (calib): {np.median(relative_err_calib):.1f}%')
+print(f'Median absolute FWHM error (calib): {np.median(absolute_err_calib):.1f} [mas]')
+
+print(f'Median relative FWHM error (tuned): {np.median(relative_err_tuned):.1f}%')
+print(f'Median absolute FWHM error (tuned): {np.median(absolute_err_tuned):.1f} [mas]')
+
+print(f'Median relative FWHM error (fitted): {np.median(relative_err_fitted):.1f}%')
+print(f'Median absolute FWHM error (fitted): {np.median(absolute_err_fitted):.1f} [mas]')
+
+
+#%%
+save_dir = '../data/temp/plots/'
+
+hist_thresholded(
+    datasets=[absolute_err_calib, absolute_err_tuned],
+    threshold=np.round( np.percentile(absolute_err_calib, 90)),
+    bins=10,
+    title="Absolute FWHM error",
+    xlabel=r"$\Delta\:$FWHM, [mas]",
+    ylabel="Percentage, [%]",
+    labels=['Caibrated', 'Tuned'],
+    colors=None,
+    alpha=0.6
+)
+plt.savefig(save_dir+'FWHM_absolute_SPHERE.pdf', dpi=300)
+
+
+hist_thresholded(
+    datasets=[relative_err_calib, relative_err_tuned],
+    threshold=np.round( np.percentile(relative_err_calib, 90)),
+    bins=10,
+    title="Relative FWHM error",
+    xlabel=r"$\Delta\:$FWHM $\, / \,$ FWHM$_{\: data}$, [%]",
+    ylabel="Percentage, [%]",
+    labels=['Caibrated', 'Tuned'],
+    colors=None,
+    alpha=0.6
+)
+plt.savefig(save_dir+'FWHM_relative_SPHERE.pdf', dpi=300)
+
+#%%
+var_data  = np.var(PSF_0_data, axis=(-2,-1))
+var_delta = np.var(PSF_1_calib-PSF_0_data, axis=(-2,-1))
+
+FVU = var_delta / var_data
+print(np.median(FVU) * 100)
+
+var_data  = np.var(PSF_0_data, axis=(-2,-1))
+var_delta = np.var(PSF_2_tuned-PSF_0_data, axis=(-2,-1))
+
+FVU = var_delta / var_data
+print(np.median(FVU) * 100)
+
+
+#%%
+import seaborn as sns
+from tools.utils import r0
+from matplotlib.ticker import MaxNLocator
+
+seeings = np.array( [seeing for config in configs for seeing in config['atmosphere']['Seeing'].tolist()] )
+r0_init_stats = r0(seeings, 500e-9)
+
+r0_stats = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['r0']] )
+dn_stats = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['dn']] )
+F_stats  = np.array( [x.tolist() for pred_inputs in pred_inputs_stats for x in pred_inputs['F']]  ).mean(axis=-1)
+Jx_stats = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['Jx']] )
+Jy_stats = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['Jy']] )
+J_stats  = np.sqrt(Jx_stats**2 + Jy_stats**2)
+
+coefs = np.array( [x.tolist() for fixed_inputs in fixed_inputs_stats for x in fixed_inputs['basis_coefs']]  )
+LWE_WFE_stats = np.sqrt(np.sum(coefs**2, axis=-1))
+
+
+#%%
+# Create grid plot for 8 plots
+fig, ax = plt.subplots(1, 5, figsize=(15, 3))
+
+sns.histplot(r0_stats, fill=True, label=r'$r_0$ (pred.)', ax=ax[0], zorder=-1, element='step', alpha=0.35)
+sns.histplot(r0_init_stats, fill=True, label=r'$r_0$ (data.)', ax=ax[0], zorder=-2, element='step', alpha=0.35)
+ax[0].legend(loc='upper right')
+
+sns.histplot(dn_stats, fill=True, label=r'$\Delta n$', ax=ax[1], zorder=-1, element='step', alpha=0.4)
+sns.histplot(J_stats, fill=True, label='J', ax=ax[2], zorder=-1, element='step', alpha=0.4)
+
+sns.histplot(LWE_WFE_stats, fill=True, label='LWE WFE', ax=ax[4], zorder=-1, element='step', alpha=0.4)
+
+for i in range(5):
+    ax[i].grid(zorder=-10, alpha=0.5)
+    ax[i].yaxis.set_major_locator(MaxNLocator(integer=True))
+
+sns.histplot(F_stats, fill=True, label=r'$F$', ax=ax[3], zorder=-1, element='step', alpha=0.4)
+
+ax[0].set_xlabel(r'$r_0$, [m]')
+ax[1].set_xlabel(r'$\Delta n$, [rad$^2$]')
+ax[2].set_xlabel('J, [mas]')
+ax[3].set_xlabel('F, [a.u.]')
+ax[4].set_xlabel('LWE WFE, [nm RMS]')
+
+
+ax[1].set_ylabel('')
+ax[2].set_ylabel('')
+ax[3].set_ylabel('')
+ax[4].set_ylabel('')
+
+plt.suptitle('Predicted parameters distribution')
+# plt.tight_layout()
+# plt.subplots_adjust(hspace=0.3)  # Increase the space between rows
+plt.savefig(save_dir+'predicted_params_SPHERE.pdf', dpi=300)

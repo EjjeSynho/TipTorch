@@ -12,7 +12,7 @@ import scipy.special as spc
 from astropy.io import fits
 import torchvision.transforms as transforms
 from tools.utils import pdims, min_2d, to_little_endian, PupilVLT
-from tools.air_refraction import n_air # TODO: make it pytorch-compatible
+from tools.air_refraction import AirRefractiveIndexCalculator
 
 
 class TipTorch_new_half(torch.nn.Module): 
@@ -47,7 +47,7 @@ class TipTorch_new_half(torch.nn.Module):
     def InitValues(self):
         # with profiler.record_function("INIT PARAMETERS"):
         # Reading parameters from the file
-        self.N_src = self.config['NumberSources'].int().item()
+        self.N_src = self.config['NumberSources']#.int().item()
                 
         self.wvl = self.config['sources_science']['Wavelength']
         # self.wvl = self.wvl if self.wvl.ndim == 2 else self.wvl.unsqueeze(0).T
@@ -56,10 +56,10 @@ class TipTorch_new_half(torch.nn.Module):
         self.wvl_atm = self.config['atmosphere']['Wavelength']
 
         # Science sources positions relative to the center of FOV
-        self.src_zenith  = self.config['sources_science']['Zenith'] / self.rad2arc # [N_src]
-        self.src_azimuth = torch.deg2rad(self.config['sources_science']['Azimuth']) # [N_src]
-        self.src_dirs_x  = torch.tan(self.src_zenith) * torch.cos(self.src_azimuth) # [N_src]
-        self.src_dirs_y  = torch.tan(self.src_zenith) * torch.sin(self.src_azimuth) # [N_src]
+        self.src_zenith  = self.config['sources_science']['Zenith'].flatten() / self.rad2arc  # [N_src]
+        self.src_azimuth = torch.deg2rad(self.config['sources_science']['Azimuth']).flatten() # [N_src]
+        self.src_dirs_x  = torch.tan(self.src_zenith) * torch.cos(self.src_azimuth).flatten() # [N_src]
+        self.src_dirs_y  = torch.tan(self.src_zenith) * torch.sin(self.src_azimuth).flatten() # [N_src]
         
         self.on_axis = (self.src_dirs_x.abs().sum() + self.src_dirs_y.abs().sum() == 0).item() # all angles are zeros
         
@@ -167,6 +167,11 @@ class TipTorch_new_half(torch.nn.Module):
             self.N_DM = 1
             
         self.NoiseGain()
+        
+        
+        self.IOR_src_wvl = self.n_air(self.wvl)
+        self.IOR_wvl_atm = self.n_air(self.wvl_atm)
+        self.IOR_GS_wvl = self.n_air(self.GS_wvl)
 
 
     def _FFTAutoCorr(self, x):
@@ -351,19 +356,11 @@ class TipTorch_new_half(torch.nn.Module):
         self.U, self.V = torch.meshgrid(UV_range, UV_range)
         self.U, self.V = pdims(self.U, -2), pdims(self.V, -2)
         
-        # self.U2, self.V2  = self.U**2, self.V**2
-        # self.UV, self.UV2 = self.U*self.V, self.U**2 + self.V**2
-        # self._stabilize(self.U2 )
-        # self._stabilize(self.V2 )
-        # self._stabilize(self.UV )
-        # self._stabilize(self.UV2)
-          
         self.u_max = self.sampling * self.D / self.wvl / self.rad2mas
         
         self.center_aligner = torch.exp( 1j * torch.pi * (self.U + self.V) * (1 - self.N_pix%2))
 
         # Compute pupil OTFs
-        
         phase_size = self.pupil.shape[-1]
         self.pupil_padder = torch.nn.ZeroPad2d( int(round(phase_size*self.sampling_min/2-phase_size/2)) )
         
@@ -472,7 +469,7 @@ class TipTorch_new_half(torch.nn.Module):
 
         # Useful lambda functions
         self.r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0).pow(6/5)
-        self.make_tensor = lambda x: torch.tensor(x, device=self.device) if type(x) is not torch.Tensor else x
+        self.make_tensor = lambda x: torch.as_tensor(x, device=self.device) if type(x) is not torch.Tensor else x
         self.interp = lambda x, sampling: interpolate(x, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False) * sampling**2
         self._to_odd_arr = lambda arr: np.vectorize(self._to_odd)(arr)
 
@@ -489,8 +486,9 @@ class TipTorch_new_half(torch.nn.Module):
         self.rad2mas  = self.make_tensor(3600 * 180 * 1000) / torch.pi
         self.rad2arc  = self.rad2mas / self.make_tensor(1000)
         self.cte = self.make_tensor( (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3))) )
-        self.jitter_norm_fact = self.make_tensor( 2*np.sqrt(2*np.log(2)) )**2
+        self.jitter_norm_fact = self.make_tensor( 2*np.sqrt(2*np.log(2)) ).pow(2)
 
+        self.n_air = AirRefractiveIndexCalculator(device=self.device, dtype=torch.float32)
 
         if self.device.type != 'cpu':
             self.start = torch.cuda.Event(enable_timing=True)
@@ -756,7 +754,7 @@ class TipTorch_new_half(torch.nn.Module):
 
 
     def VonKarmanSpectrum(self, r0, L0, freq2):
-        return self.cte*r0**(-5/3) * (freq2 + 1/L0**2)**(-11/6)
+        return self.cte*pdims(r0,2)**(-5/3) * (freq2 + 1/pdims(L0,2)**2)**(-11/6)
 
 
     def VonKarmanPSD(self):
@@ -764,26 +762,22 @@ class TipTorch_new_half(torch.nn.Module):
 
 
     def ChromatismPSD(self):
-        n2 = n_air(self.GS_wvl).view(1, 1, 1, 1)
-        n1 = n_air(self.wvl).view(1, self.N_wvl, 1, 1)
+        n2 = self.IOR_GS_wvl.view(self.N_src, 1, 1, 1)
+        n1 = self.IOR_src_wvl.view(1, self.N_wvl, 1, 1)
         
         chromatic_PSD = ((n2-n1)/n2)**2 * self.W_atm.unsqueeze(1)
         return chromatic_PSD
 
 
-    def _diff_ref_aniso(self, zenith, wvl_GS, wvl_src):
-        return (n_air(wvl_src) - n_air(wvl_GS)) * torch.tan(zenith)
-
-
     def DifferentialRefractionPSD(self):
         # TODO: account for the derotator angle
-        h = self.h.view(1, 1, 1, 1, self.nL)
-        w = self.Cn2_weights.view(1, 1, 1, 1, self.nL)
+        h = self.h.view(self.N_src, 1, 1, 1, self.nL)
+        w = self.Cn2_weights.view(self.N_src, 1, 1, 1, self.nL)
         k = self.k_AO.view(1, 1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
-        # [N_src x 1 x nOtf_AO x nOtf_AO]
+        # [N_src x 1 x nOtf_AO_y x nOtf_AO_x]
         cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - pdims(self.src_azimuth, 2)).unsqueeze(1)
         # [N_src x N_wvl]
-        tan_theta = torch.tan( self._diff_ref_aniso(self.zenith_angle, pdims(self.GS_wvl,1), self.wvl) )
+        tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle))
         
         return self.W_atm.unsqueeze(1) * ( 2*w*(1-torch.cos(2*torch.pi*h*k * pdims(tan_theta,3) * pdims(cos_ang,1))) ).sum(dim=-1)
     
@@ -895,7 +889,7 @@ class TipTorch_new_half(torch.nn.Module):
             A = (MP @ self.C_phi @ MP_t + self.C_b).transpose(-2, -1)
             B = (self.C_phi @ MP_t).transpose(-2, -1)
             # Solve the least squares problem for W^T, since we deal with W*A = B
-            self.W_tomo = torch.linalg.lstsq(A, B).solution.transpose(-2, -1)           
+            self.W_tomo = torch.linalg.lstsq(A, B, rcond=1e-2).solution.transpose(-2, -1)           
         else:
             raise ValueError('Unknown inversion method specified.') 
          

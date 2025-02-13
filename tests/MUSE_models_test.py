@@ -1,3 +1,4 @@
+
 #%%
 %reload_ext autoreload
 %autoreload 2
@@ -22,6 +23,7 @@ from data_processing.normalizers import TransformSequence, Uniform, InputsTransf
 from data_processing.MUSE_preproc_utils_old import MUSEcube
 from project_globals import MUSE_DATA_FOLDER
 
+
 #%%
 with open(MUSE_DATA_FOLDER+'/muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
@@ -39,56 +41,63 @@ if derotate_PSF:
     PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
     config_file['telescope']['PupilAngle'] = 0
 
+config_file['NumberSources'] = 1
+config_file['sensor_science']['FieldOfView'] -= 1
+
+
 
 #%% Initialize the model
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from PSF_models.TipTorch import TipTorch_new
 from PSF_models.TipTorch_half import TipTorch_new_half
 
-toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-toy.PSD_include['fitting']         = True
-toy.PSD_include['WFS noise']       = True
-toy.PSD_include['spatio-temporal'] = True
-toy.PSD_include['aliasing']        = True
-toy.PSD_include['chromatism']      = True
-toy.PSD_include['Moffat']          = False
-toy.to_float()
+# toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+# toy.PSD_include['fitting']         = True
+# toy.PSD_include['WFS noise']       = True
+# toy.PSD_include['spatio-temporal'] = True
+# toy.PSD_include['aliasing']        = True
+# toy.PSD_include['chromatism']      = True
+# toy.PSD_include['Moffat']          = False
+# toy.to_float()
 
-tiptorch = TipTorch_new(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-tiptorch.PSD_include['fitting']         = True
-tiptorch.PSD_include['WFS noise']       = True
-tiptorch.PSD_include['spatio-temporal'] = True
-tiptorch.PSD_include['aliasing']        = True
-tiptorch.PSD_include['chromatism']      = True
-tiptorch.PSD_include['diff. refract']   = True
-tiptorch.PSD_include['Moffat']          = False
-tiptorch.to_float()
+# tiptorch = TipTorch_new(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+# tiptorch.PSD_include['fitting']         = True
+# tiptorch.PSD_include['WFS noise']       = True
+# tiptorch.PSD_include['spatio-temporal'] = True
+# tiptorch.PSD_include['aliasing']        = True
+# tiptorch.PSD_include['chromatism']      = True
+# tiptorch.PSD_include['diff. refract']   = True
+# tiptorch.PSD_include['Moffat']          = False
+# tiptorch.to_float()
 
-tiptorch_half = TipTorch_new_half(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-tiptorch_half.PSD_include['fitting']         = True
-tiptorch_half.PSD_include['WFS noise']       = True
-tiptorch_half.PSD_include['spatio-temporal'] = True
-tiptorch_half.PSD_include['aliasing']        = True
-tiptorch_half.PSD_include['chromatism']      = True
-tiptorch_half.PSD_include['diff. refract']   = True
-tiptorch_half.PSD_include['Moffat']          = False
-tiptorch_half.to_float()
+with torch.no_grad():
 
-inputs = {
-    'r0':  torch.tensor([0.1], device=toy.device),
-    'F':   torch.tensor([[1.0,]*N_wvl], device=toy.device),
-    'dx':  torch.tensor([[0.0,]*N_wvl], device=toy.device),
-    'dy':  torch.tensor([[0.0,]*N_wvl], device=toy.device),
-    'dx':  torch.tensor([[0.0]], device=toy.device),
-    'dy':  torch.tensor([[0.0]], device=toy.device),
-    'bg':  torch.tensor([[1e-6,]*N_wvl], device=toy.device),
-    'dn':  torch.tensor([1.5], device=toy.device),
-    'Jx':  torch.tensor([[10,]*N_wvl], device=toy.device),
-    'Jy':  torch.tensor([[10,]*N_wvl], device=toy.device),
-    'Jx':  torch.tensor([[33]], device=toy.device),
-    'Jy':  torch.tensor([[33]], device=toy.device),
-    'Jxy': torch.tensor([[45]], device=toy.device)
-}
+    tiptorch_half = TipTorch_new_half(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+    tiptorch_half.PSD_include['fitting']         = True
+    tiptorch_half.PSD_include['WFS noise']       = True
+    tiptorch_half.PSD_include['spatio-temporal'] = True
+    tiptorch_half.PSD_include['aliasing']        = True
+    tiptorch_half.PSD_include['chromatism']      = True
+    tiptorch_half.PSD_include['diff. refract']   = True
+    tiptorch_half.PSD_include['Moffat']          = False
+    tiptorch_half.to_float()
+    # tiptorch_half.to_double()
+
+    inputs = {
+        'r0':  torch.tensor([0.1], device=tiptorch_half.device),
+        'F':   torch.tensor([[1.0,]*N_wvl], device=tiptorch_half.device),
+        'dx':  torch.tensor([[0.0,]*N_wvl], device=tiptorch_half.device),
+        'dy':  torch.tensor([[0.0,]*N_wvl], device=tiptorch_half.device),
+        'dx':  torch.tensor([[0.0]], device=tiptorch_half.device),
+        'dy':  torch.tensor([[0.0]], device=tiptorch_half.device),
+        'bg':  torch.tensor([[1e-6,]*N_wvl], device=tiptorch_half.device),
+        'dn':  torch.tensor([1.5], device=tiptorch_half.device),
+        'Jx':  torch.tensor([[0,]*N_wvl], device=tiptorch_half.device),
+        'Jy':  torch.tensor([[0,]*N_wvl], device=tiptorch_half.device),
+        'Jx':  torch.tensor([[0]], device=tiptorch_half.device),
+        'Jy':  torch.tensor([[0]], device=tiptorch_half.device),
+        'Jxy': torch.tensor([[0]], device=tiptorch_half.device)
+    }
 
 #%%
 PSF_1_torch = tiptorch(x=inputs)
@@ -148,7 +157,7 @@ writer = SummaryWriter(log_dir='./runs/tiptorch_half_inference_profiling')
 # input_tensor = torch.randn(1, 10)
 
 for _ in range(10):
-    tiptorch_half.Update(reinit_grids=True, reinit_pupils=True)
+    # tiptorch_half.Update(reinit_grids=True, reinit_pupils=True)
     tiptorch_half(x=inputs)
 
 
@@ -163,7 +172,7 @@ with profiler.profile(
     
 ) as prof:
     with torch.no_grad():
-        tiptorch_half.Update(reinit_grids=True, reinit_pupils=True)
+        # tiptorch_half.Update(reinit_grids=True, reinit_pupils=True)
         tiptorch_half(x=inputs)
         
 
@@ -173,72 +182,11 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 
 
 #%%
-def half_PSD_to_full(half_PSD):
-    n_cols_half = half_PSD.size(-1)
-    # original_shape = (half_PSD.size(0), half_PSD.size(1), half_PSD.size(2), half_PSD.size(3)*2-half_PSD.size(3) % 2)
-    
-    # full_PSD = torch.empty(original_shape, dtype=torch.complex64, device=half_PSD.device)
-    
-    # full_PSD[..., :, :n_cols_half] = half_PSD
-    # full_PSD[..., :, n_cols_half:] = torch.flip(half_PSD[..., :, :n_cols_half-n_cols_half%2], dims=(-2,-1))
-    
-    full_PSD = torch.cat([half_PSD, torch.flip(half_PSD[..., :, :n_cols_half-n_cols_half%2], dims=(-2,-1))], dim=-1)
-    
-    return full_PSD
 
-nOtf_AO_x = tiptorch.nOtf_AO // 2 + tiptorch.nOtf_AO % 2
-nOtf_AO_y = tiptorch.nOtf_AO
+with torch.no_grad():
+    PSF_1 = tiptorch_half(x=inputs)
 
-PSDEC = tiptorch.PSDs['spatio-temporal'].clone()[..., :nOtf_AO_y, :nOtf_AO_x]
-
-PSDEC_ = half_PSD_to_full(PSDEC)
-
-plt.imshow(PSDEC_.abs().cpu().squeeze().log10())
-
-#%%
-def rfft2_to_full(matrix_rfft2): #, original_shape):
-    width = matrix_rfft2.size(-1)
-    # width = original_shape[-1]
-    # n_cols_rfft = matrix_rfft2.size(-1)
-
-    # full_matrix = torch.empty(original_shape, dtype=torch.complex64, device=matrix_rfft2.device)
-
-    # full_matrix[..., :,  n_cols_rfft-width % 2:] = matrix_rfft2
-    # full_matrix[..., :, :n_cols_rfft-width % 2 ] = torch.flip(matrix_rfft2[..., :, width % 2:].conj(), dims=[-2,-1])
-    
-    full_matrix = torch.cat([torch.flip(matrix_rfft2[..., :, width % 2:].conj(), dims=[-2,-1]), matrix_rfft2], dim=-1)
-    
-    return full_matrix
-
-
-OTF_turb = torch.fft.fftshift(torch.fft.rfft2(tiptorch.PSD.abs(), dim=(-2,-1)), dim=-2).abs()
-OTF_full = rfft2_to_full(OTF_turb)#, tiptorch.PSD.shape)
-
-
-plt.imshow(OTF_full[0,0,...].abs().log10().cpu().numpy())
-plt.colorbar()
-plt.show()
-
-# aa = tiptorch.PSD.size(-1)//2
-# bb = 50
-
-# plt.imshow(tiptorch.PSD[0,0,aa-bb:aa+bb,aa-bb:aa+bb].imag.abs().log10().cpu().numpy())
-# plt.colorbar()
-# plt.show()
-
-
-#%%
-plt.imshow(tiptorch.cov[0,0,...].abs().log10().cpu().numpy())
-plt.colorbar()
-plt.show()
-
-
-
-# plt.imshow(full_shape[0,0,...].abs().log10().cpu().numpy())
-plt.imshow((full_shape.abs()-tiptorch.cov.abs())[0,0,...].log10().cpu().numpy())
-# plt.imshow((full_shape-tiptorch.cov)[0,0,...].abs().log10().cpu().numpy())
-plt.colorbar()
-plt.show()
+    plt.imshow(PSF_1[0,-1,...].abs().log10().cpu().numpy())
 
 
 #%%

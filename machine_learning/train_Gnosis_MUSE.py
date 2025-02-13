@@ -537,6 +537,9 @@ else:
 PSFs_0_val_poly, PSFs_1_val_poly, PSFs_2_val_poly, PSFs_3_val_poly = [], [], [], []
 net.eval()
 
+pred_inputs_stats = []
+configs = []
+
 with torch.no_grad():
     for i in tqdm(val_ids):
     # for i in tqdm(train_ids):
@@ -558,6 +561,9 @@ with torch.no_grad():
         x0, fixed_inputs, PSF_0, config = get_data(batch, fixed_entries)
         PSFs_0_val_poly.append(PSF_0.cpu())
         current_batch_size = len(batch['IDs'])
+        
+        pred_inputs_stats.append(transformer.destack(net(x0)))
+        configs.append(deepcopy(config))
         
         toy.config = config
         toy.Update(reinit_grids=True, reinit_pupils=True)
@@ -611,24 +617,29 @@ ids = np.hstack(ids)
 bgs = np.vstack(bgs)[..., np.newaxis, np.newaxis]
 norms = np.vstack(norms)[..., np.newaxis, np.newaxis]
 
-#%
-# Restore initial spectrum
-# PSFs_0_val_white = np.mean(PSFs_0_val_poly * norms + bgs, axis=1)
-# PSFs_1_val_white = np.mean(PSFs_1_val_poly * norms + bgs, axis=1)
-# PSFs_2_val_white = np.mean(PSFs_2_val_poly * norms + bgs, axis=1)
-# PSFs_3_val_white = np.mean(PSFs_3_val_poly * norms + bgs, axis=1)
-
-# # Normalize white PSF to sum of 1
-# PSFs_0_val_white /= PSFs_0_val_white.sum(axis=(1,2), keepdims=True)
-# PSFs_1_val_white /= PSFs_1_val_white.sum(axis=(1,2), keepdims=True)
-# PSFs_2_val_white /= PSFs_2_val_white.sum(axis=(1,2), keepdims=True)
-# PSFs_3_val_white /= PSFs_3_val_white.sum(axis=(1,2), keepdims=True)
-
 PSFs_0_val_white = np.mean(PSFs_0_val_poly, axis=1)
 PSFs_1_val_white = np.mean(PSFs_1_val_poly, axis=1)
 PSFs_2_val_white = np.mean(PSFs_2_val_poly, axis=1)
 PSFs_3_val_white = np.mean(PSFs_3_val_poly, axis=1)
 
+# Store the results
+with open('../data/temp/PSFs_val_data_polychrome.pickle', 'wb') as handle:
+    pickle.dump(PSFs_0_val_poly, handle)
+    
+with open('../data/temp/PSFs_val_calibrated_polychrome.pickle', 'wb') as handle:
+    pickle.dump(PSFs_1_val_poly, handle)
+
+if direct_tuned:
+    with open('../data/temp/PSFs_val_tuned_polychrome.pickle', 'wb') as handle:
+        pickle.dump(PSFs_2_val_poly, handle)
+else:
+    with open('../data/temp/PSFs_val_direct_polychrome_raw.pickle', 'wb') as handle:
+        pickle.dump(PSFs_2_val_poly, handle)
+    
+with open('../data/temp/PSFs_val_fitted_polychrome.pickle', 'wb') as handle:
+    pickle.dump(PSFs_3_val_poly, handle)
+
+save_dir = '/home/akuznets/Projects/TipTorch/data/temp/plots/'
 
 #%%
 # fig, ax = plt.subplots(1, 3, figsize=(12, 4))
@@ -637,14 +648,12 @@ PSFs_3_val_white = np.mean(PSFs_3_val_poly, axis=1)
 fig = plt.figure(figsize=(9, 4))
 
 draw_calibrated = True
-draw_direct     = False
+draw_direct     = True
 draw_fitted     = False
 save_profiles   = False
 draw_white      = True
 
 cutoff = 40
-
-save_dir = '/home/akuznets/Projects/TipTorch/data/temp/plots/'
 
 if draw_white:
     # White profiles
@@ -810,13 +819,35 @@ for id in tqdm(good_ids):
     plot_MUSE_PSF(id, save_dir='/home/akuznets/Projects/TipTorch/data/temp/plots/MUSE_PSFs/')
 
 
+#%%
+
+# Read the results
+with open('../data/temp/PSFs_val_data_polychrome.pickle', 'rb') as handle:
+    PSFs_0_val_poly_data = pickle.load(handle)
+    
+    
+with open('../data/temp/PSFs_val_calibrated_polychrome.pickle', 'rb') as handle:
+    PSFs_1_val_poly_calib = pickle.load(handle)
+
+
+with open('../data/temp/PSFs_val_tuned_polychrome.pickle', 'rb') as handle:
+    PSFs_2_val_poly_tuned = pickle.load(handle)
+
+
+with open('../data/temp/PSFs_val_direct_polychrome_raw.pickle', 'rb') as handle:
+    PSFs_2_val_poly_direct = pickle.load(handle)
+    
+# with open('../data/temp/PSFs_val_fitted_polychrome.pickle', 'wb') as handle:
+#     PSFs_3_val_poly = pickle.load(handle)
+
 
 #%%
 from tools.utils import FWHM_fitter, FitMoffat2D_astropy, FitGauss2D_astropy
 
-FWHM_data       = FWHM_fitter(PSFs_0_val_poly, verbose=True)
-FWHM_calibrated = FWHM_fitter(PSFs_1_val_poly, verbose=True)
-FWHM_direct     = FWHM_fitter(PSFs_2_val_poly, verbose=True)
+FWHM_data   = FWHM_fitter(PSFs_0_val_poly_data,   verbose=True)
+FWHM_calib  = FWHM_fitter(PSFs_1_val_poly_calib,  verbose=True)
+FWHM_tuned  = FWHM_fitter(PSFs_2_val_poly_tuned,  verbose=True)
+FWHM_direct = FWHM_fitter(PSFs_2_val_poly_direct, verbose=True)
 
 #%%
 ROI_ = np.s_[np.random.randint(0,77), 0, 199//2-25:199//2+25, 199//2-25:199//2+25]
@@ -840,43 +871,177 @@ plt.plot(B_[max_point[0],...], color='red')
 plt.plot(A_fit[max_point[0],...], color='blue', linestyle='--')
 plt.plot(B_fit[max_point[0],...], color='red', linestyle='--')
 plt.show()
-# plt.yscale('log')
-# Plot FWHM
-# plt.plot([25, 25], [0, 1], 'k--')
-# plt.plot([25+2*F_x_A, 25+2*F_x_A], [0, 1], 'b--')
-# plt.plot([25+2*F_x_B, 25+2*F_x_B], [0, 1], 'r--')
 
-# plt.plot(np.abs(A_.cpu().numpy())[8,...])
-# plt.plot(np.abs(testo.cpu().detach().numpy())[8,...])
-
-# plt.imshow(np.log10(A_.cpu().numpy()), cmap='gray')
-# plt.show()
-# plt.imshow(np.log10(testo.cpu().detach().numpy()), cmap='gray')
 
 #%%
 FWHMy = lambda FWHM, l: np.sqrt(FWHM[:,l,0]**2 + FWHM[:,l,1]**2)
-
 FWHMy_white = lambda FWHM: np.mean(np.array([FWHMy(FWHM, l) for l in range(FWHM.shape[1])]), axis=0)
 
-# l_id = -7
-
 x = FWHMy_white(FWHM_data)
-y = FWHMy_white(FWHM_calibrated)
+y = FWHMy_white(FWHM_calib)
+z = FWHMy_white(FWHM_tuned)
+w = FWHMy_white(FWHM_direct)
 
-# x = FWHMy(FWHM_data, l_id)
-# y = FWHMy(FWHM_calibrated, l_id)
-
-plt.plot(np.linspace(0, x.max(), 100), np.linspace(0, x.max(), 100), 'k--')
-plt.scatter(x, y)
-plt.ylabel('Direct')
-plt.xlabel('Data')
-plt.xlim([0, 10])
-plt.ylim([0, 10])
-plt.axis('equal')
-plt.show()
+# plt.plot(np.linspace(0, x.max(), 100), np.linspace(0, x.max(), 100), 'k--')
+# plt.scatter(x, y)
+# plt.ylabel('Direct')
+# plt.xlabel('Data')
+# plt.xlim([0, 10])
+# plt.ylim([0, 10])
+# plt.axis('equal')
+# plt.show()
 
 # Compute relative FWHM error
-relative_err = np.median(np.abs(x-y) / x)*100
-absolute_err = np.median(np.abs(x-y) * 25)
-print(f'Median relative FWHM error: {relative_err:.1f}%')
-print(f'Median absolute FWHM error: {absolute_err:.1f} [mas]')
+relative_err_calib = np.abs(x-y) / x * 100
+absolute_err_calib = np.abs(x-y) * 25
+
+relative_err_tuned = np.abs(x-z) / x * 100
+absolute_err_tuned = np.abs(x-z) * 25
+
+relative_err_direct = np.abs(x-w) / x * 100
+absolute_err_direct = np.abs(x-w) * 25
+
+print(f'Median relative FWHM error (calib): {np.median(relative_err_calib):.1f}%')
+print(f'Median absolute FWHM error (calib): {np.median(absolute_err_calib):.1f} [mas]')
+
+print(f'Median relative FWHM error (tuned): {np.median(relative_err_tuned):.1f}%')
+print(f'Median absolute FWHM error (tuned): {np.median(absolute_err_tuned):.1f} [mas]')
+
+print(f'Median relative FWHM error (direct): {np.median(relative_err_direct):.1f}%')
+print(f'Median absolute FWHM error (direct): {np.median(absolute_err_direct):.1f} [mas]')
+
+#%%
+from tools.utils import hist_thresholded
+
+hist_thresholded(
+    datasets=[absolute_err_calib, absolute_err_tuned],
+    threshold=np.round( np.percentile(absolute_err_calib, 90)),
+    bins=10,
+    title="Absolute FWHM error",
+    xlabel=r"$\Delta\:$FWHM, [mas]",
+    ylabel="Percentage, [%]",
+    labels=['Caibrated', 'Tuned'],
+    colors=None,
+    alpha=0.6
+)
+# plt.savefig(save_dir+'FWHM_absolute_MUSE.pdf', dpi=300)
+
+
+hist_thresholded(
+    datasets=[relative_err_calib, relative_err_tuned],
+    threshold=np.round( np.percentile(relative_err_calib, 90)),
+    bins=10,
+    title="Relative FWHM error",
+    xlabel=r"$\Delta\:$FWHM $\, / \,$ FWHM$_{\: data}$, [%]",
+    ylabel="Percentage, [%]",
+    labels=['Caibrated', 'Tuned'],
+    colors=None,
+    alpha=0.6
+)
+# plt.savefig(save_dir+'FWHM_relative_MUSE.pdf', dpi=300)
+
+#%%
+# PSFs_0_val_poly_data, 
+# PSFs_1_val_poly_calib,
+# PSFs_2_val_poly_tuned,
+# PSFs_2_val_poly_direct
+
+var_data  = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
+var_delta = np.var((PSFs_1_val_poly_calib - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+
+FVU = var_delta / var_data
+
+print(np.median(FVU))
+
+# plt.hist(FVU, bins=100)
+
+#%%
+var_data  = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
+var_delta = np.var((PSFs_2_val_poly_tuned - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+
+FVU = var_delta / var_data
+
+print(np.median(FVU))
+
+#%%
+
+var_data  = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
+var_delta = np.var((PSFs_2_val_poly_direct - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+
+FVU = var_delta / var_data
+
+print(np.median(FVU))
+
+
+#%%
+import seaborn as sns
+from tools.utils import r0
+from matplotlib.ticker import MaxNLocator
+
+seeings = np.array( [seeing for config in configs for seeing in config['atmosphere']['Seeing'].tolist()] )
+r0_init_stats = r0(seeings, 500e-9)
+
+r0_stats    = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['r0']] )
+dn_stats    = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['dn']] )
+s_pow_stats = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['s_pow']] )
+amp_stats   = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['amp']] )
+b_stats     = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['b']] )
+alpha_stats = np.array( [x.item()   for pred_inputs in pred_inputs_stats for x in pred_inputs['alpha']] )
+F_stats     = np.array( [x.tolist() for pred_inputs in pred_inputs_stats for x in pred_inputs['F']] )
+Jx_stats    = np.array( [x.tolist() for pred_inputs in pred_inputs_stats for x in pred_inputs['Jx']] )
+Jy_stats    = np.array( [x.tolist() for pred_inputs in pred_inputs_stats for x in pred_inputs['Jy']] )
+J_stats     = np.sqrt(Jx_stats**2 + Jy_stats**2)
+
+# Create grid plot for 8 plots
+fig, ax = plt.subplots(2, 4, figsize=(12, 6.5))
+
+# Plot r0
+sns.histplot(r0_stats, fill=True, label=r'$r_0$ (pred.)', ax=ax[0,0], zorder=-1, element='step', alpha=0.35)
+sns.histplot(r0_init_stats, fill=True, label=r'$r_0$ (data.)', ax=ax[0,0], zorder=-2, element='step', alpha=0.35)
+ax[0,0].legend(loc='upper right')
+
+sns.histplot(dn_stats, fill=True, label=r'$r_0$', ax=ax[0,1], zorder=-1, element='step', alpha=0.4)
+sns.histplot(alpha_stats, fill=True, label=r'$\alpha_M$', ax=ax[0,2], zorder=-1, element='step', alpha=0.4)
+sns.histplot(s_pow_stats, fill=True, label=r'$a_b$', ax=ax[0,3], zorder=-1, element='step', alpha=0.4)
+sns.histplot(amp_stats, fill=True, label='A', ax=ax[1,0], zorder=-1, element='step', alpha=0.4)
+sns.histplot(b_stats, fill=True, label='b', ax=ax[1,1], zorder=-1, element='step', alpha=0.4)
+
+for i in range(2):
+    for j in range(4):
+        ax[i,j].grid(zorder=-10, alpha=0.5)
+        ax[i,j].yaxis.set_major_locator(MaxNLocator(integer=True))
+
+colors  = sns.color_palette("rainbow", J_stats.shape[1])
+
+for i in range(F_stats.shape[1]):
+    sns.histplot(F_stats[:, i], fill=True, color=colors[i], ax=ax[1,2], label=f'{wavelength_selected[ids_wavelength_selected][i]:.0f} nm', zorder=-i+1, element='step', alpha=0.05)
+    ax[1,2].legend(title='Wavelength', loc='upper left')
+
+for i in range(J_stats.shape[1]):
+    sns.histplot(J_stats[:, i], fill=True, color=colors[i], ax=ax[1,3], label=f'{wavelength_selected[ids_wavelength_selected][i]:.0f} nm', zorder=-i+1, element='step', alpha=0.05)
+    # ax[1,3].legend(title='Wavelength', loc='upper left')
+
+ax[0,0].set_xlabel(r'$r_0$, [m]')
+ax[0,1].set_xlabel(r'$\Delta n$, [rad$^2$]')
+ax[0,2].set_xlabel(r'$\alpha_M$, [a.u.]')
+ax[0,3].set_xlabel(r'$a_b$, [a.u.]')
+ax[1,0].set_xlabel('A, [a.u.]')
+ax[1,1].set_xlabel('b, [a.u.]')
+ax[1,2].set_xlabel('F, [a.u.]')
+ax[1,3].set_xlabel('J, [mas]')
+
+ax[0,1].set_ylabel('')
+ax[0,2].set_ylabel('')
+ax[0,3].set_ylabel('')
+ax[1,1].set_ylabel('')
+ax[1,2].set_ylabel('')
+ax[1,3].set_ylabel('')
+
+plt.suptitle('Predicted parameters distribution')
+plt.tight_layout()
+plt.subplots_adjust(hspace=0.3)  # Increase the space between rows
+plt.savefig(save_dir+'predicted_params_MUSE.pdf', dpi=300)
+
+#%%
+
+

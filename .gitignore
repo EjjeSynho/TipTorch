@@ -1,9 +1,6 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 _pycache_/
-__pycache__
-_pycache_
-tools/__pycache__/
 data/temp
 data/weights
 global_config.json
@@ -11,4 +8,4 @@ data/*.npy
 data/*.json
 data/*.predictor
 data/*.txt
-tests/runs/
+runs/

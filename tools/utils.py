@@ -1325,8 +1325,115 @@ def plot_radial_profiles_relative(PSF_0,
         return p_err
     
 
+def hist_thresholded(
+    datasets,
+    threshold,
+    bins=10,
+    title="Multiple Histograms with Threshold (Side-by-Side)",
+    xlabel="Values",
+    ylabel="Percentage",
+    labels=None,
+    colors=None,
+    alpha=0.6
+):
+    """
+    Draws multiple normalized histograms (percentages) for the given datasets,
+    grouping values above a threshold into single bars for each dataset.
+    Each dataset's bars are placed side-by-side rather than overlaid.
 
-def CircPupil(samples, D=8.0, centralObstruction=1.12):
+    Parameters:
+        datasets (list of array-like): A list of datasets (each dataset is a list 
+                                       or array of numeric values).
+        threshold (float): The threshold value.
+        bins (int): Number of bins for the histograms (default: 10).
+        title (str): Title of the plot (default: "Multiple Histograms with Threshold (Side-by-Side)").
+        xlabel (str): Label for the x-axis (default: "Values").
+        ylabel (str): Label for the y-axis (default: "Percentage").
+        labels (list of str): Labels for the datasets (default: None).
+        colors (list of str): List of colors for each dataset (default: None).
+        alpha (float): Opacity for bars (default: 0.6).
+    """
+    n_datasets = len(datasets)
+
+    # If labels are not provided, create generic labels
+    if labels is None:
+        labels = [f"Dataset {i+1}" for i in range(n_datasets)]
+
+    # If colors are not provided, pick a colormap or define a simple color cycle
+    if colors is None:
+        cmap = plt.cm.get_cmap("tab10")
+        colors = [cmap(i) for i in range(n_datasets)]
+
+    # Combine all values below threshold to get consistent bin edges
+    all_below_threshold = np.concatenate(
+        [np.array(d)[np.array(d) <= threshold] for d in datasets]
+    )
+    # Calculate reference bin_edges for the histogram
+    _, bin_edges = np.histogram(all_below_threshold, bins=bins, range=(0, threshold))
+
+    # The total width of one bin
+    total_bin_width = bin_edges[1] - bin_edges[0]
+    # We'll split this bin width among the datasets
+    bar_width = total_bin_width / n_datasets
+
+    plt.figure(figsize=(8, 6))
+
+    for i, data in enumerate(datasets):
+        data_array = np.array(data)
+
+        # Split into below / above threshold
+        below_thresh = data_array[data_array <= threshold]
+        above_thresh = data_array[data_array > threshold]
+
+        # Compute histogram for the below-threshold portion
+        counts, _ = np.histogram(below_thresh, bins=bin_edges)
+        total_count = len(data_array)
+        normalized_counts = (counts / total_count) * 100
+
+        # Offset for this dataset so bars sit side-by-side
+        offset = i * bar_width
+
+        # Plot the side-by-side bars for below-threshold data
+        plt.bar(
+            bin_edges[:-1] + offset,  # shift the bin edges by offset
+            normalized_counts,
+            width=bar_width,
+            alpha=alpha,
+            color=colors[i],
+            edgecolor="black",
+            label=labels[i] if len(above_thresh) == 0 else None,  # avoid double-labeling
+            zorder=3
+        )
+
+        # Plot a single bar for values above threshold (outliers), if any
+        if len(above_thresh) > 0:
+            outlier_percentage = (len(above_thresh) / total_count) * 100
+            # Position the outlier bar near threshold plus the offset
+            plt.bar(
+                threshold + offset,
+                outlier_percentage,
+                width=bar_width,
+                alpha=alpha,
+                color=colors[i],
+                edgecolor="black",
+                label=f"{labels[i]} (> {threshold})",
+                zorder=3
+            )
+
+    # Add grid below the plot
+    plt.grid(True, which='both', linestyle='--', linewidth=0.5, alpha=0.7, zorder=1)
+
+    # Adjust x limits to show the last bar properly
+    plt.xlim(0, threshold + total_bin_width)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.legend()
+    plt.tight_layout()
+    # plt.show()
+
+
+def CircPu(samples, D=8.0, centralObstruction=1.12):
     x      = np.linspace(-1/2, 1/2, samples)*D
     xx,yy  = np.meshgrid(x,x)
     circle = np.sqrt(xx**2 + yy**2)

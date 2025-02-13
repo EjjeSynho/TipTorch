@@ -260,6 +260,7 @@ def GetConfigSolo(sample, PSF_data, wvl_id=None, device=device, convert_config=T
     config_file['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
 
     try:
+        #TODO: per aperture, not per meter squared! Watch the conversion
         LGS_ph = np.array([sample['All data'][f'LGS{i} photons, [photons/m^2/s]'].item() / 1240e3 for i in range(1,5)])
         LGS_ph[LGS_ph < 1] = np.mean(LGS_ph)
         LGS_ph = LGS_ph.tolist()

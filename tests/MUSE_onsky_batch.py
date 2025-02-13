@@ -12,7 +12,8 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle
-from PSF_models.TipToy_MUSE_multisrc import TipTorch
+# from PSF_models.TipToy_MUSE_multisrc import TipTorch
+from PSF_models.TipTorch_half import TipTorch_new_half
 from data_processing.MUSE_preproc_utils import GetMUSEonsky
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
@@ -28,10 +29,6 @@ from pprint import pprint
 
 from copy import deepcopy
 
-# import sys
-# sys.setrecursionlimit(500)  # Increase the recursion limit; default is usually 1000
-
-
 #%%
 Moffat_absorber = True
 include_sausage = True
@@ -40,18 +37,65 @@ derotate_PSF = True
 
 # 411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335
 # ids = [411, 409, 395, 343]
-ids = [124, 405, 344, 123]
+ids = [124, 405, 344, 123] + [411] #, 409, 395, 343] + [276, 395]
 
-PSF_0, merged_config = GetMUSEonsky(ids, derotate_PSF, device)
+PSF_0, _, _, merged_config = GetMUSEonsky(ids, derotate_PSF, device)
 
 N_src = PSF_0.shape[0]
 N_wvl = PSF_0.shape[1]
 
+#%%
+import configparser
+import os
+
+class CaseSensitiveConfigParser(configparser.ConfigParser):
+    def optionxform(self, optionstr):
+        return optionstr  # Return the option string as is to preserve case
+
+# Function to convert a dictionary to .ini file format
+def dict_to_ini(dictionary, ini_filename):
+    config = CaseSensitiveConfigParser()
+
+    for section, values in dictionary.items():
+        if isinstance(values, dict):
+            config[section] = {}
+            for key, value in values.items():
+                if isinstance(value, list):
+                    # Convert lists to comma-separated strings
+                    config[section][key] = ', '.join(map(str, value))
+                elif isinstance(value, str):
+                    # Add single quotes around string values
+                    config[section][key] = f"'{value}'"
+                else:
+                    config[section][key] = str(value)
+        else:
+            # Handle scalar values by placing them in a special section
+            if isinstance(values, str):
+                config["DEFAULT"][section] = f"'{values}'"
+            else:
+                config["DEFAULT"][section] = str(values)
+
+    # Write the configuration to an .ini file
+    with open(ini_filename, 'w') as ini_file:
+        config.write(ini_file)
+
+#%%
+merged_config_2 = deepcopy(merged_config)
+
+config_manager = ConfigManager()
+config_manager.Convert(merged_config_2, framework='list', device=device)
+
+#%%
+dict_to_ini(merged_config_2, "C:/Users/akuznets/Projects/TipTorch/data/parameter_files/muse_nfm_multiple.ini")
+
+
 #%% Initialize the model
-from PSF_models.TipToy_MUSE_multisrc import TipTorch
+# from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from tools.utils import SausageFeature
 
-toy = TipTorch(merged_config, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+toy = TipTorch_new_half(merged_config, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+
+#%%
 sausage_absorber = SausageFeature(toy)
 sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
 
@@ -60,7 +104,8 @@ toy.PSD_include['WFS noise'] = True
 toy.PSD_include['spatio-temporal'] = True
 toy.PSD_include['aliasing'] = False
 toy.PSD_include['chromatism'] = True
-toy.PSD_include['Moffat'] = Moffat_absorber
+toy.PSD_include['diff. refract'] = True
+toy.PSD_include['Moffat'] = False #Moffat_absorber
 
 toy.to_float()
 # toy.to_double()
@@ -75,21 +120,28 @@ inputs_tiptorch = {
     'Jy':  torch.ones ([N_src, N_wvl], device=toy.device)*10,
     'Jxy': torch.ones ([N_src, 1], device=toy.device)*45
 }
+#%%
+# if Moffat_absorber:
+#     inputs_psfao = {
+#         'amp':   torch.zeros(toy.N_src, device=toy.device),     # Phase PSD Moffat amplitude [rad²]
+#         'b':     torch.zeros(toy.N_src, device=toy.device),     # Phase PSD background [rad² m²]
+#         'alpha': torch.ones (toy.N_src, device=toy.device)*0.1, # Phase PSD Moffat alpha [1/m]
+#         'beta':  torch.ones (toy.N_src, device=toy.device)*2,   # Phase PSD Moffat beta power law
+#         'ratio': torch.ones (toy.N_src, device=toy.device),     # Phase PSD Moffat ellipticity
+#         'theta': torch.zeros(toy.N_src, device=toy.device),     # Phase PSD Moffat angle
+#     }
+# else:
+#     inputs_psfao = {}
 
-if Moffat_absorber:
-    inputs_psfao = {
-        'amp':   torch.zeros(toy.N_src, device=toy.device),     # Phase PSD Moffat amplitude [rad²]
-        'b':     torch.zeros(toy.N_src, device=toy.device),     # Phase PSD background [rad² m²]
-        'alpha': torch.ones (toy.N_src, device=toy.device)*0.1, # Phase PSD Moffat alpha [1/m]
-        'beta':  torch.ones (toy.N_src, device=toy.device)*2,   # Phase PSD Moffat beta power law
-        'ratio': torch.ones (toy.N_src, device=toy.device),     # Phase PSD Moffat ellipticity
-        'theta': torch.zeros(toy.N_src, device=toy.device),     # Phase PSD Moffat angle
-    }
-else:
-    inputs_psfao = {}
+inputs = inputs_tiptorch #| inputs_psfao
+PSF_1 = toy(x=inputs)
 
-inputs = inputs_tiptorch | inputs_psfao
+#%%
 
+plt.imshow(PSF_1[0,-1,...].abs().log10().cpu().numpy())
+
+
+#%%
 # PSF_1 = toy(x=inputs)
 # PSF_1 = toy(x=inputs2)
 
@@ -98,7 +150,24 @@ inputs = inputs_tiptorch | inputs_psfao
 # config_file['telescope']['PupilAngle'] += angle_correction
 
 # toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=True, oversampling=1)
-PSF_1 = toy(x=inputs)
+start = torch.cuda.Event(enable_timing=True)
+end   = torch.cuda.Event(enable_timing=True)
+
+times = []
+N_runs = 10
+for i in range(N_runs+1):
+    start.record()
+
+    toy.Update(reinit_grids=True, reinit_pupils=True)
+    PSF_1 = toy(x=inputs)
+
+    end.record()
+    torch.cuda.synchronize()
+    times.append(start.elapsed_time(end))
+
+times = np.array(times[1:])
+print(f'Mean time: {times.mean()} ms')
+
 # PSF_1 = toy(x=inputs, phase_generator=lambda: sausage_absorber(0.25, -20))
 
 #print(toy.EndTimer())
