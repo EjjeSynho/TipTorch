@@ -4,7 +4,6 @@ sys.path.insert(0, '..')
 
 import os
 import re
-from os import path
 import pickle
 import numpy as np
 import matplotlib.pyplot as plt
@@ -18,7 +17,7 @@ from tqdm import tqdm
 from copy import deepcopy
 from pathlib import Path
 from tools.utils import GetROIaroundMax, mask_circle
-from scipy.ndimage.measurements import center_of_mass
+from scipy.ndimage import center_of_mass
 try:
     from query_eso_archive import query_simbad
 except:
@@ -26,11 +25,10 @@ except:
 
 from project_globals import SPHERE_DATA_FOLDER
 
-ROOT = Path(SPHERE_DATA_FOLDER+'IRDIS_RAW')
-path_dtts = Path(SPHERE_DATA_FOLDER+'DTTS/')
-
-folder_L = ROOT/'SPHERE_DC_DATA_LEFT/'
-folder_R = ROOT/'SPHERE_DC_DATA_RIGHT/'
+ROOT      = Path(SPHERE_DATA_FOLDER + 'IRDIS_RAW')
+path_dtts = Path(SPHERE_DATA_FOLDER + 'DTTS/')
+folder_L  = ROOT / 'SPHERE_DC_DATA_LEFT/'
+folder_R  = ROOT / 'SPHERE_DC_DATA_RIGHT/'
 
 path_output = SPHERE_DATA_FOLDER+'IRDIS_reduced/'
 
@@ -72,46 +70,14 @@ def GetFilesList():
 
     return files_L, files_R
 
-files_L, files_R = GetFilesList()
 
-
-'''
-import PIL
-
-raw_fits_L = fits.open(files_L[1000])
-raw_fits_R = fits.open(files_R[1000])
-
-for i in range(10):
-    A = np.log10(np.abs(20+raw_fits_L[0].data[i]))
-    A -= np.nanmin(A)
-    A /= np.nanmax(A)
-
-    # Save PIL image as png 16 bit
-    im = PIL.Image.fromarray((A*65535).astype('uint16'))
-    # Stote on disk
-    im.save(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSFs_example/exposure_{i}_L.png')
-
-    A = np.log10(np.abs(20+raw_fits_R[0].data[i]))
-    A -= np.nanmin(A)
-    A /= np.nanmax(A)
-
-    # Save PIL image as png 16 bit
-    im = PIL.Image.fromarray((A*65535).astype('uint16'))
-    # Stote on disk
-    im.save(f'C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSFs_example/exposure_{i}_R.png')
-
-raw_fits_L.close()
-raw_fits_R.close()
-'''
-
-#%%
 class SPHERE_loader():
     
     def ReadImageCube(self, hdr, crop_size=256):
         cube = hdr[0].data
         mask_center = mask_circle(cube.shape[1], 128, center=(0,0), centered=True)
         # Get center of PSF
-        _, ids, _ = GetROIaroundMax(cube.sum(axis=0)*mask_center, win=crop_size)
+        _, ids, PSF_center = GetROIaroundMax(cube.sum(axis=0)*mask_center, win=crop_size)
         # Crop image
         cube = cube[:, ids[0], ids[1]]
         # Measure the background noise
@@ -120,7 +86,7 @@ class SPHERE_loader():
         # Filter out the noise
         noise_level = np.nanmedian(cube*mask_center)
         cube -= noise_level
-        return cube
+        return cube, PSF_center
 
 
     def get_telescope_pointing(self):
@@ -598,8 +564,8 @@ class SPHERE_loader():
             with fits.open(self.filename_R) as hdr_R:
                 self.hdr = hdr_L # This header is used to extract the telemetry data
                 self.data = self.LoadObservationData()
-                self.data['PSF L'] = self.ReadImageCube(hdr_L)
-                self.data['PSF R'] = self.ReadImageCube(hdr_R)
+                self.data['PSF L'], self.data['PSF L center'] = self.ReadImageCube(hdr_L)
+                self.data['PSF R'], self.data['PSF R center'] = self.ReadImageCube(hdr_R)
         return self.data
 
 
@@ -622,8 +588,7 @@ class SPHERE_loader():
         self.data = {}
         self.path_dtts = path_dtts
 
-#%%
-# Load the data
+
 def plot_sample(id):
     loader = SPHERE_loader(path_dtts)
     samp = loader.load(files_L[id], files_R[id])
@@ -649,10 +614,7 @@ def plot_sample(id):
     # plt.savefig('C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSFs_example/exposures_processed.pdf', dpi=400)
     return samp
 
-# sample = plot_sample(1632)
-# sample = plot_sample(1000)
 
-#%%
 def ReduceIRDISData():
     bad_files, good_files = [], []
 
@@ -671,9 +633,7 @@ def ReduceIRDISData():
     print('===================== Completed! =====================')
     return good_files, bad_files
 
-# good_files, bad_files = ReduceIRDISData()
 
-#%%
 def SaveReducedAsImages():
     # Visualize PSFs and save them into temporary folder
     import matplotlib
@@ -698,41 +658,7 @@ def SaveReducedAsImages():
                 # plt.show()
                 plt.savefig(dir_save_imgs + file.replace('.pickle','.png'), bbox_inches='tight', pad_inches=0)
 
-# SaveReducedAsImages()
-
-#%%
-'''
-folda_init = 'F:/ESO/Data/SPHERE/images_sortedmore/'
-
-# Scan all files in the folder and subfolders
-def list_files(folder):
-    file_list = []
-    for _, _, files in os.walk(folder):
-        for file in files:
-            # file_list.append(os.path.join(root, file))
-            if file.endswith('.png'):
-                file_list.append(file)
-    return file_list
-
-file_list_old = list_files(folda_init)
-
-#%
-import shutil
-
-file_list_new = os.listdir(SPHERE_DATA_FOLDER+'IRDIS_images/')
-set_old  = set(file_list_old)
-set_new  = set(file_list_new)
-set_diff = list(set_new.intersection(set_old))
-
-folda_new = SPHERE_DATA_FOLDER+'images_new/'
-
-# Move the files
-for file in set_diff:
-    shutil.move(SPHERE_DATA_FOLDER+'IRDIS_images/'+file, folda_new+file)
-
-'''
-
-#%%
+                      
 def CreateSPHEREdataframe(save_df_dir=None):
 
     reduced_files = os.listdir(path_output)
@@ -961,9 +887,7 @@ def CreateSPHEREdataframe(save_df_dir=None):
 
     return df
 
-# df = CreateSPHEREdataframe(save_df_dir=SPHERE_DATA_FOLDER+'sphere_df.pickle')
 
-#%%
 def LoadSPHEREsampleByID(id): # searches for the sample with the specified ID in
     with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
         request_df = pickle.load(handle)
@@ -1001,3 +925,24 @@ def plot_sample(id):
     # plt.savefig(save_folder / f'{id}.png', dpi=300)
 
 
+
+#%%
+if __name__ == '__main__':
+#%%
+    # Get the list of all stored raw IRDIS files
+    files_L, files_R = GetFilesList()
+
+    # sample = plot_sample(1632)
+    # sample = plot_sample(1000)
+
+#%%
+    # Create a dataset of cleaned IRDIS PSFs with all redued entries associated with them
+    good_files, bad_files = ReduceIRDISData()
+
+#%%
+    # Save all PSFs as images
+    SaveReducedAsImages()
+
+#%%
+    # Pack reduced entries into a nice dataframe for convenience
+    df = CreateSPHEREdataframe(save_df_dir=SPHERE_DATA_FOLDER+'sphere_df.pickle')

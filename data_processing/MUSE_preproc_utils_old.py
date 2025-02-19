@@ -1,7 +1,7 @@
 #%%
 import numpy as np
 from query_eso_archive import query_simbad
-from scipy.ndimage.measurements import center_of_mass
+from scipy.ndimage import center_of_mass
 
 from astropy.time import Time
 from astropy.coordinates import SkyCoord

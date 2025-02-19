@@ -363,34 +363,6 @@ def GetROIaroundMax(im, win=200):
     ids = CroppedROI(im, max_id, win)
     return im[ids], ids, max_id
 
-'''
-def CroppedROI(im, point, win):
-    return ( np.s_[max(point[0]-win//2, 0): min(point[0]+win//2+win%2, im.shape[0])],
-             np.s_[max(point[1]-win//2, 0): min(point[1]+win//2+win%2, im.shape[1])] )
-
-
-def GetROIaroundMax(im, win=200):
-    im[np.isinf(im)] = np.nan  # replacing inf values with nan to handle with astropy
-    
-    # determine the position of maximum intensity, so the image is centered around the brightest star
-    max_id = np.unravel_index(np.nanargmax(im), im.shape)
-
-    max_crop = CroppedROI(im, max_id, 20)
-    cropped_im = im[max_crop]
-    
-    # Applying centroiding on the non-NaN values using CoM
-    try:
-        x_centroid, y_centroid = centroid_com(cropped_im)
-        max_id = (max_crop[0].start + int(round(x_centroid)), max_crop[1].start + int(round(y_centroid)))
-        
-    # If centroid fails, fallback to the simple max position
-    except Exception as e:
-        print(f"Centroid computation failed: {e}")
-        
-    ids = CroppedROI(im, max_id, win)
-    return im[ids], ids, max_id
-'''
-
 
 def GetJmag(N_ph):
     J_zero_point = 1.9e12

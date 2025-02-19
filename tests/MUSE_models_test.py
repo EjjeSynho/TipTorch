@@ -1,4 +1,3 @@
-
 #%%
 %reload_ext autoreload
 %autoreload 2
@@ -10,17 +9,12 @@ import pickle
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from tools.utils import plot_radial_profiles_new, plot_radial_profiles_relative, SR, draw_PSF_stack, rad2mas, mask_circle
+from tools.utils import plot_radial_profiles_new, plot_radial_profiles_relative, draw_PSF_stack, mask_circle, PupilVLT
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
-from tools.config_manager import GetSPHEREonsky
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
-from astropy.stats import sigma_clipped_stats
-from tools.parameter_parser import ParameterParser
-from tools.config_manager import ConfigManager
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, PolyModel, InputsCompressor
-from data_processing.MUSE_preproc_utils_old import MUSEcube
 from project_globals import MUSE_DATA_FOLDER
 
 
@@ -29,7 +23,7 @@ with open(MUSE_DATA_FOLDER+'/muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
 
 derotate_PSF    = True
-Moffat_absorber = True
+Moffat_absorber = False
 include_sausage = True
 
 sample = LoadMUSEsampleByID(405)
@@ -37,112 +31,130 @@ PSF_0, var_mask, norms, bgs = LoadImages(sample)
 config_file, PSF_0 = GetConfig(sample, PSF_0)
 N_wvl = PSF_0.shape[1]
 
+pupil_angle = sample['All data']['Pupil angle'].item()
+
 if derotate_PSF:
-    PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
+    PSF_0 = rotate_PSF(PSF_0, -pupil_angle)
     config_file['telescope']['PupilAngle'] = 0
 
 config_file['NumberSources'] = 1
 config_file['sensor_science']['FieldOfView'] -= 1
 
+GL_fraction = 0.9
+# config_file['atmosphere']['Cn2Weights']   = torch.tensor([[GL_fraction, 1-GL_fraction]], device=device)
+# config_file['atmosphere']['Cn2Heights']   = torch.tensor([[0.0, 10000.0]], device=device)
+# config_file['sources_science']['Zenith']  = torch.tensor([7.5], device=device)
+# config_file['sources_science']['Azimuth'] = torch.tensor([45], device=device)
 
 
 #%% Initialize the model
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from PSF_models.TipTorch import TipTorch_new
-from PSF_models.TipTorch_half import TipTorch_new_half
 
-# toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-# toy.PSD_include['fitting']         = True
-# toy.PSD_include['WFS noise']       = True
-# toy.PSD_include['spatio-temporal'] = True
-# toy.PSD_include['aliasing']        = True
-# toy.PSD_include['chromatism']      = True
-# toy.PSD_include['Moffat']          = False
-# toy.to_float()
 
-# tiptorch = TipTorch_new(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-# tiptorch.PSD_include['fitting']         = True
-# tiptorch.PSD_include['WFS noise']       = True
-# tiptorch.PSD_include['spatio-temporal'] = True
-# tiptorch.PSD_include['aliasing']        = True
-# tiptorch.PSD_include['chromatism']      = True
-# tiptorch.PSD_include['diff. refract']   = True
-# tiptorch.PSD_include['Moffat']          = False
-# tiptorch.to_float()
+toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+toy.PSD_include['fitting']         = True
+toy.PSD_include['WFS noise']       = True
+toy.PSD_include['spatio-temporal'] = True
+toy.PSD_include['aliasing']        = True
+toy.PSD_include['chromatism']      = True
+toy.PSD_include['Moffat']          = False
+toy.to_float()
+
 
 with torch.no_grad():
+    pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
 
-    tiptorch_half = TipTorch_new_half(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-    tiptorch_half.PSD_include['fitting']         = True
-    tiptorch_half.PSD_include['WFS noise']       = True
-    tiptorch_half.PSD_include['spatio-temporal'] = True
-    tiptorch_half.PSD_include['aliasing']        = True
-    tiptorch_half.PSD_include['chromatism']      = True
-    tiptorch_half.PSD_include['diff. refract']   = True
-    tiptorch_half.PSD_include['Moffat']          = False
+    PSD_include = {
+        'fitting':         True,
+        'WFS noise':       True,
+        'spatio-temporal': True,
+        'aliasing':        True,
+        'chromatism':      True,
+        'diff. refract':   True,
+        'Moffat':          Moffat_absorber
+    }
+    
+    tiptorch_half = TipTorch_new(config_file, pupil, PSD_include, 'sum', device, oversampling=1)
     tiptorch_half.to_float()
-    # tiptorch_half.to_double()
-
+    
     inputs = {
-        'r0':  torch.tensor([0.1], device=tiptorch_half.device),
-        'F':   torch.tensor([[1.0,]*N_wvl], device=tiptorch_half.device),
-        'dx':  torch.tensor([[0.0,]*N_wvl], device=tiptorch_half.device),
-        'dy':  torch.tensor([[0.0,]*N_wvl], device=tiptorch_half.device),
-        'dx':  torch.tensor([[0.0]], device=tiptorch_half.device),
-        'dy':  torch.tensor([[0.0]], device=tiptorch_half.device),
-        'bg':  torch.tensor([[1e-6,]*N_wvl], device=tiptorch_half.device),
-        'dn':  torch.tensor([1.5], device=tiptorch_half.device),
-        'Jx':  torch.tensor([[0,]*N_wvl], device=tiptorch_half.device),
-        'Jy':  torch.tensor([[0,]*N_wvl], device=tiptorch_half.device),
-        'Jx':  torch.tensor([[0]], device=tiptorch_half.device),
-        'Jy':  torch.tensor([[0]], device=tiptorch_half.device),
-        'Jxy': torch.tensor([[0]], device=tiptorch_half.device)
+        'r0':  0.1,
+        'F':   [1.0,]*N_wvl,
+        # 'dx':  [0.0,]*N_wvl,
+        # 'dy':  [0.0,]*N_wvl,
+        'dx':  [0.0],
+        'dy':  [0.0],
+        'bg':  [1e-6,]*N_wvl,
+        'dn':  1.5,
+        'Jx':  [0,]*N_wvl,
+        'Jy':  [0,]*N_wvl,
+        # 'Jx':  [0],
+        # 'Jy':  [0],
+        'Jxy': [0]
     }
 
+    for value, key in zip(inputs.values(), inputs.keys()):
+        inputs[key] = torch.tensor([value], device=tiptorch_half.device)
+        
+
 #%%
-PSF_1_torch = tiptorch(x=inputs)
+W = H = tiptorch_half.N_pix
+crop = 20
+
+ROI = np.s_[0, W//2-crop:W//2+crop, H//2-crop:H//2+crop]
+
+# PSF_1_torch = tiptorch(x=inputs)
 PSF_1_toy   = toy(x=inputs)
 PSF_1_half  = tiptorch_half(x=inputs)
 
-differr      = PSF_1_toy  - PSF_1_torch
-differr_half = PSF_1_half - PSF_1_torch
+# differr      = PSF_1_toy  - PSF_1_torch
+# differr_half = PSF_1_half - PSF_1_torch
 
-#%%
-plt.imshow(differr_half[0,0,...].abs().log10().cpu().numpy())
-plt.colorbar()
+plt.imshow(  PSF_1_toy[:,-1,...][ROI].abs().log10().cpu().numpy())
 plt.show()
+plt.imshow( PSF_1_half[:,-1,...][ROI].abs().log10().cpu().numpy())
+plt.show()
+# plt.imsho(PSF_1_torch[:,1,...][ROI].abs().log10().cpu().numpy())
+# plt.show()
 
-plt.imshow(differr[0,0,...].abs().log10().cpu().numpy())
-plt.colorbar()
-plt.show()
 
 #%%
 from tqdm import tqdm
 
-diffs_full = []
-diffs_half = []
+diffs_init = []
+diffs_runs = []
 
-N = 100
+N = 25
 
+# for _ in tqdm(range(N)):
+#     tiptorch.StartTimer()
+#     PSF_1_torch = tiptorch(x=inputs)
+#     b = tiptorch.EndTimer()
+#     diffs_full.append(b)
 for _ in tqdm(range(N)):
-    tiptorch.StartTimer()
-    PSF_1_torch = tiptorch(x=inputs)
-    b = tiptorch.EndTimer()
-    diffs_full.append(b)
-    
+    tiptorch_half.StartTimer()
+    tiptorch_half.Update(reinit_grids=True, reinit_pupils=True)    
+    a = tiptorch_half.EndTimer()
+    diffs_init.append(a)
+
 for _ in tqdm(range(N)):
     tiptorch_half.StartTimer()
     PSF_1_torch = tiptorch_half(x=inputs)
     b = tiptorch_half.EndTimer()
-    diffs_half.append(b)
+    diffs_runs.append(b)
 
-diffs_full = np.array(diffs_full)
-diffs_half = np.array(diffs_half)
+# diffs_full = np.array(diffs_full)
+diffs_runs = np.array(diffs_runs[1:])
+diffs_init = np.array(diffs_init[1:])
+
+print(f'Initialization time: {diffs_init.mean()}')
+print(f'Run time: {diffs_runs.mean()}')
 
 
 #%%
 plt.hist(diffs_full[1:], bins=20, alpha=0.5, label='full')
-plt.hist(diffs_half[1:], bins=20, alpha=0.5, label='half')
+plt.hist(diffs_runs[1:], bins=20, alpha=0.5, label='half')
 plt.xlim([0, diffs_full[1:].max()])
 
 #%%

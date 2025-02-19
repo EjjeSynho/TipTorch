@@ -68,8 +68,8 @@ class LineModel:
         self.x_min = x.min().item()
 
     @staticmethod
-    def line(λ, k, y_min, λ_min, A, B):
-        return (A * k * (λ - λ_min) + y_min) * B
+    def line(x, k, y_min, x_min, A, B):
+        return (A * k * (x - x_min) + y_min) * B
 
     def fit(self, y):
         x_ = self.x.flatten().cpu().numpy()
@@ -90,8 +90,8 @@ class PolyModel:
         self.x_min = x.min().item()
 
     @staticmethod
-    def poly(λ, a, b, c, λ_min, A, B):
-        y_2 = A * λ-λ_min
+    def poly(x, a, b, c, x_min, A, B):
+        y_2 = A * x-x_min
         return (a*y_2**2 + b*y_2 + c) * B
     
     def fit(self, y):
