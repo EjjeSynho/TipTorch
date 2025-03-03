@@ -12,8 +12,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping, mask_circle
-
-from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds, process_mask
 from tools.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
@@ -41,8 +39,8 @@ subset_df = subset_df[subset_df['LWE'] == True]
 # subset_df = subset_df[subset_df['Central hole'] == False]
 
 #%%
-sample_id = 4087
-# sample_id = 2754
+# sample_id = 768
+sample_id = 2649
 
 PSF_data, _, merged_config = SPHERE_preprocess(
     sample_ids    = [sample_id],
@@ -61,12 +59,21 @@ del PSF_data
 
 
 merged_config['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
+
+merged_config['NumberSources'] = merged_config['NumberSources'].int().item()
+merged_config['DM']['DmHeights'] = torch.tensor(merged_config['DM']['DmHeights'], device=device)
+merged_config['sources_HO']['Wavelength'] = merged_config['sources_HO']['Wavelength']
+merged_config['sources_HO']['Height'] = torch.inf
+
+
 # if psf_df.loc[sample_id]['Nph WFS'] < 10:
 # PSF_mask   = PSF_mask * 0 + 1
 PSF_mask = process_mask(PSF_mask)
 # LWE_flag   = psf_df.loc[sample_id]['LWE']
 LWE_flag = True
-wings_flag = True#psf_df.loc[sample_id]['Wings']
+wings_flag = True
+
+#psf_df.loc[sample_id]['Wings']
 # wings_flag = False
 
 if psf_df.loc[sample_id]['Central hole'] == True:
@@ -77,22 +84,35 @@ if psf_df.loc[sample_id]['Central hole'] == True:
 # plt.imshow(circ_mask * np.squeeze(PSF_0[0,0,...].cpu().numpy()), norm=LogNorm())
 
 #%% Initialize model
+# from PSF_models.TipTorch import TipTorch_new
+# from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from PSF_models.TipTorch import TipTorch_new
 from tools.utils import LWE_basis
 
-tiptorch = TipTorch(merged_config, None, device, oversampling=1)
-_ = tiptorch()
+# tiptorch = TipTorch(merged_config, None, device, oversampling=1)
+# _ = tiptorch()
+
+PSD_include = {
+    'fitting':         True,
+    'WFS noise':       True,
+    'spatio-temporal': True,
+    'aliasing':        True,
+    'chromatism':      True,
+    'diff. refract':   False,
+    'Moffat':          False
+}
+tiptorch = TipTorch_new(merged_config, 'SCAO', None, PSD_include, 'sum', device, oversampling=1)
+tiptorch.to_float()
 
 basis = LWE_basis(tiptorch)
 
 PSF_1  = tiptorch()
-PSF_DL = tiptorch.DLPSF()
+# PSF_DL = tiptorch.DLPSF()
 
-draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, average=True, crop=80, scale='log')
+draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, average=True, min_val=1e-5, crop=80, scale='log')
 
 
 #%%
-
 A = PSF_0[0,0,...].abs().log10().cpu().numpy()
 B = PSF_0[0,1,...].abs().log10().cpu().numpy()
 
@@ -107,20 +127,24 @@ C = np.stack([A, B, np.zeros_like(A)], axis=-1)
 plt.imshow(C)
 plt.axis('off')
 
-
 #%% PSF fitting (no early-stopping)
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
 
-norm_F   = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0)  ])
-norm_bg  = TransformSequence(transforms=[ Uniform(a=-1e-6, b=1e-6) ])
-norm_r0  = TransformSequence(transforms=[ Uniform(a=0,     b=0.5)  ])
-norm_dxy = TransformSequence(transforms=[ Uniform(a=-1,    b=1)    ])
-norm_J   = TransformSequence(transforms=[ Uniform(a=0,     b=30)   ])
-norm_Jxy = TransformSequence(transforms=[ Uniform(a=0,     b=50)   ])
-norm_LWE = TransformSequence(transforms=[ Uniform(a=-20,   b=20)   ])
-norm_dn  = TransformSequence(transforms=[ Uniform(a=-0.02, b=0.02) ])
-norm_wind_spd = TransformSequence(transforms=[ Uniform(a=0, b=20)  ])
-norm_wind_dir = TransformSequence(transforms=[ Uniform(a=0, b=360) ])
+norm_F   = TransformSequence(transforms=[ Uniform(a=0.0,    b=1.0)  ])
+norm_bg  = TransformSequence(transforms=[ Uniform(a=-1e-6,  b=1e-6) ])
+norm_r0  = TransformSequence(transforms=[ Uniform(a=0.05,   b=0.5)  ])
+norm_dxy = TransformSequence(transforms=[ Uniform(a=-1,     b=1)    ])
+norm_J   = TransformSequence(transforms=[ Uniform(a=0,      b=10)   ])
+norm_Jxy = TransformSequence(transforms=[ Uniform(a=-180,   b=180)  ])
+norm_LWE = TransformSequence(transforms=[ Uniform(a=-20,    b=20)   ])
+norm_dn  = TransformSequence(transforms=[ Uniform(a=-0.02,  b=0.02) ])
+norm_wind_spd = TransformSequence(transforms=[ Uniform(a=0, b=20)   ])
+norm_wind_dir = TransformSequence(transforms=[ Uniform(a=0, b=360)  ])
+
+# For old
+# norm_J   = TransformSequence(transforms=[ Uniform(a=0,     b=30)   ])
+# norm_Jxy = TransformSequence(transforms=[ Uniform(a=0,     b=50)   ])
+
 
 transformer = InputsTransformer({
     'r0':  norm_r0,
@@ -134,7 +158,7 @@ transformer = InputsTransformer({
     'Jxy': norm_Jxy,
     'wind_speed':  norm_wind_spd,
     'wind_dir':    norm_wind_dir,
-    'basis_coefs': norm_LWE
+    'basis_coefs': norm_LWE,
 })
 
 inp_dict = {}
@@ -149,13 +173,16 @@ if wings_flag:
     
 if LWE_flag:
     inp_dict['basis_coefs'] = basis.coefs
+    
+# if LO_map_size is not None:
+#     inp_dict['LO_map'] = torch.zeros([1, LO_map_size**2], device=device)
 
 _ = transformer.stack(inp_dict) # to create index mapping
 
 #%%
-mask_core = 1-mask_circle(PSF_0.shape[-1], 5, center=(0,0), centered=True)
-mask_core *= mask_circle(PSF_0.shape[-1], 10, center=(0,0), centered=True)                    
-mask_core = torch.tensor(mask_core[None,None,...]).to(device)
+mask_core  = 1-mask_circle(PSF_0.shape[-1], 5,  center=(0,0), centered=True)
+mask_core *=   mask_circle(PSF_0.shape[-1], 10, center=(0,0), centered=True)                    
+mask_core  = torch.tensor(mask_core[None,None,...]).to(device)
 
 x0 = [norm_r0.forward(tiptorch.r0).item(),
       1.0, 1.0,
@@ -175,6 +202,8 @@ if wings_flag:
 
 if LWE_flag: x0 = x0 + [0,]*4 + [0,]*8
 
+# if LO_map_size is not None: x0 = x0 + [0,]*LO_map_size**2
+
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 
 def func(x_):
@@ -186,9 +215,8 @@ def func(x_):
 
 #%%
 if LWE_flag:
-
+    
     A = 50.0
-
     pattern_pos = torch.tensor([[0,0,0,0,  0,-1,1,0,  1,0,0,-1]]).to(device).float() * A
     pattern_neg = torch.tensor([[0,0,0,0,  0,1,-1,0, -1,0,0, 1]]).to(device).float() * A
     pattern_1   = torch.tensor([[0,0,0,0,  0,-1,1,0, -1,0,0, 1]]).to(device).float() * A
@@ -215,10 +243,13 @@ else:
         loss = (func(x_)-PSF_0)*PSF_mask
         return loss.flatten().abs().sum()
 
-result = minimize(loss_fn, x0, max_iter=200, tol=1e-4, method='bfgs', disp=2)
+result = minimize(loss_fn, x0, max_iter=300, tol=1e-5, method='l-bfgs', disp=2)
 
 x0 = result.x
-# x0_buf = x0.clone()
+x0_buf = x0.clone()
+
+#%%
+x0 = x0_buf.clone()
 
 #%%
 from tools.utils import BuildPTTBasis, decompose_WF, project_WF
@@ -227,7 +258,7 @@ LWE_coefs = transformer.destack(x0)['basis_coefs'].clone()
 PTT_basis = BuildPTTBasis(tiptorch.pupil.cpu().numpy(), True).to(device).float()
 
 TT_max = PTT_basis.abs()[1,...].max().item()
-pixel_shift = lambda coef: 4 * TT_max * rad2mas / tiptorch.psInMas / tiptorch.D * 1e-9 * coef
+pixel_shift = lambda coef: 4.0 * TT_max * rad2mas / tiptorch.psInMas / tiptorch.D * 1e-9 * coef
 
 LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, basis.modal_basis)
 PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, tiptorch.pupil)
@@ -239,18 +270,130 @@ x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
 x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])
 x0 = transformer.stack(x0_new)
 
-plt.imshow((LWE_OPD-PPT_OPD).cpu().numpy()[0,...])
+#%%
+plt.imshow((LWE_OPD-PPT_OPD)[0,...].cpu().numpy())#, vmin=-0.05, vmax=0.05)
+# plt.imshow(PPT_OPD[0,...].cpu().numpy())#, vmin=-0.05, vmax=0.05)
 plt.colorbar()
+plt.show()
 
 #%%
 with torch.no_grad():
+    x_final_unpacked = transformer.destack(x0)
     PSF_1 = func(x0)
+    # PSF_1 = tiptorch(x_final_unpacked, None, lambda: basis(x_final_unpacked['basis_coefs'].float()))
+
+fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+plot_radial_profiles_new( (PSF_0*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+plot_radial_profiles_new( (PSF_0*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+plt.show()
+
+draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
+
+
+#%%
+class GradientLoss(nn.Module):
+    """
+    A gradient-based loss that enforces smoothness by penalizing differences
+    between neighboring pixels in both x (horizontal) and y (vertical) directions.
+    
+    Parameters:
+    - p (int or float): The norm degree. Use p=2 for L2-norm (quadratic) or p=1 for L1-norm.
+    - reduction (str): Specifies the reduction to apply to the output: 'mean' or 'sum'.
+    """
+    def __init__(self, p=2, reduction='mean'):
+        super(GradientLoss, self).__init__()
+        self.p = p
+        self.reduction = reduction
+
+    def forward(self, input):
+        """
+        Compute the gradient loss on the input phase map.
+        
+        Args:
+            input (torch.Tensor): A tensor of shape [batch, channels, height, width].
+        
+        Returns:
+            torch.Tensor: The computed gradient loss.
+        """
+        # Compute differences along the horizontal (x) direction: shape [B, C, H, W-1]
+        diff_x = torch.abs(input[:, :, :, 1:] - input[:, :, :, :-1])
+        # Compute differences along the vertical (y) direction: shape [B, C, H-1, W]
+        diff_y = torch.abs(input[:, :, 1:, :] - input[:, :, :-1, :])
+        
+        # Apply the p-norm to the differences
+        if self.p == 1:
+            loss_x = diff_x
+            loss_y = diff_y
+        else:
+            loss_x = diff_x ** self.p
+            loss_y = diff_y ** self.p
+        
+        # Sum the losses from both directions to get a scalar loss
+        loss = loss_x.sum() + loss_y.sum()
+        
+        # Optionally, average the loss over the number of elements
+        if self.reduction == 'mean':
+            num_elements = loss_x.numel() + loss_y.numel()
+            loss = loss / num_elements
+        
+        return loss
+
+    # Create a dummy input: a batch of one 64x64 single-channel phase map
+grad_loss_fn = GradientLoss(p=1, reduction='mean')
+
+# loss_value = grad_loss_fn(PSF_0*PSF_mask)
+# print("Gradient-based loss:", loss_value.item())        
+
+
+#%%
+from tools.utils import OptimizableLO
+
+# norm_LO  = TransformSequence(transforms=[Uniform(a=-20,   b=20)])
+LO_map_size = 31
+LO_basis = OptimizableLO(tiptorch)
+
+# norm_LO = TransformSequence(transforms=[ Uniform(a=-20,    b=20)   ])
+
+x_LO = torch.ones(1, LO_map_size**2, dtype=torch.float32, device=device)
+# x_LO = torch.randn(1, LO_map_size**2, dtype=torch.float32, device=device)
+# b = LO_basis(x_LO.view(1, LO_map_size, LO_map_size))
+
+#%
+def func_LO(x_):
+    if 'basis_coefs' in x_final_unpacked:
+        return tiptorch(x_final_unpacked, None, lambda: basis(x_final_unpacked['basis_coefs'].float()) * LO_basis(x_.view(1, LO_map_size, LO_map_size)))
+    else:
+        return tiptorch(x_final_unpacked, None, lambda: LO_basis(x_.view(1, LO_map_size, LO_map_size)))
+
+def loss_fn_LO(x_):
+    Y = func_LO(x_)
+    loss_regular =  PSF_mask * (Y-PSF_0)
+    loss_gradient = grad_loss_fn(x_.view(tiptorch.N_src, 1, LO_map_size, LO_map_size))
+    return loss_regular.flatten().abs().sum() #+ 1e5*loss_gradient
+
+result = minimize(loss_fn_LO, x_LO, max_iter=200, tol=1e-5, method='l-bfgs', disp=2)
+
+x1 = result.x
+
+
+#%%
+with torch.no_grad():
+    PSF_1 = func_LO(x1)
     fig, ax = plt.subplots(1, 2, figsize=(10, 3))
     plot_radial_profiles_new( (PSF_0*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
     plot_radial_profiles_new( (PSF_0*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
     plt.show()
   
-    draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, average=True, crop=80)#, scale=None)
+    draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
+
+
+#%%
+
+# xxx = x1 - x1.median()
+xxx = x1.reshape(LO_map_size, LO_map_size).cpu().numpy() * 1e9
+
+plt.imshow(xxx, cmap='bwr')
+plt.colorbar()
 
 
 #%%

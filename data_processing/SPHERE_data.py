@@ -35,6 +35,7 @@ path_output = SPHERE_DATA_FOLDER+'IRDIS_reduced/'
 h = 'HIERARCH ESO '
 
 #%%
+"""
 def GetFilesList():
     files_L = []
     files_R = []
@@ -67,6 +68,62 @@ def GetFilesList():
             files_L_only.append(files_L.pop(i))
         else:
             files_R.append(file_R)
+
+    return files_L, files_R
+"""
+
+def GetFilesList():
+    # Verify folders exist
+    if not os.path.isdir(folder_L):
+        print('Folder does not exist:', folder_L)
+    if not os.path.isdir(folder_R):
+        print('Folder does not exist:', folder_R)
+
+    def list_files(path):
+        file_list = []
+        for root, _, files in os.walk(path):
+            for file in files:
+                # Only consider .fits files (case insensitive)
+                if file.lower().endswith('.fits'):
+                    file_list.append(os.path.join(root, file))
+        return file_list
+
+    # Get all .fits files from each folder
+    files_L_raw = list_files(folder_L)
+    files_R_raw = list_files(folder_R)
+
+    # Extract the base filename (ignoring _left, _right and extension)
+    def pure_filename(filepath):
+        m = re.search(r'([^\\\/]+?)(?:_left|_right)?\.fits$', str(filepath), re.IGNORECASE)
+        return m.group(1) if m else None
+
+    # Build dictionaries mapping pure filename -> full path for each folder
+    dict_L = {}
+    for f in files_L_raw:
+        key = pure_filename(f)
+        if key:
+            dict_L[key] = f
+
+    dict_R = {}
+    for f in files_R_raw:
+        key = pure_filename(f)
+        if key:
+            dict_R[key] = f
+
+    # Find common keys (i.e. base filenames present in both folders)
+    common_keys = sorted(set(dict_L.keys()) & set(dict_R.keys()))
+
+    # Build corresponding lists in the same order
+    files_L = [dict_L[k] for k in common_keys]
+    files_R = [dict_R[k] for k in common_keys]
+
+    # Optionally, warn about any missing matches
+    missing_left = set(dict_R.keys()) - set(dict_L.keys())
+    missing_right = set(dict_L.keys()) - set(dict_R.keys())
+    for key in missing_left:
+        print("Left file missing for:", key)
+    for key in missing_right:
+        print("Right file missing for:", key)
 
     return files_L, files_R
 
@@ -658,6 +715,55 @@ def SaveReducedAsImages():
                 # plt.show()
                 plt.savefig(dir_save_imgs + file.replace('.pickle','.png'), bbox_inches='tight', pad_inches=0)
 
+
+def RegenerateImageData(path_output_new):
+    def strip_filename(x, ext):
+        x_ = x.strip()
+        underscore_loc = x_.strip().find('_')
+        file_ext_loc   = x_.strip().find(ext)
+
+        spitted_line = x_[underscore_loc+1:file_ext_loc]
+        return spitted_line
+
+    ''' In the case if images in the reduced data needs to be processed onr more time '''
+    files_stored = os.listdir(path_output)
+    file_stored_basenames = [strip_filename(f, '.pickle')  for f in files_stored]
+    raw_files_L_basenames = [os.path.basename(file).replace('_left.fits',  '') for file in files_L]
+    raw_files_R_basenames = [os.path.basename(file).replace('_right.fits', '') for file in files_R]
+    files_processed = os.listdir(path_output_new)
+    file_processed_basenames = [strip_filename(f, '.pickle')  for f in files_processed]
+
+    for i in range(len(raw_files_L_basenames)):
+        if raw_files_L_basenames[i] != raw_files_R_basenames[i]:
+            raise ValueError('Error: left and right files do not match!')
+
+
+    loader = SPHERE_loader(path_dtts)
+
+    for id in tqdm(range(len(files_stored))):
+        # Check if the file is already processed and stored in the output folder
+        if file_stored_basenames[id] in file_processed_basenames:
+            continue
+
+        try:
+            raw_file_id = raw_files_L_basenames.index(file_stored_basenames[id])
+        
+            with open(path_output + files_stored[id], 'rb') as handle:
+                data = pickle.load(handle)
+
+            with fits.open(files_L[raw_file_id]) as hdr_L:
+                with fits.open(files_R[raw_file_id]) as hdr_R:
+                    data['PSF L'], data['PSF L center'] = loader.ReadImageCube(hdr_L)
+                    data['PSF R'], data['PSF R center'] = loader.ReadImageCube(hdr_R)
+                    
+                path_store = os.path.normpath(path_output_new + files_stored[id])
+
+                with open(path_store, 'wb') as handle:
+                    pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+                    
+        except:
+            print(f'Error processing file: {file_stored_basenames[id]}')
+
                       
 def CreateSPHEREdataframe(save_df_dir=None):
 
@@ -940,9 +1046,12 @@ if __name__ == '__main__':
     good_files, bad_files = ReduceIRDISData()
 
 #%%
-    # Save all PSFs as images
+    # Save all PSFs as images that later will be used by PSF labeler
     SaveReducedAsImages()
 
 #%%
     # Pack reduced entries into a nice dataframe for convenience
     df = CreateSPHEREdataframe(save_df_dir=SPHERE_DATA_FOLDER+'sphere_df.pickle')
+
+#%%
+    # RegenerateImageData(SPHERE_DATA_FOLDER+'IRDIS_reduced_2/')

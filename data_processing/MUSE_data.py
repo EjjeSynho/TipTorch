@@ -5,6 +5,7 @@ sys.path.insert(0, '..')
 import pickle
 import re
 import os
+import gc
 from os import path
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,6 +24,23 @@ import requests
 from io import StringIO
 from photutils.background import Background2D, MedianBackground
 
+import cupy as xp
+
+GPU_flag = True
+
+find_closest = lambda λ, λs: xp.argmin(xp.abs(λs-λ)).astype('int')
+
+def check_framework(x):
+    if GPU_flag:
+        if xp.isnumpy(x): return np
+        else: return xp
+    else: return np
+
+def store(x):
+    if GPU_flag:
+        return xp.asarray(x)
+    else:
+        return x
 
 UT4_coords = ('24d37min37.36s', '-70d24m14.25s', 2635.43)
 UT4_location = EarthLocation.from_geodetic(lat=UT4_coords[0], lon=UT4_coords[1], height=UT4_coords[2]*u.m)
@@ -37,43 +55,28 @@ IRLOS_upgrade_date = pd.to_datetime('2021-03-20T00:00:00').tz_localize('UTC')
 # http://archive.eso.org/cms/eso-data/ambient-conditions/paranal-ambient-query-forms.html
 
 
-#%% ------------------ Create/read a matching table between the raw files and reduced cubes -------------------------
-if not os.path.exists(MUSE_RAW_FOLDER+'../files_matches.csv'):
-
-    include_dirs_cubes = [
-        MUSE_CUBES_FOLDER,
-        MUSE_DATA_FOLDER+'wide_field/cubes/'
-    ]
-
-    include_dirs_raw = [
-        MUSE_RAW_FOLDER,
-        MUSE_DATA_FOLDER+'wide_field/raw/'
-    ]    
-
-    dirs_obs_types = ['Calib. on-axis', 'Science, globular']
-
-    cubes_obs_date_table = {}
-    raw_obs_date_table   = {}
-    exposure_times       = {}
-    obs_types            = {}
+#%%
+def MatchRawWithReduced(include_dirs_raw, include_dirs_cubes, verbose=False):
+    ''' Create/read a matching table between the raw exposure files and reduced cubes '''
+    cubes_obs_date_table, raw_obs_date_table = {}, {}
 
     for folder_cubes, folder_raw in zip(include_dirs_cubes, include_dirs_raw):
-        cube_files = os.listdir(folder_cubes)
-        raw_files  = os.listdir(folder_raw)
+        cube_files = [f for f in os.listdir(folder_cubes) if f.endswith('.fits')]
+        raw_files  = [f for f in os.listdir(folder_raw) if f.endswith('.fits') or f.endswith('.fits.fz')]
 
-        print(f'Scanning the cubes files in \"{folder_cubes}\"...')
+        if verbose: print(f'Scanning the cubes files in \"{folder_cubes}\"...')
+
         for file in tqdm(cube_files):
             with fits.open(os.path.join(folder_cubes, file)) as hdul_cube:
                 cubes_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
-                exposure_times[file] = (hdul_cube[0].header['DATE-OBS'], hdul_cube[0].header['EXPTIME'])
-                obs_types[file] = dirs_obs_types[include_dirs_cubes.index(folder_cubes)]
 
-        print(f'Scanning the raw files in \"{folder_raw}\"...')
+        if verbose: print(f'Scanning the raw files in \"{folder_raw}\"...')
+
         for file in tqdm(raw_files):
             with fits.open(os.path.join(folder_raw, file)) as hdul_cube:
                 raw_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
 
-        print('-'*20)
+        if verbose: print('-'*15)
 
     df1 = pd.DataFrame(cubes_obs_date_table.items(), columns=['cube', 'date'])
     df2 = pd.DataFrame(raw_obs_date_table.items(),   columns=['raw',  'date'])
@@ -84,89 +87,136 @@ if not os.path.exists(MUSE_RAW_FOLDER+'../files_matches.csv'):
 
     df1.set_index('date', inplace=True)
     df2.set_index('date', inplace=True)
-   
+
     files_matches = pd.merge(df1, df2, left_index=True, right_index=True, how='inner')
+    return files_matches
 
-    #% Save files_matches
-    files_matches.to_csv(MUSE_RAW_FOLDER+'../files_matches.csv')
 
+def GetExposureTimes(include_dirs_cubes, verbose=False):
+    # ------------------ Create/read the dataset with exposure times ---------------------------------------
+    exposure_times = {}
+    for folder_cubes in include_dirs_cubes:
+        cube_files = [f for f in os.listdir(folder_cubes) if f.endswith('.fits')]
+
+        if verbose: print(f'Scanning the cubes files in \"{folder_cubes}\"...')
+
+        for file in tqdm(cube_files):
+            with fits.open(os.path.join(folder_cubes, file)) as hdul_cube:
+                exposure_times[file] = (hdul_cube[0].header['DATE-OBS'], hdul_cube[0].header['EXPTIME'])
+
+        df_exptime = pd.DataFrame(exposure_times.items(), columns=['filename', 'obs_time'])
+
+        df_exptime['exposure_start'] = pd.to_datetime(df_exptime['obs_time'].apply(lambda x: x[0]))
+        df_exptime['exposure_time'] = df_exptime['obs_time'].apply(lambda x: x[1])
+        df_exptime.drop(columns=['obs_time'], inplace=True)
+        df_exptime['exposure_end'] = df_exptime['exposure_start'] + pd.to_timedelta(df_exptime['exposure_time'], unit='s')
+        df_exptime.drop(columns=['exposure_time'], inplace=True)
+        df_exptime.set_index('filename', inplace=True)
+        df_exptime['exposure_start'] = df_exptime['exposure_start'].dt.tz_localize('UTC')
+        df_exptime['exposure_end'] = df_exptime['exposure_end'].dt.tz_localize('UTC')
+
+    return df_exptime
+
+
+include_dirs_cubes = [
+    MUSE_CUBES_FOLDER,
+    MUSE_DATA_FOLDER + 'wide_field/cubes/',
+    MUSE_DATA_FOLDER + 'quasars/J0259_cubes/'
+]
+
+include_dirs_raw = [
+    MUSE_RAW_FOLDER,
+    MUSE_DATA_FOLDER + 'wide_field/raw/',
+    MUSE_DATA_FOLDER + 'quasars/J0259_raw/'
+]
+
+#%%
+if not os.path.exists( match_path:=(MUSE_DATA_FOLDER+'files_matches.csv') ):
+    try:
+        files_matches = MatchRawWithReduced(include_dirs_raw, include_dirs_cubes, verbose=True)
+        files_matches.to_csv(MUSE_DATA_FOLDER+'files_matches.csv')
+    except Exception as e:
+        print(f'Error: {e}')
+    else:
+        print(f'Raw and cubes mathes table is saved at: {match_path}')
 else:
-    files_matches = pd.read_csv(MUSE_RAW_FOLDER+'../files_matches.csv')
+    files_matches = pd.read_csv(match_path)
     files_matches.set_index('date', inplace=True)
 
-
-# ------------------ Create/read the dataset with exposure times ---------------------------------------
-if not os.path.exists( exp_folder:=(MUSE_RAW_FOLDER+'../exposure_times.csv') ):
-    df3 = pd.DataFrame(exposure_times.items(), columns=['filename', 'obs_time'])
-
-    df3['exposure_start'] = pd.to_datetime(df3['obs_time'].apply(lambda x: x[0]))
-    df3['exposure_time'] = df3['obs_time'].apply(lambda x: x[1])
-    df3.drop(columns=['obs_time'], inplace=True)
-    df3['exposure_end'] = df3['exposure_start'] + pd.to_timedelta(df3['exposure_time'], unit='s')
-    df3.drop(columns=['exposure_time'], inplace=True)
-    df3.set_index('filename', inplace=True)
-    df3['exposure_start'] = df3['exposure_start'].dt.tz_localize('UTC')
-    df3['exposure_end'] = df3['exposure_end'].dt.tz_localize('UTC')
-    
+#%%
+if not os.path.exists( exp_folder:=(MUSE_DATA_FOLDER+'exposure_times.csv') ):
     try:
+        df3 = GetExposureTimes(include_dirs_cubes, verbose=True)
         df3.to_csv(exp_folder)
     except Exception as e:
         print(f'Error: {e}')
     else:
-        print(f'Exposure times tables is saved at: {exp_folder}')
-    
+        print(f'Exposure times table is saved at: {exp_folder}')
+
 else:
-    df3 = pd.read_csv(MUSE_RAW_FOLDER+'../exposure_times.csv')
+    df3 = pd.read_csv(exp_folder)
     df3.set_index('filename', inplace=True)
-    
-    
+
+'''
 # ------------------ Create/read the dataset with the samples observation type ---------------------------------------
+
+obs_types      = {}
+obs_types[file] = dirs_obs_types[include_dirs_cubes.index(folder_cubes)]
+dirs_obs_types = ['Calib. on-axis', 'Science, globular']
+
 if not os.path.exists( obs_type_folder:=(MUSE_RAW_FOLDER+'../obs_types.csv') ):
     obs_types_df = pd.DataFrame(obs_types.items(), columns=['filename', 'obs_type'])
     obs_types_df.set_index('filename', inplace=True)
-    
+
     try:
         obs_types_df.to_csv(obs_type_folder)
     except Exception as e:
         print(f'Error: {e}')
     else:
         print(f'Observation types table is saved at: {obs_type_folder}')
-        
+
 else:
     obs_types_df = pd.read_csv(obs_type_folder)
     obs_types_df.set_index('filename', inplace=True)
-
+'''
 
 #%%
 # ----------------- Read the dataset with IRLOS data ---------------------------------------
-IRLOS_cmds = pd.read_csv(MUSE_RAW_FOLDER+'../IRLOS_commands.csv')
-IRLOS_cmds.drop(columns=['Unnamed: 0'], inplace=True)
+def GetIRLOSInfo(IRLOS_cms_folder):
 
-IRLOS_cmds['timestamp'] = IRLOS_cmds['timestamp'].apply(lambda x: x[:-1] if x[-1] == 'Z' else x)
-IRLOS_cmds['timestamp'] = pd.to_datetime(IRLOS_cmds['timestamp']).dt.tz_localize('UTC')
-IRLOS_cmds.set_index('timestamp', inplace=True)
-IRLOS_cmds = IRLOS_cmds.sort_values(by='timestamp')
+    IRLOS_cmds = pd.read_csv(IRLOS_cms_folder)
+    IRLOS_cmds.drop(columns=['Unnamed: 0'], inplace=True)
 
-IRLOS_cmds['command'] = IRLOS_cmds['command'].apply(lambda x: x.split(' ')[-1])
+    IRLOS_cmds['timestamp'] = IRLOS_cmds['timestamp'].apply(lambda x: x[:-1] if x[-1] == 'Z' else x)
+    IRLOS_cmds['timestamp'] = pd.to_datetime(IRLOS_cmds['timestamp']).dt.tz_localize('UTC')
+    IRLOS_cmds.set_index('timestamp', inplace=True)
+    IRLOS_cmds = IRLOS_cmds.sort_values(by='timestamp')
 
-# Filter etries that don't look like IRLOS regimes
-pattern = r'(\d+x\d+_SmallScale_\d+Hz_\w+Gain)|(\d+x\d+_\d+Hz_\w+Gain)|(\d+x\d+_SmallScale)'
-IRLOS_cmds = IRLOS_cmds[IRLOS_cmds['command'].str.contains(pattern, regex=True)]
+    IRLOS_cmds['command'] = IRLOS_cmds['command'].apply(lambda x: x.split(' ')[-1])
 
-pattern = r'(?P<window>\d+x\d+)(?:_(?P<scale>SmallScale))?(?:_(?P<frequency>\d+Hz))?(?:_(?P<gain>\w+Gain))?'
-IRLOS_df = IRLOS_cmds['command'].str.extract(pattern)
+    # Filter etries that don't look like IRLOS regimes
+    pattern = r'(\d+x\d+_SmallScale_\d+Hz_\w+Gain)|(\d+x\d+_\d+Hz_\w+Gain)|(\d+x\d+_SmallScale)'
+    IRLOS_cmds = IRLOS_cmds[IRLOS_cmds['command'].str.contains(pattern, regex=True)]
 
-IRLOS_df['window']    = IRLOS_df['window'].apply(lambda x: int(x.split('x')[0]))
-IRLOS_df['frequency'] = IRLOS_df['frequency'].apply(lambda x: int(x[:-2]) if pd.notna(x) else x)
-IRLOS_df['gain']      = IRLOS_df['gain'].apply(lambda x: 68 if x == 'HighGain' else 1 if x == 'LowGain' else x)
-IRLOS_df['scale']     = IRLOS_df['scale'].apply(lambda x: x.replace('Scale','') if pd.notna(x) else x)  
-IRLOS_df['scale']     = IRLOS_df['scale'].fillna('Small')
+    pattern = r'(?P<window>\d+x\d+)(?:_(?P<scale>SmallScale))?(?:_(?P<frequency>\d+Hz))?(?:_(?P<gain>\w+Gain))?'
+    IRLOS_df = IRLOS_cmds['command'].str.extract(pattern)
 
-IRLOS_df['plate scale, [mas/pix]'] = IRLOS_df.apply(lambda row: 60  if row.name > IRLOS_upgrade_date and row['scale'] == 'Small' else 242 if row.name > IRLOS_upgrade_date and row['scale'] == 'Large' else 78 if row['scale'] == 'Small' else 324, axis=1)
-IRLOS_df['conversion, [e-/ADU]']   = IRLOS_df.apply(lambda row: 9.8 if row.name > IRLOS_upgrade_date else 3, axis=1)
+    IRLOS_df['window']    = IRLOS_df['window'].apply(lambda x: int(x.split('x')[0]))
+    IRLOS_df['frequency'] = IRLOS_df['frequency'].apply(lambda x: int(x[:-2]) if pd.notna(x) else x)
+    IRLOS_df['gain']      = IRLOS_df['gain'].apply(lambda x: 68 if x == 'HighGain' else 1 if x == 'LowGain' else x)
+    IRLOS_df['scale']     = IRLOS_df['scale'].apply(lambda x: x.replace('Scale','') if pd.notna(x) else x)
+    IRLOS_df['scale']     = IRLOS_df['scale'].fillna('Small')
 
-IRLOS_df['gain'] = IRLOS_df['gain'].fillna(1).astype('int')
-IRLOS_df['frequency'] = IRLOS_df['frequency'].fillna(200).astype('int')
+    IRLOS_df['plate scale, [mas/pix]'] = IRLOS_df.apply(lambda row: 60  if row.name > IRLOS_upgrade_date and row['scale'] == 'Small' else 242 if row.name > IRLOS_upgrade_date and row['scale'] == 'Large' else 78 if row['scale'] == 'Small' else 324, axis=1)
+    IRLOS_df['conversion, [e-/ADU]']   = IRLOS_df.apply(lambda row: 9.8 if row.name > IRLOS_upgrade_date else 3, axis=1)
+
+    IRLOS_df['gain'] = IRLOS_df['gain'].fillna(1).astype('int')
+    IRLOS_df['frequency'] = IRLOS_df['frequency'].fillna(200).astype('int')
+
+    return IRLOS_df
+
+
+IRLOS_df = GetIRLOSInfo(MUSE_RAW_FOLDER+'../IRLOS_commands.csv')
 
 # ----------------- Read the dataset with the LGS WFSs data ---------------------------------------
 LGS_flux_df   = pd.read_csv(MUSE_RAW_FOLDER + '../LGS_flux.csv',   index_col=0)
@@ -197,7 +247,7 @@ def get_background(img, sigmas=1):
 
     threshold = sigmas * background_rms
     mask = img > (background + threshold)
-    
+
     return background, background_rms, mask
 
 
@@ -205,7 +255,7 @@ def get_background(img, sigmas=1):
 def GetIRLOScube(hdul_raw):
     if 'SPARTA_TT_CUBE' in hdul_raw:
         IRLOS_cube = hdul_raw['SPARTA_TT_CUBE'].data.transpose(1,2,0)
-        win_size = IRLOS_cube.shape[0] // 2 
+        win_size = IRLOS_cube.shape[0] // 2
 
         # Removing the frame of zeros around the cube
         quadrant_1 = np.s_[1:win_size-1,  1:win_size-1, ...]
@@ -213,21 +263,20 @@ def GetIRLOScube(hdul_raw):
         quadrant_3 = np.s_[win_size+1:win_size*2-1, 1:win_size-1, ...]
         quadrant_4 = np.s_[win_size+1:win_size*2-1, win_size+1:win_size*2-1, ...]
 
-        IRLOS_cube_ = np.vstack([  
+        IRLOS_cube_ = np.vstack([
             np.hstack([IRLOS_cube[quadrant_1], IRLOS_cube[quadrant_2]]), # 1 2
             np.hstack([IRLOS_cube[quadrant_3], IRLOS_cube[quadrant_4]]), # 3 4
         ])
 
         IRLOS_cube = IRLOS_cube_ - 200 # Minus constant ADU shift
-        
+
         background, background_rms, mask = get_background(IRLOS_cube.mean(axis=-1), 1)
         IRLOS_cube *= mask[..., None] # Remove noisy background pixels
         return IRLOS_cube, win_size # [ADU], [pix]
-        
+
     else:
         print('No IRLOS cubes found')
         return None, None
-
 
 
 # Get IR loop parameters
@@ -242,10 +291,10 @@ def GetIRLoopData(hdul, start_timestamp, verbose=False):
         if match:
             read_window, regime, LO_freq, LO_gain = match.groups()
             read_window = tuple(map(int, read_window.split('x')))[0]
-            
+
             if   LO_gain == 'HighGain': LO_gain = 68
             elif LO_gain == 'LowGain':  LO_gain = 1
-                
+
             LO_freq = int(LO_freq.replace('Hz', ''))
             regime = regime.replace('Scale', '')
 
@@ -258,7 +307,7 @@ def GetIRLoopData(hdul, start_timestamp, verbose=False):
             if verbose: print('Retrieving IRLOS data from the header...')
         else:
             raise ValueError('No matching IRLOS regime found')
-            
+
     except:
         def get_default_IRLOS_config():
             return {
@@ -266,7 +315,7 @@ def GetIRLoopData(hdul, start_timestamp, verbose=False):
                 'scale': 'Small',
                 'frequency': 200,
                 'gain': 1,
-            }     
+            }
 
         try:
             selected_IRLOS_entry = IRLOS_df[IRLOS_df.index < start_timestamp].iloc[-1]
@@ -278,7 +327,7 @@ def GetIRLoopData(hdul, start_timestamp, verbose=False):
             else:
                 IRLOS_data_df = get_default_IRLOS_config()
                 if verbose: print('Closest log is too far. Using default IRLOS config...')
-                
+
         except IndexError:
             IRLOS_data_df = get_default_IRLOS_config()
             if verbose: print('No IRLOS-related information found. Using default IRLOS config...')
@@ -287,7 +336,7 @@ def GetIRLoopData(hdul, start_timestamp, verbose=False):
         IRLOS_data_df['plate scale, [mas/pix]'] = 78  if start_timestamp > IRLOS_upgrade_date else 60
     else:
         IRLOS_data_df['plate scale, [mas/pix]'] = 314 if start_timestamp > IRLOS_upgrade_date else 242
-        
+
     IRLOS_data_df['conversion, [e-/ADU]'] = 9.8 if start_timestamp > IRLOS_upgrade_date else 3
     IRLOS_data_df['RON, [e-]'] = 1 if start_timestamp > IRLOS_upgrade_date else 11
 
@@ -302,7 +351,7 @@ def GetIRLOSphotons(flux_ADU, LO_gain, LO_freq, convert_factor): #, [ADU], [1], 
     return flux_ADU / QE * convert_factor / LO_gain * LO_freq / M1_area * transmission # [photons/s/m^2]
 
 
-def GetIRLOSdata(hdul_raw, start_time, IRLOS_cube):
+def GetIRLOSdata(hdul_raw, hdul_cube, start_time, IRLOS_cube):
     # Read NGS loop parameters
     IRLOS_data_df = GetIRLoopData(hdul_raw, start_time, verbose=False)
 
@@ -311,7 +360,7 @@ def GetIRLOSdata(hdul_raw, start_time, IRLOS_cube):
         #[ADU/frame/sub aperture] * 4 sub apertures if 2x2 mode
         IRLOS_flux_ADU_h = sum([hdul_cube[0].header[f'{h}AOS NGS{i+1} FLUX'] for i in range(4)]) * 4 # [ADU/frame]
         IRLOS_data_df['ADUs (header)'] = IRLOS_flux_ADU_h
-            
+
         LO_gain    = IRLOS_data_df['gain'].item()
         LO_freq    = IRLOS_data_df['frequency'].item()
         conversion = IRLOS_data_df['conversion, [e-/ADU]'].item()
@@ -340,7 +389,7 @@ def GetIRLOSdata(hdul_raw, start_time, IRLOS_cube):
         IRLOS_data_df['NGS mag (header)'] = hdul_cube[0].header[f'{h}SEQ NGS MAG']
     else:
         IRLOS_data_df['NGS mag (header)'] = None
-        
+
     return IRLOS_data_df
 
 
@@ -348,7 +397,7 @@ def GetIRLOSdata(hdul_raw, start_time, IRLOS_cube):
 def GetLGSphotons(flux_LGS, HO_gain):
     conversion_factor = 18 #[e-/ADU]
     GALACSI_transmission = 0.31 #(with VLT) / 0.46 (without VLT), different from IRLOS!
-    HO_rate = 1000 #[Hz] 
+    HO_rate = 1000 #[Hz]
     detector_DIT = (1-0.01982)*1e-3 # [s], 0.01982 [ms] for the frame transfer
     QE = 0.9 # [e-/photons]
     # gain should always = 100 # Laser WFS gain
@@ -358,28 +407,43 @@ def GetLGSphotons(flux_LGS, HO_gain):
     return flux_LGS * conversion_factor * num_subapertures  \
         / HO_gain / detector_DIT / QE / GALACSI_transmission \
         * HO_rate / M1_area # [photons/m^2/s]
-        
 
-def GetLGSdata(hdul_cube, cube_name, start_time):
-    # AOS LGSi FLUX: [ADU] Median flux in subapertures / 
+
+def GetLGSdata(hdul_cube, cube_name, start_time, fill_missing=False, verbose=False):
+    # AOS LGSi FLUX: [ADU] Median flux in subapertures /
     # Median of the LGSi flux in all subapertures with 0.17 photons/ADU when the camera gain is 100.
     LGS_data_df = LGS_flux_df[LGS_flux_df['filename'] == cube_name].copy()
     LGS_data_df.rename(columns = { f'LGS{i} flux': f'LGS{i} flux, [ADU/frame]' for i in range(1,5) }, inplace=True)
-    LGS_data_df.index = pd.to_datetime(LGS_data_df.index).tz_localize('UTC')
 
-    HO_gains = np.array([hdul_cube[0].header[h+'AOS LGS'+str(i+1)+' DET GAIN'] for i in range(4)]) # samevalue for all LGSs
-
-    for i in range(1,5):
-        LGS_data_df.loc[:,f'LGS{i} photons, [photons/m^2/s]'] = GetLGSphotons(LGS_data_df[f'LGS{i} flux, [ADU/frame]'], HO_gains[i-1]).round().astype('uint32')
-    
     if LGS_data_df.empty:
+        if verbose: print('No LGS flux data found. ', end='')
         # Create at least something if there is no data
-        LGS_data_df = { f'LGS{i} works': None for i in range(1,5) }
-        LGS_data_df['filename'] = cube_name
-        LGS_data_df['time'] = start_time
+        LGS_data_df = {'filename': cube_name, 'time': start_time}
+  
+        if fill_missing:
+            if verbose: print('Filling with median values...')
+            flux_filler  = 880.0
+            works_filler = True
+        else:
+            if verbose: print('Skipping...')
+            flux_filler  = None
+            works_filler = None
+    
+        for i in range(1,5):
+            LGS_data_df[f'LGS{i} flux, [ADU/frame]'] = flux_filler  
+            LGS_data_df[f'LGS{i} works'] =works_filler
+            
         LGS_data_df = pd.DataFrame(LGS_data_df, index=[-1])
         LGS_data_df.set_index('time', inplace=True)
-    
+    else:  
+        LGS_data_df.index = pd.to_datetime(LGS_data_df.index).tz_localize('UTC')
+
+    # Compute LGS photons
+    HO_gains = np.array([hdul_cube[0].header[h+'AOS LGS'+str(i+1)+' DET GAIN'] for i in range(4)]) # must be the same value for all LGSs
+    for i in range(1,5):
+        LGS_data_df.loc[:,f'LGS{i} photons, [photons/m^2/s]'] = GetLGSphotons(LGS_data_df[f'LGS{i} flux, [ADU/frame]'], HO_gains[i-1]).round().astype('uint32')
+
+    # Correct laser shutter state based on the data from the cube header
     for i in range(1,5):
         if f'{h}LGS{i} LASR{i} SHUT STATE' in hdul_cube[0].header:
             LGS_data_df.loc[:,f'LGS{i} works'] = hdul_cube[0].header[f'{h}LGS{i} LASR{i} SHUT STATE'] == 0
@@ -387,19 +451,40 @@ def GetLGSdata(hdul_cube, cube_name, start_time):
             LGS_data_df.loc[:,f'LGS{i} works'] = False
 
     LGS_data_df.drop(columns=['filename'], inplace=True)
-    
+
     # [pix] slopes RMS / Median of the Y slopes std dev measured in LGS WFSi subap (0.83 arcsec/pixel).
     LGS_slopes_data_df = LGS_slopes_df[LGS_slopes_df['filename'] == cube_name].copy()
-    LGS_slopes_data_df.index = pd.to_datetime(LGS_slopes_data_df.index).tz_localize('UTC')
-    LGS_slopes_data_df.drop(columns=['filename'], inplace=True)
     
+    if LGS_slopes_data_df.empty:
+        if verbose: print('No LGS WFS slopes data found. ', end='')
+        # Create at least something if there is no data
+        LGS_slopes_data_df = {'filename': cube_name, 'time': start_time}
+        
+        if fill_missing:
+            if verbose: print('Filling with median values...')
+            slopes_filler = 0.22
+        else:
+            if verbose: print('Skipping...')
+            slopes_filler = None
+            
+        for i in range(1,5):
+            LGS_slopes_data_df[f'AOS.LGS{i}.SLOPERMSY'] = slopes_filler
+            LGS_slopes_data_df[f'AOS.LGS{i}.SLOPERMSX'] = slopes_filler
+                
+        LGS_slopes_data_df = pd.DataFrame(LGS_slopes_data_df, index=[-1])
+        LGS_slopes_data_df.set_index('time', inplace=True)
+    else:
+        LGS_slopes_data_df.index = pd.to_datetime(LGS_slopes_data_df.index).tz_localize('UTC')
+    
+    LGS_slopes_data_df.drop(columns=['filename'], inplace=True)
+
     return pd.concat([LGS_data_df, LGS_slopes_data_df], axis=1)
 
 
-#% --------------------------------------------------------------------------------------
-def GetSpectrum(white, radius=5):
+#% ------------------------ Polychromatic cube realm-------------------------------------
+def GetSpectrum(white, data, radius=5):
     _, ids, _ = GetROIaroundMax(white, radius*2)
-    return np.nansum(hdul_cube[1].data[:, ids[0], ids[1]], axis=(1,2))
+    return check_framework(data).nansum(data[:, ids[0], ids[1]], axis=(1,2))
 
 
 def range_overlap(v_min, v_max, h_min, h_max):
@@ -407,81 +492,77 @@ def range_overlap(v_min, v_max, h_min, h_max):
     return 0.0 if start_of_overlap > end_of_overlap else (end_of_overlap-start_of_overlap) / (v_max-v_min)
 
 
-def GetImageSpectrumHeader(hdul_cube, show_plots=True, crop_cube=True):
-    find_closest = lambda λ, λs: np.argmin(np.abs(λs-λ)).astype('int')
+def GetImageSpectrumHeader(
+    hdul_cube,
+    show_plots=False,
+    crop_cube=False,
+    extract_spectrum=False,
+    impaint=False,
+    verbose=False):
 
     # Extract spectral range information
     start_spaxel = hdul_cube[1].header['CRPIX3']
     num_λs = int(hdul_cube[1].header['NAXIS3']-start_spaxel+1)
     Δλ = hdul_cube[1].header['CD3_3' ] / 10.0
     λ_min = hdul_cube[1].header['CRVAL3'] / 10.0
-    λs = np.arange(num_λs)*Δλ + λ_min
+    λs = xp.arange(num_λs)*Δλ + λ_min
     λ_max = λs.max()
 
     # 1 [erg] = 10^−7 [J]
     # 1 [Angstrom] = 10 [nm]
     # 1 [cm^2] = 0.0001 [m^2]
     # [10^-20 * erg / s / cm^2 / Angstrom] = [10^-22 * W/m^2 / nm] = [10^-22 * J/s / m^2 / nm]
-    
     units = hdul_cube[1].header['BUNIT'] # flux units
-    #%
+
     # Polychromatic image
-    white = np.nan_to_num(hdul_cube[1].data).sum(axis=0)
-    spectrum = GetSpectrum(white)
+    if GPU_flag:
+        if verbose: print('Transferring the MUSE cube to GPU...')
+        cube_data = xp.array(hdul_cube[1].data)
+        mempool = xp.get_default_memory_pool()
+        pinned_mempool = xp.get_default_pinned_memory_pool()
+    else:
+        cube_data = hdul_cube[1].data
+
+    white = xp.nan_to_num(cube_data).sum(axis=0)
+
+    if extract_spectrum:
+        if verbose: print('Extracting the target\'s spectrum...')
+        spectrum = GetSpectrum(cube_data)
+    else:
+        spectrum = xp.ones_like(λs)
 
     wvl_bins = None #np.array([478, 511, 544, 577, 606, 639, 672, 705, 738, 771, 804, 837, 870, 903, 935], dtype='float32')
 
     # Pre-defined bad wavelengths ranges
-    bad_wvls = np.array([[450, 478], [577, 606]])
-    bad_ids  = np.array([find_closest(wvl, λs) for wvl in bad_wvls.flatten()], dtype='int').reshape(bad_wvls.shape)
-    valid_λs = np.ones_like(λs)
+    bad_wvls = xp.array([[450, 478], [577, 606]])
+    bad_ids  = xp.array([find_closest(wvl, λs) for wvl in bad_wvls.flatten()], dtype='int').reshape(bad_wvls.shape)
+    valid_λs = xp.ones_like(λs)
 
     for i in range(len(bad_ids)):
         valid_λs[bad_ids[i,0]:bad_ids[i,1]+1] = 0
-        bad_wvls[i,:] = np.array([λs[bad_ids[i,0]], λs[bad_ids[i,1]+1]])
-        
+        bad_wvls[i,:] = xp.array([λs[bad_ids[i,0]], λs[bad_ids[i,1]+1]])
+
     if wvl_bins is not None:
+        if verbose: print('Using pre-defined wavelength bins...')
         λ_bins_smart = wvl_bins
     else:
         # Bin data cubes
         # Before the sodium filter
+        if verbose: print('Generating smart wavelength bins...')
         λ_bin = (bad_wvls[1][0]-bad_wvls[0][1])/3.0
-        λ_bins_before = bad_wvls[0][1] + np.arange(4)*λ_bin
+        λ_bins_before = bad_wvls[0][1] + xp.arange(4)*λ_bin
         bin_ids_before = [find_closest(wvl, λs) for wvl in λ_bins_before]
 
         # After the sodium filter
-        λ_bins_num    = (λ_max-bad_wvls[1][1]) / np.diff(λ_bins_before).mean()
-        λ_bins_after  = bad_wvls[1][1] + np.arange(λ_bins_num+1)*λ_bin
+        λ_bins_num    = (λ_max-bad_wvls[1][1]) / xp.diff(λ_bins_before).mean()
+        λ_bins_after  = bad_wvls[1][1] + xp.arange(λ_bins_num+1)*λ_bin
         bin_ids_after = [find_closest(wvl, λs) for wvl in λ_bins_after]
         bins_smart    = bin_ids_before + bin_ids_after
         λ_bins_smart  = λs[bins_smart]
 
-    print('Wavelength bins, [nm]:', *λ_bins_smart.astype('int'))
-
-    Rs, Gs, Bs = np.zeros_like(λs), np.zeros_like(λs), np.zeros_like(λs)
-
-    for i,λ in enumerate(λs):
-        Rs[i], Gs[i], Bs[i] = wavelength_to_rgb(λ, show_invisible=True)
-
-    Rs = Rs * valid_λs * spectrum / np.median(spectrum)
-    Gs = Gs * valid_λs * spectrum / np.median(spectrum)
-    Bs = Bs * valid_λs * spectrum / np.median(spectrum)
-    colors = np.dstack([np.vstack([Rs, Gs, Bs])]*600).transpose(2,1,0)
-
-    fig_handler = None
-    if show_plots and crop_cube:
-        fig_handler = plt.figure(dpi=200)
-        plt.imshow(colors, extent=[λs.min(), λs.max(), 0, 120])
-        plt.ylim(0, 120)
-        plt.vlines(λ_bins_smart, 0, 120, color='white') #draw bins borders
-        plt.plot(λs, spectrum/spectrum.max()*120, linewidth=2.0, color='white')
-        plt.plot(λs, spectrum/spectrum.max()*120, linewidth=0.5, color='blue')
-        plt.xlabel(r"$\lambda$, [nm]")
-        plt.ylabel(r"$\left[ 10^{-20} \frac{erg}{s \cdot cm^2 \cdot \AA} \right]$")
-        ax = plt.gca()
-        # ax.get_yaxis().set_visible(False)
-        # plt.show()
-        # plt.savefig('C:/Users/akuznets/Desktop/thesis_results/MUSE/MUSE_spectrum.pdf', dpi=300)
+    if verbose:
+        print('Wavelength bins, [nm]:')
+        print(*λ_bins_smart.astype('int'))
 
     if isinstance(crop_cube, tuple):
         ROI = crop_cube
@@ -490,18 +571,26 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True, crop_cube=True):
     else:
         ROI = (slice(0, white.shape[0]), slice(0, white.shape[1]))
 
+    progress_bar = tqdm if verbose else lambda x: x
+
     # Generate reduced cubes
-    data_reduced = np.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
-    std_reduced  = np.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
+    if verbose: print('Generating binned data cubes...')
+    data_reduced = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
+    std_reduced  = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
     # Central λs at each spectral bin
-    wavelengths  = np.zeros(len(λ_bins_smart)-1)
-    flux         = np.zeros(len(λ_bins_smart)-1)
+    wavelengths  = xp.zeros(len(λ_bins_smart)-1)
+    flux         = xp.zeros(len(λ_bins_smart)-1)
 
     bad_layers = [] # list of spectral layers that are corrupted (excluding the sodium filter)
     bins_to_ignore = [] # list of bins that are corrupted (including the sodium filter)
 
-    for bin in tqdm( range(len(bins_smart)-1) ):
-        chunk = hdul_cube[1].data[ bins_smart[bin]:bins_smart[bin+1], ROI[0], ROI[1] ]
+    # Loop over spectral bins
+    if verbose:
+        processing_unit = "GPU" if GPU_flag else "CPU"
+        print(f'Processing spectral bins on {processing_unit}...')
+
+    for bin in progress_bar( range(len(bins_smart)-1) ):
+        chunk = cube_data[ bins_smart[bin]:bins_smart[bin+1], ROI[0], ROI[1] ]
         wvl_chunck = λs[bins_smart[bin]:bins_smart[bin+1]]
         flux_chunck = spectrum[bins_smart[bin]:bins_smart[bin+1]]
 
@@ -512,45 +601,111 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True, crop_cube=True):
 
         for i in range(chunk.shape[0]):
             layer = chunk[i,:,:]
-            if np.isnan(layer).sum() > layer.size//2: # if more than 50% of the pixela on image are NaN
+            if xp.isnan(layer).sum() > layer.size//2: # if more than 50% of the pixela on image are NaN
                 bad_layers.append((bin, i))
-                wvl_chunck[i]  = np.nan
-                flux_chunck[i] = np.nan
+                wvl_chunck[i]  = xp.nan
+                flux_chunck[i] = xp.nan
                 continue
             else:
-                # l_std = layer.flatten().std()
-                mask_inpaint = np.zeros_like(layer, dtype=np.int8)
-                mask_inpaint[np.where(np.isnan(layer))] = 1
-                # mask_inpaint[np.where(layer < -l_std)] = 1
-                mask_inpaint[np.where(layer < -1e3)] = 1
-                # mask_inpaint[np.where(np.abs(layer) < 1e-9)] = 1
-                # mask_inpaint[np.where(layer >  5*l_std)] = 1
-                
-                chunk[i,:,:] = inpaint.inpaint_biharmonic(layer, mask_inpaint)  # Inpaint bad pixels per spectral slice
+                if impaint:
+                    # Inpaint bad pixels per spectral slice
+                    # l_std = layer.flatten().std()
+                    mask_inpaint = xp.zeros_like(layer, dtype=xp.int8)
+                    mask_inpaint[xp.where(xp.isnan(layer))] = 1
+                    # mask_inpaint[xp.where(layer < -l_std)] = 1
+                    mask_inpaint[xp.where(layer < -1e3)] = 1
+                    # mask_inpaint[xp.where(xp.abs(layer) < 1e-9)] = 1
+                    # mask_inpaint[xp.where(layer >  5*l_std)] = 1
+                    if GPU_flag:
+                        chunk[i,:,:] = xp.array(
+                            inpaint.inpaint_biharmonic(
+                                image = xp.asnumpy(layer),
+                                mask  = xp.asnumpy(mask_inpaint)
+                            ),
+                            dtype=xp.float32
+                        )
+                    else:
+                        chunk[i,:,:] = inpaint.inpaint_biharmonic(layer, mask_inpaint)
 
-        data_reduced[bin,:,:] = np.nansum(chunk, axis=0)
-        std_reduced [bin,:,:] = np.nanstd(chunk, axis=0)
-        wavelengths[bin] = np.nanmean(np.array(wvl_chunck)) # central wavelength for this bin
-        flux[bin] = np.nanmean(np.array(flux_chunck))
+                else:
+                    chunk[i,:,:] = xp.nan_to_num(layer, nan=0.0)
+
+        data_reduced[bin,:,:] = xp.nansum(chunk, axis=0)
+        std_reduced [bin,:,:] = xp.nanstd(chunk, axis=0)
+        wavelengths[bin] = xp.nanmean(xp.array(wvl_chunck)) # central wavelength for this bin
+        flux[bin] = xp.nanmean(xp.array(flux_chunck))
+
+    # Send back to RAM
+    if GPU_flag:
+        λs           = xp.asnumpy(λs)
+        valid_λs     = xp.asnumpy(valid_λs)
+        spectrum     = xp.asnumpy(spectrum)
+        λ_bins_smart = xp.asnumpy(λ_bins_smart)
+        data_reduced = xp.asnumpy(data_reduced)
+        std_reduced  = xp.asnumpy(std_reduced)
+        wavelengths  = xp.asnumpy(wavelengths)
+        flux         = xp.asnumpy(flux)
+        white        = xp.asnumpy(white)
+
+    # Generate spectral plot (if applies)
+    fig_handler = None
+    if show_plots and crop_cube and extract_spectrum:
+        if verbose: print("Generating spectral plot...")
+        # Initialize arrays using np.zeros_like to match λs shape
+        Rs, Gs, Bs = np.zeros_like(λs), np.zeros_like(λs), np.zeros_like(λs)
+
+        for i, λ in enumerate(λs):
+            Rs[i], Gs[i], Bs[i] = wavelength_to_rgb(λ, show_invisible=True)
+
+        # Scale the RGB arrays by valid_λs and spectrum
+        Rs = Rs * valid_λs * spectrum / np.median(spectrum)
+        Gs = Gs * valid_λs * spectrum / np.median(spectrum)
+        Bs = Bs * valid_λs * spectrum / np.median(spectrum)
+
+        # Create a color array by stacking and transposing appropriately
+        colors = np.dstack([np.vstack([Rs, Gs, Bs])]*600).transpose(2,1,0)
+
+        # Plotting using matplotlib
+        fig_handler = plt.figure(dpi=200)
+        plt.imshow(colors, extent=[λs.min(), λs.max(), 0, 120])
+        plt.ylim(0, 120)
+        plt.vlines(λ_bins_smart, 0, 120, color='white')  # draw bins borders
+        plt.plot(λs, spectrum/spectrum.max()*120, linewidth=2.0, color='white')
+        plt.plot(λs, spectrum/spectrum.max()*120, linewidth=0.5, color='blue')
+        plt.xlabel(r"$\lambda$, [nm]")
+        plt.ylabel(r"$\left[ 10^{-20} \frac{erg}{s \cdot cm^2 \cdot \AA} \right]$")
+        ax = plt.gca()
+
 
     data_reduced = np.delete(data_reduced, bins_to_ignore, axis=0)
     std_reduced  = np.delete(std_reduced,  bins_to_ignore, axis=0)
     wavelengths  = np.delete(wavelengths,  bins_to_ignore)
     flux         = np.delete(flux,         bins_to_ignore)
 
-    print(str(len(bad_layers))+'/'+str(hdul_cube[1].data.shape[0]), '('+str(np.round(len(bad_layers)/hdul_cube[1].data.shape[0],2))+'%)', 'slices are corrupted')
+    if verbose:
+        print(str(len(bad_layers))+'/'+str(cube_data.shape[0]), '('+str(xp.round(len(bad_layers)/cube_data.shape[0],2))+'%)', 'slices are corrupted')
+
+    del cube_data
+
+    if GPU_flag:
+        if verbose: print("Freeing GPU memory...")
+        mempool.free_all_blocks()
+        pinned_mempool.free_all_blocks()
+
 
     # Collect the telemetry from the header
+    if verbose: print("Collecting data...")
     spectral_info = {
         'spectrum (full)': (λs, spectrum),
-        'wvl range':       [λ_min, λ_max, Δλ], # From header
+        'wvl range':       [λ_min, λ_max, Δλ],  # From header
         'filtered wvls':   bad_wvls,
         'flux units':      units,
-        'wvl bins':        λ_bins_smart, # Wavelength bins
+        'wvl bins':        λ_bins_smart,  # Wavelength bins
         'wvls binned':     wavelengths,
         'flux binned':     flux,
         'spectrum fig':    fig_handler
     }
+
 
     def convert_to_dms(angle):
         is_negative = angle < 0
@@ -623,7 +778,7 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True, crop_cube=True):
         'Par. angle':    parang,
         'Derot. angle':  derot_ang, # [deg], = -0.5*(par + alt)
     }
-    
+
     science_target = {
         'Science target': hdul_cube[0].header[h+'OBS TARG NAME'],
         'RA (science)':   hdul_cube[0].header['RA'],
@@ -641,7 +796,7 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True, crop_cube=True):
     }
 
     NGS_target = {
-        'NGS RA':  ra_NGS,   
+        'NGS RA':  ra_NGS,
         'NGS DEC': dec_NGS,
         'NGS mag': NGS_mag
     }
@@ -663,37 +818,17 @@ def GetImageSpectrumHeader(hdul_cube, show_plots=True, crop_cube=True):
     }
 
     data = science_target | observation | NGS_target | from_header
-    
+
     data_df = pd.DataFrame(data, index=[0])
     data_df.rename(columns={'Date-obs': 'time'}, inplace=True)
     data_df.set_index('time', inplace=True)
     data_df.index = pd.to_datetime(data_df.index).tz_localize('UTC')
+    if verbose: print('Finished processing spectral cube!')
 
     return images, data_df, spectral_info
 
 
-# with open('C:/Users/akuznets/Data/MUSE/DATA_raw_binned/'+files[file_id].split('.fits')[0]+'.pickle', 'wb') as handle:
-#     pickle.dump(data, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-
-# plt.imshow(np.log(images['cube'].mean(axis=0)), cmap='gray')
-# plt.axis('off')
-
-# ------------------------------ Raw header reals ------------------------------------------
-'''
-def to_dist(x):
-    median_val = np.median(x)
-    std_val = np.std(x)
-    
-    if isinstance(x, np.ndarray):
-        if std_val == 0.0:
-            return median_val
-        else:
-            return median_val + 1j*std_val if np.abs(median_val/std_val) > 1e-6 else median_val
-    else:
-        return x
-    '''
-
+# ------------------------------ Raw header realm ------------------------------------------
 def extract_countables(hdul, table_name, entry_pattern):
     keys_list = [x for x in hdul[table_name].header.values()]
     values = []
@@ -702,47 +837,54 @@ def extract_countables(hdul, table_name, entry_pattern):
         entry = entry_pattern(i)
         if entry in keys_list:
             values.append(hdul[table_name].data[entry])
-            
+
     return values
 
 
-def extract_countables_df(hdul, table_name, entry_pattern):  
+def extract_countables_df(hdul, table_name, entry_pattern):
     keys_list = [x for x in hdul[table_name].header.values()]
 
     if 'Sec' in keys_list:
-        timestamps = pd.to_datetime(time_from_sec_usec(*read_secs_usecs(hdul_raw, table_name)))
+        timestamps = pd.to_datetime(time_from_sec_usec(*read_secs_usecs(hdul, table_name)))
     else:
-        timestamps = pd.to_datetime(time_from_str(hdul_raw[table_name].data['TIME_STAMP'])).tz_localize('UTC')
-    
+        timestamps = pd.to_datetime(time_from_str(hdul[table_name].data['TIME_STAMP'])).tz_localize('UTC')
+
     values_dict = {}
 
     for i in range (0, 50):
         entry = entry_pattern(i)
         if entry in keys_list:
             values_dict[entry] = hdul[table_name].data[entry]
-            
+
     return pd.DataFrame(values_dict, index=timestamps)
 
 
+# def convert_to_default_byte_order(df):
+#     for col in df.columns:
+#         if df[col].dtype.byteorder not in ('<', '=', '|'):
+#             df[col] = df[col].astype(df[col].dtype.newbyteorder('<'))
+#     return df
+
 def convert_to_default_byte_order(df):
     for col in df.columns:
+        # 'byteswap' and 'newbyteorder' should be applied to the underlying numpy arrays
         if df[col].dtype.byteorder not in ('<', '=', '|'):
-            df[col] = df[col].astype(df[col].dtype.newbyteorder('<'))
+            df[col] = df[col].apply(lambda x: x.byteswap().newbyteorder() if hasattr(x, 'byteswap') else x)
     return df
 
 
 def GetRawHeaderData(hdul_raw):
-    
+
     Cn2_data_df, atm_data_df, asm_data_df = None, None, None
-    
+
     def concatenate_non_empty_dfs(df_list):
         non_empty_dfs = [df for df in df_list if not df.empty]
         if non_empty_dfs:
             return convert_to_default_byte_order(pd.concat(non_empty_dfs, axis=1))
-            
+
         else:
             return None
-    
+
 
     if 'SPARTA_CN2_DATA' in hdul_raw:
         Cn2_data_entries    = ['L0Tot', 'r0Tot', 'seeingTot']
@@ -757,7 +899,7 @@ def GetRawHeaderData(hdul_raw):
             )
         ]
         Cn2_data_df = concatenate_non_empty_dfs(Cn2_data_df)
-        
+
 
     if 'SPARTA_ATM_DATA' in hdul_raw:
         atm_countables_list = [
@@ -785,7 +927,7 @@ def GetRawHeaderData(hdul_raw):
             'ASM_WINDDIR_10', 'ASM_WINDDIR_30',
             'ASM_WINDSPEED_10', 'ASM_WINDSPEED_30',
         ]
-        
+
         asm_data_df = [
             extract_countables_df(hdul_raw, 'ASM_DATA', lambda i: f'{x}{i}') for x in asm_countables_list
         ] + [
@@ -795,11 +937,11 @@ def GetRawHeaderData(hdul_raw):
             )
         ]
         asm_data_df = concatenate_non_empty_dfs(asm_data_df)
-    
+
     return Cn2_data_df, atm_data_df, asm_data_df
 
 
-def FetchFromESOarchive(start_time, end_time, minutes_delta=1):
+def FetchFromESOarchive(start_time, end_time, minutes_delta=1, verbose=False):
     start_time_str = (start_time - pd.Timedelta(f'{minutes_delta}m')).tz_localize(None).isoformat()
     end_time_str   = (end_time   + pd.Timedelta(f'{minutes_delta}m')).tz_localize(None).isoformat()
 
@@ -811,11 +953,11 @@ def FetchFromESOarchive(start_time, end_time, minutes_delta=1):
         if response.status_code == 200:
             csv_data = StringIO(response.text)
             df = pd.read_csv(csv_data)
-            
+
             if df.columns[0][0] == '#':
-                print('No data retrieved')
+                if verbose: print('- No data retrieved')
                 return None
-            
+
             df = df[~df['Date time'].str.contains('#')]
             df.rename(columns={'Date time': 'time'}, inplace=True)
             df['time'] = pd.to_datetime(df['time']).dt.tz_localize('UTC')
@@ -827,15 +969,15 @@ def FetchFromESOarchive(start_time, end_time, minutes_delta=1):
             return None
 
 
-    print('Quring ASM database...')
+    if verbose: print('Querying ASM database...')
     request_asm = req_str('meteo')
 
     asm_entries = [
         ('tab_press', 0),
         ('tab_presqnh', 0),
         ('tab_temp1', 1), ('tab_temp2', 0), ('tab_temp3', 0), ('tab_temp4', 0),
-        ('tab_tempdew1', 0), ('tab_tempdew2', 0), ('tab_tempdew4', 0), 
-        ('tab_dustl1', 0), ('tab_dustl2', 0), ('tab_dusts1', 0), ('tab_dusts2', 0), ('tab_rain', 0), 
+        ('tab_tempdew1', 0), ('tab_tempdew2', 0), ('tab_tempdew4', 0),
+        ('tab_dustl1', 0), ('tab_dustl2', 0), ('tab_dusts1', 0), ('tab_dusts2', 0), ('tab_rain', 0),
         ('tab_rhum1', 0), ('tab_rhum2', 0), ('tab_rhum4', 0),
         ('tab_wind_dir1', 1), ('tab_wind_dir1_180', 0), ('tab_wind_dir2', 0), ('tab_wind_dir2_180', 0),
         ('tab_wind_speed1', 1), ('tab_wind_speed2', 0), ('tab_wind_speedu', 0), ('tab_wind_speedv', 0), ('tab_wind_speedw', 0)
@@ -844,7 +986,7 @@ def FetchFromESOarchive(start_time, end_time, minutes_delta=1):
     asm_df = GetFromURL(request_asm)
 
 
-    print('Querying MASS-DIMM data')
+    if verbose: print('Querying MASS-DIMM data...')
     request_massdimm = req_str('mass')
 
     mass_dimm_entries = [
@@ -867,7 +1009,7 @@ def FetchFromESOarchive(start_time, end_time, minutes_delta=1):
     massdimm_df = GetFromURL(request_massdimm)
 
 
-    print('Querying DIMM data')
+    if verbose: print('Querying DIMM data...')
     request_dimm = req_str('dimm')
     dimm_entries = [
         ('tab_fwhm', 1),
@@ -877,8 +1019,7 @@ def FetchFromESOarchive(start_time, end_time, minutes_delta=1):
     request_dimm += ''.join([f'&{entry[0]}={entry[1]}' for entry in dimm_entries])
     dimm_df = GetFromURL(request_dimm)
 
-    #%
-    print('Querying SLODAR data')
+    if verbose: print('Querying SLODAR data...')
     request_slodar = req_str('slodar')
     slodar_entries = [
         ('tab_cnsqs_uts', 1),
@@ -895,7 +1036,7 @@ def FetchFromESOarchive(start_time, end_time, minutes_delta=1):
 # Function to create the flat DataFrame
 def create_flat_dataframe(df):
     flat_data = {}
-    
+
     for col in df.columns:
         # print(col)
         if pd.api.types.is_numeric_dtype(df[col]):
@@ -913,7 +1054,7 @@ def create_flat_dataframe(df):
                 flat_data[col] = non_nan_values[0]
             else:
                 flat_data[col] = np.nan
-       
+
     return pd.DataFrame([flat_data])
 
 
@@ -948,7 +1089,7 @@ def get_PSF_rotation(MUSE_images, derot_angle):
 
     angle_init = derot_angle * 2 + 165 - 45 # The magic formula to get the initial angle
     angle_init += 360 if angle_init <= 180 else -360
-    
+
     mask_rot  = (1-mask_circle(PSF_0.shape[0], 25)) * mask_circle(PSF_0.shape[0], 80)
 
     def subtract_radial_avg(img):
@@ -990,7 +1131,7 @@ def get_PSF_rotation(MUSE_images, derot_angle):
         for angle in angles:
             rot_0 = gaussian_filter(np.copy(PSF_0), 2)
             rot_1 = gaussian_filter(np.copy(PSF_1), 2)
-            
+
             mask_rot = rotate(mask_streaks, angle+angle_0, reshape=False)
             rot_1_ = rotate(rot_1, angle+angle_0, reshape=False)
 
@@ -1001,12 +1142,12 @@ def get_PSF_rotation(MUSE_images, derot_angle):
             # plt.show()
 
             losses.append(loss.copy())
-            
+
         # plt.plot(angles, losses)
         # plt.show()
-        
+
         optimal_angle = angles[np.argmin(losses)]
-        
+
         return 0.0 if np.abs(optimal_angle) == search_limits else optimal_angle
 
     corrective_ang = angle_search(PSF_0_diff, PSF_1_diff, angle_init)
@@ -1020,116 +1161,241 @@ def get_IRLOS_phase(cube):
             path_new = f'{LIFT_PATH}{path}/..'
             if path_new not in sys.path:
                 sys.path.append(path_new)
-                
-        from LIFT_full.experimental.IRLOS_2x2_function import estimate_2x2    
 
-        return estimate_2x2(cube)      
-        
+        from LIFT_full.experimental.IRLOS_2x2_function import estimate_2x2
+
+        return estimate_2x2(cube)
+
     except Exception as e:
         print(f'Error: {e}')
         return None
 
 
 #%%
-bad_ids = []
+def ProcessMUSEcube(
+        path_raw,
+        path_cube,
+        crop=False,
+        get_IRLOS_phase=False,
+        derotate=False,
+        impaint_bad_pixels=False,
+        extract_spectrum=False,
+        plot_spectrum=False,
+        fill_missing_values=False,
+        verbose=False
+    ):
 
-# read list of files form .txt file:
-# with open(MUSE_RAW_FOLDER+'../bad_files.txt', 'r') as f:
-#     files_bad = f.read().splitlines()
+    cube_name = os.path.basename(path_cube)
 
-# for i in range(len(files_bad)):
-#     files_bad[i] = int(files_bad[i])
+    hdul_raw  = fits.open(path_raw)
+    hdul_cube = fits.open(path_cube)
 
-# for file_id in tqdm(files_bad):
+    start_time = pd.to_datetime(time_from_str(hdul_cube[0].header['DATE-OBS'])).tz_localize('UTC')
+    end_time   = pd.to_datetime(start_time + datetime.timedelta(seconds=hdul_cube[0].header['EXPTIME']))
 
-# bad_IRLOS_ids = [68, 242, 316, 390]
+    if verbose: print(f'\n>>>>> Getting IRLOS data...')
+    IRLOS_cube, win = GetIRLOScube(hdul_raw)
+    IRLOS_data_df   = GetIRLOSdata(hdul_raw, hdul_cube, start_time, IRLOS_cube)
+    LGS_data_df     = GetLGSdata(hdul_cube, cube_name, start_time, fill_missing_values, verbose)
 
-# list_ids = [411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335]
+    if win is not None:
+        IRLOS_data_df['window'] = win
 
-for file_id in tqdm(range(0, len(files_matches))):
-# for file_id in tqdm(list_ids):
-    print(f'>>>>>>>>>>>>>> Processing file {file_id}...')
-    try:
-        hdul_raw  = fits.open(os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ]))
-        hdul_cube = fits.open(os.path.join(MUSE_CUBES_FOLDER, files_matches.iloc[file_id]['cube']))
+    if verbose: print(f'\n>>>>> Reading data from reduced MUSE spectral cube...')
+    MUSE_images, MUSE_data_df, spectral_info = GetImageSpectrumHeader(
+        hdul_cube,
+        show_plots = plot_spectrum,
+        crop_cube  = crop,
+        extract_spectrum = extract_spectrum,
+        impaint = impaint_bad_pixels,
+        verbose = verbose
+    )
+    if verbose: print(f'\n>>>>> Reading data from raw MUSE file ...')
+    Cn2_data_df, atm_data_df, asm_data_df   = GetRawHeaderData(hdul_raw)
+    if verbose: print(f'\n>>>>> Getting data from ESO archive...')
+    asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
 
-        cube_name = files_matches.iloc[file_id]['cube']
+    hdul_cube.close()
+    hdul_raw.close()
 
-        start_time = pd.to_datetime(time_from_str(hdul_cube[0].header['DATE-OBS'])).tz_localize('UTC')
-        end_time   = pd.to_datetime(start_time + datetime.timedelta(seconds=hdul_cube[0].header['EXPTIME']))
+    # Try to detect the rotation of the PSF with diffracive features, work only for high-SNR oon-axis PSFs
+    derot_ang = MUSE_data_df['Derot. angle'].item()
+    derot_ang += 360 if derot_ang < -180 else -360
 
-        IRLOS_cube, win = GetIRLOScube(hdul_raw)
-        IRLOS_data_df   = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
-        LGS_data_df     = GetLGSdata(hdul_cube, cube_name, start_time)
-        
-        if win is not None:
-            IRLOS_data_df['window'] = win
-        
-        MUSE_images, MUSE_data_df, spectral_info = GetImageSpectrumHeader(hdul_cube, show_plots=False)
-        Cn2_data_df, atm_data_df, asm_data_df    = GetRawHeaderData(hdul_raw)
-        asm_df, massdimm_df, dimm_df, slodar_df  = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
-
-        hdul_cube.close()
-        hdul_raw.close()
-
-        # Try to detect the rotation of the PSF with diffracive features, work only for good PSFs
-        derot_ang = MUSE_data_df['Derot. angle'].item()
-        derot_ang += 360 if derot_ang < -180 else -360
+    if derotate:
         pupil_angle, angle_delta = get_PSF_rotation(MUSE_images, derot_ang)
         MUSE_data_df['Pupil angle'] = pupil_angle + angle_delta
+    else:
+        MUSE_data_df['Pupil angle'] = derot_ang * 2 + 165 - 45
 
-        # Estimate the IRLOS phasecube from 2x2 PSFs
-        OPD_subap, OPD_aperture, PSF_estim = (None,)*3
-        if IRLOS_cube is not None:
-            if (res := get_IRLOS_phase(IRLOS_cube)) is not None:
+    # Estimate the IRLOS phasecube from 2x2 PSFs
+    OPD_subap, OPD_aperture, PSF_estim = (None,)*3
+    if IRLOS_cube is not None:
+        if get_IRLOS_phase:
+            if verbose: print(f'\n>>>>> Reconstructing IRLOS phase via phase diversity...')
+            res = get_IRLOS_phase(IRLOS_cube)
+            if res is not None:
                 OPD_subap, OPD_aperture, PSF_estim = res
                 OPD_subap = OPD_subap.astype(np.float32)
                 OPD_aperture = OPD_aperture.astype(np.float32)
                 PSF_estim = PSF_estim.astype(np.float32)
 
-        IRLOS_phase_data = {
-            'OPD per subap': OPD_subap,
-            'OPD aperture':  OPD_aperture,
-            'PSF estimated': PSF_estim
-        }
+    IRLOS_phase_data = {
+        'OPD per subap': OPD_subap,
+        'OPD aperture':  OPD_aperture,
+        'PSF estimated': PSF_estim
+    }
 
-        # Create a flat DataFrame with temporal dimension compressed
-        all_df = pd.concat([
-            IRLOS_data_df, LGS_data_df, MUSE_data_df, Cn2_data_df, atm_data_df,
-            asm_data_df, asm_df, massdimm_df, dimm_df, slodar_df
-        ])
-        all_df.sort_index(inplace=True)
+    if verbose: print(f'\n>>>>> Packing data...')
 
-        flat_df = create_flat_dataframe(all_df)
-        flat_df.insert(0, 'time', start_time)
-        flat_df.insert(0, 'name', cube_name)
+    # Create a flat DataFrame with temporal dimension compressed
+    all_df = pd.concat([
+        IRLOS_data_df, LGS_data_df, MUSE_data_df, Cn2_data_df, atm_data_df,
+        asm_data_df, asm_df, massdimm_df, dimm_df, slodar_df
+    ])
+    all_df.sort_index(inplace=True)
 
-        MUSE_images['IRLOS cube'] = IRLOS_cube
+    flat_df = create_flat_dataframe(all_df)
+    flat_df.insert(0, 'time', start_time)
+    flat_df.insert(0, 'name', cube_name)
 
-        data_store = {
-            'images': MUSE_images,
-            'IRLOS data': IRLOS_data_df,
-            'IRLOS phases': IRLOS_phase_data,
-            'LGS data': LGS_data_df,
-            'MUSE header data': MUSE_data_df,
-            'Raw Cn2 data': Cn2_data_df,
-            'Raw atm data': atm_data_df,
-            'Raw ASM data': asm_data_df,
-            'ASM data': asm_df,
-            'MASS-DIMM data': massdimm_df,
-            'DIMM data': dimm_df,
-            'SLODAR data': slodar_df,
-            'All data': flat_df,
-            'spectral data': spectral_info,
-        }
+    MUSE_images['IRLOS cube'] = IRLOS_cube
 
-        path_new = cube_name.split('.fits')[0] + '.pickle'
-        path_new = path_new.replace(':','-')
+    data_store = {
+        'images': MUSE_images,
+        'IRLOS data': IRLOS_data_df,
+        'IRLOS phases': IRLOS_phase_data,
+        'LGS data': LGS_data_df,
+        'MUSE header data': MUSE_data_df,
+        'Raw Cn2 data': Cn2_data_df,
+        'Raw atm data': atm_data_df,
+        'Raw ASM data': asm_data_df,
+        'ASM data': asm_df,
+        'MASS-DIMM data': massdimm_df,
+        'DIMM data': dimm_df,
+        'SLODAR data': slodar_df,
+        'All data': flat_df,
+        'spectral data': spectral_info,
+    }
+    return data_store, cube_name
+
+
+def RenderDataSample(data_dict, file_name):
+
+    white =  np.log10(1+np.abs(data_dict['images']['white']))
+    white -= white.min()
+    white /= white.max()
+
+    # from scipy.ndimage import rotate
+    # pupil_ang = data_dict['MUSE header data']['Pupil angle'].item() - 45
+    # if pupil_ang < -180: pupil_ang += 360
+    # if pupil_ang > 180:  pupil_ang -= 360
+    # white_rot = rotate(white, pupil_ang, reshape=False)
+
+    if data_dict['images']['IRLOS cube'] is not None:
+        IRLOS_img = np.log10(1+np.abs(data_dict['images']['IRLOS cube'].mean(axis=-1)))
+        IRLOS_img = data_dict['images']['IRLOS cube'].mean(axis=-1)
+    else:
+        IRLOS_img = np.zeros_like(white)
+
+    title = file_name.replace('.pickle', '')
+    fig, ax = plt.subplots(1,2, figsize=(14, 7.5))
+
+    ax[0].set_title(title)
+    ax[1].set_title('IRLOS (2x2)')
+    ax[0].imshow(white, cmap='gray')
+    ax[1].imshow(IRLOS_img, cmap='hot')
+    ax[0].set_axis_off()
+    ax[1].set_axis_off()
+    plt.tight_layout()
+
+
+#%%
+# Processing quasar data
+for name in ['2024-12-05T03_04_07.007', '2024-12-05T03_15_37.598', '2024-12-05T03_49_24.768']:
+    cube_name = f'J0259-0901_DATACUBE_FINAL_{name}.fits'
+
+    print(f'\n\n =================== Processing {cube_name} ===================')
+
+    raw_name = files_matches.loc[files_matches['cube'] == cube_name, 'raw'].values[0]
+
+    data_q, name_q = ProcessMUSEcube(
+        path_raw  = MUSE_DATA_FOLDER + 'quasars/J0259_raw/'   + raw_name,
+        path_cube = MUSE_DATA_FOLDER + 'quasars/J0259_cubes/' + cube_name,
+        crop=False,
+        get_IRLOS_phase=False,
+        derotate=False,
+        impaint_bad_pixels=False,
+        extract_spectrum=False,
+        plot_spectrum=False,
+        fill_missing_values=True,
+        verbose=True
+    )
+
+    path_new = MUSE_DATA_FOLDER + f'quasars/J0259_reduced/J0259_{name}.pickle'
+    try:
+        with open(path_new, 'wb') as handle:
+            pickle.dump(data_q, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    except Exception as e:
+        print(f'Error: {e}')
+
+print(' ======================= Done! =======================')
+
+#%%
+files = os.listdir(MUSE_DATA_FOLDER + 'quasars/J0259_reduced/')
+for file in files:
+    path = MUSE_DATA_FOLDER + 'quasars/J0259_reduced/' + file
+    with open(path, 'rb') as handle:
+        data_q = pickle.load(handle)
+
+    RenderDataSample(data_q, file)
+    plt.show()
+
+#%%
+
+data_q, name_q = ProcessMUSEcube(
+    path_raw  = MUSE_DATA_FOLDER + 'quasars/J0259_raw/MUSE.2024-12-05T03_15_37.598.fits.fz',
+    path_cube = MUSE_DATA_FOLDER + 'quasars/J0259_cubes/J0259-0901_DATACUBE_FINAL_2024-12-05T03_15_37.598.fits',
+    crop=False,
+    get_IRLOS_phase=False,
+    derotate=False,
+    impaint_bad_pixels=False,
+    extract_spectrum=False,
+    plot_spectrum=False,
+    fill_missing_values=True,
+    verbose=True
+)
+
+
+#%%
+bad_ids = []
+# read list of files form .txt file:
+# with open(MUSE_RAW_FOLDER+'../bad_files.txt', 'r') as f:
+#     files_bad = f.read().splitlines()
+# for i in range(len(files_bad)):
+#     files_bad[i] = int(files_bad[i])
+# for file_id in tqdm(files_bad):
+# bad_IRLOS_ids = [68, 242, 316, 390]
+# list_ids = [411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335]
+# cube_name = files_matches.iloc[file_id]['cube']
+
+
+for file_id in tqdm(range(0, len(files_matches))):
+# for file_id in tqdm(list_ids):
+    print(f'>>>>>>>>>>>>>> Processing file {file_id}...')
+    try:
+        path_raw  = os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ])
+        path_cube = os.path.join(MUSE_CUBES_FOLDER, files_matches.iloc[file_id]['cube'])
+
+        data_store = ProcessMUSEcube(path_raw, path_cube, get_IRLOS_phase=True, derotate_PSF=True)
+
+        path_new = os.path.basename(path_cube).replace('.fits','.pickle').replace(':','-')
         path_new = MUSE_RAW_FOLDER + '../DATA_reduced/' + str(file_id) + '_' + path_new
 
         with open(path_new, 'wb') as handle:
             pickle.dump(data_store, handle, protocol=pickle.HIGHEST_PROTOCOL)
-                    
+
     except Exception as e:
         print(f'Error with file {file_id}: {e}')
         bad_ids.append(file_id)
@@ -1142,65 +1408,16 @@ for file in tqdm(os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')):
     with open(MUSE_RAW_FOLDER+'../DATA_reduced/'+file, 'rb') as f:
         data = pickle.load(f)
 
-    white =  np.log10(1+np.abs(data['images']['white']))
-    white -= white.min()
-    white /= white.max()
+    RenderDataSample(data)
 
-    # from scipy.ndimage import rotate
-    # pupil_ang = data['MUSE header data']['Pupil angle'].item() - 45
-    # if pupil_ang < -180: pupil_ang += 360
-    # if pupil_ang > 180:  pupil_ang -= 360
-    # white_rot = rotate(white, pupil_ang, reshape=False)
-
-    if data['images']['IRLOS cube'] is not None:
-        IRLOS_img = np.log10(1+np.abs(data['images']['IRLOS cube'].mean(axis=-1)))
-        IRLOS_img = data['images']['IRLOS cube'].mean(axis=-1)
-    else:
-        IRLOS_img = np.zeros_like(white)
-
-    title = file.replace('.pickle', '')
-    fig, ax = plt.subplots(1,2, figsize=(14, 7.5))
-
-    ax[0].set_title(title)
-    ax[1].set_title('IRLOS (2x2)')
-    ax[0].imshow(white, cmap='gray')
-    ax[1].imshow(IRLOS_img, cmap='hot')
-    ax[0].set_axis_off()
-    ax[1].set_axis_off()
-    plt.tight_layout()
-    
     plt.show()
     plt.savefig(MUSE_RAW_FOLDER+'../MUSE_images/' + title + '.png')
 
 
 #%%
-# file_id = 173 #103#320 #327# 343
-# file_id = 3 #103#320 #327# 343
-# file_id = 173
-
-# file_id = 411
-# file_id = 405
-# file_id = 401
-# file_id = 146
-# file_id = 296
-# file_id = 382
-# file_id = 395
-# file_id = 254
-
 # These two have the same target: CD-38 10980
-file_id = 344
+# file_id = 344
 # file_id = 405
-
-# file_id = 276
-# file_id = 281
-# file_id = 311
-# file_id = 345
-# file_id = 170
-
-hdul_raw  = fits.open(os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ]))
-hdul_cube = fits.open(os.path.join(MUSE_CUBES_FOLDER, files_matches.iloc[file_id]['cube']))
-
-#%%
 
 # from astroquery.eso import Eso
 # eso = Eso()
@@ -1220,48 +1437,8 @@ hdul_cube = fits.open(os.path.join(MUSE_CUBES_FOLDER, files_matches.iloc[file_id
 # plt.axis('off')
 # plt.savefig('C:/Users/akuznets/Desktop/thesis_results/MUSE/colored_PSFs_example/unprocessed_PSF_example.pdf', dpi=400)
 
-cube_name = files_matches.iloc[file_id]['cube']
-
-start_time = pd.to_datetime(time_from_str(hdul_cube[0].header['DATE-OBS'])).tz_localize('UTC')
-end_time   = pd.to_datetime(start_time + datetime.timedelta(seconds=hdul_cube[0].header['EXPTIME']))
-
-IRLOS_cube, win = GetIRLOScube(hdul_raw)
-IRLOS_data_df   = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
-LGS_data_df     = GetLGSdata(hdul_cube, cube_name, start_time)
-
-if win is not None:
-    IRLOS_data_df['window'] = win
-
-MUSE_images, MUSE_data_df, misc_info    = GetImageSpectrumHeader(hdul_cube, show_plots=True)
-Cn2_data_df, atm_data_df, asm_data_df   = GetRawHeaderData(hdul_raw)
-asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
-
-hdul_cube.close()
-hdul_raw.close()
-
-# render_spectral_PSF(MUSE_images['cube'][id,...], misc_info['wvls binned'].tolist())
-
-# Get the angle of PSF rotation if streaks are visible
-derot_ang = MUSE_data_df['Derot. angle'].item()
-derot_ang += 360 if derot_ang < -180 else -360
-pupil_angle, angle_delta = get_PSF_rotation(MUSE_images, derot_ang)
-MUSE_data_df['Pupil angle'] = pupil_angle + angle_delta
-
-# Estimate the IRLOS phasecube from 2x2 PSFs
-OPD_subap, OPD_aperture, PSF_estim = (None,)*3
-if IRLOS_cube is not None:
-    if (res := get_IRLOS_phase(IRLOS_cube)) is not None:
-        OPD_subap, OPD_aperture, PSF_estim = res
-
-IRLOS_phase_data = {
-    'OPD per subap': OPD_subap,
-    'OPD aperture':  OPD_aperture,
-    'PSF estimated': PSF_estim
-}
-
-
 #%%
-data_offaxis = 'F:/ESO/Data/MUSE/wide_field/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits'
+data_offaxis = 'F:/ESO/Data/MUSE/wide_field/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits'
 hdul_cube = fits.open(data_offaxis)
 
 #%%
@@ -1292,16 +1469,16 @@ ra_NGS, dec_NGS = (coord_NGS.ra.deg, coord_NGS.dec.deg)
 
 #%
 targ_alpha = hdul_cube[0].header[h+'TEL TARG ALPHA']
-# = 162333.83 / Alpha coordinate for the target 
+# = 162333.83 / Alpha coordinate for the target
 # 162333.83
 
-# 162509.77717      
+# 162509.77717
 targ_delta = hdul_cube[0].header[h+'TEL TARG DELTA']
 # = -391346.1 / Delta coordinate for the target
 # -391346.1
 
 # -391700.69955
- 
+
 coord_targ = SkyCoord(alpha_hms(targ_alpha), delta_dms(targ_delta), frame='fk4', equinox='J2000', obstime=start_time, location=UT4_location)
 coord_targ = SkyCoord(alpha_hms(targ_alpha), delta_dms(targ_delta), frame='gcrs', obstime=start_time, location=UT4_location)
 
@@ -1315,8 +1492,8 @@ coord_targ = SkyCoord(alpha_hms(targ_alpha), delta_dms(targ_delta), frame='gcrs'
 # dec_targ = hdul_cube[0].header['DEC']
 
 '''
-RA  = 245.892843 / [deg]  16:23:34.2 RA  (J2000) pointing           
-DEC =  -39.23000 / [deg] -39:13:48.0 DEC (J2000) pointing  
+RA  = 245.892843 / [deg]  16:23:34.2 RA  (J2000) pointing
+DEC =  -39.23000 / [deg] -39:13:48.0 DEC (J2000) pointing
 '''
 # coord_targ = SkyCoord(ra=ra_targ*u.deg, dec=dec_targ*u.deg, frame='icrs')
 
@@ -1332,9 +1509,9 @@ coord_VLT = SkyCoord(altaz, frame='altaz', obstime=start_time)
 #%
 
 tel_delta = hdul_cube[0].header[h+'INS ADC1 DEC']
-# = -391700.69955 / [deg] Telescope declination         
+# = -391700.69955 / [deg] Telescope declination
 tel_alpha = hdul_cube[0].header[h+'INS ADC1 RA']
-# = 162509.77717 / [deg] Telescope right ascension 
+# = 162509.77717 / [deg] Telescope right ascension
 coord_tel = SkyCoord(alpha_hms(tel_alpha), delta_dms(tel_delta), frame='icrs')
 
 # coord_VLT = coord_tel
@@ -1350,17 +1527,6 @@ print( coord_VLT.separation(coord_NGS).degree )
 print( coord_targ.separation(coord_NGS).degree )
 
 
-#%%
-# Create a flat DataFrame with temporal dimension compressed
-all_df = pd.concat([
-    IRLOS_data_df, LGS_data_df, MUSE_data_df, Cn2_data_df, atm_data_df,
-    asm_data_df, asm_df, massdimm_df, dimm_df, slodar_df
-])
-all_df.sort_index(inplace=True)
-
-flat_df = create_flat_dataframe(all_df)
-flat_df.insert(0, 'time', start_time)
-flat_df.insert(0, 'name', cube_name)
 
 #%%
 df = raw_df
@@ -1402,78 +1568,15 @@ plt.colorbar()
 plt.show()
 
 #%% ============================================================================================
+# ---------------------- Reducing the full-frame data
 
-# Reducing the full-frame data
+#TODO: remove obs.type
 fname_cube_multi = obs_types_df.loc[obs_types_df['obs_type'] == 'Science, globular']['obs_type'].index[0]
 fname_raw_multi  = files_matches['raw'].loc[files_matches['cube'] == fname_cube_multi].values[0]
 
 hdul_raw  = fits.open(os.path.join(MUSE_DATA_FOLDER+'wide_field/raw/',   fname_raw_multi ))
 hdul_cube = fits.open(os.path.join(MUSE_DATA_FOLDER+'wide_field/cubes/', fname_cube_multi))
 
-start_time = pd.to_datetime(time_from_str(hdul_cube[0].header['DATE-OBS'])).tz_localize('UTC')
-end_time   = pd.to_datetime(start_time + datetime.timedelta(seconds=hdul_cube[0].header['EXPTIME']))
-
-IRLOS_cube, win = GetIRLOScube(hdul_raw)
-IRLOS_data_df   = GetIRLOSdata(hdul_raw, start_time, IRLOS_cube)
-LGS_data_df     = GetLGSdata(hdul_cube, fname_cube_multi, start_time)
-
-if win is not None:
-    IRLOS_data_df['window'] = win
-
-#%%
-MUSE_images, MUSE_data_df, misc_info    = GetImageSpectrumHeader(hdul_cube, show_plots=True, crop_cube=False)
-#%%
-Cn2_data_df, atm_data_df, asm_data_df   = GetRawHeaderData(hdul_raw)
-asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
-
-hdul_cube.close()
-hdul_raw.close()
-
-# Estimate the IRLOS phasecube from 2x2 PSFs
-OPD_subap, OPD_aperture, PSF_estim = (None,)*3
-if IRLOS_cube is not None:
-    if (res := get_IRLOS_phase(IRLOS_cube)) is not None:
-        OPD_subap, OPD_aperture, PSF_estim = res
-        OPD_subap = OPD_subap.astype(np.float32)
-        OPD_aperture = OPD_aperture.astype(np.float32)
-        PSF_estim = PSF_estim.astype(np.float32)
-
-IRLOS_phase_data = {
-    'OPD per subap': OPD_subap,
-    'OPD aperture':  OPD_aperture,
-    'PSF estimated': PSF_estim
-}
-
-# Create a flat DataFrame with temporal dimension compressed
-all_df = pd.concat([
-    IRLOS_data_df, LGS_data_df, MUSE_data_df, Cn2_data_df, atm_data_df,
-    asm_data_df, asm_df, massdimm_df, dimm_df, slodar_df
-])
-all_df.sort_index(inplace=True)
-
-flat_df = create_flat_dataframe(all_df)
-flat_df.insert(0, 'time', start_time)
-flat_df.insert(0, 'name', fname_cube_multi)
-
-#%%
-MUSE_images['IRLOS cube'] = IRLOS_cube
-
-data_store = {
-    'images': MUSE_images,
-    'IRLOS data': IRLOS_data_df,
-    'IRLOS phases': IRLOS_phase_data,
-    'LGS data': LGS_data_df,
-    'MUSE header data': MUSE_data_df,
-    'Raw Cn2 data': Cn2_data_df,
-    'Raw atm data': atm_data_df,
-    'Raw ASM data': asm_data_df,
-    'ASM data': asm_df,
-    'MASS-DIMM data': massdimm_df,
-    'DIMM data': dimm_df,
-    'SLODAR data': slodar_df,
-    'All data': flat_df,
-    'spectral data': misc_info,
-}
 
 path_new = fname_cube_multi.split('.fits')[0] + '.pickle'
 path_new = path_new.replace(':','-')
@@ -1650,178 +1753,6 @@ with open(path_new, 'wb') as handle:
 #TEL POS THETA: [deg] actual telescope position in THETA E/W. This position is logged at intervals of typically 1 minute.
 #TEL PRESET NAME: Name of the target star. This action is logged when presetting to a new target star (asmws).
 
-
-Filename: F:/ESO/Data/MUSE/DATA_raw/MUSE.2024-01-13T00-43-55.650.fits.fz
-No.    Name      Ver    Type      Cards   Dimensions   Format
-  0  PRIMARY       1 PrimaryHDU    1800   (0, 0)      
-  1  CHAN23        1 CompImageHDU     99   (4224, 4240)   int16   
-  2  CHAN17        1 CompImageHDU     99   (4224, 4240)   int16   
-  3  CHAN15        1 CompImageHDU     99   (4224, 4240)   int16   
-  4  CHAN11        1 CompImageHDU     99   (4224, 4240)   int16   
-  5  CHAN05        1 CompImageHDU     99   (4224, 4240)   int16   
-  6  CHAN03        1 CompImageHDU     99   (4224, 4240)   int16   
-  7  CHAN22        1 CompImageHDU     99   (4224, 4240)   int16   
-  8  CHAN20        1 CompImageHDU     99   (4224, 4240)   int16   
-  9  CHAN14        1 CompImageHDU     99   (4224, 4240)   int16   
- 10  CHAN10        1 CompImageHDU     99   (4224, 4240)   int16   
- 11  CHAN08        1 CompImageHDU     99   (4224, 4240)   int16   
- 12  CHAN02        1 CompImageHDU     99   (4224, 4240)   int16   
- 13  CHAN21        1 CompImageHDU     99   (4224, 4240)   int16   
- 14  CHAN19        1 CompImageHDU     99   (4224, 4240)   int16   
- 15  CHAN13        1 CompImageHDU     99   (4224, 4240)   int16   
- 16  CHAN09        1 CompImageHDU     99   (4224, 4240)   int16   
- 17  CHAN07        1 CompImageHDU     99   (4224, 4240)   int16   
- 18  CHAN01        1 CompImageHDU     99   (4224, 4240)   int16   
- 19  CHAN24        1 CompImageHDU     99   (4224, 4240)   int16   
- 20  CHAN18        1 CompImageHDU     99   (4224, 4240)   int16   
- 21  CHAN16        1 CompImageHDU     99   (4224, 4240)   int16   
- 22  CHAN12        1 CompImageHDU     99   (4224, 4240)   int16   
- 23  CHAN06        1 CompImageHDU     99   (4224, 4240)   int16   
- 24  CHAN04        1 CompImageHDU     99   (4224, 4240)   int16   
- 25  ASM_DATA      1 BinTableHDU     75   5R x 32C   ['26A', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D', 'D']   
- 26  SPARTA_TT_ACQ_IMG    1 CompImageHDU     14   (256, 256)   float32   
- 27  SPARTA_ATM_DATA    1 BinTableHDU    103   5R x 46C   [1J, 1J, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E]   
- 28  SPARTA_CN2_DATA    1 BinTableHDU     85   1R x 37C   [1J, 1J, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E, 1E]   
- 29  SPARTA_TT_CUBE    1 CompImageHDU     15   (40, 40, 100)   float32
-
-
-SPARTA_ATM_DATA:
-'Sec'
-'USec'
-'LGS1_R0 '
-'LGS1_L0 '
-'LGS1_SEEING'
-'LGS1_FWHM_GAIN'
-'LGS1_STREHL'
-'LGS1_TURVAR_RES
-'LGS1_TURVAR_TOT
-'LGS1_TUR_ALT'
-'LGS1_TUR_GND'
-'LGS2_SLOPERMSX'
-'LGS2_SLOPERMSY'
-'LGS2_R0'
-'LGS2_L0'
-'LGS2_SEEING'
-'LGS2_FWHM_GAIN'
-'LGS2_STREHL'
-'LGS2_TURVAR_RES'
-'LGS2_TURVAR_TOT'
-'LGS2_TUR_ALT'
-'LGS2_TUR_GND'
-'LGS3_SLOPERMSX'
-'LGS3_SLOPERMSY'
-'LGS3_R0'
-'LGS3_L0'
-'LGS3_SEEING'
-'LGS1_SLOPERMSX'
-'LGS3_FWHM_GAIN'
-'LGS3_STREHL'
-'LGS3_TURVAR_RES'
-'LGS3_TURVAR_TOT'
-'LGS3_TUR_ALT'
-'LGS3_TUR_GND'
-'LGS4_SLOPERMSX'
-'LGS4_SLOPERMSY'
-'LGS4_R0 '
-'LGS4_L0 '
-'LGS1_SLOPERMSY'
-'LGS4_SEEING'
-'LGS4_FWHM_GAIN'
-'LGS4_STREHL'
-'LGS4_TURVAR_RES'
-'LGS4_TURVAR_TOT'
-'LGS4_TUR_ALT'
-'LGS4_TUR_GND'
-
-f'LGS{}_'
-['R0', 'L0', 'SEEING', 'FWHM_GAIN', 'STREHL', 'TURVAR_RES, 'TURVAR_TOT, 'TUR_ALT', 'TUR_GND']
-
-SPARTA_TT_CUBE:
-
-SPARTA_CN2_DATA:
-'Sec'
-'USec'
-'L0Tot'
-'r0Tot'
-'seeingTot'
-'CN2_ALT1'
-'CN2_ALT2'
-'CN2_ALT3'
-'CN2_ALT4'
-'CN2_ALT5'
-'CN2_ALT6'
-'CN2_ALT7'
-'CN2_ALT8'
-'CN2_FRAC_ALT1'
-'CN2_FRAC_ALT2'
-'CN2_FRAC_ALT3'
-'CN2_FRAC_ALT4'
-'CN2_FRAC_ALT5'
-'CN2_FRAC_ALT6'
-'CN2_FRAC_ALT7'
-'CN2_FRAC_ALT8'
-'L0_ALT1'
-'L0_ALT2'
-'L0_ALT3'
-'L0_ALT4'
-'L0_ALT5'
-'L0_ALT6'
-'L0_ALT7'
-'L0_ALT8'
-'ALT1'
-'ALT2'
-'ALT3'
-'ALT4'
-'ALT5'
-'ALT6'
-'ALT7'
-'ALT8'
-
-'Sec'
-'USec'
-'L0Tot'
-'r0Tot'
-'seeingTot'
-f'CN2_ALT{i}'
-f'CN2_FRAC_ALT{i}'
-f'L0_ALT{i}'
-f'ALT{i}'
-
-
-ASM_DATA:
-'TIME_STAMP'
-'ASM_WINDDIR_10'
-'ASM_WINDDIR_30'
-'ASM_WINDSPEED_10'
-'ASM_WINDSPEED_30'
-'ASM_RFLRMS'
-'MASS_FRACGL'
-'SLODAR_FRACGL_300'
-'SLODAR_FRACGL_500'
-'ASM_TAU0'
-'IA_FWHMLIN'
-'MASS_TURB0'
-'MASS_TURB1'
-'MASS_TURB2'
-'MASS_TURB3'
-'MASS_TURB4'
-'MASS_TURB5'
-'MASS_TURB6'
-'SLODAR_CNSQ2'
-'SLODAR_CNSQ3'
-'SLODAR_CNSQ4'
-'SLODAR_CNSQ5'
-'SLODAR_CNSQ6'
-'SLODAR_CNSQ7'
-'SLODAR_CNSQ8'
-'IA_FWHMLINOBS'
-'SLODAR_TOTAL_CN2'
-'R0'
-'IA_FWHM'
-'AZ'
-'AIRMASS'
-'DIMM_SEEING'
-
 #%%
 parang = hdul_cube[0].header[h+'TEL PARANG END' ]*0.5 + hdul_cube[0].header[h+'TEL PARANG START']*0.5
 ALT    = hdul_cube[0].header[h+'TEL ALT']
@@ -1847,7 +1778,6 @@ datas = [
     [382, 149.9915, 67.234, -108.553, -58.0],
     [395, -63.0235, 73.528, -5.33955, 153.0],
     [254, -46.5385,  81.99, -17.784,  135.0],
-    # [276,  164.417,  72.376,-298.37+180, 120.0-180],
     [281, -42.8125,  65.352, -11.2668, 133.0]
 ]
 

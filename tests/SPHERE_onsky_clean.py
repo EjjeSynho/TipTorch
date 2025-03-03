@@ -12,7 +12,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping
-from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from tools.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
@@ -42,6 +41,7 @@ with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['Corrupted'] == False]
+psf_df = psf_df[psf_df['Multiples'] == False]
 # psf_df = psf_df[psf_df['Low quality'] == False]
 # psf_df = psf_df[psf_df['Medium quality'] == False]
 # psf_df = psf_df[psf_df['LWE'] == True]
@@ -57,33 +57,17 @@ subset_df = subset_df[subset_df['High SNR'] == True]
 subset_df = subset_df[subset_df['LWE'] == True]
 subset_df = subset_df[subset_df['Central hole'] == False]
 
+print(f"Total samples: {len(subset_df)}")
+
 #%%
 from matplotlib.colors import LogNorm
 from data_processing.SPHERE_preproc_utils import LoadSPHEREsampleByID
 
-# 448, 452, 465, 552, 554, 556, 564, 576, 578, 580, 581, 578, 576, 992
-# 1209 # high noise
-# 1452 # high noise
-# 1660 # LWE
-# 456
-# 465
-# 1393 #50 DITs
-# 1408
-# 898
+# samples_ids = np.array(subset_df.index.tolist())
+sample_id = 768 #np.random.choice(samples_ids)
 
-# Too high blur
-# 2423
-# 3365
+print("Chosen sample:", sample_id)
 
-# [114, 549, 811, 816, 1176, 1192, 1304, 1573, 2146,
-# 2726, 3121, 3613, 3651, 3706, 3875, 3882, 3886, 3906, 3909, 4002, 405]
-# 1296
-# 444
-sample_id = 4087 #637 #1296 #305 #471    427
-#2818 #2112 #1921 #3909
-
-# LWE_flag = psf_df.loc[sample_id]['LWE']
-#%
 PSF_data, _, merged_config = SPHERE_preprocess(
     sample_ids    = [sample_id],
     norm_regime   = 'sum',
@@ -98,37 +82,59 @@ PSF_var  = PSF_data[0]['PSF (var)'].unsqueeze(0)
 PSF_mask = PSF_data[0]['mask (mean)'].unsqueeze(0)
 norms    = PSF_data[0]['norm (mean)']
 del PSF_data
+
+merged_config['NumberSources'] = merged_config['NumberSources'].int().item()
 merged_config['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
+merged_config['DM']['DmHeights'] = torch.tensor(merged_config['DM']['DmHeights'], device=device)
+merged_config['sources_HO']['Wavelength'] = merged_config['sources_HO']['Wavelength']
+merged_config['sources_HO']['Height'] = torch.inf
+
 # if psf_df.loc[sample_id]['Nph WFS'] < 10:
 PSF_mask   = PSF_mask * 0 + 1
 # LWE_flag   = psf_df.loc[sample_id]['LWE']
 LWE_flag = True
-wings_flag = True#psf_df.loc[sample_id]['Wings']
+wings_flag = True #psf_df.loc[sample_id]['Wings']
 # wings_flag = False
 
+#%%
+# plt.imshow(PSF_0[0,0,...].abs().log10().cpu().numpy())
+# plt.show()
+# plt.imshow(PSF_0[0,1,...].abs().log10().cpu().numpy())
+# plt.show()
+
 #%% Initialize model
-from PSF_models.TipToy_SPHERE_multisrc import TipTorch
+# from PSF_models.Tiptiptorch_SPHERE_multisrc import TipTorch
+from PSF_models.TipTorch import TipTorch_new
 from tools.utils import LWE_basis
 
-toy = TipTorch(merged_config, None, device, oversampling=1)
+# tiptorch = TipTorch(merged_config, None, device, oversampling=1)
+PSD_include = {
+    'fitting':         True,
+    'WFS noise':       True,
+    'spatio-temporal': True,
+    'aliasing':        True,
+    'chromatism':      True,
+    'diff. refract':   True,
+    'Moffat':          False
+}
 
-_ = toy()
+tiptorch = TipTorch_new(merged_config, 'SCAO', None, PSD_include, 'sum', device, oversampling=1)
+tiptorch.to_float()
 
-basis = LWE_basis(toy)
+# _ = tiptorch()
+basis = LWE_basis(tiptorch)
 
-# print(toy.WFS_Nph.item())
-# _ = toy({ 'bg': bg.unsqueeze(0).to(device) })
-# _ = toy({ 'dx': torch.tensor([[0.0, 0.0]]).to(device) })
-# _ = toy({ 'dy': torch.tensor([[0.0, 0.0]]).to(device) })
+# print(tiptorch.WFS_Nph.item())
+# _ = tiptorch({ 'bg': bg.unsqueeze(0).to(device) })
+# _ = tiptorch({ 'dx': torch.tensor([[0.0, 0.0]]).to(device) })
+# _ = tiptorch({ 'dy': torch.tensor([[0.0, 0.0]]).to(device) })
 
-PSF_1 = toy()
-#print(toy.EndTimer())
-PSF_DL = toy.DLPSF()
+PSF_1 = tiptorch()
+#print(tiptorch.EndTimer())
+# PSF_DL = tiptorch.DLPSF()
 
 
 #%%
-
-
 plt.imshow(PSF_1[0,0,...].log10().cpu().numpy())
 plt.show()
 plt.imshow(PSF_1[0,1,...].log10().cpu().numpy())
@@ -140,7 +146,7 @@ plt.imshow(PSF_0[0,1,...].abs().log10().cpu().numpy())
 plt.show()
 
 #%%
-from tools.utils import safe_centroid, RadialProfile, wavelength_to_rgb
+from tools.utils import safe_centroid, RadialProfile
 
 def calc_profile(data, xycen=None):
     xycen = safe_centroid(data) if xycen is None else xycen
@@ -149,18 +155,18 @@ def calc_profile(data, xycen=None):
     return rp.profile
 
 
-dk = 2*toy.kc / toy.nOtf_AO
+dk = 2*tiptorch.kc / tiptorch.nOtf_AO
 
 PSD_norm = lambda wvl: (dk*wvl*1e9/2/np.pi)**2
 
-PSDs = {entry: (toy.PSDs[entry].clone().squeeze() * PSD_norm(500e-9)) for entry in toy.PSD_entries if toy.PSDs[entry].ndim > 1}
+PSDs = {entry: (tiptorch.PSDs[entry].clone().squeeze() * PSD_norm(500e-9)) for entry in tiptorch.PSD_entries if tiptorch.PSDs[entry].ndim > 1}
 PSDs['chromatism'] = PSDs['chromatism'].mean(dim=0)
 
 plt.figure(figsize=(8, 6))
 
-PSD_map  = toy.PSD[0,...].mean(dim=0).real.cpu().numpy()
-k_map    = toy.k[0,...].cpu().numpy()
-k_AO_map = toy.k_AO[0,...].cpu().numpy()
+PSD_map  = tiptorch.PSD[0,...].mean(dim=0).real.cpu().numpy()
+k_map    = tiptorch.k[0,...].cpu().numpy()
+k_AO_map = tiptorch.k_AO[0,...].cpu().numpy()
 
 center    = [k_map.shape[0]//2, k_map.shape[1]//2]
 center_AO = [k_AO_map.shape[0]//2, k_AO_map.shape[1]//2]
@@ -169,7 +175,7 @@ PSD_prof = calc_profile(PSD_map,  center)
 freqs    = calc_profile(k_map,    center)
 freqs_AO = calc_profile(k_AO_map, center_AO)
 
-freq_cutoff = toy.kc
+freq_cutoff = tiptorch.kc
 
 profiles = {}
 for entry in PSDs.keys():
@@ -200,96 +206,12 @@ plt.xlim(freqs.min(), freqs.max())
 
 # C:\Users\akuznets\Desktop\thesis_results\MUSE\PSDs
 
-#%%
-from matplotlib.colors import LogNorm
-import matplotlib as mpl
-
-vmins = {
-    'fitting': 1e-2,
-    'WFS noise': 0.05,
-    'spatio-temporal': 0.001,
-    'aliasing': 4e-2,
-    'chromatism': 1e-5,
-}
-
-
-cmap = mpl.colormaps.get_cmap('inferno')  # viridis is the default colormap for imshow
-cmap.set_bad(color=(0,0,0,0))
-    
-for entry in PSDs.keys():
-    fig = plt.figure(figsize=(8,)*2)
-    A = PSDs[entry].cpu().numpy().real
-    A -= np.nanmin(A)
-    A = np.abs(A)
-    
-    
-    # if entry == 'Moffat' or entry == 'chromatism':
-    if entry != 'fitting':
-        A += 1e-7
-        A = A * toy.mask_corrected_AO.squeeze().cpu().numpy()
-    
-    # if entry == 'Moffat':
-        A = A * toy.piston_filter.squeeze().cpu().numpy()
-    
-    norm = LogNorm(vmin=vmins[entry], vmax=np.nanmax(A)*2)
-    plt.imshow(A, norm=norm, cmap=cmap)
-    plt.title(entry)
-    plt.axis('off')
-    plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/{entry}.pdf", dpi=300)
-    plt.show()
-    
-#%%
-
-A = toy.PSD[0,1,...].log().cpu().numpy()
-
-# norm = LogNorm(vmin=A.min(), vmax=A.max()*2)
-plt.imshow(A, cmap='inferno')
-plt.title('Total PSD')
-plt.axis('off')
-plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/total.pdf", dpi=300)
-# plt.show()
-
-#%%
-# plt.imshow((toy.cov[0,0,...].abs()+1).log10().cpu().numpy(), cmap='inferno')
-plt.imshow(toy.SF[0,0,...].abs().cpu().numpy(), cmap=cmap)
-plt.axis('off')
-plt.colorbar()
-plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/SF.pdf", dpi=300)
-
-#%%
-
-plt.imshow(toy.OTF[0,0,...].abs().cpu().numpy(), cmap='gray')
-plt.axis('off')
-plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/OTF_total.pdf", dpi=300)
-
-plt.imshow(toy.OTF_turb[0,0,...].abs().cpu().numpy(), cmap='gray')
-plt.axis('off')
-plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/OTF_turb.pdf", dpi=300)
-
-plt.imshow(toy.OTF_static[0,0,...].abs().cpu().numpy(), cmap='gray')
-plt.axis('off')
-plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/OTF_stat.pdf", dpi=300)
-
-#%%
-plt.imshow(toy.SF[0,0,...].abs().cpu().numpy(), cmap='inferno')
-plt.axis('off')
-plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/SF.pdf", dpi=300)
-
-#%%
-
-plt.imshow(toy.pupil.cpu().numpy(), cmap='gray')
-plt.axis('off')
-plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/pupil.pdf", dpi=300)
-
-plt.imshow(toy.apodizer.cpu().numpy(), cmap='viridis')
-plt.axis('off')
-plt.savefig(f"C:/Users/akuznets/Desktop/thesis_results/SPHERE/PSDs/apodizer.pdf", dpi=300)
 
 
 #%%
-draw_PSF_stack(PSF_0*PSF_mask, PSF_1, average=True, crop=80, scale='log')
-# mask_in  = toy.mask_rim_in.unsqueeze(1).float()
-# mask_out = toy.mask_rim_out.unsqueeze(1).float()
+draw_PSF_stack(PSF_0*PSF_mask, PSF_1, average=True, min_val=2e-6, crop=80, scale='log')
+# mask_in  = tiptorch.mask_rim_in.unsqueeze(1).float()
+# mask_out = tiptorch.mask_rim_out.unsqueeze(1).float()
 
 #%% PSF fitting (no early-stopping)
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
@@ -329,11 +251,11 @@ inp_dict = {}
 
 # Loop through the class attributes
 for attr in ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']:
-    inp_dict[attr] = getattr(toy, attr)
+    inp_dict[attr] = getattr(tiptorch, attr)
 
 if wings_flag:
-    inp_dict['wind_dir'] = toy.wind_dir
-    # inp_dict['wind_speed'] = toy.wind_speed
+    inp_dict['wind_dir'] = tiptorch.wind_dir
+    # inp_dict['wind_speed'] = tiptorch.wind_speed
     
 if LWE_flag:
     inp_dict['basis_coefs'] = basis.coefs
@@ -345,7 +267,7 @@ mask_core = 1-mask_circle(PSF_0.shape[-1], 5, center=(0,0), centered=True)
 mask_core *= mask_circle(PSF_0.shape[-1], 10, center=(0,0), centered=True)                    
 mask_core = torch.tensor(mask_core[None,None,...]).to(device)
 
-x0 = [norm_r0.forward(toy.r0).item(),
+x0 = [norm_r0.forward(tiptorch.r0).item(),
       1.0, 1.0,
       0.0, 0.0,
       0.0, 0.0,
@@ -357,8 +279,8 @@ x0 = [norm_r0.forward(toy.r0).item(),
 
 if wings_flag:
     x0 = x0 + [
-        norm_wind_dir.forward(toy.wind_dir).item(),
-        # norm_wind_spd.forward(toy.wind_speed).item()
+        norm_wind_dir.forward(tiptorch.wind_dir).item(),
+        # norm_wind_spd.forward(tiptorch.wind_speed).item()
     ]   
 
 if LWE_flag: x0 = x0 + [0,]*4 + [0,]*8
@@ -376,9 +298,9 @@ x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 def func(x_):
     x_torch = transformer.destack(x_)
     if 'basis_coefs' in x_torch:
-        return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
+        return tiptorch(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
     else:
-        return toy(x_torch)
+        return tiptorch(x_torch)
 
 # testo = func(x0)
 # draw_PSF_stack(PSF_0, testo, average=True, crop=80, scale='log')
@@ -438,17 +360,17 @@ x0 = result.x
 from tools.utils import BuildPTTBasis, decompose_WF, project_WF, calc_WFE
 
 LWE_coefs = transformer.destack(x0)['basis_coefs'].clone()
-PTT_basis = BuildPTTBasis(toy.pupil.cpu().numpy(), True).to(device).float()
+PTT_basis = BuildPTTBasis(tiptorch.pupil.cpu().numpy(), True).to(device).float()
 
 TT_max = PTT_basis.abs()[1,...].max().item()
-pixel_shift = lambda coef: 4 * TT_max * rad2mas / toy.psInMas / toy.D * 1e-9 * coef
+pixel_shift = lambda coef: 4 * TT_max * rad2mas / tiptorch.psInMas / tiptorch.D * 1e-9 * coef
 
 LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, basis.modal_basis)
-PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, toy.pupil)
-PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, toy.pupil)
+PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, tiptorch.pupil)
+PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, tiptorch.pupil)
 
 x0_new = transformer.destack(x0)
-x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, toy.pupil) 
+x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, tiptorch.pupil) 
 x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
 x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])
 x0 = transformer.stack(x0_new)
@@ -490,23 +412,23 @@ with torch.no_grad():
 
 #%%
 def GetNewPhotons():
-    WFS_noise_var = toy.dn + toy.NoiseVariance(toy.r0.abs())
+    WFS_noise_var = tiptorch.dn + tiptorch.NoiseVariance(tiptorch.r0.abs())
 
-    N_ph_0 = toy.WFS_Nph.clone()
+    N_ph_0 = tiptorch.WFS_Nph.clone()
 
     def func_Nph(x):
-        toy.WFS_Nph = x
-        var = toy.NoiseVariance(toy.r0.abs())
+        tiptorch.WFS_Nph = x
+        var = tiptorch.NoiseVariance(tiptorch.r0.abs())
         return (WFS_noise_var-var).flatten().abs().sum()
 
     result_photons = minimize(func_Nph, N_ph_0, method='bfgs', disp=0)
-    toy.WFS_Nph = N_ph_0.clone()
+    tiptorch.WFS_Nph = N_ph_0.clone()
 
     return result_photons.x
 
 Nph_new = GetNewPhotons()
 
-print(toy.WFS_Nph.item(), Nph_new.item())
+print(tiptorch.WFS_Nph.item(), Nph_new.item())
 
 
 #%%
@@ -580,7 +502,7 @@ print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 draw_PSF_stack(PSF_0, PSF_1, average=True)
 
 destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
-plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'Tiptiptorch', title='IRDIS PSF', dpi=200)
 
 #%%
 with torch.no_grad():
@@ -591,11 +513,11 @@ with torch.no_grad():
     cbar.set_label('LWE OPD, [nm] RMS')
 
 #%%
-WFE = torch.mean(toy.PSD.sum(axis=(-2,-1))**0.5)
-WFE_jitter = toy.D/4 * 1e9*(toy.Jx+toy.Jy)*0.5/rad2mas
+WFE = torch.mean(tiptorch.PSD.sum(axis=(-2,-1))**0.5)
+WFE_jitter = tiptorch.D/4 * 1e9*(tiptorch.Jx+tiptorch.Jy)*0.5/rad2mas
 WFE_total  = torch.sqrt(WFE**2 + WFE_jitter**2).item()
 
-rads = 2*np.pi*WFE_total*1e-9 / toy.wvl.flatten()[0]
+rads = 2*np.pi*WFE_total*1e-9 / tiptorch.wvl.flatten()[0]
 
 S_0 = SR(PSF_0, PSF_DL).detach().cpu().numpy()
 S = torch.exp(-rads**2).detach().cpu().numpy()

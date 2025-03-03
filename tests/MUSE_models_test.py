@@ -10,7 +10,6 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, plot_radial_profiles_relative, draw_PSF_stack, mask_circle, PupilVLT
-from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
@@ -38,14 +37,14 @@ if derotate_PSF:
     config_file['telescope']['PupilAngle'] = 0
 
 config_file['NumberSources'] = 1
-config_file['sensor_science']['FieldOfView'] -= 1
+config_file['sensor_science']['FieldOfView'] = config_file['sensor_science']['FieldOfView'].int().item() - 1
+
 
 GL_fraction = 0.9
 # config_file['atmosphere']['Cn2Weights']   = torch.tensor([[GL_fraction, 1-GL_fraction]], device=device)
 # config_file['atmosphere']['Cn2Heights']   = torch.tensor([[0.0, 10000.0]], device=device)
 # config_file['sources_science']['Zenith']  = torch.tensor([7.5], device=device)
 # config_file['sources_science']['Azimuth'] = torch.tensor([45], device=device)
-
 
 #%% Initialize the model
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
@@ -58,7 +57,7 @@ toy.PSD_include['WFS noise']       = True
 toy.PSD_include['spatio-temporal'] = True
 toy.PSD_include['aliasing']        = True
 toy.PSD_include['chromatism']      = True
-toy.PSD_include['Moffat']          = False
+toy.PSD_include['Moffat']          = Moffat_absorber
 toy.to_float()
 
 
@@ -71,13 +70,14 @@ with torch.no_grad():
         'spatio-temporal': True,
         'aliasing':        True,
         'chromatism':      True,
-        'diff. refract':   True,
+        'diff. refract':   False,
         'Moffat':          Moffat_absorber
     }
     
-    tiptorch_half = TipTorch_new(config_file, pupil, PSD_include, 'sum', device, oversampling=1)
+    tiptorch_half = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
     tiptorch_half.to_float()
     
+    '''
     inputs = {
         'r0':  0.1,
         'F':   [1.0,]*N_wvl,
@@ -93,10 +93,25 @@ with torch.no_grad():
         # 'Jy':  [0],
         'Jxy': [0]
     }
-
     for value, key in zip(inputs.values(), inputs.keys()):
         inputs[key] = torch.tensor([value], device=tiptorch_half.device)
-        
+    ''' 
+    
+    inputs = {
+        'r0':    torch.tensor([0.1206], device='cuda:0'),
+        'F':     torch.tensor([[0.9876, 1.0038, 1.0193, 0.9823, 0.9953, 1.0135, 1.0284, 1.0016, 0.9713, 0.9705, 0.9454,  0.9150,  0.9032]], device='cuda:0'),
+        'dx':    torch.tensor([[0.7711, 0.7151, 0.6626, 0.5700, 0.4754, 0.4131, 0.3473, 0.2099, 0.1137, 0.1353, 0.0684, -0.0509, -0.0493]], device='cuda:0'),
+        'dy':    torch.tensor([[0.6729, 0.6363, 0.6054, 0.6064, 0.6106, 0.5911, 0.5819, 0.5877, 0.5911, 0.5854, 0.6026, 0.6167, 0.6000]], device='cuda:0'),
+        'bg':    torch.tensor([[-8.8417e-09, -3.5006e-09, -1.0428e-07, -8.2854e-08, -4.9171e-08, -8.3156e-08, -1.7448e-07, -8.5068e-08,  1.4727e-08,  3.1474e-08, 1.1614e-07,  1.6747e-07,  1.6476e-07]], device='cuda:0'),
+        'dn':    torch.tensor([2.6343], device='cuda:0'),
+        'Jx':    torch.tensor([[ 3.9943,  6.8474,  7.4349,  8.6813, 17.8425, 19.2336, 19.7889, 19.2334, 20.2027, 23.1771, 22.8105, 17.3229, 21.7012]], device='cuda:0'),
+        'Jy':    torch.tensor([[ 1.1891,  0.9108,  0.3702,  8.6809,  9.2326,  5.4804, -0.3380, -0.2175, -0.1002, -0.3949, -0.4773, -0.9462,  0.1430]], device='cuda:0'),
+        'Jxy':   torch.tensor([0.], device='cuda:0'),
+        's_pow': torch.tensor([0.3553], device='cuda:0'),
+        'amp':   torch.tensor([1.9407], device='cuda:0'),
+        'b':     torch.tensor([0.0050], device='cuda:0'),
+        'alpha': torch.tensor([0.1706], device='cuda:0')
+    }
 
 #%%
 W = H = tiptorch_half.N_pix
@@ -111,12 +126,26 @@ PSF_1_half  = tiptorch_half(x=inputs)
 # differr      = PSF_1_toy  - PSF_1_torch
 # differr_half = PSF_1_half - PSF_1_torch
 
+dPSF_1 = PSF_1_half - PSF_1_toy
+
 plt.imshow(  PSF_1_toy[:,-1,...][ROI].abs().log10().cpu().numpy())
+plt.colorbar()
 plt.show()
+
 plt.imshow( PSF_1_half[:,-1,...][ROI].abs().log10().cpu().numpy())
+plt.colorbar()
+plt.show()
+
+plt.imshow( dPSF_1[:,-1,...][ROI].abs().log10().cpu().numpy())
+plt.colorbar()
 plt.show()
 # plt.imsho(PSF_1_torch[:,1,...][ROI].abs().log10().cpu().numpy())
 # plt.show()
+
+#%%
+
+plt.imshow(tiptorch_half.PSD[0,-1,...].abs().log10().cpu().numpy())
+
 
 
 #%%
@@ -892,3 +921,221 @@ else:
     plot_radial_profiles_new( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=20, title='Left PSF')
     plt.show()
 
+#%% ==================================================================================
+import os
+import sys
+sys.path.insert(0, '..')
+
+import pickle
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+from torch import nn, optim
+from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping, mask_circle
+from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds, process_mask
+from tools.config_manager import GetSPHEREonsky
+from project_globals import SPHERE_DATA_FOLDER, device
+from torchmin import minimize
+from astropy.stats import sigma_clipped_stats
+from matplotlib.colors import LogNorm
+
+
+#%% 
+with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
+    psf_df = pickle.load(handle)
+
+sample_id = 768
+# sample_id = 2649
+
+PSF_data, _, merged_config = SPHERE_preprocess(
+    sample_ids    = [sample_id],
+    norm_regime   = 'sum',
+    split_cube    = False,
+    PSF_loader    = lambda x: SamplesByIds(x, synth=False),
+    config_loader = GetSPHEREonsky,
+    framework     = 'pytorch',
+    device        = device)
+
+PSF_0    = PSF_data[0]['PSF (mean)'].unsqueeze(0)
+PSF_var  = PSF_data[0]['PSF (var)'].unsqueeze(0)
+PSF_mask = PSF_data[0]['mask (mean)'].unsqueeze(0)
+norms    = PSF_data[0]['norm (mean)']
+del PSF_data
+
+
+merged_config['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
+# --New below
+merged_config['NumberSources'] = merged_config['NumberSources'].int().item()
+merged_config['DM']['DmHeights'] = torch.tensor(merged_config['DM']['DmHeights'], device=device)
+merged_config['sources_HO']['Wavelength'] = merged_config['sources_HO']['Wavelength']
+merged_config['sources_HO']['Height'] = torch.inf
+# --New end
+
+
+# if psf_df.loc[sample_id]['Nph WFS'] < 10:
+# PSF_mask   = PSF_mask * 0 + 1
+PSF_mask = process_mask(PSF_mask) * 0 + 1
+# LWE_flag   = psf_df.loc[sample_id]['LWE']
+LWE_flag = True
+wings_flag = True#psf_df.loc[sample_id]['Wings']
+# wings_flag = False
+
+if psf_df.loc[sample_id]['Central hole'] == True:
+    circ_mask = 1-mask_circle(PSF_0.shape[-1], 3, centered=True)
+    PSF_mask *= torch.tensor(circ_mask[None, None, ...]).to(device)
+
+
+# plt.imshow(circ_mask * np.squeeze(PSF_0[0,0,...].cpu().numpy()), norm=LogNorm())
+
+#%% Initialize model
+from PSF_models.TipToy_SPHERE_multisrc import TipTorch
+from PSF_models.TipTorch import TipTorch_new
+# from tools.utils import LWE_basis
+
+over = 1
+
+tiptorch_old = TipTorch(merged_config, None, device, oversampling=over)
+
+tiptorch_old.PSD_include = {
+    'fitting':         True,
+    'WFS noise':       True,
+    'spatio-temporal': True,
+    'aliasing':        True,
+    'chromatism':      True,
+    'diff. refract':   False,
+    'Moffat':          False
+}
+
+_ = tiptorch_old()
+
+DL_old = tiptorch_old.DLPSF() * over**2
+
+
+PSD_include = {
+    'fitting':         True,
+    'WFS noise':       True,
+    'spatio-temporal': True,
+    'aliasing':        True,
+    'chromatism':      True,
+    'diff. refract':   False,
+    'Moffat':          False
+}
+tiptorch_new = TipTorch_new(merged_config, 'SCAO', None, PSD_include, 'sum', device, oversampling=over)
+tiptorch_new.to_float()
+
+PSF_1_new = tiptorch_new()
+
+DL_new = tiptorch_new.DLPSF()
+
+#%
+'''
+x = {
+    'r0':  torch.tensor([0.0747], device=device),
+    'F':   torch.tensor([[1.1569, 1.1547]], device=device) * 0 + 1,
+    # 'dx':  torch.tensor([[0.8032, 0.7462]], device=device),
+    'dx':  torch.tensor([[40., 39.]], device=device) * 0,
+    'dy':  torch.tensor([[-0.0599, -0.1582]], device=device)*0,
+    'bg':  torch.tensor([[-6.9435e-06, -6.3148e-06]], device=device) * 0,
+    'dn':  torch.tensor([0.0070], device=device) * 0,
+    'Jx':  torch.tensor([12.3*3], device=device) ,
+    'Jy':  torch.tensor([12.3*3], device=device) ,
+    'Jxy': torch.tensor([471.3628], device=device) * 0,
+    'wind_dir': torch.tensor([397.8669], device=device) * 0,
+    'basis_coefs': torch.tensor([[
+        -30.3420,  33.2847,  34.2236, -31.0020,  -6.7741,   4.3112,
+        11.0884, 2.2478,  -0.5152,  -3.5624,  -2.766,   9.7230
+    ]], device=device)
+}
+'''
+
+x = {
+    'r0': torch.tensor([0.0437], device='cuda:0'),
+    'F':  torch.tensor([[1.2656, 1.2267]], device='cuda:0')* 0 + 1,
+    'dx': torch.tensor([[0.5865, 0.8096]], device='cuda:0') * 0,
+    'dy': torch.tensor([[-0.5381, -0.9207]], device='cuda:0') * 0,
+    'bg': torch.tensor([[-2.4762e-05, -1.0387e-05]], device='cuda:0')* 0,
+    'dn': torch.tensor([0.0245], device='cuda:0')* 0,
+    'Jx': torch.tensor([36.1686], device='cuda:0')*0,
+    'Jy': torch.tensor([37.7516], device='cuda:0')*0,
+    'Jxy': torch.tensor([-0.2651], device='cuda:0')* 0,
+    'wind_dir': torch.tensor([-33.6068], device='cuda:0')* 0,
+    'basis_coefs': torch.tensor([[
+        22.5876, -15.5937, -37.1299,  25.9760, -41.4860,   0.7404,
+        -1.0915,  -4.5618,   1.3280,  16.4002, -23.5714,  -1.0974
+    ]], device='cuda:0') * 0
+}
+
+#%%
+PSF_1_old = tiptorch_old(x)
+PSF_1_new = tiptorch_new(x)
+
+# PSF_1_old = DL_old
+# PSF_1_new = DL_new
+
+
+#%
+# with torch.no_grad():
+fig, ax = plt.subplots(1, 2, figsize=(10, 3))
+plot_radial_profiles_new( (PSF_1_old*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1_new*PSF_mask)[:,0,...].cpu().numpy(), 'Old', 'New', title='Left PSF',  ax=ax[0] )
+plot_radial_profiles_new( (PSF_1_old*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1_new*PSF_mask)[:,1,...].cpu().numpy(), 'Old', 'New', title='Right PSF', ax=ax[1] )
+plt.show()
+
+draw_PSF_stack(PSF_1_old*PSF_mask, PSF_1_new*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
+plt.show()
+#%%
+# PSD_old = tiptorch_old.PSDs['WFS noise']#.squeeze()
+# PSD_new = tiptorch_new.half_PSD_to_full(tiptorch_new.PSDs['WFS noise'])
+
+# PSD_old = tiptorch_old.Rx.unsqueeze(0).imag
+# PSD_new = tiptorch_new.half_PSD_to_full(tiptorch_new.Rx.unsqueeze(0)).real
+
+# PSD_old = tiptorch_old.piston_filter.unsqueeze(0)
+# PSD_new = tiptorch_new.half_PSD_to_full(tiptorch_new.piston_filter.unsqueeze(0))
+
+
+# PSD_old = tiptorch_old.VonKarmanSpectrum(tiptorch_old.r0.abs(), tiptorch_old.L0.abs(), tiptorch_old.k2_AO) #* self.piston_filter
+# PSD_new = tiptorch_new.VonKarmanSpectrum(tiptorch_new.r0.abs(), tiptorch_new.L0.abs(), tiptorch_new.k2_AO) #* self.piston_filter
+
+PSD_old = tiptorch_old.kx
+PSD_new = tiptorch_new.kx
+PSD_new = tiptorch_new.half_PSD_to_full(PSD_new)
+
+plot_radial_profiles_new( PSD_old.cpu().numpy(), PSD_new.cpu().numpy(), 'Old', 'New', title='Left PSF')
+plt.show()
+
+#%%
+
+
+PSD_old
+
+
+#%%
+
+print( tiptorch_old.noise_gain )
+print( tiptorch_new.noise_gain )
+
+
+print( tiptorch_old.NoiseVariance(tiptorch_old.r0) )
+print( tiptorch_new.NoiseVariance() )
+
+#%%
+
+plt.imshow(tiptorch_new.piston_filter.squeeze().cpu())
+
+
+
+#%%
+# Gaussian blur
+from scipy.ndimage import gaussian_filter
+
+x['Jx'] *= 0
+x['Jy'] *= 0
+
+# PSF_1_old_blur = tiptorch_old(x)
+PSF_1_new_blur = tiptorch_new(x)
+
+PSF_1_new_blur[0,0,...] = torch.tensor(gaussian_filter(PSF_1_new_blur[0,0,...].cpu().numpy(), sigma=2), device=device)
+PSF_1_new_blur[0,1,...] = torch.tensor(gaussian_filter(PSF_1_new_blur[0,1,...].cpu().numpy(), sigma=2), device=device)
+
+draw_PSF_stack(PSF_1_new, PSF_1_new_blur, min_val=1e-6, average=True, crop=80)#, scale=None)
+plt.show()

@@ -128,6 +128,9 @@ class ImageLabeller:
         self.image_label.config(image=self.current_image)
         self.image_label.image = self.current_image  # Keep a reference!
         
+        current_id = os.path.basename(image_path).split('_')[0]
+        self.master.title(f"Dataset Labeller - Current ID: {current_id}")
+        
         self.update_checkboxes()
 
 

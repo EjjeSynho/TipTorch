@@ -10,18 +10,19 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, plot_radial_profiles_relative, SR, draw_PSF_stack, rad2mas, mask_circle#, register_hooks
-from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
-from tools.config_manager import GetSPHEREonsky
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
-from astropy.stats import sigma_clipped_stats
-from tools.parameter_parser import ParameterParser
-from tools.config_manager import ConfigManager
+# from astropy.stats import sigma_clipped_stats
+# from tools.parameter_parser import ParameterParser
+# from tools.config_manager import ConfigManager
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, PolyModel, InputsCompressor
-from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tqdm import tqdm
 from project_globals import MUSE_DATA_FOLDER
+
+# As = ['F:/ESO/Data/MUSE/quasars/J0259_raw/MUSE.2024-12-05T03_04_07.008.fits.fz',
+#       'F:/ESO/Data/MUSE/quasars/J0259_raw/MUSE.2024-12-05T03_15_37.598.fits.fz',
+#       'F:/ESO/Data/MUSE/quasars/J0259_raw/MUSE.2024-12-05T03_49_24.769.fits.fz']
 
 #%%
 with open(MUSE_DATA_FOLDER+'/muse_df.pickle', 'rb') as handle:
@@ -37,7 +38,7 @@ gave_NaNs = [21, 60, 103, 148, 167, 240, 302, 319, 349]
 # 302, 319 - wrong rotation, fits okay
 
 derotate_PSF    = True
-Moffat_absorber = True
+Moffat_absorber = False
 include_sausage = True
 
 sample = LoadMUSEsampleByID(402)
@@ -46,12 +47,15 @@ config_file, PSF_0 = GetConfig(sample, PSF_0)
 N_wvl = PSF_0.shape[1]
 
 PSF_0 = PSF_0[...,1:,1:]
-var_mask = var_mask[:,1:,1:]
+# var_mask = var_mask[:,1:,1:]
+
 config_file['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
+config_file['NumberSources'] = config_file['NumberSources'].int().item()
 
 if derotate_PSF:
     PSF_0 = rotate_PSF(PSF_0, -sample['All data']['Pupil angle'].item())
     config_file['telescope']['PupilAngle'] = 0
+
 
 '''
 from scipy.io import loadmat
@@ -65,12 +69,25 @@ plt.savefig('C:/Users/akuznets/Desktop/thesis_results/MUSE/sausage_feature.pdf',
 '''
 
 #%% Initialize the model
-from PSF_models.TipToy_MUSE_multisrc import TipTorch
+# from PSF_models.TipToy_MUSE_multisrc import TipTorch
+from PSF_models.TipTorch import TipTorch_new
 from tools.utils import SausageFeature
+from tools.utils import PupilVLT
 
+pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
+PSD_include = {
+    'fitting':         True,
+    'WFS noise':       True,
+    'spatio-temporal': True,
+    'aliasing':        False,
+    'chromatism':      True,
+    'diff. refract':   True,
+    'Moffat':          Moffat_absorber
+}
+toy = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+
+'''
 toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-sausage_absorber = SausageFeature(toy)
-sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
 
 toy.PSD_include['fitting'] = True
 toy.PSD_include['WFS noise'] = True
@@ -78,9 +95,13 @@ toy.PSD_include['spatio-temporal'] = True
 toy.PSD_include['aliasing'] = False
 toy.PSD_include['chromatism'] = True
 toy.PSD_include['Moffat'] = Moffat_absorber
+'''
 
 toy.to_float()
 # toy.to_double()
+
+sausage_absorber = SausageFeature(toy)
+sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
 
 inputs_tiptorch = {
     # 'r0':  torch.tensor([0.09561153075597545], device=toy.device),
@@ -251,8 +272,8 @@ norm_sausage_pow = TransformSequence(transforms=[ Uniform(a=0, b=1)  ])
 
 norm_amp   = TransformSequence(transforms=[ Uniform(a=0,     b=10)   ])
 norm_b     = TransformSequence(transforms=[ Uniform(a=0,     b=0.1)   ])
-norm_alpha = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
-norm_beta  = TransformSequence(transforms=[ Uniform(a=0,     b=10)   ])
+norm_alpha = TransformSequence(transforms=[ Uniform(a=-1,    b=10)   ])
+norm_beta  = TransformSequence(transforms=[ Uniform(a=0,     b=2)   ])
 norm_ratio = TransformSequence(transforms=[ Uniform(a=0,     b=2)   ])
 norm_theta = TransformSequence(transforms=[ Uniform(a=-np.pi/2, b=np.pi/2)])
 
@@ -280,7 +301,7 @@ if Moffat_absorber:
         'amp'  : norm_amp,
         'b'    : norm_b,
         'alpha': norm_alpha,
-        # 'beta' : norm_beta,
+        'beta' : norm_beta,
         # 'ratio': norm_ratio,
         # 'theta': norm_theta
     })
@@ -317,8 +338,8 @@ if Moffat_absorber:
         # PSFAO realm
         -1,
         -1,
-         0.3,
-        # *([ 1.0,]*N_wvl),
+        0.0,
+        1.5
         # *([ 0.0,]*N_wvl),
         # *([ 0.3,]*N_wvl)
     ]
@@ -358,31 +379,49 @@ mask_inv = 1.0 - mask
 # grad_map = torch.tensor(grad_map).float().to(device).unsqueeze(0).unsqueeze(0)
 
 def loss_MSE(x_, include_list=None, mask_=1):
-    diff = (func(x_, include_list) - PSF_0) * mask_ * wvl_weights ##
-    return diff.pow(2).sum() * 200 / PSF_0.shape[0] / PSF_0.shape[1] #+ MAP*0.25
+    diff = (func(x_, include_list) - PSF_0) * mask_ * wvl_weights * 1000
+    return diff.pow(2).sum() / PSF_0.shape[-2] / PSF_0.shape[-1]
     # MAP = ((x_-dn_m)*mask_dn).sum()**2 /0.5**2 + ((x_-r0_m)*mask_r0).sum()**2 / 0.5**2
     # return ( mask*diff.pow(2)*200 + diff.abs() ).flatten().sum() / PSF_0.shape[0] / PSF_0.shape[1]
 
 def loss_MAE(x_, include_list=None, mask_=1):
-    diff = (func(x_, include_list) - PSF_0) * wvl_weights * mask_
-    return diff.abs().sum() / PSF_0.shape[0] / PSF_0.shape[1]
+    diff = (func(x_, include_list) - PSF_0) * wvl_weights * mask_ * 2500
+    return diff.abs().sum() / PSF_0.shape[-2] / PSF_0.shape[-1]
 
+'''
+def loss_MSE2(x_, include_list=None, mask_=1):
+    diff = (func(x_, include_list) - PSF_0) * mask_ * wvl_weights * var_mask
+    return diff.pow(2).sum() / PSF_0.shape[-2] / PSF_0.shape[-1]
+
+def loss_MAE2(x_, include_list=None, mask_=1):
+    diff = (func(x_, include_list) - PSF_0) * wvl_weights * mask_ * torch.sqrt(var_mask)
+    return diff.abs().sum() / PSF_0.shape[-2] / PSF_0.shape[-1]
+'''
 
 # include_MAE = ['r0', 'bg', 'dn', 's_pow']
 # include_MSE = ['F', 'dx', 'dy', 'Jx', 'Jy', 'Jxy', 'r0', 'bg']
 # include_all.remove('dn')
 
+# def loss_fn(x_): 
+#     return loss_MSE(x_)*5 + loss_MAE(x_) * 0.4
+
 def loss_fn(x_): 
-    return loss_MSE(x_) + loss_MAE(x_) * 0.4
+    return loss_MSE(x_)*1.25 + loss_MAE(x_)
     
+# print(loss_MAE(x0))
+# print(loss_MSE2(x0)*1e8)
+# plt.imshow(1/var_mask[0,0].pow(0.5).cpu().numpy())
+
 #%%
 # if toy.N_wvl > 1:
 _ = func(x0)
 
-result = minimize(loss_MAE, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
+# result = minimize(loss_MAE, x0, max_iter=100, tol=1e-3, method='l-bfgs', disp=2)
+# x0 = result.x
+result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='l-bfgs', disp=2)
 x0 = result.x
-result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
-x0 = result.x
+# result = minimize(loss_fn2, x0, max_iter=100, tol=1e-3, method='l-bfgs', disp=2)
+# x0 = result.x
 
 x_torch = transformer.destack(x0)
 
@@ -393,6 +432,7 @@ else:
 
 PSF_1 = toy(x_torch, None, phase_generator=phase_func)
 
+#%%
 '''
 else:
     _ = func(x0)
@@ -427,7 +467,7 @@ if len(toy.wvl[0]) > 1:
 
     fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
     for i, lmbd in enumerate(wvl_select):
-        plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+        plot_radial_profiles_new( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  y_min=3e-2, linthresh=1e-2, ax=ax[i] )
     plt.show()
 
 else:
@@ -435,14 +475,12 @@ else:
     
     plot_radial_profiles_new( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
     plt.show()
+
     
 #%%
-
 if len(toy.wvl[0]) > 1:
     wvl_select = np.s_[0, 6, 12]
-
     draw_PSF_stack( PSF_0.cpu().numpy()[0, wvl_select, ...], PSF_1.cpu().numpy()[0, wvl_select, ...], average=True, crop=120 )
-    
     PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
 
     fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
@@ -452,11 +490,30 @@ if len(toy.wvl[0]) > 1:
 
 else:
     draw_PSF_stack( PSF_0.cpu().numpy()[:,0,...], PSF_1.cpu().numpy()[:,0,...], average=True, crop=120 )
-    
     plot_radial_profiles_relative( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
     plt.show()
 
-    
+#%%
+from tools.utils import pdims
+
+# PSD_M = toy.PSDs['Moffat'].abs().cpu().numpy()[0,0]
+
+amp   = pdims(toy.amp,   2)
+b     = pdims(toy.b,     2)
+alpha = pdims(toy.alpha, 2)
+beta  = pdims(toy.beta,  2)
+ratio = pdims(toy.ratio, 2)
+theta = pdims(toy.theta, 2)
+
+print(amp.item(), b.item(), alpha.item(), beta.item(), ratio.item(), theta.item(), sep='\n')
+PSDs_M = toy.MoffatPSD(amp, b, alpha, beta, ratio, theta) * toy.piston_filter
+PSDs_M = PSDs_M[0,...].cpu().numpy()
+
+
+plt.imshow(PSDs_M)
+# Render the radial profile using astropy
+# plt.plot(np.flip(PSDs_M[PSDs_M.shape[0]//2, :]))
+   
 
    
 #%% ======================================================================================================

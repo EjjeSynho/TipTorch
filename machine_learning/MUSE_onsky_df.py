@@ -166,7 +166,8 @@ def reduce_columns(df):
     ]
 
     # Remove columns with specific names
-    df.drop(columns=entries_to_drop, inplace=True)
+    entries_to_drop_in_df = [entry for entry in entries_to_drop if entry in df.columns]
+    df.drop(columns=entries_to_drop_in_df, inplace=True)
     
     return df
 

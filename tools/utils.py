@@ -2,6 +2,7 @@
 import numpy as np
 import torch
 from torch import optim, nn
+import torch.nn.functional as F
 from astropy.io import fits
 from scipy.ndimage import center_of_mass
 from scipy.optimize import least_squares
@@ -231,10 +232,49 @@ class LWE_basis():
  
         # self.coefs = self.__coefs_flat.repeat(self.model.N_src, 1)
         OPD = torch.einsum('mn,nwh->mwh', self.coefs, self.modal_basis) * 1e-9  
-        return pdims(self.model.pupil * self.model.apodizer, -2) * torch.exp(1j*2*np.pi / pdims(self.model.wvl,2)*OPD.unsqueeze(1))
+        return pdims(self.model.pupil * self.model.apodizer, -2) * torch.exp(2j*torch.pi / pdims(self.model.wvl,2)*OPD.unsqueeze(1))
     
     def __call__(self, *args):
         return self.forward(*args)
+
+
+class OptimizableLO():
+    def __init__(self, model):
+        self.model = model
+
+    # def fft_upscale(self, x):
+    #     h, w = x.shape[-2:]
+    #     H, W = self.model.pupil.shape[-2:]
+
+    #     X = torch.fft.fftshift(torch.fft.fft2(x))
+
+    #     top_pad    = (H - h) // 2
+    #     bottom_pad =  H - h - top_pad
+    #     left_pad   = (W - w) // 2
+    #     right_pad  =  W - w - left_pad
+
+    #     padded_F = torch.pad(X, (left_pad, right_pad, top_pad, bottom_pad), mode='constant', value=0)
+    #     upscaled = torch.fft.ifft2(torch.fft.ifftshift(padded_F)) * (H * W / (h * w))
+        
+    #     return upscaled.abs().unsqueeze(1)
+
+    def interp_upscale(self, x, mode='bicubic'):
+        return F.interpolate(
+            x.unsqueeze(1),
+            size = (self.model.pupil.shape[-2], self.model.pupil.shape[-1]),
+            mode = mode,
+            align_corners = True
+        )
+
+    def forward(self, x):
+        OPD = self.interp_upscale(x) * 1e-9
+        k = 2j * torch.pi / self.model.wvl.view(self.model.N_src, self.model.N_wvl, 1, 1)
+        # return (self.model.pupil * self.model.apodizer).unsqueeze(0).unsqueeze(0) * torch.exp(k * OPD)
+        return torch.exp(k * OPD)
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
 
 class SausageFeature:
     def __init__(self, model) -> None:
@@ -255,7 +295,7 @@ class SausageFeature:
         self.OPD_map = interpolate(self.OPD_map[None,None,...], size=(self.model.pupil.shape), mode='bilinear', align_corners=False)
 
     def forward(self, coef):
-        angle_rot = self.model.pupil_angle - 45.0
+        angle_rot = self.model.pupil_angle - 45.0 # Empirical values
 
         OPD = self.OPD_map.repeat(coef.shape[0], 1, 1, 1)
         OPD = TF.rotate(OPD, angle_rot, interpolation=TF.InterpolationMode.BILINEAR)
@@ -405,7 +445,7 @@ def print_dict(d, indent=0):
 
 
 def wavelength_to_rgb(wavelength, gamma=0.8, show_invisible=False):
-    wavelength = float(wavelength)
+    wavelength = wavelength * 1.0 # Ensure float
     if wavelength >= 380 and wavelength <= 440:
         attenuation = 0.3 + 0.7 * (wavelength - 380) / (440 - 380)
         R = ((-(wavelength - 440) / (440 - 380)) * attenuation) ** gamma

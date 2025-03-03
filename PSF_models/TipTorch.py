@@ -36,8 +36,7 @@ class TipTorch_new(torch.nn.Module):
         self.OTF_static = self.OTF_static_default.clone()
         
         # Diffraction-limited PSF (switched off by default)
-        if self.compute_PSF_DL:
-            self.PSF_DL = self.OTF2PSF(self.OTF_static_default)
+        # if self.compute_PSF_DL:
 
 
     def InitValues(self):
@@ -62,7 +61,7 @@ class TipTorch_new(torch.nn.Module):
         
         self.psInMas = self.config['sensor_science']['PixelScale']
         self.D       = self.config['telescope']['TelescopeDiameter'] # [m]
-        self.N_pix   = self.config['sensor_science']['FieldOfView'].int().item() # [pix]
+        self.N_pix   = self.config['sensor_science']['FieldOfView']#.int().item() # [pix]
         
         # Deformable mirror(s) parameters
         self.pitch = self.config['DM']['DmPitchs'] #[m]
@@ -225,12 +224,14 @@ class TipTorch_new(torch.nn.Module):
         
         
     def InitGrids(self):
-        # with profiler.record_function("INIT GRIDS"):
         # Initialize grids
         # for all generated PSDs within one batch sampling must be the same
        
         pixels_per_l_D = self.wvl * self.rad2mas / (self.psInMas * self.D)
-        self.sampling_factor = 2.0 / pixels_per_l_D * self.oversampling 
+        # self.sampling_factor = torch.maximum(2./pixels_per_l_D, self.one_gpu) * self.oversampling
+        self.sampling_factor = 2./pixels_per_l_D * self.oversampling
+        self.sampling_factor /= torch.clamp(self.sampling_factor, 0, 1).min()
+        
         self.sampling = self.sampling_factor * pixels_per_l_D # must be = 2*oversampling
         self.sampling_min = self.sampling.min().item()
 
@@ -447,7 +448,7 @@ class TipTorch_new(torch.nn.Module):
         #TODO: an open-loop case
 
 
-    def __init__(self, AO_config, pupil=None, PSD_include=None, norm_regime='sum', device=torch.device('cpu'), oversampling=1):
+    def __init__(self, AO_config, AO_type, pupil=None, PSD_include=None, norm_regime='sum', device=torch.device('cpu'), oversampling=1):
         super().__init__()
         
         self.device = device
@@ -455,7 +456,7 @@ class TipTorch_new(torch.nn.Module):
         self.pupil = pupil
         self.is_float = False
         
-        self.AO_type = 'LTAO'
+        self.AO_type = AO_type
         self.tomography = True if self.AO_type in ['LTAO', 'MCAO', 'GLAO'] else False
 
         # Useful lambda functions
@@ -497,7 +498,7 @@ class TipTorch_new(torch.nn.Module):
         self.PR = None # piston mode filter in alised freq. domain
         self.apodizer = None
         
-        self.compute_PSF_DL = False # set to "True" to compute the diffraction-limited PSF
+        # self.compute_PSF_DL = False # set to "True" to compute the diffraction-limited PSF
         
         # Read data and initialize AO system
         self.Update(
@@ -637,7 +638,7 @@ class TipTorch_new(torch.nn.Module):
         if WFS_noise_var.shape[1] > 1: # it means that there are several LGS, 0th dim is reserved for the targets
             varNoise = WFS_noise_var.mean(dim=1) # averaging the varience over the LGSs
         else:
-            varNoise = WFS_noise_var
+            varNoise = WFS_noise_var.view(self.N_src)
         
         W_n = pdims(varNoise / (2*self.kc)**2, 2)
 
@@ -845,7 +846,7 @@ class TipTorch_new(torch.nn.Module):
 
     def TomographicReconstructors(self, WFS_noise_var, inv_method='lstsq'):
         
-        # Note that if all simulated sources use the same atmospheric profile, r0/L0, and noise variance,
+        # Note that if all simulated sources use the same atmospheric profile, r0, L0, and noise variance,
         # then it's possible to compute one tomographic reconstructor for all sources.
         # For example, this is possible if objects are within one FoV and belong to one observation
         N_src_tomo = self.h.shape[0]
@@ -862,9 +863,7 @@ class TipTorch_new(torch.nn.Module):
         
         M = 2j*torch.pi*self.k_AO * torch.sinc(self.WFS_d_sub*self.kx_AO) * torch.sinc(self.WFS_d_sub*self.ky_AO)
         M = pdims(M, 2).expand(N_src_tomo, self.nOtf_AO_y, self.nOtf_AO_x, self.N_GS, self.N_GS) * diag_mask(self.N_GS) # [N_src_tomo x nOtf_y x nOtf_x x nGS x nGS]
-        
         P = torch.exp( 2j*torch.pi*h * (kx*GS_dirs_x + ky*GS_dirs_y) ) # N_src_tomo x nOtf_y x nOtf_x x nGS x nL
-
         MP   = torch.einsum('nwhik,nwhkj->nwhij', M, P)  # N_src_tomo x nOtf_y x nOtf_x x nL x nGS
         MP_t = torch.conj(MP.permute(0,1,2,4,3))
 
@@ -872,9 +871,7 @@ class TipTorch_new(torch.nn.Module):
         
         # Note, that size of WFS_noise_var == N_src_tomo
         WFS_noise_variance = WFS_noise_var.to(dtype=MP.dtype)
-
         self.C_b = fix_dims( WFS_noise_variance, self.N_GS )
-
         kernel = self.VonKarmanSpectrum(self.r0.abs().to(dtype=MP.dtype), self.L0.abs(), self.k2_AO) * self.piston_filter
         self.C_phi = pdims(kernel, 2) * fix_dims(self.Cn2_weights, self.nL)
 
@@ -899,16 +896,12 @@ class TipTorch_new(torch.nn.Module):
         else:
             raise ValueError('Unknown inversion method specified.') 
          
-
         self.W = self.P_opt @ self.W_tomo
         
         # Note, that size of HOloop_rate == N_src_tomo
         samp_time = 1.0 / self.HOloop_rate
-
         www = 2j * torch.pi * pdims(self.k_AO, 1) * torch.sinc(pdims(samp_time * self.WFS_det_clock_rate, 3) * self.freq_t)
-
         self.MP_alpha_L = www.unsqueeze(-2) * P * (torch.sinc(self.WFS_d_sub*kx) * torch.sinc(self.WFS_d_sub*ky))
-
         self.W_alpha = self.W @ self.MP_alpha_L
 
 
@@ -944,7 +937,8 @@ class TipTorch_new(torch.nn.Module):
 
     
     def DLPSF(self):
-        return self.PSF_DL / self.norm_scale
+        self.PSF_DL = self.OTF2PSF(self.OTF_static_default) / self.norm_scale
+        return self.PSF_DL
 
 
     def ComputePSD(self):
@@ -1024,19 +1018,21 @@ class TipTorch_new(torch.nn.Module):
     
     
     def half_PSD_to_full(self, half_PSD):
-        n_cols_half = half_PSD.size(-1) 
+        # n_cols_half = half_PSD.size(-1) 
         return torch.cat([
             half_PSD,
-            torch.flip(half_PSD[..., :, :n_cols_half-n_cols_half % 2], dims=(-2,-1))
+            # torch.flip(half_PSD[..., :, :n_cols_half-n_cols_half % 2], dims=(-2,-1))
+            torch.flip(half_PSD[..., :, :-1], dims=(-2,-1)) # Works only for odd num.pixels
         ], dim=-1)
     
     
     def _rfft2_to_full(self, matrix_rfft2):
-        width = matrix_rfft2.size(-1)
+        # width = matrix_rfft2.size(-1)
         return torch.cat([
-            torch.flip(matrix_rfft2[..., :, width % 2:].conj(), dims=[-2,-1]),
+            # torch.flip(matrix_rfft2[..., :, width % 2:].conj(), dims=[-2,-1]),
+            torch.flip(matrix_rfft2[..., :, 1:].conj(), dims=[-2,-1]),
             matrix_rfft2
-        ], dim=-1)
+        ], dim=-1) # Works only for odd num.pixels
     
 
     def OTF2PSF(self, OTF): 
@@ -1074,7 +1070,7 @@ class TipTorch_new(torch.nn.Module):
 
     def PSD2PSF(self, PSD, OTF_static):
         F   = pdims(self.F,   2) # TODO: move it from here to down
-        bg  = pdims(self.bg,  2) # TODO: move it from here to down
+        bg  = pdims(self.bg,  2) # TODO: move it from here to downW
         dx  = pdims(self.dx,  2)
         dy  = pdims(self.dy,  2)
         Jx  = pdims(self.Jx,  3) if self.Jx.ndim  == 1 else pdims(self.Jx,  2)
@@ -1082,7 +1078,7 @@ class TipTorch_new(torch.nn.Module):
         Jxy = pdims(self.Jxy, 3) if self.Jxy.ndim == 1 else pdims(self.Jxy, 2)
 
         # Removing the DC component
-        PSD[..., self.nOtf_y//2, self.nOtf_x//2] = 0.0
+        PSD[..., self.nOtf_y//2, self.nOtf_x] = 0.0
         
         # Computing OTF from PSD, real is to remove the imaginary part that appears due to numerical errors
         cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(PSD.abs(), dim=(-2,-1)), dim=-2).abs())
