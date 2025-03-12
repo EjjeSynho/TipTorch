@@ -33,8 +33,8 @@ def GetRadialBackround(img):
 
 
 def LoadImages(sample, device=device, subtract_background=True, normalize=True, convert_images=True):
-    # PSF_data = np.copy(sample['images']['cube'][:,1:,1:]) 
     PSF_data = np.copy(sample['images']['cube']) 
+    PSF_std  = np.copy(sample['images']['std'])
     
     if subtract_background:
         bgs = np.array([ GetRadialBackround(PSF_data[i,:,:]) for i in range(PSF_data.shape[0]) ])[:,None,None]
@@ -46,24 +46,18 @@ def LoadImages(sample, device=device, subtract_background=True, normalize=True, 
     if normalize:
         norms = PSF_data.sum(axis=(-1,-2), keepdims=True)
         PSF_data /= norms
+        PSF_std  /= norms
     else:
         norms = np.ones(PSF_data.shape[0])[:,None,None]
     
     if convert_images:
         PSF_data = torch.tensor(PSF_data).float().unsqueeze(0).to(device)
+        PSF_std  = torch.tensor(PSF_std).float().unsqueeze(0).to(device)
     else:
         PSF_data = PSF_data.astype(np.float32)[None,...]
-    
-    var_mask = sample['images']['std'][:,1:,1:]
-    var_mask = np.clip(1 / var_mask, 0, 1e6)
-    var_mask = var_mask / var_mask.max(axis=(-1,-2), keepdims=True)
+        PSF_std  = PSF_std.astype(np.float32)[None,...]
 
-    if convert_images:
-        var_mask = torch.tensor(var_mask).float().unsqueeze(0).to(device)
-    else:
-        var_mask = var_mask.astype(np.float32)[None,...]
-
-    return PSF_data, var_mask, norms, bgs
+    return PSF_data, PSF_std, norms, bgs
 
 
 # 'images'

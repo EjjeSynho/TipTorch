@@ -134,7 +134,7 @@ inp_dict = inp_dict_
 # }
 
 _ = transformer.stack(inp_dict, no_transform=True) # to create index mapping and initial values
-# testo = toy(transformer.destack(x0) | fitted_buf, None, lambda: sausage_absorber(toy.s_pow.flatten()))
+# testo = toy(transformer.unstack(x0) | fitted_buf, None, lambda: sausage_absorber(toy.s_pow.flatten()))
 
 #%%
 class Gnosis(nn.Module):
@@ -235,7 +235,7 @@ def run_model(model, batch, predicted_inputs, fixed_inputs={}):
 
 def func(x_, batch, fixed_inputs):
     y_pred = net(x_)
-    pred_inputs = transformer.destack(y_pred)
+    pred_inputs = transformer.unstack(y_pred)
     return run_model(toy, batch, pred_inputs, fixed_inputs)
 
 
@@ -279,7 +279,7 @@ val_ids   = np.arange(len(batches_val)).tolist()
 # batch_size = len(batch['IDs'])
 
 # y_pred = net(x)
-# pred_inputs = transformer.destack(y_pred)
+# pred_inputs = transformer.unstack(y_pred)
 # PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
 
 #%%
@@ -378,7 +378,7 @@ for epoch in range(epochs):
         batch_size = len(batch['IDs']) / N_wvl
         
         y_pred = net(x)
-        pred_inputs = transformer.destack(y_pred)
+        pred_inputs = transformer.unstack(y_pred)
         PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
 
         loss = img_punish(PSF_pred, PSF_0)
@@ -490,7 +490,7 @@ def get_jitter_from_ids(ids):
 # batch_size = len(batch['IDs'])
 
 # y_pred = net(x)
-# pred_inputs = transformer.destack(y_pred)
+# pred_inputs = transformer.unstack(y_pred)
 # PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
 
 
@@ -561,7 +561,7 @@ with torch.no_grad():
         PSFs_0_val_poly.append(PSF_0.cpu())
         current_batch_size = len(batch['IDs'])
         
-        pred_inputs_stats.append(transformer.destack(net(x0)))
+        pred_inputs_stats.append(transformer.unstack(net(x0)))
         configs.append(deepcopy(config))
         
         toy.config = config

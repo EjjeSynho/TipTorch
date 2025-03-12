@@ -350,14 +350,14 @@ net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_s
 net.eval()
 
 with torch.no_grad():
-    PSF_pred_big = toy(pred_inputs := normalizer.destack(net(NN_inp))).clone()
+    PSF_pred_big = toy(pred_inputs := normalizer.unstack(net(NN_inp))).clone()
 
 #%%
 config_file['sensor_science']['FieldOfView'] = box_size
 toy.Update(reinit_grids=True, reinit_pupils=True)
 
 with torch.no_grad():
-    PSF_pred_small = toy(pred_inputs := normalizer.destack(net(NN_inp)))
+    PSF_pred_small = toy(pred_inputs := normalizer.unstack(net(NN_inp)))
 
 #%%
 cut_middle = lambda n,m: np.s_[..., n//2-m//2 : n//2 + m//2 + m%2, n//2-m//2 : n//2 + m//2 + m%2 ]
@@ -394,7 +394,7 @@ transformer_dxdy = InputsTransformer(transformer_dict_astrometry)
 _ = transformer_dxdy.stack({ attr: getattr(toy, attr) for attr in transformer_dict_astrometry })
 
 expand_dxdy = lambda x_: x_.unsqueeze(0).T.repeat(1, N_wvl).flatten().unsqueeze(0)
-func = lambda x_: toy(pred_inputs | transformer_dxdy.destack(expand_dxdy(x_)))
+func = lambda x_: toy(pred_inputs | transformer_dxdy.unstack(expand_dxdy(x_)))
 
 def fit_dxdy(source_id, verbose=0):
     if verbose > 0: 
@@ -481,28 +481,19 @@ x_size = normalizer.get_packed_size()
 
 x0 = normalizer.stack(pred_inputs).squeeze().clone().detach()
 Fs_flat = torch.ones([N_src], device=device)
-x0 = torch.cat([x0, Fs_flat, dxdys.flatten()])
-# x0 = torch.cat([x0, dxdys.flatten()])
+x0 = torch.cat([x0, Fs_flat, dxdys.flatten()]) # [PSF params, flux, dx/dy] are packed into one vector
 x0.requires_grad = True
 
 empty_img = torch.zeros([N_wvl, data_onsky_sparse.shape[-2], data_onsky_sparse.shape[-1]], device=device)
-
-# x = x0.clone()
-# plt.imshow(test.squeeze().sum(dim=0).detach().abs().cpu().numpy(), origin='lower')
 wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
 
-# print( x0[N_src+x_size+i*2 : N_src+x_size+(i+1)*2] )
-
 #%%
-result = 0
-
 def func_fit(x):
-    global result
     PSFs_fit = []
     for i in range(N_src):
-        dxdy_ = x[x_size+N_src+i*2 : 2*x_size+N_src+(i+1)*2]
-        x_fit_dict = normalizer.destack(x[:x_size].unsqueeze(0))
-        dxdy_dict  = transformer_dxdy.destack(expand_dxdy(dxdy_))
+        x_fit_dict = normalizer.unstack(x[:x_size].unsqueeze(0))
+        dxdy_ = x[x_size+N_src+i*2 : x_size+N_src+(i+1)*2]
+        dxdy_dict  = transformer_dxdy.unstack(expand_dxdy(dxdy_))
 
         inputs = x_fit_dict | dxdy_dict
         PSFs_fit.append( toy(inputs).squeeze() * fluxes[i, ...] * x[x_size+i] )
@@ -520,26 +511,23 @@ def loss_fit(x_):
 _ = func_fit(x0)
     
 #%%
-# print(func_fit(x0))
-# composite_img = func_fit(x0)
+result_global = minimize(loss_fit, x0, max_iter=300, tol=1e-3, method='bfgs', disp=2)
+x_fit_dict = normalizer.unstack(result_global.x[:x_size].unsqueeze(0))
 
-result_global = minimize(loss_fit, x0, max_iter=50, tol=1e-3, method='bfgs', disp=2)
-x0 = result_global.x
-# plt.imshow(np.maximum(composite_img.sum(dim=0).abs().detach().cpu().numpy(), 5e3), norm=norm_field, origin='lower')
-# plt.savefig(folder_write + 'composite_pred.png', dpi=300)
-# plt.show()
+dxdy_dicts = []
 
-#%%
+for i in range(N_src):
+    dxdy_ = result_global.x[x_size+N_src+i*2 : x_size+N_src+(i+1)*2]
+    dxdy_dicts.append( transformer_dxdy.unstack(expand_dxdy(dxdy_)) )
 
-x_fit_dict = normalizer.destack(x0[:x_size].unsqueeze(0))
+flux_corrections = result_global.x[x_size:x_size+N_src]
 
 #%%
-
 for key in pred_inputs.keys():
     percent_err = 100 * (x_fit_dict[key] - pred_inputs[key]) / pred_inputs[key]
     percent_err = percent_err.squeeze().detach().cpu().numpy()
     percent_err = np.round(percent_err, 1)
-    print(f'{key} : {percent_err:.1f} %')
+    print(f'{key} : {percent_err} %')
 
 
 
@@ -568,8 +556,81 @@ PSFs_2_white = np.mean((PSFs_2*ratio_crop).cpu().cpu().numpy(), axis=1)#*0.9
 
 plot_radial_profiles_new(PSFs_0_white, PSFs_2_white, 'Data', 'TipTorch', title='PSFs fitted over the field', cutoff=16, y_min=1e-1)
 
+#%% --------- Optimizable LOs ----------
+from tools.utils import OptimizableLO
+
+# norm_LO  = TransformSequence(transforms=[Uniform(a=-20, b=20)])
+LO_map_size = 5
+LO_basis = OptimizableLO(toy, ignore_pupil=False)
+toy.apodizer = 1.0
+
+# x_LO = torch.ones(N_src*LO_map_size**2, dtype=torch.float32, device=device) # [Flux, LO map pixels]
+x_LO = 10 * torch.randn(N_src*LO_map_size**2, dtype=torch.float32, device=device) # [Flux, LO map pixels]
+
+x_LO = torch.cat([flux_corrections, x_LO])
+x_LO.requires_grad = True
+
 #%%
+def func_LO(x):
+    PSFs_fit = []
+    for i in range(N_src):
+        x_LO_ = x[N_src + i*LO_map_size**2 : N_src + (i+1)*LO_map_size**2]
+        PSF_ = toy(x_fit_dict | dxdy_dicts[i], None, lambda: LO_basis(x_LO_.view(1, LO_map_size, LO_map_size)))
+        PSFs_fit.append( PSF_.squeeze() * fluxes[i, ...] * x[i] )
+    
+    return add_ROIs( empty_img*0.0, PSFs_fit, local_coords, global_coords )
+
+def loss_LO(x_):
+    PSFs_ = func_LO(x_)
+    l1 = F.smooth_l1_loss(data_onsky_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
+    l2 = F.mse_loss(data_onsky_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
+    return l1 * 1e-3 + l2 * 5e-6
+
+
+PSFs_ = func_LO(x_LO).detach()
+# print(PSFs_.shape)
+
+#%%
+i=0
+aaa = LO_basis(100*x_LO[N_src + 0*LO_map_size**2 : N_src + (0+1)*LO_map_size**2].view(1, LO_map_size, LO_map_size)).detach()
+
+plt.imshow(aaa[0,0,...].real.detach().cpu().numpy(), origin='lower')
+
+PSFs_ = toy(x_fit_dict|dxdy_dicts[i], None, lambda: aaa)
+
+# plt.imshow(PSFs_[ROI_plot].abs().sum(dim=0).cpu().numpy(), norm=norm_field, origin='lower')
+# plt.imshow(PSFs_[0,...].abs().log10().sum(dim=0).cpu().numpy(), origin='lower')
+
+#%%
+result = minimize(loss_LO, x_LO, max_iter=200, tol=1e-5, method='l-bfgs', disp=2)
+
+x_LO = result.x
+
+#%%
+# with torch.no_grad():
+composite_img_fit = func_LO(x_LO).detach()
+
+diff_img = (data_onsky_sparse-composite_img_fit) * torch.tensor(valid_mask[None,...], device=device).float()
+
+plt.imshow(data_onsky_sparse[ROI_plot].abs().sum(dim=0).cpu().numpy(), norm=norm_field, origin='lower')
+plt.show()
+
+plt.imshow(np.maximum(composite_img_fit[ROI_plot].sum(dim=0).abs().cpu().numpy(), 5e3), norm=norm_field, origin='lower')
+plt.show()
+
+plt.imshow(diff_img[ROI_plot].abs().sum(dim=0).cpu().numpy(), norm=norm_field, origin='lower')
+plt.show()
+
+#%%
+ROIs_1, _, _ = extract_ROIs(composite_img_fit, sources, box_size=box_size)
+PSFs_2 = torch.nan_to_num(torch.stack(ROIs_1) / fluxes, nan=0.0)
+
 PSFs_0_white = np.mean(PSFs_0.cpu().cpu().numpy(), axis=1)
+# PSFs_2_white = np.mean(PSFs_2.cpu().cpu().numpy(), axis=1) #*0.9
+PSFs_2_white = np.mean((PSFs_2*ratio_crop).cpu().cpu().numpy(), axis=1)#*0.9
+
+plot_radial_profiles_new(PSFs_0_white, PSFs_2_white, 'Data', 'TipTorch', title='PSFs fitted over the field', cutoff=16, y_min=1e-1)
+
 
 
 #%% ==============================================================================================================================

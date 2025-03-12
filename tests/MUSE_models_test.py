@@ -483,7 +483,7 @@ if include_sausage:
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 
 def func(x_, include_list=None):
-    x_torch = transformer.destack(x_)
+    x_torch = transformer.unstack(x_)
     
     if include_sausage and 's_pow' in x_torch:
         phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
@@ -537,7 +537,7 @@ x0 = result.x
 result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
 x0 = result.x
 
-x_torch = transformer.destack(x0)
+x_torch = transformer.unstack(x0)
 
 if include_sausage:
     phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
@@ -553,14 +553,14 @@ else:
     result = minimize(lambda x: loss_MAE(x, mask_=mask_inv), x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
     x0 = result.x
 
-    x_torch = transformer.destack(x0)
+    x_torch = transformer.unstack(x0)
     x_torch['Jx'] = x_torch['Jx']*0 + 10
     x_torch['Jy'] = x_torch['Jy']*0 + 10
     result = minimize(lambda x: loss_MSE(x, include_MSE), x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
     # result = minimize(loss_fn, x0_tiptorch, max_iter=100, tol=1e-3, method='bfgs', disp=2)
     x0 = result.x
 
-    x_torch = transformer.destack(x0)
+    x_torch = transformer.unstack(x0)
 
     phase_func = lambda: sausage_absorber(toy.s_pow.flatten()) if include_sausage else None
     PSF_1 = toy(x_torch, None, phase_generator=phase_func)
@@ -688,7 +688,7 @@ plt.show()
 #%% ======================================================================================================
 from tools.utils import calc_profile
 
-x_torch = transformer.destack(x0)
+x_torch = transformer.unstack(x0)
 _ = toy(x_torch, None, phase_generator=phase_func)
 
 dk = 2*toy.kc / toy.nOtf_AO
@@ -798,7 +798,7 @@ for entry in PSDs.keys():
 #%%
 x = x0.clone().detach().requires_grad_(True)
 
-x_torch = transformer.destack(x)
+x_torch = transformer.unstack(x)
 
 Q = ( toy(x_torch)-PSF_0 ).abs().sum()
 get_dot = register_hooks(Q)
@@ -860,7 +860,7 @@ x0_compressed_backup = x0_compressed.clone()
 
 #%
 def func2(x_, include_list=None):
-    x_torch = compressor.destack(x_)
+    x_torch = compressor.unstack(x_)
     
     if include_sausage and 's_pow' in x_torch:
         phase_func = lambda: sausage_absorber(toy.s_pow.flatten())

@@ -189,7 +189,7 @@ if LWE_flag:
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 
 def func(x_):
-    x_torch = transformer.destack(x_)
+    x_torch = transformer.unstack(x_)
     if 'basis_coefs' in x_torch:
         return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
     else:
@@ -204,7 +204,7 @@ if LWE_flag:
     def loss_fn(x_):
         img_punish = ( (func(x_)-PSF_0) * PSF_mask ).flatten().abs().sum()
         LWE_punish = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, 40)).flatten().abs().sum()
-        coefs_ = transformer.destack(x_)['basis_coefs']
+        coefs_ = transformer.unstack(x_)['basis_coefs']
         loss = img_punish + LWE_punish(pattern_pos, coefs_) + LWE_punish(pattern_neg, coefs_)
         return loss
 else:
@@ -241,7 +241,7 @@ print(toy.WFS_Nph.item(), Nph_new.item())
 #%%
 from tools.utils import BuildPTTBasis, decompose_WF, project_WF, calc_WFE
 
-LWE_coefs = transformer.destack(x0)['basis_coefs'].clone()
+LWE_coefs = transformer.unstack(x0)['basis_coefs'].clone()
 PTT_basis = BuildPTTBasis(toy.pupil.cpu().numpy(), True).to(device).float()
 
 TT_max = PTT_basis.abs()[1,...].max().item()
@@ -252,7 +252,7 @@ PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, toy.pupil)
 PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, toy.pupil)
 
 #%
-x0_new = transformer.destack(x0)
+x0_new = transformer.unstack(x0)
 x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, toy.pupil) 
 x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
 x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])
@@ -282,7 +282,7 @@ for attr in ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy']:
 '''
 
 def func_dynesty(x_):
-    x_torch = transformer.destack(torch.tensor(x_).float().to(device).unsqueeze(0))
+    x_torch = transformer.unstack(torch.tensor(x_).float().to(device).unsqueeze(0))
     if 'basis_coefs' in x_torch:
         return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
     else:
@@ -327,7 +327,7 @@ buf = np.copy(results.samples)
 sample = np.zeros_like(results.samples)
 
 for i in range(0, sample.shape[1]):
-    sample[:,i] = transformer.destack(torch.tensor(sample[:,i]).float().unsqueeze(0).to(device)).cpu().numpy()
+    sample[:,i] = transformer.unstack(torch.tensor(sample[:,i]).float().unsqueeze(0).to(device)).cpu().numpy()
 
 
 

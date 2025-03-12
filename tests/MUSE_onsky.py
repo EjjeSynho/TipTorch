@@ -38,10 +38,12 @@ gave_NaNs = [21, 60, 103, 148, 167, 240, 302, 319, 349]
 # 302, 319 - wrong rotation, fits okay
 
 derotate_PSF    = True
-Moffat_absorber = False
-include_sausage = True
+Moffat_absorber = True
+include_sausage = False
 
-sample = LoadMUSEsampleByID(402)
+sample = LoadMUSEsampleByID(296)
+# sample = LoadMUSEsampleByID(394) # -- Blurry, check it later
+# sample = LoadMUSEsampleByID(296) -- sosig
 PSF_0, var_mask, norms, bgs = LoadImages(sample)
 config_file, PSF_0 = GetConfig(sample, PSF_0)
 N_wvl = PSF_0.shape[1]
@@ -85,7 +87,9 @@ PSD_include = {
     'Moffat':          Moffat_absorber
 }
 toy = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+toy.apodizer = toy.make_tensor(1.0)
 
+#%%
 '''
 toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 
@@ -261,18 +265,18 @@ plt.plot(w, b_pred, 'o-', color='red')
 #%% PSF fitting (no early-stopping)
 norm_F     = TransformSequence(transforms=[ Uniform(a=0.0,   b=1.0) ])
 norm_bg    = TransformSequence(transforms=[ Uniform(a=-5e-6, b=5e-6)])
-norm_r0    = TransformSequence(transforms=[ Uniform(a=0,     b=1)  ])
+norm_r0    = TransformSequence(transforms=[ Uniform(a=0,     b=1)   ])
 norm_dxy   = TransformSequence(transforms=[ Uniform(a=-1,    b=1)   ])
 norm_J     = TransformSequence(transforms=[ Uniform(a=0,     b=50)  ])
 norm_Jxy   = TransformSequence(transforms=[ Uniform(a=-180,  b=180) ])
-norm_dn    = TransformSequence(transforms=[ Uniform(a=0,     b=5)  ])
+norm_dn    = TransformSequence(transforms=[ Uniform(a=0,     b=5)   ])
 
 norm_sausage_pow = TransformSequence(transforms=[ Uniform(a=0, b=1)  ])
 # norm_sausage_ang = TransformSequence(transforms=[ Uniform(a=-30, b=30)  ])
 
-norm_amp   = TransformSequence(transforms=[ Uniform(a=0,     b=10)   ])
-norm_b     = TransformSequence(transforms=[ Uniform(a=0,     b=0.1)   ])
-norm_alpha = TransformSequence(transforms=[ Uniform(a=-1,    b=10)   ])
+norm_amp   = TransformSequence(transforms=[ Uniform(a=0,     b=10)  ])
+norm_b     = TransformSequence(transforms=[ Uniform(a=0,     b=0.1) ])
+norm_alpha = TransformSequence(transforms=[ Uniform(a=-1,    b=10)  ])
 norm_beta  = TransformSequence(transforms=[ Uniform(a=0,     b=2)   ])
 norm_ratio = TransformSequence(transforms=[ Uniform(a=0,     b=2)   ])
 norm_theta = TransformSequence(transforms=[ Uniform(a=-np.pi/2, b=np.pi/2)])
@@ -350,8 +354,9 @@ if include_sausage:
 # x0 = transformer.stack(inputs)
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 
+#%%
 def func(x_, include_list=None):
-    x_torch = transformer.destack(x_)
+    x_torch = transformer.unstack(x_)
     
     if include_sausage and 's_pow' in x_torch:
         phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
@@ -364,53 +369,54 @@ def func(x_, include_list=None):
         return toy(x_torch, None, phase_generator=phase_func)
 
 #%
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) * 2
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
+
 mask = torch.tensor(mask_circle(PSF_1.shape[-1], 5)).view(1, 1, *PSF_1.shape[-2:]).to(device)
 mask_inv = 1.0 - mask
 
-# plt.imshow(mask.cpu().numpy().squeeze())
-
-#%
-# XX, YY = np.meshgrid(np.arange(PSF_0.shape[-1]), np.arange(PSF_0.shape[-2]))
-# grad_map = np.sqrt( (XX - PSF_0.shape[-1]//2)**2 + (YY - PSF_0.shape[-2]//2)**2 )
-# grad_map = grad_map / grad_map.max()
-# grad_map += 0.25
-# grad_map = grad_map / grad_map.max() * 2
-# grad_map = torch.tensor(grad_map).float().to(device).unsqueeze(0).unsqueeze(0)
 
 def loss_MSE(x_, include_list=None, mask_=1):
-    diff = (func(x_, include_list) - PSF_0) * mask_ * wvl_weights * 1000
+    diff = (func(x_, include_list) - PSF_0) * mask_ * wvl_weights * 1120
     return diff.pow(2).sum() / PSF_0.shape[-2] / PSF_0.shape[-1]
-    # MAP = ((x_-dn_m)*mask_dn).sum()**2 /0.5**2 + ((x_-r0_m)*mask_r0).sum()**2 / 0.5**2
-    # return ( mask*diff.pow(2)*200 + diff.abs() ).flatten().sum() / PSF_0.shape[0] / PSF_0.shape[1]
 
 def loss_MAE(x_, include_list=None, mask_=1):
     diff = (func(x_, include_list) - PSF_0) * wvl_weights * mask_ * 2500
     return diff.abs().sum() / PSF_0.shape[-2] / PSF_0.shape[-1]
 
-'''
-def loss_MSE2(x_, include_list=None, mask_=1):
-    diff = (func(x_, include_list) - PSF_0) * mask_ * wvl_weights * var_mask
-    return diff.pow(2).sum() / PSF_0.shape[-2] / PSF_0.shape[-1]
-
-def loss_MAE2(x_, include_list=None, mask_=1):
-    diff = (func(x_, include_list) - PSF_0) * wvl_weights * mask_ * torch.sqrt(var_mask)
-    return diff.abs().sum() / PSF_0.shape[-2] / PSF_0.shape[-1]
-'''
-
-# include_MAE = ['r0', 'bg', 'dn', 's_pow']
-# include_MSE = ['F', 'dx', 'dy', 'Jx', 'Jy', 'Jxy', 'r0', 'bg']
-# include_all.remove('dn')
-
 # def loss_fn(x_): 
-#     return loss_MSE(x_)*5 + loss_MAE(x_) * 0.4
+#     return loss_MSE(x_) + loss_MAE(x_)
 
-def loss_fn(x_): 
-    return loss_MSE(x_)*1.25 + loss_MAE(x_)
-    
-# print(loss_MAE(x0))
-# print(loss_MSE2(x0)*1e8)
-# plt.imshow(1/var_mask[0,0].pow(0.5).cpu().numpy())
+def loss_fn(x_):
+    diff1 = (func(x_)-PSF_0) * wvl_weights
+    # mse_loss = (diff1 * 1120*3.6).pow(2).mean()
+    # mae_loss = (diff1 * 2500*13).abs().mean()
+    mse_loss = (diff1 * 4000).pow(2).mean()
+    mae_loss = (diff1 * 32000).abs().mean()
+    return (mse_loss + mae_loss) #/ PSF_0.shape[-2] / PSF_0.shape[-1] / PSF_0.shape[1]
+
+
+class CombinedLoss:
+    def __init__(self, data, func, wvl_weights, mae_weight=2500, mse_weight=1120):
+        self.data = data
+        self.func = func
+        self.wvl_weights = wvl_weights
+        self.mse_weight = mse_weight
+        self.mae_weight = mae_weight
+
+    def __call__(self, x):
+        diff = (self.func(x) - self.data) * self.wvl_weights
+        mse_loss = (diff * self.mse_weight).pow(2).mean()
+        mae_loss = (diff * self.mae_weight).abs().mean()
+        return (mse_loss + mae_loss)
+
+
+# loss_fn = CombinedLoss(PSF_0, func, wvl_weights, 5e4, 250)
+
+print(loss_fn(x0))
+
+#%%
+x = transformer.unstack(x0)
 
 #%%
 # if toy.N_wvl > 1:
@@ -423,7 +429,7 @@ x0 = result.x
 # result = minimize(loss_fn2, x0, max_iter=100, tol=1e-3, method='l-bfgs', disp=2)
 # x0 = result.x
 
-x_torch = transformer.destack(x0)
+x_torch = transformer.unstack(x0)
 
 if include_sausage:
     phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
@@ -433,25 +439,51 @@ else:
 PSF_1 = toy(x_torch, None, phase_generator=phase_func)
 
 #%%
-'''
-else:
-    _ = func(x0)
+from tools.utils import OptimizableLO
 
-    result = minimize(lambda x: loss_MAE(x, mask_=mask_inv), x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
-    x0 = result.x
+# norm_LO  = TransformSequence(transforms=[Uniform(a=-20, b=20)])
+LO_map_size = 31
+LO_basis = OptimizableLO(toy, ignore_pupil=False)
+x1 = torch.ones(1, LO_map_size**2, dtype=torch.float32, device=device)
 
-    x_torch = transformer.destack(x0)
-    x_torch['Jx'] = x_torch['Jx']*0 + 10
-    x_torch['Jy'] = x_torch['Jy']*0 + 10
-    result = minimize(lambda x: loss_MSE(x, include_MSE), x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
-    # result = minimize(loss_fn, x0_tiptorch, max_iter=100, tol=1e-3, method='bfgs', disp=2)
-    x0 = result.x
+def func_LO(x_):
+    return toy(x_torch, None, lambda: LO_basis(x_.view(1, LO_map_size, LO_map_size) * 100))
 
-    x_torch = transformer.destack(x0)
+def loss_fn_LO(x_):
+    diff = func_LO(x_ ) - PSF_0
+    masked_diff = diff * wvl_weights
+    mse_loss = masked_diff.pow(2).sum() / PSF_0.shape[-2] / PSF_0.shape[-1] * 1250
+    mae_loss = masked_diff.abs().sum()  / PSF_0.shape[-2] / PSF_0.shape[-1] * 2500
+    return mse_loss + mae_loss
 
-    phase_func = lambda: sausage_absorber(toy.s_pow.flatten()) if include_sausage else None
-    PSF_1 = toy(x_torch, None, phase_generator=phase_func)
-'''
+#%%
+result = minimize(loss_fn_LO, x1, max_iter=100, tol=1e-5, method='l-bfgs', disp=2)
+x1 = result.x
+
+OPD_map = x1.view(1, LO_map_size, LO_map_size) * 100
+
+plt.imshow(OPD_map[0].cpu().numpy())
+PSF_1 = func_LO(x1)
+
+#%%
+def func2(x_):
+    x_torch = transformer.unstack(x_)
+    return toy(x_torch, None, lambda: LO_basis(x1.view(1, LO_map_size, LO_map_size) * 100))
+
+def loss_fn2(x_):
+    diff1 = (func2(x_ )-PSF_0) * wvl_weights
+    mse_loss = (diff1 * 1500).pow(2).sum()
+    mae_loss = (diff1 * 2500).abs().sum()
+    return (mse_loss + mae_loss) / PSF_0.shape[-2] / PSF_0.shape[-1]
+
+x2 = x0.clone()
+
+#%%
+result = minimize(loss_fn2, x2, max_iter=100, tol=1e-5, method='l-bfgs', disp=2)
+x2 = result.x
+x_torch = transformer.unstack(x2)
+
+PSF_1 = func2(x2)
 
 #%%
 from tools.utils import plot_radial_profiles_new
@@ -592,7 +624,7 @@ plt.show()
 #%% ======================================================================================================
 from tools.utils import calc_profile
 
-x_torch = transformer.destack(x0)
+x_torch = transformer.unstack(x0)
 _ = toy(x_torch, None, phase_generator=phase_func)
 
 dk = 2*toy.kc / toy.nOtf_AO
@@ -702,7 +734,7 @@ for entry in PSDs.keys():
 #%%
 x = x0.clone().detach().requires_grad_(True)
 
-x_torch = transformer.destack(x)
+x_torch = transformer.unstack(x)
 
 Q = ( toy(x_torch)-PSF_0 ).abs().sum()
 get_dot = register_hooks(Q)
@@ -764,7 +796,7 @@ x0_compressed_backup = x0_compressed.clone()
 
 #%
 def func2(x_, include_list=None):
-    x_torch = compressor.destack(x_)
+    x_torch = compressor.unstack(x_)
     
     if include_sausage and 's_pow' in x_torch:
         phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
@@ -829,8 +861,8 @@ else:
 #%%
 # decomposed = depack_line(x0_compressed)
 
-destacked_1 = transformer.destack(x0.clone())
-destacked_2 = compressor.destack(x0_compressed)
+destacked_1 = transformer.unstack(x0.clone())
+destacked_2 = compressor.unstack(x0_compressed)
 
 Ffs_2 = destacked_2['F'].cpu().flatten()
 bgs_2 = destacked_2['bg'].cpu().flatten()
@@ -875,7 +907,7 @@ Fs  = []
 bgs = []
 
 for x_ in x0s:
-    x_torch = transformer.destack(x_)
+    x_torch = transformer.unstack(x_)
     r0s.append(x_torch['r0'].abs().item())
     dns.append(x_torch['dn'].abs().item())
     Jxs.append(x_torch['Jx'].abs().item())

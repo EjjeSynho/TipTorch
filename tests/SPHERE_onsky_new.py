@@ -11,13 +11,11 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
-from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping, mask_circle
+from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper, mask_circle, GradientLoss
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds, process_mask
 from tools.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
 from torchmin import minimize
-from astropy.stats import sigma_clipped_stats
-from matplotlib.colors import LogNorm
 
 
 #%% Initialize data sample
@@ -98,7 +96,7 @@ PSD_include = {
     'spatio-temporal': True,
     'aliasing':        True,
     'chromatism':      True,
-    'diff. refract':   False,
+    'diff. refract':   True,
     'Moffat':          False
 }
 tiptorch = TipTorch_new(merged_config, 'SCAO', None, PSD_include, 'sum', device, oversampling=1)
@@ -207,7 +205,7 @@ if LWE_flag: x0 = x0 + [0,]*4 + [0,]*8
 x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 
 def func(x_):
-    x_torch = transformer.destack(x_)
+    x_torch = transformer.unstack(x_)
     if 'basis_coefs' in x_torch:
         return tiptorch(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
     else:
@@ -234,7 +232,7 @@ if LWE_flag:
         Gauss_err(pattern_3, c)   + Gauss_err(pattern_4, c)
     
     def loss_fn(x_):
-        coefs_ = transformer.destack(x_)['basis_coefs']
+        coefs_ = transformer.unstack(x_)['basis_coefs']
         loss = img_punish(x_)  + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
         return loss
     
@@ -254,7 +252,7 @@ x0 = x0_buf.clone()
 #%%
 from tools.utils import BuildPTTBasis, decompose_WF, project_WF
 
-LWE_coefs = transformer.destack(x0)['basis_coefs'].clone()
+LWE_coefs = transformer.unstack(x0)['basis_coefs'].clone()
 PTT_basis = BuildPTTBasis(tiptorch.pupil.cpu().numpy(), True).to(device).float()
 
 TT_max = PTT_basis.abs()[1,...].max().item()
@@ -264,7 +262,7 @@ LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, basis.modal_basis)
 PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, tiptorch.pupil)
 PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, tiptorch.pupil)
 
-x0_new = transformer.destack(x0)
+x0_new = transformer.unstack(x0)
 x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, tiptorch.pupil) 
 x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
 x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])
@@ -278,7 +276,7 @@ plt.show()
 
 #%%
 with torch.no_grad():
-    x_final_unpacked = transformer.destack(x0)
+    x_final_unpacked = transformer.unstack(x0)
     PSF_1 = func(x0)
     # PSF_1 = tiptorch(x_final_unpacked, None, lambda: basis(x_final_unpacked['basis_coefs'].float()))
 
@@ -290,55 +288,6 @@ plt.show()
 draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
 
 
-#%%
-class GradientLoss(nn.Module):
-    """
-    A gradient-based loss that enforces smoothness by penalizing differences
-    between neighboring pixels in both x (horizontal) and y (vertical) directions.
-    
-    Parameters:
-    - p (int or float): The norm degree. Use p=2 for L2-norm (quadratic) or p=1 for L1-norm.
-    - reduction (str): Specifies the reduction to apply to the output: 'mean' or 'sum'.
-    """
-    def __init__(self, p=2, reduction='mean'):
-        super(GradientLoss, self).__init__()
-        self.p = p
-        self.reduction = reduction
-
-    def forward(self, input):
-        """
-        Compute the gradient loss on the input phase map.
-        
-        Args:
-            input (torch.Tensor): A tensor of shape [batch, channels, height, width].
-        
-        Returns:
-            torch.Tensor: The computed gradient loss.
-        """
-        # Compute differences along the horizontal (x) direction: shape [B, C, H, W-1]
-        diff_x = torch.abs(input[:, :, :, 1:] - input[:, :, :, :-1])
-        # Compute differences along the vertical (y) direction: shape [B, C, H-1, W]
-        diff_y = torch.abs(input[:, :, 1:, :] - input[:, :, :-1, :])
-        
-        # Apply the p-norm to the differences
-        if self.p == 1:
-            loss_x = diff_x
-            loss_y = diff_y
-        else:
-            loss_x = diff_x ** self.p
-            loss_y = diff_y ** self.p
-        
-        # Sum the losses from both directions to get a scalar loss
-        loss = loss_x.sum() + loss_y.sum()
-        
-        # Optionally, average the loss over the number of elements
-        if self.reduction == 'mean':
-            num_elements = loss_x.numel() + loss_y.numel()
-            loss = loss / num_elements
-        
-        return loss
-
-    # Create a dummy input: a batch of one 64x64 single-channel phase map
 grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
 # loss_value = grad_loss_fn(PSF_0*PSF_mask)
@@ -354,16 +303,16 @@ LO_basis = OptimizableLO(tiptorch)
 
 # norm_LO = TransformSequence(transforms=[ Uniform(a=-20,    b=20)   ])
 
-x_LO = torch.ones(1, LO_map_size**2, dtype=torch.float32, device=device)
+x1 = torch.ones(1, LO_map_size**2, dtype=torch.float32, device=device)
 # x_LO = torch.randn(1, LO_map_size**2, dtype=torch.float32, device=device)
 # b = LO_basis(x_LO.view(1, LO_map_size, LO_map_size))
 
 #%
 def func_LO(x_):
     if 'basis_coefs' in x_final_unpacked:
-        return tiptorch(x_final_unpacked, None, lambda: basis(x_final_unpacked['basis_coefs'].float()) * LO_basis(x_.view(1, LO_map_size, LO_map_size)))
+        return tiptorch(x_final_unpacked, None, lambda: basis(x_final_unpacked['basis_coefs'].float()) * LO_basis(x_.view(1, LO_map_size, LO_map_size))*20)
     else:
-        return tiptorch(x_final_unpacked, None, lambda: LO_basis(x_.view(1, LO_map_size, LO_map_size)))
+        return tiptorch(x_final_unpacked, None, lambda: LO_basis(x_.view(1, LO_map_size, LO_map_size))*20)
 
 def loss_fn_LO(x_):
     Y = func_LO(x_)
@@ -371,7 +320,7 @@ def loss_fn_LO(x_):
     loss_gradient = grad_loss_fn(x_.view(tiptorch.N_src, 1, LO_map_size, LO_map_size))
     return loss_regular.flatten().abs().sum() #+ 1e5*loss_gradient
 
-result = minimize(loss_fn_LO, x_LO, max_iter=200, tol=1e-5, method='l-bfgs', disp=2)
+result = minimize(loss_fn_LO, x1, max_iter=200, tol=1e-5, method='l-bfgs', disp=2)
 
 x1 = result.x
 

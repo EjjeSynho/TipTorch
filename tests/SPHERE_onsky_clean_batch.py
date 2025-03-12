@@ -172,7 +172,7 @@ def loss_fn_all(A, B):
     return nn.L1Loss(reduction='sum')(A[crop_all], B[crop_all])
 
 def func(x_):
-    x_torch = transformer.destack(x_)
+    x_torch = transformer.unstack(x_)
     return toy(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
 
 early_stopping = EarlyStopping(patience=2, tolerance=1e-4, relative=False)
@@ -199,7 +199,7 @@ for i in range(100):
 torch.cuda.empty_cache()
 
 #%%
-decomposed_variables = transformer.destack(x0)
+decomposed_variables = transformer.unstack(x0)
 # for key, value in decomposed_variables.items(): print(f"{key}: {value}")
 
 with torch.no_grad():

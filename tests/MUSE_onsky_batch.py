@@ -396,7 +396,7 @@ x0 = torch.hstack([norm_r0.forward(toy.r0).unsqueeze(-1), x0])
 
 #%%
 def func(x_, include_list=None):
-    x_torch = transformer.destack(x_)
+    x_torch = transformer.unstack(x_)
     
     if include_sausage and 's_pow' in x_torch:
         phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
@@ -450,7 +450,7 @@ x0 = result.x
 result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
 x0 = result.x
 
-x_torch = transformer.destack(x0)
+x_torch = transformer.unstack(x0)
 
 phase_func = lambda: sausage_absorber(toy.s_pow.flatten()) if include_sausage else None
 PSF_1 = toy(x_torch, None, phase_generator=phase_func)
@@ -463,14 +463,14 @@ else:
     result = minimize(lambda x: loss_MAE(x, mask_=mask_inv), x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
     x0 = result.x
 
-    x_torch = transformer.destack(x0)
+    x_torch = transformer.unstack(x0)
     x_torch['Jx'] = x_torch['Jx']*0 + 10
     x_torch['Jy'] = x_torch['Jy']*0 + 10
     result = minimize(lambda x: loss_MSE(x, include_MSE), x0, max_iter=100, tol=1e-3, method='bfgs', disp=2)
     # result = minimize(loss_fn, x0_tiptorch, max_iter=100, tol=1e-3, method='bfgs', disp=2)
     x0 = result.x
 
-    x_torch = transformer.destack(x0)
+    x_torch = transformer.unstack(x0)
 
     phase_func = lambda: sausage_absorber(toy.s_pow.flatten()) if include_sausage else None
     PSF_1 = toy(x_torch, None, phase_generator=phase_func)
@@ -573,7 +573,7 @@ x0_compressed_backup = x0_compressed.clone()
 
 #%
 def func2(x_, include_list=None):
-    x_torch = compressor.destack(x_)
+    x_torch = compressor.unstack(x_)
     
     if include_sausage and 's_pow' in x_torch:
         phase_func = lambda: sausage_absorber(toy.s_pow.flatten())
@@ -638,8 +638,8 @@ else:
 #%%
 # decomposed = depack_line(x0_compressed)
 
-destacked_1 = transformer.destack(x0.clone())
-destacked_2 = compressor.destack(x0_compressed)
+destacked_1 = transformer.unstack(x0.clone())
+destacked_2 = compressor.unstack(x0_compressed)
 
 Ffs_2 = destacked_2['F'].cpu().flatten()
 bgs_2 = destacked_2['bg'].cpu().flatten()
@@ -684,7 +684,7 @@ Fs  = []
 bgs = []
 
 for x_ in x0s:
-    x_torch = transformer.destack(x_)
+    x_torch = transformer.unstack(x_)
     r0s.append(x_torch['r0'].abs().item())
     dns.append(x_torch['dn'].abs().item())
     Jxs.append(x_torch['Jx'].abs().item())

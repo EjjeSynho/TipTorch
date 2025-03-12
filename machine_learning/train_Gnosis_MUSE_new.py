@@ -208,7 +208,7 @@ def run_model(model, config, predicted_inputs, fixed_inputs={}):
         return model(x_unpacked)
 
 def func(x_, config, fixed_inputs):
-    pred_inputs = transformer.destack(net(x_))
+    pred_inputs = transformer.unstack(net(x_))
     return run_model(tiptorch, config, pred_inputs, fixed_inputs)
 
 
@@ -334,7 +334,7 @@ for epoch in range(epochs):
         x, fixed_inputs, PSF_0, config = get_data(batch, fixed_entries)
         batch_size = len(batch['IDs']) / N_wvl_train
         
-        PSF_pred = run_model(tiptorch, config, transformer.destack(net(x)), fixed_inputs)
+        PSF_pred = run_model(tiptorch, config, transformer.unstack(net(x)), fixed_inputs)
 
         loss = loss_combined(PSF_pred, PSF_0)
 
@@ -365,7 +365,7 @@ for epoch in range(epochs):
 
             batch_size = len(batch['IDs']) / N_wvl_train
 
-            PSF_pred = run_model(tiptorch, config, transformer.destack(net(x0)), fixed_inputs)
+            PSF_pred = run_model(tiptorch, config, transformer.unstack(net(x0)), fixed_inputs)
             loss = loss_combined(PSF_pred, PSF_0)
             
             loss_val.append(loss.item() / batch_size)
@@ -496,7 +496,7 @@ with torch.no_grad():
         PSFs_0_val_poly.append(PSF_0.cpu())
         current_batch_size = len(batch['IDs'])
         
-        pred_inputs_stats.append(transformer.destack(net(x0)))
+        pred_inputs_stats.append(transformer.unstack(net(x0)))
         configs.append(deepcopy(config))
         
         PSFs_1_val_poly.append(func(x0, config, fixed_inputs).cpu())

@@ -997,7 +997,7 @@ class TipTorch_new(torch.nn.Module):
             self.PSDs['chromatism'] = self.ChromatismPSD() # no need to add dimension since it's polychromatic already
 
         if self.PSD_include['Moffat']:
-            self.PSDs['Moffat'] = self.MoffatPSD(amp, b, alpha, beta, ratio, theta).unsqueeze(1)
+            self.PSDs['Moffat'] = self.MoffatPSD(amp.abs(), b, alpha, beta, ratio, theta).unsqueeze(1)
 
         if self.PSD_include['diff. refract']:
             self.PSDs['diff. refract'] = self.DifferentialRefractionPSD()

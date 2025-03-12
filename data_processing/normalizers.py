@@ -4,22 +4,31 @@ from torch.distributions.normal import Normal
 from project_globals import device
 import numpy as np
 from scipy import stats
-from scipy.stats import boxcox, yeojohnson, norm
+# from scipy.stats import boxcox, yeojohnson, norm
 from scipy.optimize import curve_fit
-
+from dataclasses import dataclass
+from typing import Any, Optional, Union
+from tabulate import tabulate  # For pretty table formatting
+from copy import deepcopy
 
 class InputsTransformer:
-    def __init__(self, transforms):
+    def __init__(self, transforms={}):
         # Store the transforms provided as a dictionary
         self.transforms = transforms
+        self.slices = {}
+
+    def __len__(self):
+        return len(self.transforms)
 
     def stack(self, args_dict, no_transform=False):
+        if len(self.transforms) == 0:
+            raise ValueError("No transforms provided for stacking.")
         """
         Constructs a joint tensor from provided keyword arguments,
         applying the corresponding transforms to each.
         Keeps track of each tensor's size for later decomposition.
         """
-        self._slices = {}
+        self.slices = {}
         self._packed_size = None
         tensors = []
         current_index = 0
@@ -32,12 +41,12 @@ class InputsTransformer:
                 transformed_value = self.transforms[key](value.unsqueeze(-1) if value.dim() == 1 else value)
             else:
                 transformed_value = value.unsqueeze(-1) if value.dim() == 1 else value
-            
+
             next_index = current_index + transformed_value.shape[1]
-            self._slices[key] = slice(current_index, next_index)
+            self.slices[key] = slice(current_index, next_index)
             current_index = next_index
             tensors.append(transformed_value)
-        
+
         # Concatenate all transformed tensors
         joint_tensor = torch.hstack(tensors)
         self._packed_size = joint_tensor.shape[1]
@@ -47,19 +56,173 @@ class InputsTransformer:
     def get_packed_size(self):
         return self._packed_size
 
-    def destack(self, joint_tensor):
+    def unstack(self, joint_tensor):
+        if self.slices is None:
+            raise ValueError("No cache of decomposing slices found. Stack the tensors first.")
         """
         Decomposes the joint tensor back into a dictionary of variables,
         inversely transforming each back to its original space.
         Uses the slices tracked during the stack operation.
         """
         decomposed = {}
-        for key, sl in self._slices.items():
+        for key, sl in self.slices.items():
             val = self.transforms[key].backward(joint_tensor[:, sl])
             decomposed[key] = val.squeeze(-1) if sl.stop-sl.start<2 else val # expects the TipTorch's conventions about the tensors dimensions
-        
+
         return decomposed
 
+@dataclass
+class InputParameter:
+    value: Any
+    transform: Optional[Any] = None
+    optimizable: bool = True
+
+class InputsManager:
+    def __init__(self):
+        self.parameters = {}
+        self.inputs_transformer = InputsTransformer()
+
+    def add(self, name: str, default_val: Any, transform: Any = None, optimizable: bool = True):
+        self.parameters[name] = InputParameter(
+            value       = default_val,
+            transform   = TransformSequence(transforms=[transform]),
+            optimizable = optimizable
+        )
+
+        self.inputs_transformer.transforms.update({name: transform})
+        # self.inputs_transformer.transforms = dict(sorted(self.inputs_transformer.transforms.items(), key=lambda x: x[0]))
+        # self.parameters = dict(sorted(self.parameters.items(), key=lambda x: x[0]))
+
+    def get_value(self, name: str) -> Any:
+        """Get the value of a parameter."""
+        return self.parameters[name].value
+
+    def get_transform(self, name: str) -> Any:
+        """Get the transform of a parameter."""
+        return self.parameters[name].transform
+
+    def is_optimizable(self, name: str) -> bool:
+        """Check if parameter is optimizable."""
+        return self.parameters[name].optimizable
+
+    def set_optimizable(self, names: Union[str, list], optimizable: bool):
+        """Set optimizable status for a parameter or list of parameters.
+
+        Args:
+            names: Either a single parameter name (str) or a list of parameter names
+            optimizable: Boolean flag to set optimizable status
+        """
+        if isinstance(names, str):
+            self.parameters[names].optimizable = optimizable
+        else:
+            for name in names:
+                self.parameters[name].optimizable = optimizable
+        
+        optimizable_names = [name for name, param in self.parameters.items() if param.optimizable]
+    
+        if set(optimizable_names) != set(self.inputs_transformer.slices.keys()):
+            self.stack()
+    
+    def stack(self):
+        if self.inputs_transformer.transforms == {} or self.parameters == {}:
+            return None
+
+        """Stack the parameters into a single tensor."""
+        args_dict = {name: param.value for name, param in self.parameters.items() if param.optimizable}
+        return self.inputs_transformer.stack(args_dict)
+
+    def unstack(self, x: torch.Tensor, include_all=True):
+        if self.inputs_transformer.transforms == {} or self.parameters == {}:
+            return None
+
+        """Unstack a tensor into the parameters."""
+        args_dict = self.inputs_transformer.unstack(x)
+        
+        for name, value in args_dict.items():
+            self.parameters[name].value = value
+        
+        # return all parameters, not just optimizable ones
+        if include_all:
+            for name, param in self.parameters.items():
+                if name not in args_dict:
+                    args_dict[name] = param.value
+                    
+        return args_dict
+
+    def __getitem__(self, item):
+        return self.parameters[item].value
+
+    def __setitem__(self, key, value):
+        self.parameters[key].value = value
+
+    def to(self, device: torch.device):
+        for name, param in self.parameters.items():
+            self.parameters[name].value = param.value.to(device)
+
+    def to_float(self):
+        """Convert all parameter values to float32."""
+        for name, param in self.parameters.items():
+            if hasattr(param.value, 'float'):
+                self.parameters[name].value = param.value.float()
+
+    def to_double(self):
+        """Convert all parameter values to float64."""
+        for name, param in self.parameters.items():
+            if hasattr(param.value, 'double'):
+                self.parameters[name].value = param.value.double()
+
+    def copy(self):
+        """Return a new InputsManager instance with copied parameters and transforms."""
+        new_manager = InputsManager()
+        # Rebuild parameters dictionary
+        for name, param in self.parameters.items():
+            new_manager.parameters[name] = InputParameter(
+                value=deepcopy(param.value),
+                transform=deepcopy(param.transform),
+                optimizable=param.optimizable
+            )
+        # Copy the inputs_transformer
+        new_manager.inputs_transformer = deepcopy(self.inputs_transformer)
+        return new_manager
+
+    def __str__(self) -> str:
+        """Pretty print the InputsManager contents."""
+        if not self.parameters:
+            return "InputsManager: No parameters defined"
+
+        # Prepare table headers and data
+        headers = ["Parameter", "Shape", "Device", "Dtype", "Optimizable", "Transform"]
+        rows = []
+
+        for name, param in self.parameters.items():
+            value = param.value
+            # Get shape, device, and dtype info
+            shape = tuple(value.shape) if hasattr(value, 'shape') else 'N/A'
+            device = value.device if hasattr(value, 'device') else 'N/A'
+            dtype = value.dtype if hasattr(value, 'dtype') else 'N/A'
+            # Get transform info
+            transform_name = type(param.transform.transforms[0]).__name__ if param.transform and param.transform.transforms else 'None'
+
+            rows.append([
+                name,
+                str(shape),
+                str(device),
+                str(dtype),
+                '✓' if param.optimizable else '✗',
+                transform_name
+            ])
+
+        # Create the table
+        table = tabulate(rows, headers=headers, tablefmt="pretty")
+
+        # Add header and footer
+        total_params = len(self.parameters)
+        optimizable_params = sum(1 for param in self.parameters.values() if param.optimizable)
+
+        header = "InputsManager Summary\n" + "="*len(table.split('\n')[0]) + "\n"
+        footer = f"\nTotal parameters: {total_params} (Optimizable: {optimizable_params})"
+
+        return header + table + footer
 
 class LineModel:
     def __init__(self, x, norms):
@@ -115,7 +278,7 @@ class InputsCompressor:
     def __init__(self, transforms, models):
         self.transforms = transforms
         self.models = models
-        self._slices = {}
+        self.slices = {}
         self._packed_size = None
 
     def stack(self, args_dict, no_transform=False):
@@ -130,7 +293,7 @@ class InputsCompressor:
                     transformed_value = self.transforms[key](value.unsqueeze(-1) if value.dim() == 1 else value)
 
             next_index = current_index + transformed_value.numel()
-            self._slices[key] = slice(current_index, next_index)
+            self.slices[key] = slice(current_index, next_index)
             current_index = next_index
             tensors.append(transformed_value.view(-1))
 
@@ -141,9 +304,9 @@ class InputsCompressor:
     def get_packed_size(self):
         return self._packed_size
 
-    def destack(self, joint_tensor):
+    def unstack(self, joint_tensor):
         decomposed = {}
-        for key, sl in self._slices.items():
+        for key, sl in self.slices.items():
             if key in self.models.keys():
                 params = joint_tensor[:, sl]
                 

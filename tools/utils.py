@@ -239,8 +239,9 @@ class LWE_basis():
 
 
 class OptimizableLO():
-    def __init__(self, model):
+    def __init__(self, model, ignore_pupil=True):
         self.model = model
+        self.ignore_pupil = ignore_pupil
 
     # def fft_upscale(self, x):
     #     h, w = x.shape[-2:]
@@ -258,7 +259,7 @@ class OptimizableLO():
         
     #     return upscaled.abs().unsqueeze(1)
 
-    def interp_upscale(self, x, mode='bicubic'):
+    def interp_upscale(self, x, mode='bilinear'):
         return F.interpolate(
             x.unsqueeze(1),
             size = (self.model.pupil.shape[-2], self.model.pupil.shape[-1]),
@@ -269,8 +270,143 @@ class OptimizableLO():
     def forward(self, x):
         OPD = self.interp_upscale(x) * 1e-9
         k = 2j * torch.pi / self.model.wvl.view(self.model.N_src, self.model.N_wvl, 1, 1)
-        # return (self.model.pupil * self.model.apodizer).unsqueeze(0).unsqueeze(0) * torch.exp(k * OPD)
-        return torch.exp(k * OPD)
+        if self.ignore_pupil:
+            return torch.exp(k*OPD)
+        else:
+            return (self.model.pupil * self.model.apodizer).unsqueeze(0).unsqueeze(0) * torch.exp(k*OPD)
+
+    def __call__(self, *args, **kwargs):
+        return self.forward(*args, **kwargs)
+
+
+class ZernikeBasis:
+    def __init__(self, pupil, modes_num=1):
+        self.nModes = modes_num
+        self.modesFullRes = None
+        self.pupil = pupil
+
+
+    def zernikeRadialFunc(self, n, m, r):
+        """
+        Function to calculate the Zernike radial function
+
+        Parameters:
+            n (int): Zernike radial order
+            m (int): Zernike azimuthal order
+            r (ndarray): 2-d array of radii from the center of the array
+
+        Returns:
+            ndarray: The Zernike radial function
+        """
+        from math import factorial
+
+        R = np.zeros(r.shape)
+        # Can cast the below to "int", n,m are always *both* either even or odd
+        for i in range(0, int((n-m)/2) + 1):
+            R += np.array(r**(n - 2 * i) * (((-1)**(i)) *
+                            factorial(n-i)) / (factorial(i) *
+                            factorial(int(0.5 * (n+m) - i)) *
+                            factorial(int(0.5 * (n-m) - i))),
+                            dtype='float')
+        return R
+   
+
+    def zernIndex(self, j):
+        n = int((-1.0 + np.sqrt(8*(j-1)+1))/2.)
+        p = (j-(n*(n+1))/2.)
+        k = n % 2
+        m = int((p+k)/2.)*2 - k
+
+        if m != 0:
+            if j % 2 == 0: s = 1
+            else:  s = -1
+            m *= s
+
+        return [n, m]
+
+
+    def __rotate_coordinates(self, angle, X, Y):
+            angle_rad = np.radians(angle)
+
+            rotation_matrix = np.array([
+                [np.cos(angle_rad), -np.sin(angle_rad)],
+                [np.sin(angle_rad),  np.cos(angle_rad)]
+            ])
+
+            coordinates = np.vstack((X, Y))
+            rotated_coordinates = np.dot(rotation_matrix, coordinates)
+            rotated_X, rotated_Y = rotated_coordinates[0, :], rotated_coordinates[1, :]
+
+            return rotated_X, rotated_Y
+        
+
+    def computeZernike(self, angle=None, transposed=False):
+
+        resolution = self.pupil.shape[-1]
+
+        X, Y = np.where(self.pupil == 1)
+        X = (X-resolution//2+0.5*(1-resolution%2)) / resolution
+        Y = (Y-resolution//2+0.5*(1-resolution%2)) / resolution
+        
+        if transposed:
+            X, Y = Y, X
+        
+        if angle is not None and angle != 0.0:
+            X, Y = self.__rotate_coordinates(angle, X, Y)
+        
+        R = np.sqrt(X**2 + Y**2)
+        R /= R.max()
+        theta = np.arctan2(Y, X)
+
+        self.modesFullRes = np.zeros([resolution**2, self.nModes])
+
+        for i in range(1, self.nModes+1):
+            n, m = self.zernIndex(i+1)
+            if m == 0:
+                Z = np.sqrt(n+1) * self.zernikeRadialFunc(n, 0, R)
+            else:
+                if m > 0: # j is even
+                    Z = np.sqrt(2*(n+1)) * self.zernikeRadialFunc(n, m, R) * np.cos(m*theta)
+                else:   #i is odd
+                    m = abs(m)
+                    Z = np.sqrt(2*(n+1)) * self.zernikeRadialFunc(n, m, R) * np.sin(m*theta)
+            
+            Z -= Z.mean()
+            Z /= np.std(Z)
+
+            self.modesFullRes[np.where(np.reshape(self.pupil, resolution*resolution)>0), i-1] = Z
+            
+        self.modesFullRes = np.reshape( self.modesFullRes, [resolution, resolution, self.nModes] )
+
+
+class ZernikeLO():
+    def __init__(self, model, N_modes, ignore_pupil=True):
+        self.model = model
+        self.ignore_pupil = ignore_pupil
+        
+        if self.ignore_pupil:
+            pupil = mask_circle(N=self.model.pupil.shape[-1], r=self.model.pupil.shape[-1]//2)
+        else:
+            pupil = self.model.pupil[0].cpu().numpy()
+        
+        Z = ZernikeBasis(pupil, N_modes)
+        Z.computeZernike()
+        
+        self.zernike_basis = torch.as_tensor(Z.modesFullRes, device=model.device, dtype=model.pupil.dtype).permute(2,0,1)
+
+
+    def compute_OPD(self, coefs):
+        return torch.einsum('om,mhw->ohw', coefs, self.zernike_basis) * 1e-9
+
+
+    def forward(self, x):
+        OPD = self.compute_OPD(x)
+        k = 2j * torch.pi / self.model.wvl.view(self.model.N_src, self.model.N_wvl, 1, 1)
+        if self.ignore_pupil:
+            return torch.exp(k*OPD)
+        else:
+            return (self.model.pupil * self.model.apodizer).unsqueeze(0).unsqueeze(0) * torch.exp(k*OPD)
+
 
     def __call__(self, *args, **kwargs):
         return self.forward(*args, **kwargs)
@@ -1538,3 +1674,248 @@ def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pix
     else:
         return mask_spiders
     
+
+class GradientLoss(nn.Module):
+    """
+    A gradient-based loss that enforces smoothness by penalizing differences
+    between neighboring pixels in both x (horizontal) and y (vertical) directions.
+    
+    Parameters:
+    - p (int or float): The norm degree. Use p=2 for L2-norm (quadratic) or p=1 for L1-norm.
+    - reduction (str): Specifies the reduction to apply to the output: 'mean' or 'sum'.
+    """
+    def __init__(self, p=2, reduction='mean'):
+        super(GradientLoss, self).__init__()
+        self.p = p
+        self.reduction = reduction
+
+    def forward(self, input):
+        """
+        Compute the gradient loss on the input phase map.
+        
+        Args:
+            input (torch.Tensor): A tensor of shape [batch, channels, height, width].
+        
+        Returns:
+            torch.Tensor: The computed gradient loss.
+        """
+        # Compute differences along the horizontal (x) direction: shape [B, C, H, W-1]
+        diff_x = torch.abs(input[:, :, :, 1:] - input[:, :, :, :-1])
+        # Compute differences along the vertical (y) direction: shape [B, C, H-1, W]
+        diff_y = torch.abs(input[:, :, 1:, :] - input[:, :, :-1, :])
+        
+        # Apply the p-norm to the differences
+        if self.p == 1:
+            loss_x = diff_x
+            loss_y = diff_y
+        else:
+            loss_x = diff_x ** self.p
+            loss_y = diff_y ** self.p
+        
+        # Sum the losses from both directions to get a scalar loss
+        loss = loss_x.sum() + loss_y.sum()
+        
+        # Optionally, average the loss over the number of elements
+        if self.reduction == 'mean':
+            num_elements = loss_x.numel() + loss_y.numel()
+            loss = loss / num_elements
+        
+        return loss
+
+
+class CombinedLoss:
+    def __init__(self, data, func, wvl_weights, mae_weight=2500, mse_weight=1120):
+        self.data = data
+        self.func = func
+        self.wvl_weights = wvl_weights
+        self.mse_weight = mse_weight
+        self.mae_weight = mae_weight
+
+    def __call__(self, x):
+        diff = (self.func(x) - self.data) * self.wvl_weights
+        mse_loss = (diff * self.mse_weight).pow(2).mean()
+        mae_loss = (diff * self.mae_weight).abs().mean()
+        return (mse_loss + mae_loss)
+    
+    
+'''
+class Zernike:
+    def __init__(self, modes_num=1):
+        global global_gpu_flag
+        self.nModes = modes_num
+        self.modesFullRes = None
+        self.pupil = None
+
+        self.modes_names = [
+            'Tip', 'Tilt', 'Defocus', 'Astigmatism (X)', 'Astigmatism (+)',
+            'Coma vert', 'Coma horiz', 'Trefoil vert', 'Trefoil horiz',
+            'Sphere', 'Secondary astig (X)', 'Secondary astig (+)',
+            'Quadrofoil vert', 'Quadrofoil horiz',
+            'Secondary coma horiz', 'Secondary coma vert',
+            'Secondary trefoil horiz', 'Secondary trefoil vert',
+            'Pentafoil horiz', 'Pentafoil vert'
+        ]
+        self.gpu = global_gpu_flag  
+
+
+    @property
+    def gpu(self):
+        return self.__gpu
+
+    @gpu.setter
+    def gpu(self, var):
+        if var:
+            self.__gpu = True
+            if hasattr(self, 'modesFullRes'):
+                if not hasattr(self.modesFullRes, 'device'):
+                    self.modesFullRes = cp.array(self.modesFullRes, dtype=cp.float32)
+        else:
+            self.__gpu = False
+            if hasattr(self, 'modesFullRes'):
+                if hasattr(self.modesFullRes, 'device'):
+                    self.modesFullRes = self.modesFullRes.get()
+
+
+    def zernikeRadialFunc(self, n, m, r):
+        """
+        Fucntion to calculate the Zernike radial function
+
+        Parameters:
+            n (int): Zernike radial order
+            m (int): Zernike azimuthal order
+            r (ndarray): 2-d array of radii from the centre the array
+
+        Returns:
+            ndarray: The Zernike radial function
+        """
+
+        R = np.zeros(r.shape)
+        # Can cast the below to "int", n,m are always *both* either even or odd
+        for i in range(0, int((n-m)/2) + 1):
+            R += np.array(r**(n - 2 * i) * (((-1)**(i)) *
+                            np.math.factorial(n-i)) / (np.math.factorial(i) *
+                            np.math.factorial(int(0.5 * (n+m) - i)) *
+                            np.math.factorial(int(0.5 * (n-m) - i))),
+                            dtype='float')
+        return R
+
+
+    def zernIndex(self, j):
+        n = int((-1.0 + np.sqrt(8*(j-1)+1))/2.)
+        p = (j-(n*(n+1))/2.)
+        k = n % 2
+        m = int((p+k)/2.)*2 - k
+
+        if m != 0:
+            if j % 2 == 0: s = 1
+            else:  s = -1
+            m *= s
+
+        return [n, m]
+
+
+    def rotate_coordinates(self, angle, X, Y):
+            angle_rad = np.radians(angle)
+
+            rotation_matrix = np.array([
+                [np.cos(angle_rad), -np.sin(angle_rad)],
+                [np.sin(angle_rad), np.cos(angle_rad)]
+            ])
+
+            coordinates = np.vstack((X, Y))
+            rotated_coordinates = np.dot(rotation_matrix, coordinates)
+            rotated_X, rotated_Y = rotated_coordinates[0, :], rotated_coordinates[1, :]
+
+            return rotated_X, rotated_Y
+        
+
+    def computeZernike(self, tel, normalize_unit=False, angle=None, transposed=False):
+        """
+        Function to calculate the Zernike modal basis
+
+        Parameters:
+            tel (Telescope): A telescope object, needed mostly to extract pupil data 
+            normalize_unit (bool): Sets the regime for normalization of Zernike modes
+                                   it's either the telescope's pupil or a unit circle  
+        """
+ 
+        resolution = tel.pupil.shape[0]
+
+        self.gpu = self.gpu and tel.gpu
+        if normalize_unit:
+            self.pupil = mask_circle(N=resolution, r=resolution/2)
+        else:
+            self.pupil = tel.pupil.get() if self.gpu else tel.pupil
+
+        X, Y = np.where(self.pupil == 1)
+        X = (X-resolution//2+0.5*(1-resolution%2)) / resolution
+        Y = (Y-resolution//2+0.5*(1-resolution%2)) / resolution
+        
+        if transposed:
+            X, Y = Y, X
+        
+        if angle is not None and angle != 0.0:
+            X, Y = self.rotate_coordinates(angle, X, Y)
+        
+        R = np.sqrt(X**2 + Y**2)
+        R /= R.max()
+        theta = np.arctan2(Y, X)
+
+        self.modesFullRes = np.zeros([resolution**2, self.nModes])
+
+        for i in range(1, self.nModes+1):
+            n, m = self.zernIndex(i+1)
+            if m == 0:
+                Z = np.sqrt(n+1) * self.zernikeRadialFunc(n, 0, R)
+            else:
+                if m > 0: # j is even
+                    Z = np.sqrt(2*(n+1)) * self.zernikeRadialFunc(n, m, R) * np.cos(m*theta)
+                else:   #i is odd
+                    m = abs(m)
+                    Z = np.sqrt(2*(n+1)) * self.zernikeRadialFunc(n, m, R) * np.sin(m*theta)
+            
+            Z -= Z.mean()
+            Z /= np.std(Z)
+
+            self.modesFullRes[np.where(np.reshape(self.pupil, resolution*resolution)>0), i-1] = Z
+            
+        self.modesFullRes = np.reshape( self.modesFullRes, [resolution, resolution, self.nModes] )
+        
+        if self.gpu: # if GPU is used, return a GPU-based array
+            self.modesFullRes = cp.array(self.modesFullRes, dtype=cp.float32)
+
+
+    def modeName(self, index):
+        if index < 0:
+            return('Incorrent index!')
+        elif index >= len(self.modes_names):
+            return('Z ' + str(index+2))
+        else:
+            return(self.modes_names[index])
+
+
+    # Generate wavefront shape corresponding to given model coefficients and modal basis 
+    def wavefrontFromModes(self, tel, coefs_inp):
+        xp = cp if self.gpu else np
+
+        coefs = xp.array(coefs_inp).flatten()
+        coefs[xp.where(xp.abs(coefs)<1e-13)] = xp.nan
+        valid_ids = xp.where(xp.isfinite(coefs))[0]
+
+        if self.modesFullRes is None:
+            print('Warning: Zernike modes were not computed! Calculating...')
+            self.nModes = xp.max(xp.array([coefs.shape[0], self.nModes]))
+            self.computeZernike(tel)
+
+        if self.nModes < coefs.shape[0]:
+            self.nModes = coefs.shape[0]
+            print('Warning: vector of coefficients is too long. Computiong additional modes...')
+            self.computeZernike(tel)
+
+        return self.modesFullRes[:,:,valid_ids] @ coefs[valid_ids] # * tel.pupil
+
+
+    def Mode(self, coef):
+        return self.modesFullRes[:,:,coef]
+
+'''

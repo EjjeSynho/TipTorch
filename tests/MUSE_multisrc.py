@@ -463,14 +463,14 @@ net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_s
 net.eval()
 
 with torch.no_grad():
-    PSF_pred_big = toy(pred_inputs := normalizer.destack(net(NN_inp))).clone()
+    PSF_pred_big = toy(pred_inputs := normalizer.unstack(net(NN_inp))).clone()
 
 #%%
 config_file['sensor_science']['FieldOfView'] = box_size
 toy.Update(reinit_grids=True, reinit_pupils=True)
 
 with torch.no_grad():
-    PSF_pred_small = toy(pred_inputs := normalizer.destack(net(NN_inp)))
+    PSF_pred_small = toy(pred_inputs := normalizer.unstack(net(NN_inp)))
 
 #%%
 cut_middle = lambda n,m: np.s_[..., n//2-m//2 : n//2 + m//2 + m%2, n//2-m//2 : n//2 + m//2 + m%2 ]
@@ -532,7 +532,7 @@ transformer_dxdy = InputsTransformer(transformer_dict_astrometry)
 _ = transformer_dxdy.stack({ attr: getattr(toy, attr) for attr in transformer_dict_astrometry })
 
 expand_dxdy = lambda x_: x_.unsqueeze(0).T.repeat(1, N_wvl).flatten().unsqueeze(0)
-func = lambda x_: toy(pred_inputs | transformer_dxdy.destack(expand_dxdy(x_)))
+func = lambda x_: toy(pred_inputs | transformer_dxdy.unstack(expand_dxdy(x_)))
 
 def fit_dxdy(source_id, verbose=0):
     if verbose > 0: 
@@ -660,8 +660,8 @@ def func_fit(x):
     PSFs_fit = []
     for i in range(N_src):
         dxdy_ = x[x_size+N_src+i*2 : 2*x_size+N_src+(i+1)*2]
-        x_fit_dict = normalizer.destack(x[:x_size].unsqueeze(0))
-        dxdy_dict  = transformer_dxdy.destack(expand_dxdy(dxdy_))
+        x_fit_dict = normalizer.unstack(x[:x_size].unsqueeze(0))
+        dxdy_dict  = transformer_dxdy.unstack(expand_dxdy(dxdy_))
 
         inputs = x_fit_dict | dxdy_dict
         

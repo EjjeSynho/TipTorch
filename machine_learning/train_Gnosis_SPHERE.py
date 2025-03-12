@@ -213,7 +213,7 @@ def get_data(batch, fixed_entries):
 
 
 def func(x_, fixed_inputs):
-    pred_inputs = transformer.destack(net(x_))
+    pred_inputs = transformer.unstack(net(x_))
     return run_model(toy, batch_data, pred_inputs, fixed_inputs)
 
 #%%
@@ -350,9 +350,9 @@ LWE_regularizer = lambda c: \
     Gauss_err(pattern_3, c)   + Gauss_err(pattern_4, c)
 
 def loss_fn(x_, PSF_data):
-    pred_inputs = transformer.destack(net(x_))
+    pred_inputs = transformer.unstack(net(x_))
     PSF_pred = run_model(toy, batch_data, pred_inputs, fixed_inputs)
-    # coefs_ = transformer.destack(x_)['basis_coefs']
+    # coefs_ = transformer.unstack(x_)['basis_coefs']
     # coefs_gt = torch.tensor(np.array(batch_data['fitted data']['LWE coefs']), device=device).float()
     # loss = img_punish(PSF_pred, PSF_data) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4 + center_punish(PSD_pred, PSF_data)
     # loss = img_punish(PSF_pred, PSF_data) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
@@ -609,7 +609,7 @@ with torch.no_grad():
             toy.Update(reinit_grids=True, reinit_pupils=True)
 
             configs.append(deepcopy(init_config))
-            pred_inputs_stats.append( deepcopy(transformer.destack(net(x0))) )
+            pred_inputs_stats.append( deepcopy(transformer.unstack(net(x0))) )
 
             batch_size = len(batch_data['IDs'])
             
@@ -701,7 +701,7 @@ index_ = batch_data['IDs'].tolist().index(j)
 
 x0, fixed_inputs, _, _ = get_data(batch_data, fitted_entries)
 
-pred_coefs = transformer.destack(net(x0))['basis_coefs'][index_, ...]
+pred_coefs = transformer.unstack(net(x0))['basis_coefs'][index_, ...]
 test_coefs = fixed_inputs['basis_coefs'][index_, ...]
         
 with torch.no_grad():

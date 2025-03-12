@@ -265,7 +265,7 @@ def load_and_fit_sample(id):
         x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
         
         def func(x_):
-            x_torch = transformer.destack(x_)
+            x_torch = transformer.unstack(x_)
             if 'basis_coefs' in x_torch:
                 return model(x_torch, None, lambda: basis(x_torch['basis_coefs'].float()))
             else:
@@ -293,7 +293,7 @@ def load_and_fit_sample(id):
                 Gauss_err(pattern_3, c)   + Gauss_err(pattern_4, c)
             
             def loss_fn(x_):
-                coefs_ = transformer.destack(x_)['basis_coefs']
+                coefs_ = transformer.unstack(x_)['basis_coefs']
                 loss = img_punish(x_) + LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
                 return loss
             
@@ -306,7 +306,7 @@ def load_and_fit_sample(id):
 
         x0 = result.x
 
-        LWE_coefs = transformer.destack(x0)['basis_coefs'].clone()
+        LWE_coefs = transformer.unstack(x0)['basis_coefs'].clone()
         PTT_basis = BuildPTTBasis(model.pupil.cpu().numpy(), True).to(device).float()
 
         TT_max = PTT_basis.abs()[1,...].max().item()
@@ -316,7 +316,7 @@ def load_and_fit_sample(id):
         PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, model.pupil)
         PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, model.pupil)
 
-        x0_new = transformer.destack(x0)
+        x0_new = transformer.unstack(x0)
         x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, model.pupil) 
         x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
         x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])

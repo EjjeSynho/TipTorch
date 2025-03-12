@@ -260,7 +260,7 @@ def load_and_fit_sample(id):
     x0 = torch.tensor(x0).float().to(device).unsqueeze(0)
 
     def func(x_, include_list=None):
-        x_torch = transformer.destack(x_)
+        x_torch = transformer.unstack(x_)
         
         if include_sausage and 's_pow' in x_torch:
             phase_func = lambda: sausage_absorber(model.s_pow.flatten())
@@ -296,7 +296,7 @@ def load_and_fit_sample(id):
     result = minimize(loss_fn, x0, max_iter=100, tol=1e-3, method='bfgs', disp=0)
     x0 = result.x
 
-    x_torch = transformer.destack(x0)
+    x_torch = transformer.unstack(x0)
 
     if include_sausage:
         PSF_1 = model(x_torch, None, phase_generator=lambda: sausage_absorber(model.s_pow.flatten()))
