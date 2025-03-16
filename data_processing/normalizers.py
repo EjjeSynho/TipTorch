@@ -53,7 +53,7 @@ class InputsTransformer:
         return joint_tensor
 
     # Getter
-    def get_packed_size(self):
+    def get_stacked_size(self):
         return self._packed_size
 
     def unstack(self, joint_tensor):
@@ -85,13 +85,17 @@ class InputsManager:
     def add(self, name: str, default_val: Any, transform: Any = None, optimizable: bool = True):
         self.parameters[name] = InputParameter(
             value       = default_val,
-            transform   = TransformSequence(transforms=[transform]),
+            transform   = TransformSequence(transforms=[transform]) if type(transform) is not TransformSequence else transform,
             optimizable = optimizable
         )
 
         self.inputs_transformer.transforms.update({name: transform})
         # self.inputs_transformer.transforms = dict(sorted(self.inputs_transformer.transforms.items(), key=lambda x: x[0]))
         # self.parameters = dict(sorted(self.parameters.items(), key=lambda x: x[0]))
+
+    def get_stacked_size(self):
+        """Get the size of the stacked tensor."""
+        return self.inputs_transformer.get_stacked_size()
 
     def get_value(self, name: str) -> Any:
         """Get the value of a parameter."""
@@ -123,6 +127,12 @@ class InputsManager:
         if set(optimizable_names) != set(self.inputs_transformer.slices.keys()):
             self.stack()
     
+    def update(self, other: dict):
+        """Update the parameters with a new dictionary of values."""
+        for name, value in other.items():
+            if name in self.parameters:
+                self.parameters[name].value = value       
+    
     def stack(self):
         if self.inputs_transformer.transforms == {} or self.parameters == {}:
             return None
@@ -148,6 +158,14 @@ class InputsManager:
                     args_dict[name] = param.value
                     
         return args_dict
+
+    def __len__(self):
+        """Return number of parameters."""
+        return len(self.parameters)
+        
+    def to_dict(self) -> dict:
+        """Explicit method to convert to dictionary."""
+        return {name: param.value for name, param in self.parameters.items()}
 
     def __getitem__(self, item):
         return self.parameters[item].value
@@ -301,7 +319,7 @@ class InputsCompressor:
         self._packed_size = joint_tensor.shape[0]
         return joint_tensor
 
-    def get_packed_size(self):
+    def get_stacked_size(self):
         return self._packed_size
 
     def unstack(self, joint_tensor):

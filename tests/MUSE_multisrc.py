@@ -455,7 +455,7 @@ class Gnosis(nn.Module):
         return x
     
 # Initialize the network, loss function and optimizer
-net = Gnosis(NN_inp.shape[-1], normalizer.get_packed_size(), 200, 0.1)
+net = Gnosis(NN_inp.shape[-1], normalizer.get_stacked_size(), 200, 0.1)
 net.to(device)
 net.float()
 
@@ -635,7 +635,7 @@ for id in range(len(ROIs_1)):
 
 #%% ----- Fitting -----
 N_src = len(ROIs)
-x_size = normalizer.get_packed_size()
+x_size = normalizer.get_stacked_size()
 
 x0 = normalizer.stack(pred_inputs).squeeze().clone().detach()
 Fs_flat = torch.ones([N_src], device=device)

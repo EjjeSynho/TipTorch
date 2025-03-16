@@ -51,7 +51,7 @@ class TipTorch_new(torch.nn.Module):
         self.N_wvl = self.wvl.shape[-1]
         self.wvl_atm = self.config['atmosphere']['Wavelength']
 
-        # Science sources positions relative to the center of FOV in [arc]
+        # Science sources positions relative to the center of FOV, input in [arc]
         self.src_zenith  = self.config['sources_science']['Zenith'].flatten() / self.rad2arc  # [N_src]
         self.src_azimuth = torch.deg2rad(self.config['sources_science']['Azimuth']).flatten() # [N_src]
         self.src_dirs_x  = torch.tan(self.src_zenith) * torch.cos(self.src_azimuth).flatten() # [N_src]
@@ -101,6 +101,8 @@ class TipTorch_new(torch.nn.Module):
         self.stretch  = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
         self.h  = self.Cn2_heights * self.stretch
         self.nL = self.Cn2_heights.shape[-1]
+
+        self.N_src_tomo = self.h.shape[0]
 
         # WFS parameters
         self.WFS_d_sub = self.config['sensor_HO']['SizeLenslets']
@@ -457,7 +459,7 @@ class TipTorch_new(torch.nn.Module):
         self.is_float = False
         
         self.AO_type = AO_type
-        self.tomography = True if self.AO_type in ['LTAO', 'MCAO', 'GLAO'] else False
+        self.tomography = True if self.AO_type in ['LTAO', 'MCAO', 'GLAO'] else False # TODO: automatic regime selection
 
         # Useful lambda functions
         self.r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0).pow(6/5)
@@ -689,7 +691,7 @@ class TipTorch_new(torch.nn.Module):
         else:
             kx = pdims(self.kx_AO, 1)
             ky = pdims(self.ky_AO, 1)
-            h  = self.h.view(self.N_src, 1, 1, self.nL)
+            h  = self.h.view(self.N_src_tomo, 1, 1, self.nL)
             
             beta_x = self.src_dirs_x.view(self.N_src, 1, 1, 1)
             beta_y = self.src_dirs_y.view(self.N_src, 1, 1, 1)
@@ -741,7 +743,7 @@ class TipTorch_new(torch.nn.Module):
         # Add aliasing dimension and more
         vx = self.vx.view(1, self.N_src, 1, 1, self.nL)
         vy = self.vy.view(1, self.N_src, 1, 1, self.nL)
-        Cn2_weights = self.Cn2_weights.view(1, self.N_src, 1, 1, self.nL)
+        Cn2_weights = self.Cn2_weights.view(1, self.N_src_tomo, 1, 1, self.nL)
         
         # Add atmo layers dimension
         km, kn = self.km.unsqueeze(-1), self.kn.unsqueeze(-1)
@@ -763,6 +765,7 @@ class TipTorch_new(torch.nn.Module):
 
 
     def ChromatismPSD(self):
+        # GS_wvl maaay depend on the filter for SCAO
         n2 = self.IOR_GS_wvl.view(self.N_src, 1, 1, 1)
         n1 = self.IOR_src_wvl.view(1, self.N_wvl, 1, 1)
         
@@ -773,7 +776,7 @@ class TipTorch_new(torch.nn.Module):
     def DifferentialRefractionPSD(self):
         # TODO: account for the pupil angle
         h = self.h.view(self.N_src, 1, 1, 1, self.nL)
-        w = self.Cn2_weights.view(self.N_src, 1, 1, 1, self.nL)
+        w = self.Cn2_weights.view(self.N_src_tomo, 1, 1, 1, self.nL)
         k = self.k_AO.view(1, 1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
         # [N_src x 1 x nOtf_AO_y x nOtf_AO_x]
         cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - pdims(self.src_azimuth, 2)).unsqueeze(1)
@@ -849,29 +852,29 @@ class TipTorch_new(torch.nn.Module):
         # Note that if all simulated sources use the same atmospheric profile, r0, L0, and noise variance,
         # then it's possible to compute one tomographic reconstructor for all sources.
         # For example, this is possible if objects are within one FoV and belong to one observation
-        N_src_tomo = self.h.shape[0]
-        
+                
         # h = self.h.view(self.N_src, 1, 1, 1, self.nL)
-        h = self.h.view(N_src_tomo, 1, 1, 1, self.nL)
+        h = self.h.view(self.N_src_tomo, 1, 1, 1, self.nL)
         
         kx = pdims(self.kx_AO, 2)
         ky = pdims(self.ky_AO, 2)
-        GS_dirs_x = self.GS_dirs_x.view(N_src_tomo, 1, 1, self.N_GS, 1)
-        GS_dirs_y = self.GS_dirs_y.view(N_src_tomo, 1, 1, self.N_GS, 1)
+        GS_dirs_x = self.GS_dirs_x.view(self.N_src_tomo, 1, 1, self.N_GS, 1)
+        GS_dirs_y = self.GS_dirs_y.view(self.N_src_tomo, 1, 1, self.N_GS, 1)
         
         diag_mask = lambda N: torch.eye(N, device=self.device).view(1,1,1,N,N).expand(self.N_src, self.nOtf_AO_y, self.nOtf_AO_x, -1, -1)
         
         M = 2j*torch.pi*self.k_AO * torch.sinc(self.WFS_d_sub*self.kx_AO) * torch.sinc(self.WFS_d_sub*self.ky_AO)
-        M = pdims(M, 2).expand(N_src_tomo, self.nOtf_AO_y, self.nOtf_AO_x, self.N_GS, self.N_GS) * diag_mask(self.N_GS) # [N_src_tomo x nOtf_y x nOtf_x x nGS x nGS]
+        M = pdims(M, 2).expand(self.N_src_tomo, self.nOtf_AO_y, self.nOtf_AO_x, self.N_GS, self.N_GS) * diag_mask(self.N_GS) # [N_src_tomo x nOtf_y x nOtf_x x nGS x nGS]
         P = torch.exp( 2j*torch.pi*h * (kx*GS_dirs_x + ky*GS_dirs_y) ) # N_src_tomo x nOtf_y x nOtf_x x nGS x nL
         MP   = torch.einsum('nwhik,nwhkj->nwhij', M, P)  # N_src_tomo x nOtf_y x nOtf_x x nL x nGS
         MP_t = torch.conj(MP.permute(0,1,2,4,3))
 
-        fix_dims = lambda x_, N: torch.diag_embed(x_).view(N_src_tomo, 1, 1, N, N).expand(N_src_tomo, self.nOtf_AO_y, self.nOtf_AO_x, N, N)
+        fix_dims = lambda x_, N: torch.diag_embed(x_).view(self.N_src_tomo, 1, 1, N, N).expand(self.N_src_tomo, self.nOtf_AO_y, self.nOtf_AO_x, N, N)
         
         # Note, that size of WFS_noise_var == N_src_tomo
         WFS_noise_variance = WFS_noise_var.to(dtype=MP.dtype)
-        self.C_b = fix_dims( WFS_noise_variance, self.N_GS )
+        # Well, if the same tomo reconstructor is used for all targets, then WFS_noise_variance also must be the same for all targets
+        self.C_b = fix_dims( WFS_noise_variance[:self.N_src_tomo], self.N_GS )
         kernel = self.VonKarmanSpectrum(self.r0.abs().to(dtype=MP.dtype), self.L0.abs(), self.k2_AO) * self.piston_filter
         self.C_phi = pdims(kernel, 2) * fix_dims(self.Cn2_weights, self.nL)
 
@@ -898,7 +901,7 @@ class TipTorch_new(torch.nn.Module):
          
         self.W = self.P_opt @ self.W_tomo
         
-        # Note, that size of HOloop_rate == N_src_tomo
+        # Note, that size of HOloop_rate == N_src_tomo (wait, why?)
         samp_time = 1.0 / self.HOloop_rate
         www = 2j * torch.pi * pdims(self.k_AO, 1) * torch.sinc(pdims(samp_time * self.WFS_det_clock_rate, 3) * self.freq_t)
         self.MP_alpha_L = www.unsqueeze(-2) * P * (torch.sinc(self.WFS_d_sub*kx) * torch.sinc(self.WFS_d_sub*ky))

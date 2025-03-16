@@ -135,7 +135,7 @@ class Gnosis(nn.Module):
         return x
     
 # Initialize the network, loss function and optimizer
-net = Gnosis(batch_data['NN input'].shape[1], transformer.get_packed_size(), 200, 0.1)#0.25)
+net = Gnosis(batch_data['NN input'].shape[1], transformer.get_stacked_size(), 200, 0.1)#0.25)
 net.to(device)
 net.float()
 
@@ -148,7 +148,7 @@ x0 = x0.float().repeat(len(batch_data['IDs']), 1).to(device)
 # I = batch_data['NN input'].to(device).float()
 
 # A = torch.linalg.pinv(I) @ x0
-# A += torch.randn([batch_data['NN input'].shape[1], transformer.get_packed_size()], device=device) * 1e-2
+# A += torch.randn([batch_data['NN input'].shape[1], transformer.get_stacked_size()], device=device) * 1e-2
 # A.requires_grad = True
 
 #%%

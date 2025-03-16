@@ -161,7 +161,7 @@ class Gnosis(nn.Module):
         return x
     
 # Initialize the network, loss function and optimizer
-net = Gnosis(batch_init['NN input'].shape[1], transformer.get_packed_size(), 200, 0.1)#0.25)
+net = Gnosis(batch_init['NN input'].shape[1], transformer.get_stacked_size(), 200, 0.1)#0.25)
 net.to(device)
 net.float()
 

@@ -37,8 +37,12 @@ from machine_learning.MUSE_onsky_df import *
 
 #%%
 # Load the FITS file
-# cube_path = MUSE_DATA_FOLDER + "quasars/J0259_cubes/J0259-0901_DATACUBE_FINAL_2024-12-05T03_04_07.007.fits"
-cube_path = MUSE_DATA_FOLDER + "quasars/J0259_cubes/J0259-0901_DATACUBE_FINAL_2024-12-05T03_49_24.768.fits"
+
+# reduced_name = 'J0259_2024-12-05T03_04_07.007'
+# reduced_name = 'J0259_2024-12-05T03_49_24.768'
+reduced_name = 'J0259_2024-12-05T03_15_37.598'
+
+cube_path = MUSE_DATA_FOLDER + f"quasars/J0259_cubes/J0259-0901_DATACUBE_FINAL_{reduced_name[6:]}.fits"
 test_fits = fits.open(cube_path)
 
 
@@ -48,8 +52,7 @@ valid_mask = ~nan_mask
 
 test_fits.close()
 
-# with open(MUSE_DATA_FOLDER + "quasars/J0259_reduced/J0259_2024-12-05T03_04_07.007.pickle", 'rb') as f:
-with open(MUSE_DATA_FOLDER + "quasars/J0259_reduced/J0259_2024-12-05T03_49_24.768.pickle", 'rb') as f:
+with open(MUSE_DATA_FOLDER + f"quasars/J0259_reduced/{reduced_name}.pickle", 'rb') as f:
     data = pickle.load(f)
     
 #%%
@@ -193,7 +196,7 @@ def plot_ROIs_as_grid(ROIs, cols=5):
 
 
 ROIs, local_coords, global_coords = extract_ROIs(data_onsky, sources, box_size=box_size)
-
+N_src = len(ROIs)
 # plot_ROIs_as_grid(ROIs, cols=np.ceil(np.sqrt(len(ROIs))).astype('uint'))  # Adjust the number of columns as needed
 
 #%%
@@ -212,7 +215,6 @@ df_norm = df_norm.fillna(0)
 
 selected_entries_input = muse_df_norm.columns.values.tolist()
 
-NN_inp = torch.tensor(df_norm[selected_entries_input].loc[0].to_numpy()).to(device).float().unsqueeze(0)
 
 #%%
 # from PSF_models.TipToy_MUSE_multisrc import TipTorch
@@ -222,8 +224,7 @@ from PSF_models.TipTorch import TipTorch_new
 config_file, data_onsky = GetConfig(data, data_onsky)
 data_onsky = data_onsky.squeeze()
 
-config_file['NumberSources'] = config_file['NumberSources'].int().item()
-
+config_file['NumberSources'] = 1 #N_src
 config_file['sensor_science']['FieldOfView'] = 511
 
 wavelength = config_file['sources_science']['Wavelength'].clone()
@@ -236,25 +237,33 @@ N_wvl = len(ids_wavelength_selected)
 
 data_onsky_sparse = data_onsky.clone()[ids_wavelength_selected,...]
 
+#%
+'''
+config_file['DM']['OptimizationZenith']  = config_file['DM']['OptimizationZenith'].repeat(N_src)
+config_file['DM']['OptimizationAzimuth'] = config_file['DM']['OptimizationAzimuth'].repeat(N_src)
+
+config_file['RTC']['SensorFrameRate_HO'] = config_file['RTC']['SensorFrameRate_HO'].repeat(N_src)
+config_file['RTC']['LoopDelaySteps_HO'] = config_file['RTC']['LoopDelaySteps_HO'].repeat(N_src)
+config_file['RTC']['LoopGain_HO'] = config_file['RTC']['LoopGain_HO'].repeat(N_src)
+
+config_file['sensor_HO']['NumberPhotons'] = config_file['sensor_HO']['NumberPhotons'].repeat(N_src, 1)
+config_file['atmosphere']['Seeing'] = config_file['atmosphere']['Seeing'].repeat(N_src)
+
+config_file['atmosphere']['WindSpeed'] = config_file['atmosphere']['WindSpeed'].repeat(N_src, 1)
+config_file['atmosphere']['WindDirection'] = config_file['atmosphere']['WindDirection'].repeat(N_src, 1)
+# config_file['atmosphere']['Cn2Weights'] = config_file['atmosphere']['Cn2Weights'].repeat(N_src, 1)
+# config_file['atmosphere']['Cn2Heights'] = config_file['atmosphere']['Cn2Heights'].repeat(N_src, 1)
+
+config_file['sources_science']['Zenith'] = config_file['sources_science']['Zenith'].repeat(N_src)
+config_file['sources_science']['Azimuth'] = config_file['sources_science']['Azimuth'].repeat(N_src)
+config_file['sources_HO']['Wavelength'] = config_file['sources_HO']['Wavelength'].repeat(N_src, 1)
+'''
+
 
 #%%
 from tools.utils import PupilVLT, OptimizableLO
 
-Moffat_absorber = True
-predict_Moffat = Moffat_absorber
-
-'''
-toy = TipTorch_new(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-# toy = TipTorch_new(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-
-toy.PSD_include['fitting'] = True
-toy.PSD_include['WFS noise'] = True
-toy.PSD_include['spatio-temporal'] = True
-toy.PSD_include['aliasing'] = False
-toy.PSD_include['chromatism'] = True
-# toy.PSD_include['diff. refract'] = False
-toy.PSD_include['Moffat'] = Moffat_absorber
-'''
+LO_map_size = 31
 
 pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
 PSD_include = {
@@ -264,88 +273,54 @@ PSD_include = {
     'aliasing':        False,
     'chromatism':      True,
     'diff. refract':   True,
-    'Moffat':          Moffat_absorber
+    'Moffat':          False
 }
 model = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 model.apodizer = model.make_tensor(1.0)
 
 model.to_float()
 model.to(device)
-
 #%
-inputs_tiptorch = {
-    # 'r0':  torch.tensor([0.09561153075597545], device=toy.device),
-    'F':   torch.tensor([[1.0,]*N_wvl], device=model.device),
-    'dx':  torch.tensor([[0.0,]*N_wvl], device=model.device),
-    'dy':  torch.tensor([[0.0,]*N_wvl], device=model.device),
-    # 'bg':  torch.tensor([[1e-06,]*N_wvl], device=toy.device),
-    'bg':  torch.tensor([[0,]*N_wvl], device=model.device),
-    'dn':  torch.tensor([1.5], device=model.device),
-    'Jx':  torch.tensor([[10,]*N_wvl], device=model.device),
-    'Jy':  torch.tensor([[10,]*N_wvl], device=model.device),
-    # 'Jxy': torch.tensor([[45]], device=toy.device)
-    'Jxy': torch.tensor([[0]], device=model.device)
-}
-
-if Moffat_absorber:
-    inputs_psfao = {
-        'amp':   torch.ones (model.N_src, device=model.device)*0.0, # Phase PSD Moffat amplitude [rad²]
-        'b':     torch.ones (model.N_src, device=model.device)*0.0, # Phase PSD background [rad² m²]
-        'alpha': torch.ones (model.N_src, device=model.device)*0.1, # Phase PSD Moffat alpha [1/m]
-        'beta':  torch.ones (model.N_src, device=model.device)*2,   # Phase PSD Moffat beta power law
-        'ratio': torch.ones (model.N_src, device=model.device),     # Phase PSD Moffat ellipticity
-        'theta': torch.zeros(model.N_src, device=model.device),     # Phase PSD Moffat angle
-    }
-else:
-    inputs_psfao = {}
-
-_ = model(x=inputs_tiptorch | inputs_psfao)
+# PSF_1 = model()
 
 #%%
+from data_processing.normalizers import Uniform, InputsManager
+
 df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
 df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/muse_df_fitted_transforms.pickle')
 
-transforms = {
-    'r0':    df_transforms_fitted['r0'],
-    'F':     df_transforms_fitted['F'],
-    'bg':    df_transforms_fitted['bg'],
-    'dx':    df_transforms_fitted['dx'],
-    'dy':    df_transforms_fitted['dy'],
-    'Jx':    df_transforms_fitted['Jx'],
-    'Jy':    df_transforms_fitted['Jy'],
-    'Jxy':   df_transforms_fitted['Jxy'],
-    'dn':    df_transforms_fitted['dn'],
-    's_pow': df_transforms_fitted['s_pow'],
-    'amp':   df_transforms_fitted['amp'],
-    'b':     df_transforms_fitted['b'],
-    'alpha': df_transforms_fitted['alpha'],
-    'beta':  df_transforms_fitted['beta'],
-    'ratio': df_transforms_fitted['ratio'],
-    'theta': df_transforms_fitted['theta']
-}
+inputs_manager = InputsManager()
 
-predicted_entries  = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow']
-if predict_Moffat:
-    predicted_entries += ['amp', 'b', 'alpha']
+inputs_manager.add('r0',    torch.tensor([model.r0[0].item()]), df_transforms_fitted['r0'])
+inputs_manager.add('F',     torch.tensor([[1.0,]*N_wvl]),    df_transforms_fitted['F'])
+inputs_manager.add('bg',    torch.tensor([[0,]*N_wvl]),      df_transforms_fitted['bg'])
+inputs_manager.add('dx',    torch.tensor([[0.0,]*N_wvl]),    df_transforms_fitted['dx'])
+inputs_manager.add('dy',    torch.tensor([[0.0,]*N_wvl]),    df_transforms_fitted['dy'])
+inputs_manager.add('dn',    torch.tensor([1.5]),             df_transforms_fitted['dn'])
+inputs_manager.add('Jx',    torch.tensor([[10,]*N_wvl]),     df_transforms_fitted['Jx'])
+inputs_manager.add('Jy',    torch.tensor([[10,]*N_wvl]),     df_transforms_fitted['Jy'])
+inputs_manager.add('Jxy',   torch.tensor([[0]]), df_transforms_fitted['Jxy'])
+inputs_manager.add('amp',   torch.tensor([0.0]), df_transforms_fitted['amp'])
+inputs_manager.add('b',     torch.tensor([0.0]), df_transforms_fitted['b'])
+inputs_manager.add('alpha', torch.tensor([4.5]), df_transforms_fitted['alpha'])
+inputs_manager.add('beta',  torch.tensor([2.5]), df_transforms_fitted['beta'])
+inputs_manager.add('ratio', torch.tensor([1.0]), df_transforms_fitted['ratio'])
+inputs_manager.add('theta', torch.tensor([0.0]), df_transforms_fitted['theta']) 
+inputs_manager.add('s_pow', torch.tensor([0.0]), df_transforms_fitted['s_pow'])
 
 
-normalizer = InputsTransformer({ entry: transforms[entry] for entry in predicted_entries })
+if LO_map_size is not None:
+    inputs_manager.add('LO_coefs', torch.zeros([1, LO_map_size**2]), Uniform(a=-100, b=100))
+    inputs_manager.set_optimizable('LO_coefs', False)
 
-inp_dict = {
-    'r0':    torch.ones ( model.N_src, device=model.device)*0.1,
-    'F':     torch.ones ([model.N_src, N_wvl], device=model.device),
-    'Jx':    torch.ones ([model.N_src, N_wvl], device=model.device)*10,
-    'Jy':    torch.ones ([model.N_src, N_wvl], device=model.device)*10,
-    'dn':    torch.ones (model.N_src, device=model.device)*1.5,
-    's_pow': torch.zeros(model.N_src, device=model.device),
-    'amp':   torch.zeros(model.N_src, device=model.device),
-    'b':     torch.zeros(model.N_src, device=model.device),
-    'alpha': torch.ones (model.N_src, device=model.device)*0.1,
-}
+# inputs_manager.set_optimizable(['ratio', 'theta', 'alpha', 'beta', 'amp', 'b'], False)
+inputs_manager.set_optimizable(['ratio', 'theta'], False)
+           
+inputs_manager.to_float()
+inputs_manager.to(device)
 
+print(inputs_manager)
 
-inp_dict_ = { entry: inp_dict[entry] for entry in predicted_entries if entry in inp_dict.keys() }
-_ = normalizer.stack(inp_dict_, no_transform=True)
 
 #%%
 class Gnosis(nn.Module):
@@ -364,17 +339,79 @@ class Gnosis(nn.Module):
         x = self.dropout3(x)
         x = torch.tanh(self.fc4(x))
         return x
-    
-# Initialize the network, loss function and optimizer
-net = Gnosis(NN_inp.shape[-1], normalizer.get_stacked_size(), 200, 0.1)
-net.to(device)
-net.float()
 
-net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict', map_location=torch.device('cpu')))
-net.eval()
+
+class Calibrator(nn.Module):
+
+    def __init__(self, inputs_manager, calibrator_network, predicted_values, device=torch.device('cpu')):
+        super().__init__()
+        self.device = device
+        self.predicted_values = predicted_values
+        
+        # Initialiize inputs normalizer and staker/unstacker
+        self.normalizer = InputsTransformer({ inp: inputs_manager.get_transform(inp) for inp in predicted_values })
+        _ = self.normalizer.stack({ inp: inputs_manager[inp] for inp in predicted_values }, no_transform=True)
+
+        # Initialize the calibrator network
+        net_class      = calibrator_network['artichitecture']
+        inputs_size    = calibrator_network['inputs_size']
+        outputs_size   = calibrator_network['outputs_size'] if 'outputs_size' in calibrator_network else self.normalizer.get_stacked_size()
+        weights_folder = calibrator_network['weights_folder']
+        NN_kwargs      = calibrator_network['NN_kwargs']
+
+        self.net = net_class(inputs_size, outputs_size, **NN_kwargs)
+        self.net.to(device)
+        self.net.float() # TODO: support double precision
+        self.net.load_state_dict(torch.load(weights_folder, map_location=torch.device('cpu')))
+
+    def eval(self):
+        self.net.eval()
+
+    def train(self):
+        self.net.train()
+
+    def forward(self, x):
+        if type(x) is pd.DataFrame or type(x) is pd.Series:
+            NN_inp = torch.as_tensor(x.to_numpy(), device=device)
+        elif type(x) is list or type(x) is np.ndarray:
+            NN_inp = torch.as_tensor(x, device=device)
+        elif type(x) is torch.Tensor:
+            NN_inp = x
+        else:
+            raise ValueError('NN_inputs must be a pandas DataFrame, numpy array, list, or torch tensor')
+
+        if NN_inp.ndim == 1: NN_inp = NN_inp.unsqueeze(0)
+
+        NN_inp = NN_inp.float() # TODO: support double precision
+
+        # Scale the inputs back to the original range and pack them into the dictionary format
+        return self.normalizer.unstack(self.net(NN_inp))
+
+
+calibrator = Calibrator(
+    inputs_manager=inputs_manager,
+    predicted_values = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow', 'amp', 'b', 'alpha'],
+    device=device,
+    calibrator_network = {
+        'artichitecture': Gnosis,
+        'inputs_size': len(selected_entries_input),
+        'NN_kwargs': {
+            'hidden_size': 200,
+            'dropout_p': 0.1
+        },
+        'weights_folder': '../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict'
+    }
+)
+
+calibrator.eval()
+
+
+#%%
+# pred_inputs = normalizer.unstack(net(NN_inp))
+pred_inputs = calibrator(df_norm[selected_entries_input].loc[0])
 
 with torch.no_grad():
-    PSF_pred_big = model(pred_inputs := normalizer.unstack(net(NN_inp))).clone()
+    PSF_pred_big = model(pred_inputs).clone()
 
 #%%
 config_file['sensor_science']['FieldOfView'] = box_size
@@ -382,7 +419,9 @@ config_file['sensor_science']['FieldOfView'] = box_size
 model.Update(init_grids=True, init_pupils=True, init_tomography=True)
 
 with torch.no_grad():
-    PSF_pred_small = model(pred_inputs := normalizer.unstack(net(NN_inp)))
+    PSF_pred_small = model(pred_inputs)
+
+inputs_manager.update(pred_inputs)
 
 #%%
 cut_middle = lambda n,m: np.s_[..., n//2-m//2 : n//2 + m//2 + m%2, n//2-m//2 : n//2 + m//2 + m%2 ]
@@ -404,6 +443,7 @@ core_mask = torch.tensor(mask_circle(box_size, 3)[None,None,...]).to(device).flo
 
 # core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], 4)[None,None,...]).to(device).float()
 
+
 #%%
 from data_processing.MUSE_preproc_utils import GetRadialBackround
 from scipy.ndimage import gaussian_filter
@@ -421,9 +461,10 @@ _ = transformer_dxdy.stack({ attr: getattr(model, attr) for attr in transformer_
 expand_dxdy = lambda x_: x_.unsqueeze(0).T.repeat(1, N_wvl).flatten().unsqueeze(0)
 func = lambda x_: model(pred_inputs | transformer_dxdy.unstack(expand_dxdy(x_)))
 
+
 def fit_dxdy(source_id, verbose=0):
     if verbose > 0: 
-        print(f'Predicting source {source_id}...')
+        print(f'Fitting source {source_id}...')
     
     PSF_0 = torch.nan_to_num(ROIs[source_id].clone()[ids_wavelength_selected,...].unsqueeze(0))
     F_norm = (PSF_0 * core_mask).sum(dim=(-2,-1), keepdim=True) / ratio_core
@@ -483,12 +524,28 @@ PSFs_2_white = np.mean(PSFs_2.cpu().cpu().numpy(), axis=1)
 plot_radial_profiles_new(PSFs_0_white, PSFs_2_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
 plt.show()
 
+#%%
+from tools.utils import OptimizableLO
+
+LO_basis = OptimizableLO(model, ignore_pupil=False)
+
+inputs_manager.set_optimizable('LO_coefs', True)
+inputs_manager.set_optimizable('s_pow', False)
+inputs_manager.set_optimizable('Jxy', False)
+# inputs_manager.set_optimizable('dx', False)
+# inputs_manager.set_optimizable('dy', False)
+# inputs_manager.set_optimizable(['amp', 'beta', ], False)
+
+# _ = inputs_manager.stack()
+
+print(inputs_manager)
+
+# print(inputs_manager.get_stacked_size())
 
 #%% ----- Fitting -----
-N_src = len(ROIs)
-x_size = normalizer.get_stacked_size()
+x_size = inputs_manager.get_stacked_size()
 
-x0 = normalizer.stack(pred_inputs).squeeze().clone().detach()
+x0 = inputs_manager.stack().squeeze().clone().detach()
 Fs_flat = torch.ones([N_src], device=device)
 x0 = torch.cat([x0, Fs_flat, dxdys.flatten()]) # [PSF params, flux, dx/dy] are packed into one vector
 x0.requires_grad = True
@@ -500,12 +557,15 @@ wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
 def func_fit(x):
     PSFs_fit = []
     for i in range(N_src):
-        x_fit_dict = normalizer.unstack(x[:x_size].unsqueeze(0))
+        x_fit_dict = inputs_manager.unstack(x[:x_size].unsqueeze(0))
+        
+        phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_map_size, LO_map_size))
+        
         dxdy_ = x[x_size+N_src+i*2 : x_size+N_src+(i+1)*2]
         dxdy_dict  = transformer_dxdy.unstack(expand_dxdy(dxdy_))
 
         inputs = x_fit_dict | dxdy_dict
-        PSFs_fit.append( model(inputs).squeeze() * fluxes[i, ...] * x[x_size+i] )
+        PSFs_fit.append( model(inputs, phase_generator=phase_func).squeeze() * fluxes[i, ...] * x[x_size+i] )
     
     return add_ROIs( empty_img*0.0, PSFs_fit, local_coords, global_coords )
 
@@ -522,7 +582,7 @@ _ = func_fit(x0)
 #%%
 result_global = minimize(loss_fit, x0, max_iter=300, tol=1e-3, method='bfgs', disp=2)
 x0 = result_global.x.clone()
-x_fit_dict = normalizer.unstack(x0[:x_size].unsqueeze(0))
+x_fit_dict = calibrator.normalizer.unstack(x0[:x_size].unsqueeze(0))
 
 dxdy_dicts = []
 
@@ -565,81 +625,117 @@ PSFs_2_white = np.mean((PSFs_2*ratio_crop).cpu().cpu().numpy(), axis=1)#*0.9
 
 plot_radial_profiles_new(PSFs_0_white, PSFs_2_white, 'Data', 'TipTorch', title='PSFs fitted over the field', cutoff=16, y_min=1e-1)
 
-#%% --------- Optimizable LOs ----------
-from tools.utils import OptimizableLO
-
-# norm_LO  = TransformSequence(transforms=[Uniform(a=-20, b=20)])
-LO_map_size = 5
-LO_basis = OptimizableLO(model, ignore_pupil=False)
-
-model.apodizer = 1.0
-
-# x_LO = torch.ones(N_src*LO_map_size**2, dtype=torch.float32, device=device) # [Flux, LO map pixels]
-x_LO = 10 * torch.randn(N_src*LO_map_size**2, dtype=torch.float32, device=device) # [Flux, LO map pixels]
-
-x_LO = torch.cat([flux_corrections, x_LO])
-x_LO.requires_grad = True
 
 #%%
-def func_LO(x):
-    PSFs_fit = []
-    for i in range(N_src):
-        x_LO_ = x[N_src + i*LO_map_size**2 : N_src + (i+1)*LO_map_size**2]
-        PSF_ = model(x_fit_dict | dxdy_dicts[i], None, lambda: LO_basis(x_LO_.view(1, LO_map_size, LO_map_size)))
-        PSFs_fit.append( PSF_.squeeze() * fluxes[i, ...] * x[i] )
-    
-    return add_ROIs( empty_img*0.0, PSFs_fit, local_coords, global_coords )
-
-def loss_LO(x_):
-    PSFs_ = func_LO(x_)
-    l1 = F.smooth_l1_loss(data_onsky_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
-    l2 = F.mse_loss(data_onsky_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
-    return l1 * 1e-3 + l2 * 5e-6
+from tools.utils import wavelength_to_rgb
 
 
-PSFs_ = func_LO(x_LO).detach()
-# print(PSFs_.shape)
+wavelength_display = wavelength_selected.cpu().numpy()[0,...] * 1e9
 
-#%%
-i=0
-aaa = LO_basis(100*x_LO[N_src + 0*LO_map_size**2 : N_src + (0+1)*LO_map_size**2].view(1, LO_map_size, LO_map_size)).detach()
-
-plt.imshow(aaa[0,0,...].real.detach().cpu().numpy(), origin='lower')
-
-PSFs_ = model(x_fit_dict|dxdy_dicts[i], None, lambda: aaa)
-
-# plt.imshow(PSFs_[ROI_plot].abs().sum(dim=0).cpu().numpy(), norm=norm_field, origin='lower')
-# plt.imshow(PSFs_[0,...].abs().log10().sum(dim=0).cpu().numpy(), origin='lower')
-
-#%%
-result = minimize(loss_LO, x_LO, max_iter=200, tol=1e-5, method='l-bfgs', disp=2)
-
-x_LO = result.x
-
-#%%
-# with torch.no_grad():
-composite_img_fit = func_LO(x_LO).detach()
-
-diff_img = (data_onsky_sparse-composite_img_fit) * torch.tensor(valid_mask[None,...], device=device).float()
-
-plt.imshow(data_onsky_sparse[ROI_plot].abs().sum(dim=0).cpu().numpy(), norm=norm_field, origin='lower')
-plt.show()
-
-plt.imshow(np.maximum(composite_img_fit[ROI_plot].sum(dim=0).abs().cpu().numpy(), 5e3), norm=norm_field, origin='lower')
-plt.show()
-
-plt.imshow(diff_img[ROI_plot].abs().sum(dim=0).cpu().numpy(), norm=norm_field, origin='lower')
-plt.show()
-
-#%%
-ROIs_1, _, _ = extract_ROIs(composite_img_fit, sources, box_size=box_size)
-PSFs_2 = torch.nan_to_num(torch.stack(ROIs_1) / fluxes, nan=0.0)
-
-PSFs_0_white = np.mean(PSFs_0.cpu().cpu().numpy(), axis=1)
-# PSFs_2_white = np.mean(PSFs_2.cpu().cpu().numpy(), axis=1) #*0.9
-PSFs_2_white = np.mean((PSFs_2*ratio_crop).cpu().cpu().numpy(), axis=1)#*0.9
-
-plot_radial_profiles_new(PSFs_0_white, PSFs_2_white, 'Data', 'TipTorch', title='PSFs fitted over the field', cutoff=16, y_min=1e-1)
+wavelength_display = np.linspace(380, 750, wavelength_display.shape[0])
 
 
+def plot_wavelength_rgb(image, wavelengths=None, ROI=None, log_offset=1.5, clip_min=0, rgb_scale=3,
+                       title=None, origin='lower', show=True):
+    """
+    Create and display a logarithmic RGB visualization of a wavelength-dependent image.
 
+    Parameters
+    ----------
+    image : torch.Tensor or numpy.ndarray
+        Input image with shape (n_wavelengths, height, width)
+    wavelengths : array-like, optional
+        Wavelengths in nanometers. If None, uses evenly spaced values between 380-750nm
+    ROI : slice or tuple, optional
+        Region of interest to display. If None, shows full image
+    log_offset : float, optional
+        Offset subtracted from log-scaled image (higher values make image darker)
+    clip_min : float, optional
+        Minimum value after log_offset subtraction (values below are clipped to 0)
+    rgb_scale : float, optional
+        Multiplication factor for final RGB values
+    title : str, optional
+        Plot title
+    origin : str, optional
+        Plot origin ('lower' or 'upper')
+    show : bool, optional
+        If True, displays the plot immediately
+
+    Returns
+    -------
+    numpy.ndarray
+        The RGB image array
+    """
+    # Convert to numpy if needed
+    if torch.is_tensor(image):
+        image = image.cpu().numpy()
+
+    # Apply ROI if specified
+    if ROI is not None:
+        image = image[ROI]
+
+    # Generate wavelengths if not provided
+    if wavelengths is None:
+        wavelengths = np.linspace(380, 750, image.shape[0])
+    wavelengths = np.asarray(wavelengths)
+
+    # Generate RGB values for each wavelength
+    R, G, B = np.zeros_like(wavelengths), np.zeros_like(wavelengths), np.zeros_like(wavelengths)
+    for i, λ in enumerate(wavelengths):
+        R[i], G[i], B[i] = wavelength_to_rgb(λ, show_invisible=True)
+    RGB_weights = np.stack([R, G, B], axis=0)
+
+    # Create RGB image
+    image_log = np.log10(np.abs(image) + 1e-10)  # Add small constant to avoid log(0)
+    image_RGB = (image_log[None, ...] * RGB_weights[...,None,None]).transpose(1,2,3,0)
+
+    # Apply scaling and clipping
+    image_RGB = image_RGB - log_offset
+    image_RGB = np.clip(image_RGB, clip_min, None)
+    # Normalize each color channel independently
+    image_RGB = image_RGB / image_RGB.max(axis=(-3,-2), keepdims=True)
+    image_RGB = np.nan_to_num(image_RGB, nan=0.0) * rgb_scale
+
+    # Display the result
+    if show:
+        plt.figure()
+        plt.imshow(image_RGB.mean(axis=0), origin=origin)
+        if title:
+            plt.title(title)
+            plt.axis('off')
+            plt.show()
+
+    return image_RGB
+
+# Example usage:
+# For the original case:
+rgb_image = plot_wavelength_rgb(
+    diff_img,
+    wavelengths=wavelength_display,
+    ROI=ROI_plot,
+    log_offset=1.5,
+    clip_min=0,
+    rgb_scale=3,
+    title=f"{reduced_name}\nDifference"
+)
+
+# For a different image with custom parameters:
+# rgb_image = plot_wavelength_rgb(
+#     some_other_image,
+#     log_offset=2.0,
+#     clip_min=0.1,
+#     rgb_scale=2
+# )
+
+rgb_image = plot_wavelength_rgb(
+    data_onsky_sparse,
+    wavelengths=wavelength_display,
+    ROI=ROI_plot,
+    log_offset=1.5,
+    clip_min=0,
+    rgb_scale=3,
+    title=f"{reduced_name}\nData"
+)
+
+
+# %%

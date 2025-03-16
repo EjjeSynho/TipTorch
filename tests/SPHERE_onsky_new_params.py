@@ -35,6 +35,20 @@ subset_df = subset_df[subset_df['LWE'] == True]
 # subset_df = subset_df[subset_df['Central hole'] == False]
 
 #%%
+
+windy_entries = [x for x in psf_df.columns.values if 'Wind' in x]
+
+
+'Wind direction (header)',
+'Wind direction (MASSDIMM)',
+'Wind direction (200 mbar)',
+'Wind speed (header)',
+'Wind speed (SPARTA)',
+'Wind speed (MASSDIMM)',
+'Wind speed (200 mbar)'
+
+
+#%%
 sample_id = 768
 # sample_id = 2649
 # sample_id = 438
