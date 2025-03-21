@@ -13,7 +13,7 @@ from tools.utils import plot_radial_profiles_new, plot_radial_profiles_relative,
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
-from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, PolyModel, InputsCompressor
+from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, QuadraticModel, InputsCompressor
 from project_globals import MUSE_DATA_FOLDER
 
 
@@ -828,7 +828,7 @@ line_norms = {
     # 'Jy': (1e6, 1e2),
 }
 
-models_dict = {key: PolyModel(toy.wvl, line_norms[key]) for key in line_norms.keys() }
+models_dict = {key: QuadraticModel(toy.wvl, line_norms[key]) for key in line_norms.keys() }
 
 inp_dict_2 = {}
 for key in transformer.transforms.keys(): 

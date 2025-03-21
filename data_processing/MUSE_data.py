@@ -482,8 +482,12 @@ def GetLGSdata(hdul_cube, cube_name, start_time, fill_missing=False, verbose=Fal
 
 
 #% ------------------------ Polychromatic cube realm-------------------------------------
-def GetSpectrum(white, data, radius=5):
-    _, ids, _ = GetROIaroundMax(white, radius*2)
+# def GetSpectrum(white, data, radius=5):
+#     _, ids, _ = GetROIaroundMax(white, radius*2)
+#     return check_framework(data).nansum(data[:, ids[0], ids[1]], axis=(1,2))
+
+
+def GetSpectrum(data, ids):
     return check_framework(data).nansum(data[:, ids[0], ids[1]], axis=(1,2))
 
 
@@ -527,7 +531,8 @@ def GetImageSpectrumHeader(
 
     if extract_spectrum:
         if verbose: print('Extracting the target\'s spectrum...')
-        spectrum = GetSpectrum(cube_data)
+        _, ids, _ = GetROIaroundMax(white, 10)
+        spectrum = GetSpectrum(cube_data, ids)
     else:
         spectrum = xp.ones_like(λs)
 

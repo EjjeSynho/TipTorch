@@ -11,11 +11,13 @@ from typing import Any, Optional, Union
 from tabulate import tabulate  # For pretty table formatting
 from copy import deepcopy
 
+from collections import OrderedDict
+
 class InputsTransformer:
-    def __init__(self, transforms={}):
+    def __init__(self, transforms: Union[OrderedDict, dict] = OrderedDict()):
         # Store the transforms provided as a dictionary
-        self.transforms = transforms
-        self.slices = {}
+        self.transforms = OrderedDict(transforms) if type(transforms) is dict else transforms
+        self.slices = OrderedDict()
 
     def __len__(self):
         return len(self.transforms)
@@ -28,7 +30,7 @@ class InputsTransformer:
         applying the corresponding transforms to each.
         Keeps track of each tensor's size for later decomposition.
         """
-        self.slices = {}
+        self.slices = OrderedDict()
         self._packed_size = None
         tensors = []
         current_index = 0
@@ -79,7 +81,7 @@ class InputParameter:
 
 class InputsManager:
     def __init__(self):
-        self.parameters = {}
+        self.parameters = OrderedDict()
         self.inputs_transformer = InputsTransformer()
 
     def add(self, name: str, default_val: Any, transform: Any = None, optimizable: bool = True):
@@ -127,12 +129,20 @@ class InputsManager:
         if set(optimizable_names) != set(self.inputs_transformer.slices.keys()):
             self.stack()
     
-    def update(self, other: dict):
+    def update(self, other: Union[dict, OrderedDict]):
         """Update the parameters with a new dictionary of values."""
         for name, value in other.items():
             if name in self.parameters:
                 self.parameters[name].value = value       
     
+    def delete(self, name: str):
+        """Delete a parameter by name."""
+        if name in self.parameters:
+            del self.parameters[name]
+            if name in self.inputs_transformer.slices:
+                del self.inputs_transformer.slices[name]
+                self.stack()
+                
     def stack(self):
         if self.inputs_transformer.transforms == {} or self.parameters == {}:
             return None
@@ -202,6 +212,9 @@ class InputsManager:
         # Copy the inputs_transformer
         new_manager.inputs_transformer = deepcopy(self.inputs_transformer)
         return new_manager
+    
+    def clone(self):
+        return self.copy()
 
     def __str__(self) -> str:
         """Pretty print the InputsManager contents."""
@@ -264,7 +277,7 @@ class LineModel:
         return self.line(self.x, *params, self.x_min, *self.norms)
 
 
-class PolyModel:
+class QuadraticModel:
     def __init__(self, x, norms):
         self.norms = norms
         self.x = x
