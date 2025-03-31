@@ -47,7 +47,7 @@ from machine_learning.MUSE_onsky_df import *
 cube_path = MUSE_DATA_FOLDER + "wide_field/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 with fits.open(cube_path) as hdulist:
     header = hdulist[1].header  # Assuming data is in extension 1 (SCI)
-    data = hdulist[1].data  # This loads the actual cube data if needed
+    data_sample = hdulist[1].data  # This loads the actual cube data if needed
     wcs = WCS(header)
 
 # RA  = 201.696643 / [deg]  13:26:47.1 RA  (J2000) pointing           
@@ -122,7 +122,7 @@ gaia_pixels = wcs.world_to_pixel_values(
 )
 
 #%%
-data_disp = np.nanmean(data, axis=0)
+data_disp = np.nanmean(data_sample, axis=0)
 data_disp = np.nan_to_num(data_disp, nan=0)
 
 # Plot the image and overlay the sources
@@ -151,14 +151,14 @@ valid_mask = ~nan_mask
 test_fits.close()
 
 with open(MUSE_DATA_FOLDER + "wide_field/reduced/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle", 'rb') as f:
-    data = pickle.load(f)
+    data_sample = pickle.load(f)
     
 #%%
 # box_size = 31  # Define the size of each ROI (in pixels)
 # box_size = 61  # Define the size of each ROI (in pixels)
 box_size = 111  # Define the size of each ROI (in pixels)
 
-data_onsky, var_mask, norms, bgs = LoadImages(data, device=device, subtract_background=False, normalize=False, convert_images=True)
+data_onsky, var_mask, norms, bgs = LoadImages(data_sample, device=device, subtract_background=False, normalize=False, convert_images=True)
 data_onsky = data_onsky.squeeze()
 data_onsky *= torch.tensor(valid_mask, device=device).float().unsqueeze(0)
 
@@ -194,13 +194,13 @@ apertures = CircularAperture(positions, r=5)
 apertures_box = RectangularAperture(positions, box_size//2, box_size//2)
 
 norm = simple_norm(data_src, 'log', percent=99.99)
-# plt.imshow(data_src, norm=norm, origin='lower')
-plt.imshow(data_src*0+1, origin='lower', cmap='gray')
+plt.imshow(data_src, norm=norm, origin='lower')
+# plt.imshow(data_src*0+1, origin='lower', cmap='gray')
 # apertures.plot(color='red', lw=1.5, alpha=0.75)
-apertures_box.plot(color='gold', lw=1, alpha=0.45)
+_ = apertures_box.plot(color='gold', lw=1, alpha=0.45)
 # plt.savefig('C:/Users/akuznets/Desktop/wide_field_results/presentation/srcs_circs.pdf', dpi=300)
-plt.savefig('C:/Users/akuznets/Desktop/wide_field_results/presentation/srcs_sqrs.pdf', dpi=300)
-plt.show()
+# plt.savefig('C:/Users/akuznets/Desktop/wide_field_results/presentation/srcs_sqrs.pdf', dpi=300)
+# plt.show()
 
 # def find_sources_in_range(sources, x_range, y_range):
 #     sources_in_range = sources[
@@ -309,7 +309,7 @@ ROIs, local_coords, global_coords = extract_ROIs(data_onsky, sources, box_size=b
 with open(MUSE_DATA_FOLDER+'muse_df_norm_imputed.pickle', 'rb') as handle:
     muse_df_norm = pickle.load(handle)
 
-df = data['All data']
+df = data_sample['All data']
 df['ID'] = 0
 df.loc[0, 'Pupil angle'] = 0.0
 
@@ -328,7 +328,7 @@ from PSF_models.TipToy_MUSE_multisrc import TipTorch
 # from PSF_models.TipTorch import TipTorch_new
 # from tools.utils import SausageFeature
 
-config_file, data_onsky = GetConfig(data, data_onsky)
+config_file, data_onsky = GetConfig(data_sample, data_onsky)
 data_onsky = data_onsky.squeeze()
 
 config_file['sensor_science']['FieldOfView'] = 511

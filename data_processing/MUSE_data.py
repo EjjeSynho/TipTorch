@@ -1348,6 +1348,33 @@ for name in ['2024-12-05T03_04_07.007', '2024-12-05T03_15_37.598', '2024-12-05T0
 print(' ======================= Done! =======================')
 
 #%%
+
+print(f'\n\n =================== Processing combined exposure cube ===================')
+
+data_q, name_q = ProcessMUSEcube(
+    path_raw  = MUSE_DATA_FOLDER + 'quasars/J0259_raw/MUSE.2024-12-05T03_04_07.008.fits.fz',
+    path_cube = MUSE_DATA_FOLDER + 'quasars/J0259_cubes/J0259-0901_all.fits',
+    crop=False,
+    get_IRLOS_phase=False,
+    derotate=False,
+    impaint_bad_pixels=False,
+    extract_spectrum=False,
+    plot_spectrum=False,
+    fill_missing_values=True,
+    verbose=True
+)
+
+path_new = MUSE_DATA_FOLDER + f'quasars/J0259_reduced/J0259_all.pickle'
+try:
+    with open(path_new, 'wb') as handle:
+        pickle.dump(data_q, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+except Exception as e:
+    print(f'Error: {e}')
+
+print(' ======================= Done! =======================')
+
+#%%
 files = os.listdir(MUSE_DATA_FOLDER + 'quasars/J0259_reduced/')
 for file in files:
     path = MUSE_DATA_FOLDER + 'quasars/J0259_reduced/' + file
@@ -1371,6 +1398,8 @@ data_q, name_q = ProcessMUSEcube(
     fill_missing_values=True,
     verbose=True
 )
+
+print(' ======================= Done! =======================')
 
 
 #%%

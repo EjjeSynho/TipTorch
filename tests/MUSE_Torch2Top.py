@@ -37,10 +37,10 @@ include_sausage = True
 # sample_id = 296
 sample_id = 292
 
-data = LoadMUSEsampleByID(sample_id)
+data_sample = LoadMUSEsampleByID(sample_id)
 
-PSF_onsky, var_mask, norms, bgs = LoadImages(data)
-config_file, PSF_onsky = GetConfig(data, PSF_onsky)
+PSF_onsky, var_mask, norms, bgs = LoadImages(data_sample)
+config_file, PSF_onsky = GetConfig(data_sample, PSF_onsky)
 N_wvl = PSF_onsky.shape[1]
 
 PSF_onsky = PSF_onsky[...,1:,1:]
@@ -49,7 +49,7 @@ config_file['sensor_science']['FieldOfView'] = PSF_onsky.shape[-1]
 config_file['NumberSources'] = config_file['NumberSources'].int().item()
 
 # Derotate PSF
-PSF_onsky = rotate_PSF(PSF_onsky, -data['All data']['Pupil angle'].item())
+PSF_onsky = rotate_PSF(PSF_onsky, -data_sample['All data']['Pupil angle'].item())
 config_file['telescope']['PupilAngle'] = 0
 
 # Select only 7 wavelengths
@@ -304,7 +304,7 @@ def save_ini(config_dict, filename):
             f.write('\n')  # add a newline between sections
             
 
-output_file = data['All data']['name'].loc[0].replace('.fits','.ini')
+output_file = data_sample['All data']['name'].loc[0].replace('.fits','.ini')
 
 save_ini(config_list, '../data/parameter_files/' + output_file)
 

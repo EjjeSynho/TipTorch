@@ -58,7 +58,7 @@ class InputsTransformer:
     def get_stacked_size(self):
         return self._packed_size
 
-    def unstack(self, joint_tensor):
+    def unstack(self, x_stacked):
         if self.slices is None:
             raise ValueError("No cache of decomposing slices found. Stack the tensors first.")
         """
@@ -68,8 +68,9 @@ class InputsTransformer:
         """
         decomposed = {}
         for key, sl in self.slices.items():
-            val = self.transforms[key].backward(joint_tensor[:, sl])
-            decomposed[key] = val.squeeze(-1) if sl.stop-sl.start<2 else val # expects the TipTorch's conventions about the tensors dimensions
+            val = self.transforms[key].backward(x_stacked[:, sl])
+            decomposed[key] = val.squeeze(-1) if sl.stop-sl.start<2 else val
+            # expects that the 0th dimension is allocated to sources. Meaning that the tensor is of shape (n_sources, n_features)
 
         return decomposed
 
@@ -151,16 +152,17 @@ class InputsManager:
         args_dict = {name: param.value for name, param in self.parameters.items() if param.optimizable}
         return self.inputs_transformer.stack(args_dict)
 
-    def unstack(self, x: torch.Tensor, include_all=True):
+    def unstack(self, x: torch.Tensor, include_all=True, update=True):
         if self.inputs_transformer.transforms == {} or self.parameters == {}:
             return None
 
         """Unstack a tensor into the parameters."""
         args_dict = self.inputs_transformer.unstack(x)
         
-        for name, value in args_dict.items():
-            self.parameters[name].value = value
-        
+        if update:     
+            for name, value in args_dict.items():
+                self.parameters[name].value = value
+            
         # return all parameters, not just optimizable ones
         if include_all:
             for name, param in self.parameters.items():
@@ -256,98 +258,142 @@ class InputsManager:
         return header + table + footer
 
 class LineModel:
-    def __init__(self, x, norms):
-        self.norms = norms
+    """
+    A PyTorch-compatible line model for non-linear optimization.
+
+    The model function is defined as:
+        f(x; k, y_intercept) = k * x + y_intercept
+    """
+
+    def __init__(self, x: torch.Tensor):
+        """
+        Initialize the LineModel.
+
+        Parameters:
+            x (torch.Tensor): Tensor of x-values.
+        """
         self.x = x
-        self.x_min = x.min().item()
 
     @staticmethod
-    def line(x, k, y_min, x_min, A, B):
-        return (A * k * (x - x_min) + y_min) * B
+    def line_function(x, k, y_intercept):
+        """
+        Compute the line function.
 
-    def fit(self, y):
-        x_ = self.x.flatten().cpu().numpy()
-        y_ = y.flatten().cpu().numpy()
+        Parameters:
+            x (Tensor or numpy.ndarray): Input x-values.
+            k (float): Slope.
+            y_intercept (float): Y-intercept.
 
-        func = lambda x, k, y_min: self.line(x, k, y_min, self.x_min, *self.norms)
-        popt, _ = curve_fit(func, x_, y_, p0=[1e-6, 1e-6])
+        Returns:
+            Tensor or numpy.ndarray: Computed y-values.
+        """
+        return k * x + y_intercept
+
+    def fit(self, y: torch.Tensor):
+        """
+        Fit the line model to target y-values using non-linear least squares.
+
+        This method converts the input tensors to numpy arrays and then
+        uses SciPy's curve_fit to estimate the parameters [k, y_intercept].
+
+        Parameters:
+            y (torch.Tensor): Tensor of target y-values.
+
+        Returns:
+            array: Optimal parameters [k, y_intercept].
+        """
+        # Convert tensors to 1D numpy arrays for curve_fit.
+        x_np = self.x.flatten().cpu().numpy()
+        y_np = y.flatten().cpu().numpy()
+
+        # Define the fitting function.
+        def fit_func(x, k, y_intercept):
+            return self.line_function(x, k, y_intercept)
+
+        popt, _ = curve_fit(fit_func, x_np, y_np, p0=[1e-6, 1e-6])
         return popt
-    
+
     def __call__(self, params):
-        return self.line(self.x, *params, self.x_min, *self.norms)
+        """
+        Evaluate the model using the provided parameters.
+
+        Parameters:
+            params (tuple): Parameters (k, y_intercept).
+
+        Returns:
+            Tensor: Computed y-values.
+        """
+        return self.line_function(self.x, *params)
 
 
 class QuadraticModel:
-    def __init__(self, x, norms):
-        self.norms = norms
+    """
+    A PyTorch-compatible quadratic model for non-linear optimization.
+
+    The model function is defined as:
+        f(x; a, b, c) = a * x^2 + b * x + c
+    """
+
+    def __init__(self, x: torch.Tensor):
+        """
+        Initialize the QuadraticModel.
+
+        Parameters:
+            x (torch.Tensor): Tensor of x-values.
+        """
         self.x = x
-        self.x_min = x.min().item()
 
     @staticmethod
-    def poly(x, a, b, c, x_min, A, B):
-        y_2 = A * x-x_min
-        return (a*y_2**2 + b*y_2 + c) * B
-    
-    def fit(self, y):
-        # Flatten the arrays and move data to CPU and numpy for processing with curve_fit
-        x_ = self.x.flatten().cpu().numpy()
-        y_ = y.flatten().cpu().numpy()
+    def quadratic_function(x, a, b, c):
+        """
+        Compute the quadratic function.
 
-        # Define the fitting function adjusting to the model's x_min and norms
-        func = lambda x, a, b, c: self.poly(x, a, b, c, self.x_min, *self.norms)
-        
-        # Use curve_fit to find the optimal parameters
-        popt, _ = curve_fit(func, x_, y_, p0=[1e-6, 1e-6, 1e-6])
+        Parameters:
+            x (Tensor or numpy.ndarray): Input x-values.
+            a (float): Quadratic coefficient.
+            b (float): Linear coefficient.
+            c (float): Constant term.
+
+        Returns:
+            Tensor or numpy.ndarray: Computed y-values.
+        """
+        return a * x ** 2 + b * x + c
+
+    def fit(self, y: torch.Tensor, p0=[1e-6, 1e-6, 1e-6]):
+        """
+        Fit the quadratic model to target y-values using non-linear least squares.
+
+        This method converts the input tensors to numpy arrays and then
+        uses SciPy's curve_fit to estimate the parameters [a, b, c].
+
+        Parameters:
+            y (torch.Tensor): Tensor of target y-values.
+
+        Returns:
+            array: Optimal parameters [a, b, c].
+        """
+        # Convert tensors to 1D numpy arrays for curve_fit.
+        x_np = self.x.flatten().cpu().numpy()
+        y_np = y.flatten().cpu().numpy()
+
+        # Define the fitting function.
+        def fit_func(x, a, b, c):
+            return self.quadratic_function(x, a, b, c)
+
+        popt, _ = curve_fit(fit_func, x_np, y_np, p0=p0)
         return popt
 
     def __call__(self, params):
-        # Call the polynomial function with the found parameters and stored x-values
-        return self.poly(self.x, *params, self.x_min, *self.norms)
+        """
+        Evaluate the model using the provided parameters.
 
+        Parameters:
+            params (tuple): Parameters (a, b, c).
 
-class InputsCompressor:
-    def __init__(self, transforms, models):
-        self.transforms = transforms
-        self.models = models
-        self.slices = {}
-        self._packed_size = None
-
-    def stack(self, args_dict, no_transform=False):
-        tensors = []
-        current_index = 0
-
-        for key, value in args_dict.items():
-            if key in self.models:
-                transformed_value = value.unsqueeze(-1) if value.ndim == 1 else value
-            else:
-                if not no_transform:
-                    transformed_value = self.transforms[key](value.unsqueeze(-1) if value.dim() == 1 else value)
-
-            next_index = current_index + transformed_value.numel()
-            self.slices[key] = slice(current_index, next_index)
-            current_index = next_index
-            tensors.append(transformed_value.view(-1))
-
-        joint_tensor = torch.cat(tensors)
-        self._packed_size = joint_tensor.shape[0]
-        return joint_tensor
-
-    def get_stacked_size(self):
-        return self._packed_size
-
-    def unstack(self, joint_tensor):
-        decomposed = {}
-        for key, sl in self.slices.items():
-            if key in self.models.keys():
-                params = joint_tensor[:, sl]
-                
-                y_pred = self.models[key](*params)
-                decomposed[key] = y_pred.squeeze(-1) if sl.stop - sl.start < 2 else y_pred
-            else:
-                val = self.transforms[key].backward(joint_tensor[:, sl])
-                decomposed[key] = val.squeeze(-1) if sl.stop - sl.start < 2 else val
-
-        return decomposed
+        Returns:
+            Tensor: Computed y-values.
+        """
+        return self.quadratic_function(self.x, *params)
 
 
 class YeoJohnson:

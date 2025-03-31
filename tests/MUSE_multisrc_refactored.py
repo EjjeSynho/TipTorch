@@ -34,19 +34,14 @@ from scipy.ndimage import binary_dilation
 
 from machine_learning.MUSE_onsky_df import *
 
+predict_Moffat = True
+predict_phase_bump = True
 
+# device = torch.device('cpu')
 #%%
 # Load the FITS file
 
-# reduced_name = 'J0259_all'
-# reduced_name = 'J0259_2024-12-05T03_04_07.007'
-# reduced_name = 'J0259_2024-12-05T03_49_24.768'
-reduced_name = 'J0259_2024-12-05T03_15_37.598'
-
-if reduced_name == 'J0259_all':
-    cube_path = MUSE_DATA_FOLDER + f"quasars/J0259_cubes/J0259-0901_all.fits"
-else:
-    cube_path = MUSE_DATA_FOLDER + f"quasars/J0259_cubes/J0259-0901_DATACUBE_FINAL_{reduced_name[6:]}.fits"
+cube_path = MUSE_DATA_FOLDER + "wide_field/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 
 test_fits = fits.open(cube_path)
 
@@ -64,7 +59,10 @@ data_full = data_full * valid_mask[np.newaxis, :, :]
 valid_mask = torch.tensor(valid_mask, device=device).float().unsqueeze(0)
 
 # Load processed data file
-with open(MUSE_DATA_FOLDER + f"quasars/J0259_reduced/{reduced_name}.pickle", 'rb') as f:
+
+reduced_name = 'DATACUBEFINALexpcombine_20200224T050448_7388e773'
+
+with open(MUSE_DATA_FOLDER + f"wide_field/reduced/{reduced_name}.pickle", 'rb') as f:
     data_sample = pickle.load(f)
 
 # Compute wavelength data
@@ -78,35 +76,6 @@ if hasattr(λ_max, 'item'): # To compensate for a small error in the data reduct
 λ = np.linspace(λ_min, λ_max, np.round((λ_max-λ_min)/Δλ_full+1).astype('int'))
 assert len(λ) == data_full.shape[0]
 
-if reduced_name == 'J0259_2024-12-05T03_15_37.598':
-    host_coords  = [53, 37]
-    AGN_coords_1 = [47, 39]
-    bg_coords    = [56, 39]
-    AGN_coords_2 = [61, 37]
-    lens_coords  = [55, 65]
-    
-elif reduced_name == 'J0259_2024-12-05T03_49_24.768':
-    host_coords  = [44, 30]
-    AGN_coords_1 = [37, 28]
-    bg_coords    = [12, 62]
-    AGN_coords_2 = [52, 30]
-    lens_coords  = [46, 58]
-    
-elif reduced_name == 'J0259_2024-12-05T03_04_07.007':
-    host_coords  = [46, 37]
-    AGN_coords_1 = [38, 35]
-    bg_coords    = [10, 57]
-    AGN_coords_2 = [53, 36]
-    lens_coords  = [47, 65]
-  
-elif reduced_name == 'J0259_all':
-    host_coords  = [53, 37]
-    AGN_coords_1 = [46, 35]
-    bg_coords    = [10, 58]
-    AGN_coords_2 = [60, 37]
-    lens_coords  = [55, 66]
-else: 
-    print('No coordinates for this reduced_name')
 
 #%%
 data_onsky, _, _, _ = LoadImages(data_sample, device=device, subtract_background=False, normalize=False, convert_images=True)
@@ -114,10 +83,10 @@ data_onsky = data_onsky.squeeze()
 data_onsky *= valid_mask
 
 # Correct the flux to match MUSE cube
-data_onsky = data_onsky * (data_full.sum(axis=0).max() /  data_onsky.sum(axis=0).max())
+data_onsky = data_onsky * (data_full.sum(axis=0).max() / data_onsky.sum(axis=0).max())
 
 # Extract config file and update it
-config_file, data_onsky = GetConfig(data_sample, data_onsky)
+config_file, data_onsky = GetConfig(data_sample, data_onsky, device=device)
 data_onsky = data_onsky.squeeze()
 
 config_file['NumberSources'] = 1 #N_src
@@ -143,8 +112,8 @@ data_src = data_onsky.sum(dim=0).cpu().numpy()
 # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
 
 PSF_size = 111  # Define the size of each ROI (in pixels)
-thres = 50000
-
+thres = 700000
+# thres = 2500000
 
 sources   = detect_sources(data_src, threshold=thres, box_size=11, verbose=True)
 srcs_pos  = np.transpose((sources['x_peak'], sources['y_peak']))
@@ -160,9 +129,9 @@ plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
 apertures_box.plot(color='gold', lw=2, alpha=0.45)
 plt.show()
 
+
 #%%
 from tools.multisrc import extract_ROIs, add_ROIs
-
 
 ROIs, local_coords, global_coords = extract_ROIs(data_sparse, sources, box_size=PSF_size)
 N_src = len(ROIs)
@@ -214,7 +183,7 @@ src_spectra_full   = [GetSpectrum(data_full,   sources.iloc[i], radius=flux_core
 
 # STRANGE LINE IN THE FIRST SPECTRUM!!!!!
 #%%
-i_src = 1
+i_src = 24
 
 plt.plot(λ, src_spectra_full[i_src], linewidth=0.25, alpha=0.3)
 plt.scatter(wavelength.squeeze().cpu().numpy()*1e9, src_spectra_binned[i_src].cpu().numpy())
@@ -277,7 +246,7 @@ PSD_include = {
     'aliasing':        False,
     'chromatism':      True,
     'diff. refract':   True,
-    'Moffat':          False
+    'Moffat':          predict_Moffat
 }
 model = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 model.apodizer = model.make_tensor(1.0)
@@ -309,7 +278,7 @@ inputs_manager.add('b',     torch.tensor([0.0]), df_transforms_fitted['b'])
 inputs_manager.add('alpha', torch.tensor([4.5]), df_transforms_fitted['alpha'])
 inputs_manager.add('beta',  torch.tensor([2.5]), df_transforms_fitted['beta'])
 inputs_manager.add('ratio', torch.tensor([1.0]), df_transforms_fitted['ratio'])
-inputs_manager.add('theta', torch.tensor([0.0]), df_transforms_fitted['theta']) 
+inputs_manager.add('theta', torch.tensor([0.0]), df_transforms_fitted['theta'])
 inputs_manager.add('s_pow', torch.tensor([0.0]), df_transforms_fitted['s_pow'])
 
 
@@ -317,7 +286,8 @@ if LO_map_size is not None:
     inputs_manager.add('LO_coefs', torch.zeros([1, LO_map_size**2]), Uniform(a=-100, b=100))
     inputs_manager.set_optimizable('LO_coefs', False)
 
-inputs_manager.set_optimizable(['ratio', 'theta', 'alpha', 'beta', 'amp', 'b'], False)
+inputs_manager.set_optimizable(['ratio', 'theta', 'alpha', 'beta', 'amp', 'b'], predict_Moffat)
+inputs_manager.set_optimizable(['s_pow'], predict_phase_bump)
 inputs_manager.set_optimizable(['Jxy'], False)
 
 inputs_manager.to_float()
@@ -331,19 +301,18 @@ inputs_manager_objs = InputsManager()
 
 inputs_manager_objs.add('dx', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dx'])
 inputs_manager_objs.add('dy', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dy'])
-inputs_manager_objs.add('F_norm', torch.tensor([[1.0,]]*N_src), df_transforms_fitted['F'])
+# inputs_manager_objs.add('F_norm', torch.tensor([[1.0,]]*N_src), df_transforms_fitted['F'])
 
 inputs_manager_objs.to_float()
 inputs_manager_objs.to(device)
 
-inputs_manager_objs.set_optimizable(['F_norm'], False)
+# inputs_manager_objs.set_optimizable(['F_norm'], False)
 
 print(inputs_manager_objs)
 
 
 #%%
 from machine_learning.calibrator import Calibrator, Gnosis
-
 
 calibrator = Calibrator(
     inputs_manager=inputs_manager,
@@ -362,13 +331,12 @@ calibrator = Calibrator(
 
 calibrator.eval()
 
-
 #%%
 # pred_inputs = normalizer.unstack(net(NN_inp))
 pred_inputs = calibrator(df_norm[selected_entries_input].loc[0])
 
 with torch.no_grad():
-    PSF_pred_big = model(pred_inputs).clone() # First initial prediction of the "big" PSF
+    PSF_pred_big = model(pred_inputs) # First initial prediction of the "big" PSF
 
 #%%
 config_file['sensor_science']['FieldOfView'] = PSF_size # Set the actual size of the simulated PSFs
@@ -391,54 +359,100 @@ core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radiu
 core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
 PSF_norm_factor = N_core_pixels / flux_λ_norm / core_flux_ratio / crop_ratio
 
-#%%
-
+#%% --------------------------
 def func_dxdy(x_):
     dxdy_inp = inputs_manager_objs.unstack(x_.unsqueeze(0), update=False) # Don't update interal values yet
     dxdy_inp['dx'] = dxdy_inp['dx'].repeat(1, N_wvl) # Extend to simulated number of wavelength
     dxdy_inp['dy'] = dxdy_inp['dy'].repeat(1, N_wvl) # assuming the same shift for all wavelengths
-    return model(pred_inputs | dxdy_inp)
+    # dxdy_inp['F_norm'] = dxdy_inp['F_norm'].repeat(1, N_wvl) # assuming the same shift for all wavelengths
+    return model(pred_inputs | dxdy_inp) #* dxdy_inp['F_norm']
 
 
 def fit_dxdy(i_src, verbose=0):
+    if verbose > 0:
+        print(f'Predicting source {i_src}...')
+       
+    # PSF_0 = torch.nan_to_num(ROIs[i_src].unsqueeze(0)) / (src_spectra_sparse[i_src] * PSF_norm_factor)[None,:,None,None]
+    # F_norm = (PSF_0 * core_mask).sum(dim=(-2,-1), keepdim=True)
+    # PSF_0 /= F_norm
+
+    PSF_0 = torch.nan_to_num(ROIs[i_src].unsqueeze(0)) / src_spectra_sparse[i_src][None,:,None,None]
+    F_norm = (PSF_0 * core_mask).sum(dim=(-2,-1), keepdim=True) / core_flux_ratio[None,:,None,None]
+    PSF_0 /= F_norm
+
     dxdy_0 = inputs_manager_objs.stack()[i_src,:]
-    PSF_data = torch.nan_to_num(ROIs[i_src].unsqueeze(0)) * flux_λ_norm / src_spectra_sparse[i_src][None,:,None,None]
-    peaks_scaler = PSF_pred_big.amax(dim=(-2,-1)) / (PSF_data*core_mask).amax(dim=(-2,-1))
-    PSF_data *= peaks_scaler[:, :, None, None] # a sort of normalizing fetch-factor
-    
-    loss = lambda dxdy_: F.smooth_l1_loss(PSF_data*core_mask, func_dxdy(dxdy_)*core_mask, reduction='sum')*1e3
+    _ = func_dxdy(dxdy_0)
+    loss = lambda dxdy_: F.smooth_l1_loss(PSF_0, func_dxdy(dxdy_), reduction='sum')*1e3
     result = minimize(loss, dxdy_0, max_iter=100, tol=1e-3, method='bfgs', disp=verbose)
 
-    # Update managers internal values with the new fitted values
     dxdy_1 = inputs_manager_objs.unstack(result.x.unsqueeze(0), update=False)
     inputs_manager_objs['dx'][i_src,:] = dxdy_1['dx'].flatten()
     inputs_manager_objs['dy'][i_src,:] = dxdy_1['dy'].flatten()
-    
-    return func_dxdy(result.x).detach().clone().squeeze(), result.x.detach().clone()
+    # inputs_manager_objs['F_norm'][i_src,:] = dxdy_1['F_norm'].flatten()
+
+    return PSF_0.clone(), func_dxdy(result.x).detach().clone(), result.x.clone(), F_norm.clone()
 
 
-PSFs_fitted = []
+#%
+# i_src = sources['peak_value'].idxmax()
 
-# The PSF model generates PSFs normalized to sum of 1 per wavelength. We need to normalize them to the flux of the sources.
-# To do so, we need to account for: 1. the flux normalization factor, 2. the crop ratio, 3. the core to wings flux ratio.
-for i in tqdm(range(N_src)):
-    PSF_fitted, dxdy = fit_dxdy(i, verbose=0)
-    PSFs_fitted.append(PSF_fitted * (src_spectra_sparse[i] * PSF_norm_factor)[:,None,None])
-    
-PSFs_fitted = torch.stack(PSFs_fitted, dim=0)
+# i_src = 10
+
+# PSF_0 = torch.nan_to_num(ROIs[i_src].unsqueeze(0)) / (src_spectra_sparse[i_src] * PSF_norm_factor)[None,:,None,None] #* N_core_pixels
+
+# F_norm = (PSF_0 * core_mask).sum(dim=(-2,-1), keepdim=True)
+# PSF_0 /= F_norm
+
+# plt.plot((PSF_0*core_mask).amax(dim=(-2,-1)).squeeze().cpu().numpy())
+# plt.show()
+# plt.plot(F_norm.squeeze().cpu().numpy())
+# plt.show()
 
 
 #%%
+PSFs_data, PSFs_fitted, fluxes, dxdys = [], [], [], []
+
+for i in tqdm(range(len(ROIs))):
+    PSF_0, PSF_1, dxdy, flux = fit_dxdy(i, verbose=0)
+    PSFs_data.append(PSF_0)
+    PSFs_fitted.append(PSF_1)
+    fluxes.append(flux)
+    dxdys.append(dxdy)
+    
+PSFs_data = torch.vstack(PSFs_data)
+PSFs_fitted = torch.vstack(PSFs_fitted)
+fluxes = torch.vstack(fluxes)
+dxdys  = torch.stack(dxdys)
+
+
+#%%
+display_mask = mask_circle(PSF_size, 18)[None,...]
+
+PSFs_0_white = np.mean(PSFs_data.cpu().cpu().numpy(), axis=1) * display_mask
+PSFs_1_white = np.mean(PSFs_fitted.cpu().cpu().numpy(), axis=1)
+
+plot_radial_profiles_new(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
+
+#%% ---------------------------
+# model_sparse = add_ROIs(
+#     torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device), # blanck baase image
+#     [PSFs_fitted[i,...] for i in range(N_src)], # predicted flux-normalized PSFs after coordinates tuning
+#     local_coords,
+#     global_coords
+# )
+
+norm_factor = lambda i: (src_spectra_sparse[i] * PSF_norm_factor)[None,:,None,None] * fluxes[i, ...]
+
 model_sparse = add_ROIs(
-    torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device), # blanck baase image
-    [PSFs_fitted[i,...] for i in range(N_src)], # predicted flux-normalized PSFs after coordinates tuning
+    torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device),
+    [PSFs_fitted[i,...]*norm_factor[i] for i in range(PSFs_fitted.shape[0])],
     local_coords,
     global_coords
 )
 
 # It tells the average flux in the PSF core for each source
-src_spectra_sparse = [GetSpectrum(data_sparse,  sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
-src_spectra_fitted = [GetSpectrum(model_sparse, sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
+# src_spectra_sparse = [GetSpectrum(data_sparse,  sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
+# src_spectra_fitted = [GetSpectrum(model_sparse, sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
 
 # STRANGE LINE IN THE FIRST SPECTRUM!!!!!
 #%

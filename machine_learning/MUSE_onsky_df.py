@@ -267,12 +267,16 @@ def create_normalizing_transforms(df):
     return df_transforms
 
 
-def normalize_df(df, df_transforms):
+def normalize_df(df, df_transforms, backward=False):
     df_normalized = {}
 
-    for entry in df_transforms:
+    for entry in df.columns.values:
         series = df[entry].replace([np.inf, -np.inf], np.nan)
-        transformed_values = df_transforms[entry].forward(series.dropna().values)
+        if backward:
+            transformed_values = df_transforms[entry].backward(series.dropna().values)
+        else:
+            transformed_values = df_transforms[entry].forward(series.dropna().values)
+            
         full_length_values = np.full_like(series, np.nan, dtype=np.float64)
         full_length_values[~series.isna()] = transformed_values 
         df_normalized[entry] = full_length_values   
@@ -442,8 +446,8 @@ if __name__ == "__main__":
 
         for file in tqdm(files):
             with open(MUSE_RAW_FOLDER+'../DATA_reduced/'+file, 'rb') as f:
-                data = pickle.load(f)
-                df_ = data['All data']
+                data_sample = pickle.load(f)
+                df_ = data_sample['All data']
                 df_['ID'] = int(file.split('_')[0])
                 muse_df.append(df_)
                 

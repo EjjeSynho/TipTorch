@@ -128,7 +128,15 @@ def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True)
     config_file['telescope']['TelescopeDiameter'] = 8.0
     config_file['telescope']['ZenithAngle'] = [90.0 - sample['MUSE header data']['Tel. altitude'].item()]
     config_file['telescope']['Azimuth']     = [sample['MUSE header data']['Tel. azimuth'].item()]
-    config_file['telescope']['PupilAngle']  = sample['All data']['Pupil angle'].item()
+    
+    if 'PupilAngle' not in config_file['telescope']:
+        config_file['telescope']['PupilAngle'] = 0.0
+    else:
+        try:
+            config_file['telescope']['PupilAngle'] = sample['All data']['Pupil angle'].item()
+        except (KeyError, TypeError):
+            config_file['telescope']['PupilAngle'] = 0.0
+    
     
     if sample['Raw Cn2 data'] is not None:
         config_file['atmosphere']['L0']  = [sample['All data']['L0Tot'].item()]
