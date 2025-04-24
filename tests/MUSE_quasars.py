@@ -38,10 +38,10 @@ from machine_learning.MUSE_onsky_df import *
 #%%
 # Load the FITS file
 
-# reduced_name = 'J0259_all'
+reduced_name = 'J0259_all'
 # reduced_name = 'J0259_2024-12-05T03_04_07.007'
 # reduced_name = 'J0259_2024-12-05T03_49_24.768'
-reduced_name = 'J0259_2024-12-05T03_15_37.598'
+# reduced_name = 'J0259_2024-12-05T03_15_37.598'
 
 if reduced_name == 'J0259_all':
     cube_path = MUSE_DATA_FOLDER + f"quasars/J0259_cubes/J0259-0901_all.fits"
@@ -751,6 +751,8 @@ norm_full = LogNorm(vmin=1e1, vmax=thres*10)
 VisualizeSources(data_full, model_full, norm=norm_full, mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(data_full, model_full, sources, radius=16, title='Fitted PSFs')
 
+diff_img_full = (data_full - model_full) * valid_mask.cpu().numpy()
+
 #%%
 from astropy.convolution import convolve, Box1DKernel
 
@@ -870,6 +872,16 @@ diff_rgb = plot_wavelength_rgb(
     title=f"{reduced_name}\nObservation",
     min_val=500, max_val=200000, show=True
 )
+
+diff_rgb = plot_wavelength_rgb(
+    data_full[ROI_plot],
+    wavelengths=λ_vis,
+    title=f"{reduced_name}\nObservation",
+    min_val=500, max_val=200000, show=True
+)
+
+
+
 # %%
 spectra_dicts = []
 
@@ -899,17 +911,35 @@ for target, _ in targets:
     means[target] = np.mean(spectra, axis=0)
     stds[target] = np.std(spectra, axis=0)
 
+
+# no_smooth = True
+no_smooth = False
+
 # Create the plot
 plt.figure()
 for target, color in targets:
-    plt.plot(λ, means[target], label=target, color=color, linewidth=0.25)
-    plt.fill_between(λ,
-                     means[target] - stds[target],
-                     means[target] + stds[target],
-                     color=color, alpha=0.2)
+    if no_smooth:
+        plt.plot(λ, means[target], label=target, color=color, linewidth=0.25)
+        plt.fill_between(λ,
+                        means[target] - stds[target],
+                        means[target] + stds[target],
+                        color=color, alpha=0.2)
+    else:
+        spectrum_avg = convolve(means[target], kernel, boundary='extend')
+
+        plt.plot(λ, means[target], label=target, color=color, linewidth=0.5, alpha=0.25)
+        plt.plot(λ, spectrum_avg, label=target+' (smoothed)', color=color, linewidth=1)
+        
+plt.xlim(λ.min(), λ.max())
+plt.ylim(-7, 12.5)  
 plt.legend()
 plt.grid(alpha=0.2)
-plt.title('Mean spectra with std')
+
+if no_smooth:
+    plt.title('Mean spectra with std')
+else:
+    plt.title('Mean spectra (smoothed)')
+
 plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
 plt.xlabel('Wavelength, [nm]')
 plt.show()

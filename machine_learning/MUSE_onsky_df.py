@@ -271,15 +271,16 @@ def normalize_df(df, df_transforms, backward=False):
     df_normalized = {}
 
     for entry in df.columns.values:
-        series = df[entry].replace([np.inf, -np.inf], np.nan)
-        if backward:
-            transformed_values = df_transforms[entry].backward(series.dropna().values)
-        else:
-            transformed_values = df_transforms[entry].forward(series.dropna().values)
-            
-        full_length_values = np.full_like(series, np.nan, dtype=np.float64)
-        full_length_values[~series.isna()] = transformed_values 
-        df_normalized[entry] = full_length_values   
+        if entry in df_transforms:
+            series = df[entry].replace([np.inf, -np.inf], np.nan)
+            if backward:
+                transformed_values = df_transforms[entry].backward(series.dropna().values)
+            else:
+                transformed_values = df_transforms[entry].forward(series.dropna().values)
+                    
+            full_length_values = np.full_like(series, np.nan, dtype=np.float64)
+            full_length_values[~series.isna()] = transformed_values 
+            df_normalized[entry] = full_length_values   
 
     df_normalized = pd.DataFrame(df_normalized)
     df_normalized['ID'] = df.index

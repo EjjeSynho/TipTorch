@@ -19,8 +19,10 @@ from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from tools.config_manager import GetSPHEREonsky, ConfigManager
 from project_globals import SPHERE_DATASET_FOLDER, SPHERE_DATA_FOLDER, device
-from data_processing.normalizers import InputsTransformer, CreateTransformSequenceFromFile
+from data_processing.normalizers import CreateTransformSequenceFromFile
 from copy import copy, deepcopy
+from tools.input_manager import InputsTransformer
+
 
 df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/psf_df_norm_transforms.pickle')
 df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/fitted_df_norm_transforms.pickle')

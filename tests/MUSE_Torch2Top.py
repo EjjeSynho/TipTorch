@@ -14,7 +14,8 @@ from tools.utils import plot_radial_profiles_new, plot_radial_profiles_relative,
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
-from data_processing.normalizers import InputsTransformer, CreateTransformSequenceFromFile
+from data_processing.normalizers import CreateTransformSequenceFromFile
+from tools.input_manager import InputsTransformer
 from tqdm import tqdm
 from project_globals import MUSE_DATA_FOLDER
 from machine_learning.MUSE_onsky_df import *

@@ -20,7 +20,8 @@ from torchmin import minimize
 from astropy.stats import sigma_clipped_stats
 from tools.parameter_parser import ParameterParser
 from tools.config_manager import ConfigManager
-from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, QuadraticModel, InputsCompressor
+from data_processing.normalizers import TransformSequence, Uniform, LineModel, QuadraticModel
+from tools.input_manager import InputsTransformer
 from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tqdm import tqdm
 from scipy.ndimage import rotate

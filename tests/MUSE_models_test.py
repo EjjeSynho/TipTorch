@@ -13,8 +13,46 @@ from tools.utils import plot_radial_profiles_new, plot_radial_profiles_relative,
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
-from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer, LineModel, QuadraticModel, InputsCompressor
+from data_processing.normalizers import TransformSequence, Uniform, LineModel, QuadraticModel
+from tools.input_manager import InputsTransformer
 from project_globals import MUSE_DATA_FOLDER
+
+#%%
+from tools.config_manager import ConfigFromFile
+from PSF_models.TipTorch import TipTorch_new
+
+config_file = ConfigFromFile('../data/parameter_files/muse_ltao_ang.ini', device)
+
+
+#%%
+pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
+
+PSD_include = {
+    'fitting':         True,
+    'WFS noise':       True,
+    'spatio-temporal': True,
+    'aliasing':        True,
+    'chromatism':      True,
+    'diff. refract':   False,
+    'Moffat':          False
+}
+
+tiptorch_half = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+tiptorch_half.to_float()
+
+
+W = H = tiptorch_half.N_pix
+crop = 20
+
+ROI = np.s_[0, W//2-crop:W//2+crop, H//2-crop:H//2+crop]
+
+with torch.no_grad():
+    PSF_1_half  = tiptorch_half()#x=inputs)
+
+plt.imshow( PSF_1_half[:,-1,...][ROI].abs().log10().cpu().numpy())
+plt.colorbar()
+plt.show()
+
 
 
 #%%

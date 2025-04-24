@@ -2,8 +2,7 @@ import torch
 import torch.nn as nn
 import pandas as pd
 import numpy as np
-from data_processing.normalizers import InputsTransformer
-
+from tools.input_manager import InputsTransformer
 
 class Gnosis(nn.Module):
     def __init__(self, in_size, out_size, hidden_size=100, dropout_p=0.25):

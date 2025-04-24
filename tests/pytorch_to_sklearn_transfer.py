@@ -2,6 +2,8 @@
 %reload_ext autoreload
 %autoreload 2
 
+import pickle
+import os
 import numpy as np
 import torch
 import shap
@@ -48,6 +50,17 @@ print(inputs_manager)
 with open(MUSE_DATA_FOLDER+'muse_df_norm_imputed.pickle', 'rb') as handle:
     muse_df_norm = pickle.load(handle)
 
+# Open pickle file
+with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'rb') as handle:
+    muse_df = pickle.load(handle)
+
+muse_df_pruned  = prune_columns(muse_df.copy())
+muse_df_reduced = reduce_columns(muse_df_pruned.copy())
+
+selected_entries_input = muse_df_norm.columns.values.tolist()
+
+df_transforms = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
+
 # Load processed data file
 with open(MUSE_DATA_FOLDER + f"quasars/J0259_reduced/J0259_2024-12-05T03_15_37.598.pickle", 'rb') as f:
     data_sample = pickle.load(f)
@@ -58,12 +71,9 @@ df.loc[0, 'Pupil angle'] = 0.0
 
 df_pruned  = prune_columns(df.copy())
 df_reduced = reduce_columns(df_pruned.copy())
-df_transforms = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
 
 df_norm = normalize_df(df_reduced, df_transforms)
 df_norm = df_norm.fillna(0)
-
-selected_entries_input = muse_df_norm.columns.values.tolist()
 
 X = df_norm[selected_entries_input].loc[0].to_numpy().reshape(1,-1)
 
@@ -140,13 +150,13 @@ def transfer_to_sklearn(pytorch_model, X):
     return sklearn_model
 
 
-MLP_regressor = transfer_to_sklearn(calibrator.net, X)
+PSF_calibrator = transfer_to_sklearn(calibrator.net, X)
 
 #%%
 with torch.no_grad():
     Y_torch = calibrator.net(torch.as_tensor(X, dtype=torch.float32)).numpy()
     
-Y_sklearn = MLP_regressor.predict(X)
+Y_sklearn = PSF_calibrator.predict(X)
 
 print('Mean absolute difference between PyTorch and sklearn predictions:', np.abs(Y_sklearn - Y_torch).mean())
 
@@ -201,17 +211,15 @@ input_features = [
     'NGS mag (from ph.)',
     'Seeing (header)',
     'Airmass',
-    'RA (science)',
-    'DEC (science)',
     'Tau0 (header)',
 ]
 
 
-# Define the features to use as inputs
-# Calculate the median values for the specified features
 median_features = [
     'Tel. altitude',
     'Tel. azimuth',
+    'RA (science)',
+    'DEC (science)',
     'Derot. angle',
     'NGS RA',
     'NGS DEC',
@@ -248,6 +256,7 @@ input_features.sort()
 median_features.sort()
 predicted_entries.sort()
 
+
 #%%
 # Calculate the median for each feature
 median_values = {}
@@ -261,19 +270,22 @@ for feature in median_features:
 # Create a DataFrame with the median values
 median_df = pd.DataFrame([median_values])
 
-# Display the first few rows of the median DataFrame
-print("Median values for specified features:")
-print(median_df.head())
+# Save median values dataframe with pickle
+with open('../data/temp/median_values_norm.pkl', 'wb') as f:
+    pickle.dump(median_df, f)
 
-#%%
+# Display the first few rows of the median DataFrame
+# print("Median values for specified features:")
+# print(median_df.head())
+
+#%
 # from machine_learning.MUSE_onsky_df import normalize_df
-median_df_unnorm = normalize_df(median_df, df_transforms, backward=True)
-median_df_unnorm.head()
+# median_df_unnorm = normalize_df(median_df, df_transforms, backward=True)
+# median_df_unnorm.head()
 
 
 #%%
 from sklearn.metrics import mean_squared_error, r2_score
-from sklearn.preprocessing import StandardScaler
 import pandas as pd
 
 # Prepare the dataset for training
@@ -281,13 +293,8 @@ X_data = muse_df_norm[input_features].values
 y_data = muse_df_norm[predicted_entries].values
 
 # Use train_ids and valid_ids for splitting the data instead of train_test_split
-X_train = X_data[train_ids]
-y_train = y_data[train_ids]
-X_test = X_data[valid_ids]
-y_test = y_data[valid_ids]
-
-# Scale the input features
-scaler = StandardScaler()
+X_train, y_train = X_data[train_ids], y_data[train_ids]
+X_test,  y_test  = X_data[valid_ids], y_data[valid_ids]
 
 # Create and train the MLP regressor
 tc2sparta = MLPRegressor(
@@ -315,6 +322,15 @@ r2 = r2_score(y_test, y_pred)
 
 print(f"Validation Mean Squared Error: {mse:.4f}")
 print(f"Validation R² Score: {r2:.4f}")
+
+#%%
+with open('../data/models/tc2sparta.pkl', 'wb') as f:
+    pickle.dump(tc2sparta, f)
+    print("Model saved successfully.")
+
+with open('../data/models/sparta2PSF.pkl', 'wb') as f:
+    pickle.dump(PSF_calibrator, f)
+    print("Model saved successfully.")
 
 
 #%%
@@ -406,13 +422,45 @@ random_id = np.random.choice(valid_ids)
 print(f'Random ID: {random_id}')
 
 #%%
-X_1 = muse_df_norm[input_features].loc[random_id]
+# Get the row as a Series first
+X = muse_df[input_features].loc[[random_id]]  # Note the double brackets to keep it as a DataFrame
 
-X_2 = pd.DataFrame([tc2sparta.predict(X_1.to_numpy().reshape(1,-1))[0]], columns=predicted_entries)
-X_2 = pd.concat([X_2, median_df, pd.DataFrame([X_1], index=[0])], axis=1)
-X_2 = X_2[muse_df_norm.columns]
+inputs = {
+    'Wind direction': X['Wind dir (header)'].item(),
+    'NGS magnitude': X['NGS mag (from ph.)'].item(),
+    'Seeing': X['Seeing (header)'].item(),
+    'Airmass': X['Airmass'].item(),
+    'Tau0': X['Tau0 (header)'].item(),
+    'Wavelengths': [500e-9, 600e-9],
+    'Image size': 200,
+}
 
-Y = MLP_regressor.predict(X_2.to_numpy().reshape(1,-1))
+#%%
+inputs_map = {
+    'Wind direction': 'Wind dir (header)',
+    'NGS magnitude': 'NGS mag (from ph.)',
+    'Seeing': 'Seeing (header)',
+    'Airmass': 'Airmass',
+    'Tau0': 'Tau0 (header)',
+}
+
+inputs_df = pd.DataFrame({x: inputs[x] for x in inputs_map.keys()}, index=[0])
+inputs_df = inputs_df.rename(columns=inputs_map)
+inputs_df = normalize_df(inputs_df, df_transforms)
+inputs_df = inputs_df[input_features]
+inputs_df.index = [0]
+inputs_df = inputs_df.sort_index(axis=1)
+
+#%%
+sparta_df = pd.DataFrame([tc2sparta.predict(inputs_df.to_numpy().reshape(1,-1))[0]], columns=predicted_entries)
+full_df = pd.concat([inputs_df, sparta_df, median_df], axis=1)
+full_df = full_df[muse_df_norm.columns]
+full_df = full_df.sort_index(axis=1)
+
+full_df_denorm = normalize_df(full_df, df_transforms, backward=True)
+full_df_denorm = full_df_denorm.sort_index(axis=1)
+
+Y = PSF_calibrator.predict(full_df.to_numpy().reshape(1,-1))
 Y_dict = calibrator.normalizer.unstack(Y)
 
 atmo_wvl = 500e-9 # [m]
@@ -420,12 +468,163 @@ D_tel = 8.1 #[m]
 TT_max = 2
 
 TT_jitter = 0.5*(Y_dict['Jx'] + Y_dict['Jy']).mean() / rad2mas # [rad]
-TT_WFE = D_tel/2/TT_max * TT_jitter * 1e9 # [nm]
+TT_WFE_nm = D_tel/2/TT_max * TT_jitter * 1e9 # [nm]
 
 WFS_add_noise = Y_dict['dn'].item() # [rad^2]
 WFS_add_noise_nm = np.sqrt(WFS_add_noise) * atmo_wvl*1e9 / (2 * np.pi)  # [nm]
 
-
-print(f"Tip-tilt jitter: {TT_jitter*rad2mas:.2f} mas = {TT_WFE:.2f} nm WFE RMS")
+print(f"Tip-tilt jitter: {TT_jitter*rad2mas:.2f} mas = {TT_WFE_nm:.2f} nm WFE RMS")
 print(f"WFS noise: {WFS_add_noise_nm:.2f} nm RMS")
 
+#%%
+def parse_ini_file(file_path):
+    """
+    Parse a configuration file in INI format into a nested dictionary
+
+    Parameters
+    ----------
+    file_path : str
+        Path to the INI file
+
+    Returns
+    -------
+    dict
+        Nested dictionary with configuration sections and key-value pairs
+    """
+    config = {}
+    current_section = None
+
+    with open(file_path, 'r') as f:
+        for line in f:
+            # Remove comments and strip whitespace
+            if ';' in line:
+                line = line.split(';')[0]
+            line = line.strip()
+
+            # Skip empty lines
+            if not line:
+                continue
+
+            # Process section headers
+            if line.startswith('[') and line.endswith(']'):
+                current_section = line[1:-1]
+                config[current_section] = {}
+                continue
+
+            # Process key-value pairs
+            if '=' in line and current_section is not None:
+                key, value = [part.strip() for part in line.split('=', 1)]
+
+                # Process list values
+                if value.startswith('[') and value.endswith(']'):
+                    value = value[1:-1]
+                    value_list = [item.strip() for item in value.split(',')]
+
+                    # Convert numeric values in lists
+                    parsed_list = []
+                    for item in value_list:
+                        try:
+                            if '.' in item:
+                                parsed_list.append(float(item))
+                            else:
+                                parsed_list.append(int(item))
+                        except ValueError:
+                            parsed_list.append(item.strip('"\''))
+
+                    config[current_section][key] = parsed_list
+                else:
+                    # Handle non-list values
+                    try:
+                        # Try to convert to numeric value
+                        if value.lower() == 'true':
+                            config[current_section][key] = True
+                        elif value.lower() == 'false':
+                            config[current_section][key] = False
+                        elif value.lower() == 'none' or value.lower() == 'null':
+                            config[current_section][key] = None
+                        elif value.startswith("'") and value.endswith("'"):
+                            config[current_section][key] = value[1:-1]
+                        elif '.' in value or 'e' in value.lower():
+                            config[current_section][key] = float(value)
+                        else:
+                            config[current_section][key] = int(value)
+                    except ValueError:
+                        # Keep as string if conversion fails
+                        if value.startswith("'") and value.endswith("'"):
+                            config[current_section][key] = value[1:-1]
+                        elif value.startswith('"') and value.endswith('"'):
+                            config[current_section][key] = value[1:-1]
+                        else:
+                            config[current_section][key] = value
+
+    return config
+
+def write_ini_file(config, file_path):
+    """
+    Write a configuration dictionary to an INI file
+
+    Parameters
+    ----------
+    config : dict
+        Nested dictionary with configuration sections and key-value pairs
+    file_path : str
+        Path to the output INI file
+    """
+    with open(file_path, 'w') as f:
+        for section, keys in config.items():
+            f.write(f'[{section}]\n')
+
+            for key, value in keys.items():
+                # Format lists
+                if isinstance(value, list):
+                    formatted_list = ', '.join(str(item) for item in value)
+                    f.write(f'{key} = [{formatted_list}]\n')
+                # Format strings with quotes if they contain spaces
+                elif isinstance(value, str) and (' ' in value or ',' in value):
+                    f.write(f"{key} = '{value}'\n")
+                # Format booleans, None, and other values
+                else:
+                    f.write(f'{key} = {value}\n')
+
+            f.write('\n')
+
+
+#%%
+
+config = parse_ini_file('../data/parameter_files/muse_base.ini')
+
+config['telescope']['ZenithAngle'] = np.rad2deg(np.arccos(1.0/full_df_denorm['Airmass'].item()))
+
+config['atmosphere']['Seeing'] = full_df_denorm['Seeing (header)'].item()
+config['atmosphere']['L0'] = 27.44 # TODO: get it from somewhere
+
+GL_frac = full_df_denorm['Cn2 fraction below 2000m'].item()
+
+config['atmosphere']['Cn2Weights'] = [GL_frac, 1-GL_frac]
+config['atmosphere']['Cn2Heights'] = [0, 2000.0]
+
+num_layers = len(config['atmosphere']['Cn2Weights'])
+
+assert num_layers == len(config['atmosphere']['Cn2Heights'])
+
+config['atmosphere']['WindSpeed']     = [full_df_denorm['Wind speed (header)'].item(),] * num_layers
+config['atmosphere']['WindDirection'] = [full_df_denorm['Wind dir (header)'].item(),]   * num_layers
+    
+config['sources_science']['Wavelength'] = inputs['Wavelengths']
+config['sensor_science']['FieldOfView'] = inputs['Image size']
+
+median_LGS_photons = sum([full_df_denorm[f'LGS{i} photons, [photons/m^2/s]'].item() for i in range(1,5)]) / 4 / 1000 / 1240
+IRLOS_photons = full_df_denorm['IRLOS photons, [photons/s/m^2]'].item() / full_df_denorm['frequency'].item() / 4
+
+config['sensor_HO']['NumberPhotons'] = [median_LGS_photons,]*4
+config['sensor_HO']['extraErrorNm']  = WFS_add_noise_nm
+
+config['sensor_LO']['PixelScale']  = full_df_denorm['plate scale, [mas/pix]'].item()
+config['sensor_LO']['FieldOfView'] = int(full_df_denorm['window'].item())
+config['sensor_LO']['Gain'] = full_df_denorm['gain'].item()
+
+config['sensor_LO']['NumberPhotons'] = [IRLOS_photons]
+config['sensor_LO']['extraErrorNm']  = TT_WFE_nm
+
+#%%
+write_ini_file(config, 'config.ini')

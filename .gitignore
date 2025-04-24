@@ -1,6 +1,7 @@
 # Byte-compiled / optimized / DLL files
 __pycache__/
 _pycache_/
+.continue/
 data/temp
 data/weights
 global_config.json
@@ -9,3 +10,4 @@ data/*.json
 data/*.predictor
 data/*.txt
 runs/
+data/models/

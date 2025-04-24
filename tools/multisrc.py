@@ -57,7 +57,9 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
     half_box = box_size // 2
     extra_pixel = box_size % 2  # 1 if box_size is odd, 0 if even
 
-    for pos in positions:
+    valid_ids = []
+
+    for i,pos in enumerate(positions):
         x, y = int(pos[0]), int(pos[1])
         
         # Calculate the boundaries, ensuring they don't exceed the image size
@@ -100,7 +102,9 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
             # Store the global coordinates relative to the original image
             roi_global_coords.append(((y_min_img, y_max_img), (x_min_img, x_max_img)))
     
-    return ROIs, roi_local_coords, roi_global_coords
+            valid_ids.append(i)
+    
+    return ROIs, roi_local_coords, roi_global_coords, valid_ids
 
 
 def add_ROIs(image, ROIs, local_coords, global_coords):    
@@ -113,12 +117,12 @@ def add_ROIs(image, ROIs, local_coords, global_coords):
     return image
 
 
-def add_ROI(image, ROI, local_coord, global_coord):    
-    (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_coord
-    (y_min_img, y_max_img), (x_min_img, x_max_img) = global_coord
-    image[:, y_min_img:y_max_img, x_min_img:x_max_img] += ROI[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+# def add_ROI(image, ROI, local_coord, global_coord):    
+#     (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_coord
+#     (y_min_img, y_max_img), (x_min_img, x_max_img) = global_coord
+#     image[:, y_min_img:y_max_img, x_min_img:x_max_img] += ROI[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
     
-    return image
+#     return image
 
 
 def plot_ROIs_as_grid(ROIs, cols=5):
@@ -194,11 +198,12 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None):
         plt.axis('off')
         plt.show()
 
+    return diff_vis
     
 def PlotSourcesProfiles(data, model, sources, radius, title=''):
 
-    ROIs_0, _, _ = extract_ROIs(data,  sources, box_size=np.round(radius*2+4).astype('int'))
-    ROIs_1, _, _ = extract_ROIs(model, sources, box_size=np.round(radius*2+4).astype('int'))
+    ROIs_0, _, _, _ = extract_ROIs(data,  sources, box_size=np.round(radius*2+4).astype('int'))
+    ROIs_1, _, _, _ = extract_ROIs(model, sources, box_size=np.round(radius*2+4).astype('int'))
     
     if isinstance(data, torch.Tensor):
         PSFs_0_white = torch.stack(ROIs_0).mean(dim=1).cpu().numpy()

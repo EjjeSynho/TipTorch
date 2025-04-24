@@ -69,7 +69,7 @@ def MatchRawWithReduced(include_dirs_raw, include_dirs_cubes, verbose=False):
         for file in tqdm(cube_files):
             with fits.open(os.path.join(folder_cubes, file)) as hdul_cube:
                 cubes_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
-
+        
         if verbose: print(f'Scanning the raw files in \"{folder_raw}\"...')
 
         for file in tqdm(raw_files):
@@ -88,8 +88,17 @@ def MatchRawWithReduced(include_dirs_raw, include_dirs_cubes, verbose=False):
     df1.set_index('date', inplace=True)
     df2.set_index('date', inplace=True)
 
+    # Get the matching entries
     files_matches = pd.merge(df1, df2, left_index=True, right_index=True, how='inner')
-    return files_matches
+
+    # Get entries that are in df2 (raw files) but not in df1 (cube files)
+    in_raw_only = df2[~df2.index.isin(df1.index)].copy()
+    in_raw_only.reset_index(inplace=True)
+
+    if verbose:
+        print(f"Found {len(files_matches)} matching entries between raw and reduced files")
+        print(f"Found {len(in_raw_only)} raw files without corresponding reduced files")
+    return files_matches, in_raw_only
 
 
 def GetExposureTimes(include_dirs_cubes, verbose=False):
@@ -131,10 +140,71 @@ include_dirs_raw = [
 ]
 
 #%%
+def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
+    '''Renames the MUSE cubes .fits files according to their exposure date and time'''
+    original_cubes_exposure, new_cubes_exposure = [], []
+    original_filename, new_filename = [], []
+
+    print(f'Reding cubes in {folder_cubes_new}')
+    for file in tqdm(os.listdir(folder_cubes_new)):
+        if file == 'renamed':
+            continue
+        
+        with fits.open(os.path.join(folder_cubes_new, file)) as hdul_cube:
+            new_cubes_exposure.append(hdul_cube[0].header['DATE-OBS'])
+            new_filename.append(file)
+
+    print(f'Reding cubes in {folder_cubes_old}')
+    for file in tqdm(os.listdir(folder_cubes_old)):
+        with fits.open(os.path.join(folder_cubes_old, file)) as hdul_cube:
+            original_cubes_exposure.append(hdul_cube[0].header['DATE-OBS'])
+            original_filename.append(file)
+
+    intersection = list(set(original_cubes_exposure).intersection(set(new_cubes_exposure)))
+
+    # Remove files which intersect
+    if len(intersection) > 0:
+        for exposure in intersection:
+            file = new_filename[new_cubes_exposure.index(exposure)]
+            file_2_rm = os.path.normpath(os.path.join(folder_cubes_new, file))
+            print(f'Removed duplicate: {file_2_rm}')
+            os.remove(file_2_rm)
+
+    # Rename files according to the their exposure timestamps (just for convenience)
+    renamed_dir = os.path.join(folder_cubes_new, 'renamed')
+    if not os.path.exists(renamed_dir):
+        os.makedirs(renamed_dir)
+
+    for file in tqdm(os.listdir(folder_cubes_new)):
+        # Skip the 'renamed' directory itself
+        if file == 'renamed':
+            continue
+
+        with fits.open(os.path.join(folder_cubes_new, file)) as hdul_cube:
+            exposure = hdul_cube[0].header['DATE-OBS']
+
+        new_name = 'M.MUSE.' + exposure.replace(':', '-') + '.fits'
+        file_2_rm = os.path.normpath(os.path.join(folder_cubes_new, file))
+        file_2_mv = os.path.normpath(os.path.join(renamed_dir, new_name))
+
+        # Check if destination file already exists
+        if os.path.exists(file_2_mv):
+            print(f"Warning: Duplicate file found for {exposure}. Removing {file_2_rm}")
+            os.remove(file_2_rm)
+        else:
+            os.rename(file_2_rm, file_2_mv)
+
+    return renamed_dir
+
+
+_ = RenameMUSECubes(MUSE_CUBES_FOLDER, MUSE_DATA_FOLDER+'NFM_cubes/')
+
+#%%
 if not os.path.exists( match_path:=(MUSE_DATA_FOLDER+'files_matches.csv') ):
     try:
-        files_matches = MatchRawWithReduced(include_dirs_raw, include_dirs_cubes, verbose=True)
+        files_matches, file_mismatches = MatchRawWithReduced(include_dirs_raw, include_dirs_cubes, verbose=True)
         files_matches.to_csv(MUSE_DATA_FOLDER+'files_matches.csv')
+        file_mismatches.to_csv(MUSE_DATA_FOLDER+'file_mismatches.csv')
     except Exception as e:
         print(f'Error: {e}')
     else:
@@ -142,6 +212,16 @@ if not os.path.exists( match_path:=(MUSE_DATA_FOLDER+'files_matches.csv') ):
 else:
     files_matches = pd.read_csv(match_path)
     files_matches.set_index('date', inplace=True)
+    file_mismatches = pd.read_csv(MUSE_DATA_FOLDER+'file_mismatches.csv')
+    file_mismatches.set_index('date', inplace=True)
+    
+#%
+# import shutil
+# from tqdm import tqdm
+
+# # Move all files whoch are in file_mismatches raw column to a specified folder:
+# for file in tqdm(file_mismatches['raw'].values):
+#     shutil.move(MUSE_RAW_FOLDER+file, MUSE_DATA_FOLDER+'file_mismatches/')
 
 #%%
 if not os.path.exists( exp_folder:=(MUSE_DATA_FOLDER+'exposure_times.csv') ):
