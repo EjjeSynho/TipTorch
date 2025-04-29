@@ -39,6 +39,7 @@ predict_Moffat = True
 predict_phase_bump = True
 
 # device = torch.device('cpu')
+
 #%%
 # Load the FITS file
 
@@ -115,7 +116,8 @@ data_src = data_onsky.sum(dim=0).cpu().numpy()
 # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
 
 PSF_size = 111  # Define the size of each ROI (in pixels)
-thres = 1000000
+thres = 1200000
+# thres = 1000000
 # thres = 700000
 # thres = 2500000
 
@@ -135,13 +137,14 @@ plt.show()
 
 
 #%%
-from tools.multisrc import extract_ROIs, add_ROIs
+from tools.multisrc import extract_ROIs, add_ROIs, extract_ROIs_from_coords
 
 ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_sparse, sources, box_size=PSF_size)
 N_src = len(ROIs)
 # plot_ROIs_as_grid(ROIs, cols=np.ceil(np.sqrt(len(ROIs))).astype('uint'))  # Adjust the number of columns as needed
 
 sources_valid = sources.iloc[valid_srcs]
+# del sources
 
 yy, xx = torch.where(valid_mask.squeeze() > 0) # Compute center of mass for valid mask assuming it's the center of the field
 
@@ -243,8 +246,7 @@ model.to_float()
 model.to(device)
 model.on_axis = False
 
-PSF_1 = model()
-
+# PSF_1 = model()
 
 #%%
 from data_processing.normalizers import Uniform, Uniform
@@ -254,68 +256,77 @@ df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/muse_df_nor
 df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/muse_df_fitted_transforms.pickle')
 df_transforms_src_coords  = Uniform(None, -1.8e-5, 1.8e-5)
 df_transforms_Cn2_weights = Uniform(None, 0, 1)
+df_transforms_GL_frac = Uniform(None, 0, 5)
 df_transforms_LO = Uniform(None, -100, 100)
-inputs_manager = InputsManager()
 
-inputs_manager.add('r0',    torch.tensor([model.r0[0].item()]), df_transforms_fitted['r0'])
-inputs_manager.add('F',     torch.tensor([[1.0,]*N_wvl]), df_transforms_fitted['F'])
-inputs_manager.add('bg',    torch.tensor([[0,]*N_wvl]),   df_transforms_fitted['bg'])
-inputs_manager.add('dx',    torch.tensor([[0.0,]*N_wvl]), df_transforms_fitted['dx'])
-inputs_manager.add('dy',    torch.tensor([[0.0,]*N_wvl]), df_transforms_fitted['dy'])
-inputs_manager.add('dn',    torch.tensor([1.5]),          df_transforms_fitted['dn'])
-inputs_manager.add('Jx',    torch.tensor([[10,]*N_wvl]),  df_transforms_fitted['Jx'])
-inputs_manager.add('Jy',    torch.tensor([[10,]*N_wvl]),  df_transforms_fitted['Jy'])
-inputs_manager.add('Jxy',   torch.tensor([[0]]), df_transforms_fitted['Jxy'])
-inputs_manager.add('amp',   torch.tensor([0.0]), df_transforms_fitted['amp'])
-inputs_manager.add('b',     torch.tensor([0.0]), df_transforms_fitted['b'])
-inputs_manager.add('alpha', torch.tensor([4.5]), df_transforms_fitted['alpha'])
-inputs_manager.add('beta',  torch.tensor([2.5]), df_transforms_fitted['beta'])
-inputs_manager.add('ratio', torch.tensor([1.0]), df_transforms_fitted['ratio'])
-inputs_manager.add('theta', torch.tensor([0.0]), df_transforms_fitted['theta'])
-inputs_manager.add('s_pow', torch.tensor([0.0]), df_transforms_fitted['s_pow'])
+shared_inputs = InputsManager()
 
-inputs_manager.add('Cn2_weights', torch.tensor([[0.9, 0.1]]), df_transforms_Cn2_weights)
+shared_inputs.add('r0',    torch.tensor([model.r0[0].item()]), df_transforms_fitted['r0'])
+shared_inputs.add('F',     torch.tensor([[1.0,]*N_wvl]), df_transforms_fitted['F'])
+shared_inputs.add('bg',    torch.tensor([[0,]*N_wvl]),   df_transforms_fitted['bg'])
+shared_inputs.add('dx',    torch.tensor([[0.0,]*N_wvl]), df_transforms_fitted['dx'])
+shared_inputs.add('dy',    torch.tensor([[0.0,]*N_wvl]), df_transforms_fitted['dy'])
+shared_inputs.add('dn',    torch.tensor([1.5]),          df_transforms_fitted['dn'])
+shared_inputs.add('Jx',    torch.tensor([[10,]*N_wvl]),  df_transforms_fitted['Jx'])
+shared_inputs.add('Jy',    torch.tensor([[10,]*N_wvl]),  df_transforms_fitted['Jy'])
+shared_inputs.add('Jxy',   torch.tensor([[0]]), df_transforms_fitted['Jxy'])
+shared_inputs.add('amp',   torch.tensor([0.0]), df_transforms_fitted['amp'])
+shared_inputs.add('b',     torch.tensor([0.0]), df_transforms_fitted['b'])
+shared_inputs.add('alpha', torch.tensor([4.5]), df_transforms_fitted['alpha'])
+# inputs_manager.add('beta',  torch.tensor([2.5]), df_transforms_fitted['beta'])
+# inputs_manager.add('ratio', torch.tensor([1.0]), df_transforms_fitted['ratio'])
+# inputs_manager.add('theta', torch.tensor([0.0]), df_transforms_fitted['theta'])
+shared_inputs.add('s_pow', torch.tensor([0.0]), df_transforms_fitted['s_pow'])
+
+# inputs_manager.add('Cn2_weights', torch.tensor([[0.9, 0.1]]), df_transforms_Cn2_weights)
+shared_inputs.add('GL_frac', torch.tensor([np.arctanh(config_file['atmosphere']['Cn2Weights'][0][0].item())]), df_transforms_GL_frac)
+
 
 if LO_map_size is not None:
-    inputs_manager.add('LO_coefs', torch.zeros([1, LO_map_size**2]), df_transforms_LO)
-    inputs_manager.set_optimizable('LO_coefs', False)
+    shared_inputs.add('LO_coefs', torch.zeros([1, LO_map_size**2]), df_transforms_LO)
+    shared_inputs.set_optimizable('LO_coefs', False)
 
-inputs_manager.set_optimizable(['ratio', 'theta', 'alpha', 'beta', 'amp', 'b'], predict_Moffat)
-inputs_manager.set_optimizable(['s_pow'], predict_phase_bump)
-inputs_manager.set_optimizable(['Jxy'], False)
+# inputs_manager.set_optimizable(['ratio', 'theta', 'alpha', 'beta', 'amp', 'b'], predict_Moffat)
+shared_inputs.set_optimizable(['alpha', 'amp', 'b'], predict_Moffat)
+shared_inputs.set_optimizable(['s_pow'], predict_phase_bump)
+shared_inputs.set_optimizable(['Jxy'], False)
 
-inputs_manager.to_float()
-inputs_manager.to(device)
+shared_inputs.to_float()
+shared_inputs.to(device)
 
-print(inputs_manager)
+# print(shared_inputs)
 
-inputs_manager_objs = InputsManager()
+individual_inputs = InputsManager()
 
-inputs_manager_objs.add('dx', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dx'])
-inputs_manager_objs.add('dy', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dy'])
-inputs_manager_objs.add('F_norm', torch.tensor([[1.0,]]*N_src), df_transforms_fitted['F'])
-inputs_manager_objs.add('src_dirs_x', torch.tensor(sources_coords[:,0]), df_transforms_src_coords)
-inputs_manager_objs.add('src_dirs_y', torch.tensor(sources_coords[:,1]), df_transforms_src_coords)
+individual_inputs.add('dx', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dx'])
+individual_inputs.add('dy', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dy'])
+individual_inputs.add('F_norm', torch.tensor([[1.0,]]*N_src), df_transforms_fitted['F'])
+individual_inputs.add('src_dirs_x', torch.tensor(sources_coords[:,0]), df_transforms_src_coords)
+individual_inputs.add('src_dirs_y', torch.tensor(sources_coords[:,1]), df_transforms_src_coords)
 
-inputs_manager_objs.to_float()
-inputs_manager_objs.to(device)
+individual_inputs.to_float()
+individual_inputs.to(device)
 
-inputs_manager_objs.set_optimizable(['F_norm'], False)
-inputs_manager_objs.set_optimizable(['src_dirs_x'], False)
-inputs_manager_objs.set_optimizable(['src_dirs_y'], False)
+individual_inputs.set_optimizable(['F_norm'], False)
+individual_inputs.set_optimizable(['src_dirs_x'], False)
+individual_inputs.set_optimizable(['src_dirs_y'], False)
 
-print(inputs_manager_objs)
+# print(individual_inputs)
 
-
-inputs_managers_union = InputsManagersUnion([inputs_manager, inputs_manager_objs])
+all_inputs = InputsManagersUnion([shared_inputs, individual_inputs])
 
 # _ = inputs_managers_union.unstack(inputs_managers_union.stack())
+#%%
+print(all_inputs)
+
+
+
 
 #%%
 from machine_learning.calibrator import Calibrator, Gnosis
 
 calibrator = Calibrator(
-    inputs_manager=inputs_manager,
+    inputs_manager=shared_inputs,
     predicted_values = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow', 'amp', 'b', 'alpha'],
     device=device,
     calibrator_network = {
@@ -334,7 +345,8 @@ calibrator.eval()
 #%%
 # pred_inputs = normalizer.unstack(net(NN_inp))
 pred_inputs = calibrator(df_norm[selected_entries_input].loc[0])
-inputs_manager.update(pred_inputs)
+# shared_inputs.update(pred_inputs)
+all_inputs.update(pred_inputs)
 
 with torch.no_grad():
     config_file['NumberSources'] = 1
@@ -346,7 +358,6 @@ with torch.no_grad():
     model.Update(config=config_file, init_grids=True, init_pupils=True, init_tomography=True)
     PSF_pred_small = model(pred_inputs) # Second initial prediction of the "small" PSF
     torch.cuda.empty_cache()
-
 
 #%%
 # How much flux is cropped by assuming the finite size of the PSF box (PSF_predbif is assumed to be quasi-infinite)
@@ -361,13 +372,14 @@ PSF_norm_factor = N_core_pixels / flux_λ_norm / core_flux_ratio / crop_ratio
 
 #%% --------------------------
 def func_dxdy(x_, i_src):
-    dxdy_inp = inputs_manager_objs.unstack(x_.unsqueeze(0), update=False) # Don't update internal values
+    dxdy_inp = individual_inputs.unstack(x_.unsqueeze(0), update=False) # Don't update internal values
     dxdy_inp['dx'] = dxdy_inp['dx'].repeat(1, N_wvl) # Extend to simulated number of wavelength
     dxdy_inp['dy'] = dxdy_inp['dy'].repeat(1, N_wvl) # assuming the same shift for all wavelengths
     dxdy_inp['src_dirs_x'] = dxdy_inp['src_dirs_x'][i_src].unsqueeze(0)
     dxdy_inp['src_dirs_y'] = dxdy_inp['src_dirs_y'][i_src].unsqueeze(0)
-    
+
     return model(pred_inputs | dxdy_inp)
+
 
 
 def fit_dxdy(i_src, verbose=0):
@@ -378,15 +390,15 @@ def fit_dxdy(i_src, verbose=0):
     F_norm = (PSF_0 * core_mask).sum(dim=(-2,-1), keepdim=True) / core_flux_ratio[None,:,None,None]
     PSF_0 /= F_norm
 
-    dxdy_0 = inputs_manager_objs.stack()[i_src,:]
+    dxdy_0 = individual_inputs.stack()[i_src,:]
 
     _ = func_dxdy(dxdy_0, i_src)
     loss = lambda dxdy_: F.smooth_l1_loss(PSF_0, func_dxdy(dxdy_, i_src), reduction='sum')*1e3
     result = minimize(loss, dxdy_0, max_iter=100, tol=1e-3, method='bfgs', disp=verbose)
 
-    dxdy_1 = inputs_manager_objs.unstack(result.x.unsqueeze(0), update=False)
-    inputs_manager_objs['dx'][i_src] = dxdy_1['dx'].flatten()
-    inputs_manager_objs['dy'][i_src] = dxdy_1['dy'].flatten()
+    dxdy_1 = individual_inputs.unstack(result.x.unsqueeze(0), update=False)
+    individual_inputs['dx'][i_src] = dxdy_1['dx'].flatten()
+    individual_inputs['dy'][i_src] = dxdy_1['dy'].flatten()
 
     return PSF_0.clone(), func_dxdy(result.x, i_src).detach().clone(), result.x.clone(), F_norm.clone()
 
@@ -394,7 +406,7 @@ def fit_dxdy(i_src, verbose=0):
 #%%
 PSFs_data, PSFs_fitted, fluxes, dxdys = [], [], [], []
 
-for i in tqdm(range(len(ROIs))):
+for i in tqdm(range(N_src)):
     PSF_0, PSF_1, dxdy, flux = fit_dxdy(i, verbose=0)
     PSFs_data.append(PSF_0)
     PSFs_fitted.append(PSF_1)
@@ -417,14 +429,12 @@ PSFs_1_white = np.mean(PSFs_fitted.cpu().cpu().numpy(), axis=1)
 plot_radial_profiles_new(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
 
 #%% ---------------------------
-
 model_sparse = add_ROIs(
     torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device),
     [PSFs_fitted[i,...]*norm_factors[i] for i in range(N_src)],
     local_coords,
     global_coords
 )
-
 
 # It tells the average flux in the PSF core for each source
 # src_spectra_sparse = [GetSpectrum(data_sparse,  sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
@@ -445,20 +455,13 @@ from tools.multisrc import VisualizeSources, PlotSourcesProfiles
 VisualizeSources(data_sparse, model_sparse, norm=norm_field, mask=valid_mask)
 PlotSourcesProfiles(data_sparse, model_sparse, sources_valid, radius=16, title='Predicted PSFs')
 
-
 #%%
-# merged_config = MultipleTargetsInOneObservation(config_file, N_src)
-merged_config = MultipleTargetsInOneObservation(config_file, N_batch := 16)
+# merged_config = MultipleTargetsInOneObservation(config_file, N_batch := 16)
+merged_config = MultipleTargetsInOneObservation(config_file, N_src)
 
-merged_inputs = inputs_managers_union.unstack(inputs_managers_union.stack())
+# for key, value in sources_inputs.items():
+#     print(f'{key}: {value.shape}')
 
-merged_inputs['dx'] = merged_inputs['dx'].unsqueeze(-1).repeat(1,N_wvl)
-merged_inputs['dy'] = merged_inputs['dy'].unsqueeze(-1).repeat(1,N_wvl)
-
-for key, value in merged_inputs.items():
-    print(f'{key}: {value.shape}')
-
-#%%
 def select_sources(src_dict: dict, selected_ids: list) -> dict:
     result_dict = {}
     for key, tensor in src_dict.items():
@@ -468,27 +471,651 @@ def select_sources(src_dict: dict, selected_ids: list) -> dict:
             result_dict[key] = tensor
     return result_dict
 
-selected_ids = np.random.choice(range(N_src), min(N_batch, N_src), replace=False)
 
-merged_inputs = select_sources(merged_inputs, selected_ids)
+#%%
+'''
+shared_inputs.set_optimizable(['dx'], False)
+shared_inputs.set_optimizable(['dy'], False)
+shared_inputs.set_optimizable(['bg'], False)
+shared_inputs.set_optimizable(['s_pow'], False)
+# inputs_manager.set_optimizable(['theta'], False)
+# inputs_manager.set_optimizable(['ratio'], False)
+shared_inputs.set_optimizable(['amp'], False)
+shared_inputs.set_optimizable(['alpha'], False)
+shared_inputs.set_optimizable(['b'], False)
+shared_inputs.set_optimizable(['Jx'], False)
+shared_inputs.set_optimizable(['Jy'], False)
+shared_inputs.set_optimizable(['Jxy'], False)
+shared_inputs.set_optimizable(['GL_frac'], True)
+shared_inputs.set_optimizable(['F'], False)
 
-for key, value in merged_inputs.items():
-    print(f'{key}: {value.shape}')
+individual_inputs.set_optimizable(['F_norm'], True)
+individual_inputs.set_optimizable(['dx'], False)
+individual_inputs.set_optimizable(['dy'], False)
+'''
+
+all_inputs.set_optimizable(['dx', 'dy', 'bg', 's_pow', 'amp', 'alpha', 'b', 'Jx', 'Jy', 'Jxy', 'F'], False)
+all_inputs.set_optimizable(['GL_frac', 'F_norm'], True)
+
+#%%
+x0 = all_inputs.stack()
+empty_img   = torch.zeros([N_wvl, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) * 0 + 1
+
+torch.cuda.empty_cache()
+model.Update(config=merged_config, init_grids=True, init_pupils=True, init_tomography=True)
+
+#%%
+def func_fit(x_):
+    sources_inputs = all_inputs.unstack(x_, update=False)
+    sources_inputs['dx'] = sources_inputs['dx'].unsqueeze(-1).repeat(1,N_wvl)
+    sources_inputs['dy'] = sources_inputs['dy'].unsqueeze(-1).repeat(1,N_wvl)
+    
+    GL_frac = nn.functional.tanh(sources_inputs['GL_frac'].abs())
+    sources_inputs['Cn2_weights'] = torch.stack([GL_frac, 1-GL_frac]).T
+
+    PSF_ = model(sources_inputs) * norm_factors * sources_inputs['F_norm'].view(-1,1,1,1)
+      
+    return add_ROIs( empty_img*0.0, PSF_, local_coords, global_coords )
+
+
+def loss_fit(x_):
+    simulated_field = func_fit(x_)
+    
+    l1 = F.smooth_l1_loss(data_sparse*wvl_weights, simulated_field*wvl_weights, reduction='mean')
+    # l2 = F.mse_loss(data_sparse*wvl_weights, simulated_field*wvl_weights, reduction='mean')
+    return l1 * 1e-3 #+ l2 * 5e-6
 
 
 #%%
 torch.cuda.empty_cache()
-model.Update(config=merged_config, init_grids=True, init_pupils=True, init_tomography=True)
-
-with torch.no_grad():
-    AAA = model(merged_inputs)
+result_global = minimize(loss_fit, x0, max_iter=300, tol=1e-3, method='l-bfgs', disp=2)
 
 #%%
-for i in range(AAA.shape[0]):
-    plt.imshow(AAA[i,...].mean(dim=0).log10().cpu().numpy())
-    plt.axis('off')
+with torch.no_grad():
+    x1 = result_global.x.clone()
+    # x1 = x0
+    sources_inputs_fitted = all_inputs.unstack(x1, update=True)
+    field_fitted = func_fit(x1)
+
+
+#%%
+# VisualizeSources(data_sparse, model_sparse, norm=norm_field, mask=valid_mask)
+# PlotSourcesProfiles(data_sparse, model_sparse, sources_valid, radius=16, title='Predicted PSFs')
+
+VisualizeSources(data_sparse, field_fitted, norm=norm_field, mask=valid_mask)
+PlotSourcesProfiles(data_sparse, field_fitted, sources_valid, radius=16, title='Fitted PSFs')
+
+
+#%% ------ Adam implementation
+
+# Convert to PyTorch parameters for optimization
+x0_param = nn.Parameter(all_inputs.stack().clone(), requires_grad=True)
+
+# Create Adam optimizer
+optimizer = optim.Adam([x0_param], lr=1e-3)
+
+# Hyperparameters for optimization
+num_epochs = 30
+
+# Progress tracking
+losses = []
+
+# Main optimization loop
+for epoch in range(num_epochs):
+    epoch_loss = 0.0
+    optimizer.zero_grad()  # Zero gradients at the beginning of each epoch
+
+
+
+
+#%% --------------- Tiled optimization ------------------------------
+def find_closest_sources(i_src: int, N: int) -> np.ndarray:
+    """
+    Find N closest sources to the source with index i_src.
+
+    Args:
+        i_src: Index of the reference source
+        N: Number of closest sources to return
+
+    Returns:
+        numpy array of indices of N closest sources, sorted by distance
+    """
+    sources_ = sources_valid.to_numpy()[:, :-1]  # Exclude the last column
+    deltas = sources_ - sources_[i_src]
+    dist_sq = np.einsum('ij,ij->i', deltas, deltas)  # Efficient way to compute squared distances
+    indices = np.argpartition(dist_sq, N)[:N]  # Get indices of N smallest distances
+    return indices[np.argsort(dist_sq[indices])]  # Sort indices by distance
+
+
+def create_proximity_table(sources_data: pd.DataFrame) -> np.ndarray:
+    """
+    Create a proximity table for all sources.
+
+    Args:
+        sources_data: DataFrame containing source positions
+
+    Returns:
+        N_src x N_src numpy array where element [i,j] is the squared distance
+        between source i and source j
+    """
+    sources_ = sources_data.to_numpy()[:, :-1]  # Exclude the last column
+    N = len(sources_)
+    proximity_table = np.zeros((N, N))
+
+    for i in range(N):
+        deltas = sources_ - sources_[i]
+        proximity_table[i, :] = np.einsum('ij,ij->i', deltas, deltas)
+
+    return proximity_table # [pix^2]
+
+
+def get_sources_in_ROI(i_src: int, roi_radius: float, proximity_table: np.ndarray) -> list:
+    """
+    Find all sources within a specified ROI around the selected source.
+
+    Args:
+        i_src: Index of the center source
+        roi_radius: Radius of ROI in pixels
+        proximity_table: Pre-computed proximity table with squared distances
+
+    Returns:
+        List of indices of sources within the ROI, sorted by distance
+    """
+    # Get squared distances from source i_src to all other sources
+    distances = proximity_table[i_src, :]
+
+    # Find indices of sources within the ROI radius (using squared distance)
+    indices = np.where(distances <= roi_radius**2)[0]
+
+    # Sort indices by distance
+    return indices[np.argsort(distances[indices])].tolist()
+
+
+def get_N_closest_sources(i_src: int, n: int, proximity_table: np.ndarray) -> list:
+    """
+    Find the N closest sources to the selected source.
+
+    Args:
+        i_src: Index of the center source
+        n: Number of closest sources to return (including the center source)
+        proximity_table: Pre-computed proximity table with squared distances
+
+    Returns:
+        List of indices of N closest sources, sorted by distance
+    """
+    # Get squared distances from source i_src to all other sources
+    distances = proximity_table[i_src, :]
+
+    # Get indices of n smallest distances (including the center source)
+    indices = np.argpartition(distances, min(n, len(distances)-1))[:n]
+    # Sort indices by distance
+    return indices[np.argsort(distances[indices])].tolist()
+
+
+def select_sources_in_tile(
+    sources_data: pd.DataFrame,
+    proximity_table: np.ndarray,
+    x_range: tuple,
+    y_range: tuple,
+    d_offset: float,
+    N: int
+) -> list:
+    """
+    Select all sources within a specified tile plus some sources outside the tile
+    but within d_offset distance, ensuring that exactly N sources are returned.
+
+    Args:
+        sources_data: DataFrame containing source positions and other info
+        proximity_table: Pre-computed proximity table with squared distances
+        x_range: (x_min, x_max) defining the tile's x boundaries
+        y_range: (y_min, y_max) defining the tile's y boundaries
+        d_offset: Maximum distance outside the tile to consider additional sources
+        N: Exact number of sources to return
+
+    Returns:
+        List of indices of selected sources
+    """
+    sources_pos = sources_data[['x_peak', 'y_peak']].to_numpy()
+
+    # Extract x and y range values
+    x_min, x_max = x_range
+    y_min, y_max = y_range
+
+    # Find sources within the tile
+    in_tile_mask = ((sources_pos[:, 0] >= x_min) &
+                   (sources_pos[:, 0] <= x_max) &
+                   (sources_pos[:, 1] >= y_min) &
+                   (sources_pos[:, 1] <= y_max))
+
+    in_tile_indices = np.where(in_tile_mask)[0].tolist()
+
+    # If we have exactly N sources, return them
+    if len(in_tile_indices) == N:
+        return in_tile_indices
+
+    # If we have fewer than N sources within the tile, add nearby sources
+    if len(in_tile_indices) < N:
+        # Find sources outside the tile but within d_offset
+        outside_tile_mask = ~in_tile_mask
+        outside_sources = sources_pos[outside_tile_mask]
+        outside_indices = np.where(outside_tile_mask)[0]
+
+        # Calculate distances to the nearest tile boundary for each outside source
+        distances = np.zeros(len(outside_sources))
+        for i, (x, y) in enumerate(outside_sources):
+            # Calculate distance to nearest x and y boundaries
+            dx = max(0, x_min - x, x - x_max)
+            dy = max(0, y_min - y, y - y_max)
+            # Euclidean distance to nearest boundary
+            distances[i] = np.sqrt(dx**2 + dy**2)
+        # Find indices within d_offset of the tile boundary
+        near_tile_mask = distances <= d_offset
+        near_tile_indices = outside_indices[near_tile_mask].tolist()
+
+        # Sort near tile indices by peak value (brightness)
+        if len(near_tile_indices) > 0:
+            peak_values = sources_data.iloc[near_tile_indices]['peak_value'].to_numpy()
+            sorted_indices = np.argsort(peak_values)[::-1]  # Sort descending
+            near_tile_indices = [near_tile_indices[i] for i in sorted_indices]
+
+        # Add more sources from proximity if needed
+        if len(in_tile_indices) + len(near_tile_indices) < N:
+            # Find remaining sources
+            remaining_indices = np.setdiff1d(np.arange(len(sources_data)),
+                                            np.concatenate([in_tile_indices, near_tile_indices]))
+
+            # If we have tile sources, find closest to those
+            if len(in_tile_indices) > 0:
+                # Use the closest source from the tile as reference
+                ref_source = in_tile_indices[0]
+                distances = proximity_table[ref_source, remaining_indices]
+                sorted_indices = np.argsort(distances)
+                additional_indices = remaining_indices[sorted_indices][:N - len(in_tile_indices) - len(near_tile_indices)]
+            else:
+                # Use the brightest source as reference
+                peak_values = sources_data.iloc[remaining_indices]['peak_value'].to_numpy()
+                sorted_indices = np.argsort(peak_values)[::-1]  # Sort descending
+                additional_indices = remaining_indices[sorted_indices][:N - len(in_tile_indices) - len(near_tile_indices)]
+
+            all_indices = in_tile_indices + near_tile_indices + additional_indices.tolist()
+        else:
+            # Just add near tile indices until we have N
+            all_indices = in_tile_indices + near_tile_indices[:N - len(in_tile_indices)]
+
+    # If we have more than N sources within the tile, keep the brightest ones
+    else:
+        peak_values = sources_data.iloc[in_tile_indices]['peak_value'].to_numpy()
+        sorted_indices = np.argsort(peak_values)[::-1]  # Sort descending
+        all_indices = [in_tile_indices[i] for i in sorted_indices[:N]]
+
+    return all_indices
+
+
+proximity_table = create_proximity_table(sources_valid)
+
+# brightest_id = sources_valid['peak_value'].argmax()
+# brightest_pos = sources_valid.iloc[brightest_id][['x_peak', 'y_peak']].to_numpy()
+# x_range = (brightest_pos[0] - 50, brightest_pos[0] + 10)
+# y_range = (brightest_pos[1] - 50, brightest_pos[1] + 10)
+
+# # testo = get_n_closest_sources(brightest_id, N_batch, proximity_table)
+# testo = select_sources_in_tile(sources_valid, proximity_table, x_range, y_range, 50, N_batch)
+
+# model_sparse = add_ROIs(
+#     torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device),
+#     [PSFs_fitted[i,...]*norm_factors[i] for i in testo],
+#     [local_coords[i]  for i in testo],
+#     [global_coords[i] for i in testo]
+# )
+
+# VisualizeSources(data_sparse, model_sparse, norm=norm_field, mask=valid_mask)
+
+
+#%%
+import matplotlib.patches as patches
+
+def split_image_into_tiles(
+    image_shape: tuple,
+    n_tiles_x: int,
+    n_tiles_y: int,
+    border_offset: int = 0
+) -> list:
+    """
+    Split an image into NxM tiles with an optional border offset.
+
+    Args:
+        image_shape: Tuple of (height, width) for the image
+        n_tiles_x: Number of tiles along x-axis
+        n_tiles_y: Number of tiles along y-axis
+        border_offset: Pixels to exclude from borders
+
+    Returns:
+        List of dictionaries containing tile information with x_range and y_range
+    """
+    height, width = image_shape[-2:]
+
+    # Calculate effective dimensions after applying border offset
+    eff_height = height - 2 * border_offset
+    eff_width  = width  - 2 * border_offset
+
+    # Calculate tile sizes
+    tile_height = eff_height // n_tiles_y
+    tile_width = eff_width // n_tiles_x
+
+    tiles = []
+
+    for i in range(n_tiles_y):
+        for j in range(n_tiles_x):
+            # Calculate tile boundaries with offset
+            y_min = border_offset + i * tile_height
+            y_max = border_offset + (i + 1) * tile_height
+            x_min = border_offset + j * tile_width
+            x_max = border_offset + (j + 1) * tile_width
+
+            # Ensure the last tiles include any remaining pixels
+            if i == n_tiles_y - 1:
+                y_max = height - border_offset
+            if j == n_tiles_x - 1:
+                x_max = width - border_offset
+
+            tile_info = {
+                'x_range': (x_min, x_max),
+                'y_range': (y_min, y_max),
+                'id': (i, j)
+            }
+
+            tiles.append(tile_info)
+
+    return tiles
+
+
+def visualize_tiles(
+    image,
+    tiles: list,
+    title: str = 'Image Tiles',
+    cmap: str = 'gray',
+    norm = None,
+    alpha: float = 0.7
+) -> None:
+    """
+    Visualize the tiling of an image.
+
+    Args:
+        image: The image data to display
+        tiles: List of tile dictionaries as returned by split_image_into_tiles
+        title: Plot title
+        cmap: Colormap for the image display
+        norm: Normalization for the image display
+        alpha: Alpha value for the rectangle overlay
+    """
+    if torch.is_tensor(image):
+        if image.dim() > 2:
+            # If multi-channel/wavelength, take mean or sum
+            display_img = image.mean(dim=0).cpu().numpy()
+        else:
+            display_img = image.cpu().numpy()
+    else:
+        if image.ndim > 2:
+            # If multi-channel/wavelength, take mean or sum
+            display_img = image.mean(axis=0)
+        else:
+            display_img = image
+
+    plt.figure(figsize=(10, 8))
+    plt.imshow(display_img, origin='lower', cmap=cmap, norm=norm)
+
+    colors = plt.cm.tab10.colors
+
+    for i, tile in enumerate(tiles):
+        x_min, x_max = tile['x_range']
+        y_min, y_max = tile['y_range']
+        width = x_max - x_min
+        height = y_max - y_min
+
+        color = colors[i % len(colors)]
+        rect = patches.Rectangle(
+            (x_min, y_min), width, height,
+            linewidth=2, edgecolor=color, facecolor='none', alpha=alpha
+        )
+        plt.gca().add_patch(rect)
+
+        # Add tile ID label
+        plt.text(
+            x_min + width/2, y_min + height/2,
+            f"Tile {tile['id']}", color=color,
+            ha='center', va='center', fontweight='bold'
+        )
+
+    plt.title(title)
+    plt.tight_layout()
     plt.show()
 
+
+tiles = split_image_into_tiles(data_full.shape, n_tiles_x=4, n_tiles_y=4, border_offset=10)
+visualize_tiles(data_full.sum(axis=0), tiles, title='Image Tiles', norm=norm_field)
+
+#%%
+sources_inputs = all_inputs.unstack(all_inputs.stack())
+sources_inputs['dx'] = sources_inputs['dx'].unsqueeze(-1).repeat(1,N_wvl)
+sources_inputs['dy'] = sources_inputs['dy'].unsqueeze(-1).repeat(1,N_wvl)
+
+
+def simulate_tile(model_inputs, tile, proximity_table, sources, max_sources):
+    
+    x_range, y_range = tile['x_range'], tile['y_range']
+
+    source_indices = select_sources_in_tile(
+        sources,
+        proximity_table,
+        tile['x_range'],
+        tile['y_range'],
+        d_offset = 30,
+        N = max_sources
+    )
+
+    if len(source_indices) == 0:
+        return torch.zeros([N_wvl, tile['y_range']-tile['y_range'], tile['x_range']-tile['x_range']], device=device)
+
+    # Create model for this tile using the selected sources
+    # model_tile = add_ROIs(
+    #     torch.zeros([N_wvl, y_range[1]-y_range[0], x_range[1]-x_range[0]], device=device),
+    #     [PSFs_fitted[i, ...] * norm_factors[i] for i in source_indices],
+    #     [local_coords[i] - torch.tensor([x_range[0], y_range[0]], device=device) for i in source_indices],
+    #     [global_coords[i] for i in source_indices]
+    # )
+    
+    batch_inputs = select_sources(model_inputs, source_indices)
+    PSF_1 = model(batch_inputs)
+
+    model_tile = add_ROIs(
+        torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device),
+        [PSF_1[i,...]*norm_factors[src_id] for i, src_id in enumerate(source_indices)],
+        [local_coords [src_id] for src_id in source_indices],
+        [global_coords[src_id] for src_id in source_indices]
+    )
+    
+    return model_tile[..., y_range[0]:y_range[1], x_range[0]:x_range[1]]
+
+
+torch.cuda.empty_cache()
+with torch.no_grad():
+    tiles_model = [simulate_tile(sources_inputs, tile, proximity_table, sources_valid, max_sources=N_batch) for tile in tqdm(tiles)]
+
+# Concatenate tiles back into image based on their positions
+model_sparse_tiled = torch.zeros_like(data_sparse, device=device)
+for tile, model_tile in zip(tiles, tiles_model):
+    x_min, x_max = tile['x_range']
+    y_min, y_max = tile['y_range']
+    model_sparse_tiled[:, y_min:y_max, x_min:x_max] = model_tile[...]
+
+    
+#%%
+VisualizeSources(data_sparse, model_sparse_tiled.detach(), norm=norm_field, mask=valid_mask)
+
+#%%
+# Create a parameter initialization for inputs_manager_objs
+x0 = individual_inputs.stack()
+
+# Convert to PyTorch parameters for optimization
+x0_param = nn.Parameter(x0.clone(), requires_grad=True)
+
+# Create Adam optimizer
+optimizer = optim.Adam([x0_param], lr=1e-3)
+
+# Hyperparameters for optimization
+num_epochs = 30
+accumulation_steps = len(tiles)  # Accumulate gradients over all tiles
+log_interval = 5
+
+# Progress tracking
+losses = []
+
+# Main optimization loop
+for epoch in range(num_epochs):
+    epoch_loss = 0.0
+    optimizer.zero_grad()  # Zero gradients at the beginning of each epoch
+
+    # Process each tile with gradient accumulation
+    for tile_idx, tile in enumerate(tqdm(tiles, desc=f"Epoch {epoch+1}/{num_epochs}")):
+        # Extract tile boundaries
+        x_range, y_range = tile['x_range'], tile['y_range']
+
+        # Select sources relevant to this tile
+        source_indices = select_sources_in_tile(
+            sources_valid,
+            proximity_table,
+            x_range, y_range,
+            d_offset=30,
+            N=min(N_batch, N_src)
+        )
+
+        if len(source_indices) == 0:
+            continue  # Skip empty tiles
+
+        # Get tile data
+        tile_data = data_sparse[:, y_range[0]:y_range[1], x_range[0]:x_range[1]]
+
+        # Prepare empty image for this tile
+        tile_empty = torch.zeros([N_wvl, y_range[1]-y_range[0], x_range[1]-x_range[0]], device=device)
+
+        # Forward pass - create model for this batch of sources
+        PSFs_fit = []
+        for i, src_idx in enumerate(source_indices):
+            # Get parameters for this source
+            src_params = x0_param[src_idx].unsqueeze(0)
+            dxdy_inp = individual_inputs.unstack(src_params, update=False)
+
+            # Extend dx and dy for all wavelengths
+            dxdy_inp['dx'] = dxdy_inp['dx'].repeat(1, N_wvl)
+            dxdy_inp['dy'] = dxdy_inp['dy'].repeat(1, N_wvl)
+
+            # Set source directions
+            dxdy_inp['src_dirs_x'] = dxdy_inp['src_dirs_x'][0].unsqueeze(0)
+            dxdy_inp['src_dirs_y'] = dxdy_inp['src_dirs_y'][0].unsqueeze(0)
+
+            # Generate PSF
+            psf = model(pred_inputs | dxdy_inp)
+
+            # Apply normalization
+            flux_norm = norm_factors[src_idx]
+            PSFs_fit.append(psf.squeeze() * flux_norm)
+
+        # Add all PSFs to the tile
+        local_tile_coords = [local_coords[idx] - torch.tensor([x_range[0], y_range[0]], device=device) for idx in source_indices]
+        model_tile = add_ROIs(tile_empty, PSFs_fit, local_tile_coords, [global_coords[idx] for idx in source_indices])
+
+        # Calculate loss for this tile
+        tile_loss = F.smooth_l1_loss(tile_data, model_tile, reduction='sum')
+
+        # Normalize loss by tile size and accumulate
+        normalized_loss = tile_loss / (tile_data.shape[0] * tile_data.shape[1] * tile_data.shape[2])
+        normalized_loss = normalized_loss / accumulation_steps  # Scale by accumulation steps
+        normalized_loss.backward()
+
+        # Track loss
+        epoch_loss += normalized_loss.item()
+
+        # Clear cache to save memory
+        torch.cuda.empty_cache()
+
+    # Update weights
+    optimizer.step()
+
+    # Record average loss
+    avg_loss = epoch_loss / len(tiles)
+    losses.append(avg_loss)
+
+    # Print progress
+    if (epoch + 1) % log_interval == 0:
+        print(f"Epoch {epoch+1}/{num_epochs}, Loss: {avg_loss:.6f}")
+
+    # Adaptive learning rate - reduce if loss plateaus
+    if epoch > 10 and losses[-1] > 0.98 * losses[-2]:
+        for param_group in optimizer.param_groups:
+            param_group['lr'] *= 0.8
+            print(f"Reducing learning rate to {param_group['lr']:.6f}")
+
+# Update the inputs_manager_objs with optimized parameters
+with torch.no_grad():
+    for i in range(N_src):
+        src_params = individual_inputs.unstack(x0_param[i].unsqueeze(0), update=False)
+        individual_inputs['dx'][i] = src_params['dx'].flatten()
+        individual_inputs['dy'][i] = src_params['dy'].flatten()
+        individual_inputs['F_norm'][i] = src_params['F_norm'].flatten()
+
+# Plot the loss curve
+plt.figure(figsize=(10, 5))
+plt.plot(losses)
+plt.title('Optimization Loss')
+plt.xlabel('Epoch')
+plt.ylabel('Loss')
+plt.grid(True)
+plt.show()
+
+# Generate final model with optimized parameters
+with torch.no_grad():
+    # Use the tiled approach for the final model to save memory
+    model_sparse_optimized = torch.zeros_like(data_sparse, device=device)
+
+    for tile in tqdm(tiles, desc="Generating final model"):
+        x_range, y_range = tile['x_range'], tile['y_range']
+        source_indices = select_sources_in_tile(
+            sources_valid, proximity_table, x_range, y_range, d_offset=30, N=min(N_batch, N_src)
+        )
+
+        if len(source_indices) == 0:
+            continue
+
+        tile_empty = torch.zeros([N_wvl, y_range[1]-y_range[0], x_range[1]-x_range[0]], device=device)
+        PSFs_fit = []
+
+        for src_idx in source_indices:
+            # Get optimized parameters
+            dxdy_inp = individual_inputs.unstack(x0_param[src_idx].unsqueeze(0), update=False)
+            dxdy_inp['dx'] = dxdy_inp['dx'].repeat(1, N_wvl)
+            dxdy_inp['dy'] = dxdy_inp['dy'].repeat(1, N_wvl)
+            dxdy_inp['src_dirs_x'] = dxdy_inp['src_dirs_x'][0].unsqueeze(0)
+            dxdy_inp['src_dirs_y'] = dxdy_inp['src_dirs_y'][0].unsqueeze(0)
+
+            # Generate PSF with optimized parameters
+            psf = model(pred_inputs | dxdy_inp)
+            flux_norm = norm_factors[src_idx] * dxdy_inp['F_norm'][0]
+            PSFs_fit.append(psf.squeeze() * flux_norm)
+
+        # Add all PSFs to the tile
+        local_tile_coords = [local_coords[idx] - torch.tensor([x_range[0], y_range[0]], device=device) for idx in source_indices]
+        model_tile = add_ROIs(tile_empty, PSFs_fit, local_tile_coords, [global_coords[idx] for idx in source_indices])
+
+        # Add to final model
+        model_sparse_optimized[:, y_range[0]:y_range[1], x_range[0]:x_range[1]] = model_tile
+
+        # Clear cache to save memory
+        torch.cuda.empty_cache()
+
+# Visualize the optimized model
+VisualizeSources(data_sparse, model_sparse_optimized, norm=norm_field, mask=valid_mask)
+PlotSourcesProfiles(data_sparse, model_sparse_optimized, sources_valid, radius=16, title='Optimized PSFs')
 
 
 #%% ====================================================== Fitting =======================================================
@@ -496,42 +1123,33 @@ from tools.utils import OptimizableLO
 
 LO_basis = OptimizableLO(model, ignore_pupil=False)
 
-inputs_manager.set_optimizable('LO_coefs', False)
-inputs_manager.set_optimizable('Jxy', False)
+shared_inputs.set_optimizable('LO_coefs', False)
+shared_inputs.set_optimizable('Jxy', False)
 
-inputs_manager.delete('amp')
-inputs_manager.delete('beta')
-inputs_manager.delete('alpha')
-inputs_manager.delete('b')
-inputs_manager.delete('ratio')
-inputs_manager.delete('theta')
+shared_inputs.delete('amp')
+shared_inputs.delete('beta')
+shared_inputs.delete('alpha')
+shared_inputs.delete('b')
+shared_inputs.delete('ratio')
+shared_inputs.delete('theta')
 
-inputs_manager.delete('dx')
-inputs_manager.delete('dy')
-inputs_manager.delete('s_pow')
+shared_inputs.delete('dx')
+shared_inputs.delete('dy')
+shared_inputs.delete('s_pow')
 
-print(inputs_manager)
+print(shared_inputs)
 
-inputs_manager_objs.set_optimizable('F_norm', True)
+individual_inputs.set_optimizable('F_norm', True)
 
 #%%
 x0 = torch.cat([
-    inputs_manager.stack().flatten(),
-    inputs_manager_objs.stack().flatten(),
+    shared_inputs.stack().flatten(),
+    individual_inputs.stack().flatten(),
 ])
-x_size = inputs_manager.get_stacked_size()
+x_size = shared_inputs.get_stacked_size()
 
 empty_img   = torch.zeros([N_wvl, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
 wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) * 0 + 1
-
-#%%
-def find_closest_sources(i_src, N):
-    sources_ = sources_valid.to_numpy()[:,:-1]
-    deltas = sources_ - sources_[i_src]
-    dist_sq = np.einsum('ij,ij->i', deltas, deltas)
-    indices = np.argpartition(dist_sq, N)[:N]
-    return indices[np.argsort(dist_sq[indices])]
-
 
 #%%
 torch.cuda.empty_cache()
@@ -541,8 +1159,8 @@ def func_fit(x): # TODO: relative weights for different brigtness
     PSFs_fit = []
     for i in range(N_src):
     # for i in selected_ids:
-        params_dict = inputs_manager.unstack(x[:x_size].unsqueeze(0))
-        F_dxdy_dict = inputs_manager_objs.unstack(x[x_size:].view(N_src, -1))
+        params_dict = shared_inputs.unstack(x[:x_size].unsqueeze(0))
+        F_dxdy_dict = individual_inputs.unstack(x[x_size:].view(N_src, -1))
 
         # phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_map_size, LO_map_size))
 
@@ -574,7 +1192,7 @@ _ = func_fit(x0)
 #%%
 result_global = minimize(loss_fit, x0, max_iter=300, tol=1e-3, method='bfgs', disp=2)
 x0 = result_global.x.clone()
-x_fit_dict = inputs_manager.unstack(x0.unsqueeze(0), include_all=False)
+x_fit_dict = shared_inputs.unstack(x0.unsqueeze(0), include_all=False)
 
 #%% 
 # with torch.no_grad():
@@ -597,9 +1215,9 @@ Jx_model   = QuadraticModel(λ_sparse)
 Jy_model   = QuadraticModel(λ_sparse)
 norm_model = QuadraticModel(λ_sparse)
 
-params_Jx   = Jx_model.fit(inputs_manager['Jx'].flatten())
-params_Jy   = Jy_model.fit(inputs_manager['Jy'].flatten())
-params_F    = F_model.fit(inputs_manager['F'].flatten())
+params_Jx   = Jx_model.fit(shared_inputs['Jx'].flatten())
+params_Jy   = Jy_model.fit(shared_inputs['Jy'].flatten())
+params_F    = F_model.fit(shared_inputs['F'].flatten())
 params_norm = norm_model.fit(PSF_norm_factor.flatten(), [2, 1, 1e3])
 
 Fx_curve_fit   = Jx_model(params_Jx)
@@ -653,11 +1271,11 @@ norm_new = curve_sample(λ_sparse, curve_params_, 'norm')
 #%
 plt.figure(figsize=(10, 6))
 
-plt.plot(λ_sparse.cpu(), inputs_manager['Jx'].flatten().cpu(), label='Data', color='tab:blue')
+plt.plot(λ_sparse.cpu(), shared_inputs['Jx'].flatten().cpu(), label='Data', color='tab:blue')
 plt.plot(λ_sparse.cpu(), Fx_curve_fit.cpu(), label='Fitted Quadratic Curve', linestyle='--', color='tab:blue')
 plt.scatter(λ_sparse.cpu(), Jx_new.cpu(), label='New Quadratic Curve', color='tab:blue', marker='x')
 
-plt.plot(λ_sparse.cpu(), inputs_manager['Jy'].flatten().cpu(), label='Data', color='tab:orange')
+plt.plot(λ_sparse.cpu(), shared_inputs['Jy'].flatten().cpu(), label='Data', color='tab:orange')
 plt.plot(λ_sparse.cpu(), Fy_curve_fit.cpu(), label='Fitted Quadratic Curve', linestyle='--', color='tab:orange')
 plt.scatter(λ_sparse.cpu(), Jy_new.cpu(), label='New Quadratic Curve', color='tab:orange', marker='x')
 plt.xlabel('Wavelength [nm]')
@@ -674,7 +1292,7 @@ plt.legend()
 plt.grid(True)
 plt.show()
 
-plt.plot(λ_sparse.cpu(), inputs_manager['F'].flatten().cpu(), label='Data', color='tab:green')
+plt.plot(λ_sparse.cpu(), shared_inputs['F'].flatten().cpu(), label='Data', color='tab:green')
 plt.plot(λ_sparse.cpu(), F_curve_fit.cpu(), label='Fitted Quadratic Curve', linestyle='--', color='tab:green')
 plt.scatter(λ_sparse.cpu(), F_new.cpu(), label='New Quadratic Curve', color='tab:green', marker='x')
 plt.xlabel('Wavelength [nm]')
@@ -683,20 +1301,20 @@ plt.grid(True)
 plt.show()
 
 #%%
-inputs_manager.set_optimizable(['F', 'Jx', 'Jy'],  False)
-inputs_manager_objs.set_optimizable(['dx', 'dy'], False)
+shared_inputs.set_optimizable(['F', 'Jx', 'Jy'],  False)
+individual_inputs.set_optimizable(['dx', 'dy'], False)
 
-print(inputs_manager)
+print(shared_inputs)
 
 #%%
-x_size_model = inputs_manager.get_stacked_size()
+x_size_model = shared_inputs.get_stacked_size()
 x_size_curve = curve_inputs.get_stacked_size()
 x_size_total = x_size_curve + x_size_model
 
 x2 = torch.cat([
-    inputs_manager.stack().flatten(),
+    shared_inputs.stack().flatten(),
     curve_inputs.stack().flatten(),
-    inputs_manager_objs.stack().flatten(),
+    individual_inputs.stack().flatten(),
 ])
 
 empty_img = torch.zeros([N_wvl, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
@@ -705,19 +1323,19 @@ empty_img = torch.zeros([N_wvl, data_sparse.shape[-2], data_sparse.shape[-1]], d
 def func_fit_curve(x):
     PSFs_fit = []
     for i in range(N_src):
-        params_dict = inputs_manager.unstack(x[:x_size_model].unsqueeze(0))
+        params_dict = shared_inputs.unstack(x[:x_size_model].unsqueeze(0))
         curve_p_    = curve_inputs.unstack(x[x_size_model:x_size_curve+x_size_model].unsqueeze(0))
-        F_dxdy_dict = inputs_manager_objs.unstack(x[x_size_curve+x_size_model:].view(N_src, -1))
+        F_dxdy_dict = individual_inputs.unstack(x[x_size_curve+x_size_model:].view(N_src, -1))
         
         curve_dict = {p: curve_sample(λ_sparse, curve_p_, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
         
-        phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_map_size, LO_map_size))
+        phase_func = lambda: LO_basis(shared_inputs["LO_coefs"].view(1, LO_map_size, LO_map_size))
         
         # F_dxdy_dict['dx'] = F_dxdy_dict['dx'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # Extend to simulated number of wavelength
         # F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
 
-        F_dxdy_dict['dx'] = inputs_manager_objs['dx'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # Extend to simulated number of wavelength
-        F_dxdy_dict['dy'] = inputs_manager_objs['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
+        F_dxdy_dict['dx'] = individual_inputs['dx'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # Extend to simulated number of wavelength
+        F_dxdy_dict['dy'] = individual_inputs['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
 
         inputs = params_dict | curve_dict | F_dxdy_dict
         flux_norm = (src_spectra_sparse[i] * norm_new)[:,None,None] * F_dxdy_dict['F_norm'][i]
@@ -741,9 +1359,9 @@ _ = loss_fit_curve(x2)
 result_global = minimize(loss_fit_curve, x2, max_iter=300, tol=1e-3, method='bfgs', disp=2)
 x2 = result_global.x.clone().detach()
 
-x_fit_dict = inputs_manager.unstack(x2[:x_size_model].unsqueeze(0))
+x_fit_dict = shared_inputs.unstack(x2[:x_size_model].unsqueeze(0))
 x_curve_fit_dict = curve_inputs.unstack(x2[x_size_model:x_size_curve+x_size_model].unsqueeze(0))
-flux_corrections = inputs_manager_objs['F_norm']
+flux_corrections = individual_inputs['F_norm']
 
 #%% 
 model_fit_curves = func_fit_curve(result_global.x).detach()
@@ -779,8 +1397,8 @@ for batch_id in tqdm(range(len(λ_batches))):
         }
 
         dxdy_dict = {
-            'dx': inputs_manager_objs['dx'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0), # Extend to simulated number of wavelength
-            'dy': inputs_manager_objs['dy'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0) # assuming the same shift for all wavelengths
+            'dx': individual_inputs['dx'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0), # Extend to simulated number of wavelength
+            'dy': individual_inputs['dy'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0) # assuming the same shift for all wavelengths
         }
 
         dict_selected = x_fit_dict | dict_selected | dxdy_dict

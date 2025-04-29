@@ -40,7 +40,6 @@ class TipTorch_new(torch.nn.Module):
 
 
     def InitValues(self):
-        # self.auto_update = False
         # Reading parameters from the config file
         self.N_src = self.config['NumberSources'] # Make sure it is type(int) already in the config file
         
@@ -90,8 +89,9 @@ class TipTorch_new(torch.nn.Module):
         self.h  = self.Cn2_heights * self.stretch
         self.nL = self.Cn2_heights.shape[-1]
 
-        # N_src_tomo is very imnportant. It must be one if all simulated targets share the same atmospheric conditions.
-        # Otherwise, it must be equal to the number of simulated targets
+        # N_src_tomo is very important! It must = 1 if all simulated targets share the same atmospheric conditions.
+        # Doing so can dramatically reduce the computational cost. Otherwise, for multiple targets in multiple conditions,
+        # it must be equal to the number of simulated targets
         self.N_src_tomo = self.h.shape[0]
         assert self.N_src_tomo == 1 or self.N_src_tomo == self.N_src
 
@@ -175,20 +175,8 @@ class TipTorch_new(torch.nn.Module):
         # Initialize index of refraction values
         self.IOR_src_wvl = self.n_air(self.wvl)
         self.IOR_wvl_atm = self.n_air(self.wvl_atm)
-        self.IOR_GS_wvl  = self.n_air(self.GS_wvl)
-
-        # self.auto_update = True
-
-
-    # @property
-    # def x(self):
-    #     return self._x
-
-    # @x.setter
-    # def x(self, value):
-    #     self._x = value
-    #     self._result = self.compute(value)
-
+        self.IOR_GS_wvl  = self.n_air(self.GS_wvl) # GS_wvl may depend on the filter for SCAO or on LGS wavelength
+ 
 
     def _FFTAutoCorr(self, x):
         return fft.fftshift( fft.ifft2(fft.fft2(x, dim=(-2,-1)).abs()**2, dim=(-2,-1)), dim=(-2,-1) ) / x.shape[-2] / x.shape[-1]
@@ -299,9 +287,11 @@ class TipTorch_new(torch.nn.Module):
         last_one = len(mask_slice)-mask_slice[::-1].index(1)-1 # detect the borders of the correction area
         self.nOtf_AO = last_one-first_one+1
 
+        self.dk = 2*self.kc / self.nOtf_AO # Correct dk to account for the actual sampling
+
         corrected_ROI = (slice(first_one, last_one+1), slice(first_one, last_one+1))
         self.mask_corrected_AO = pdims(self.mask_corrected[corrected_ROI], -1)
-        self.mask         = pdims( self.mask, -1 )
+        self.mask = pdims( self.mask, -1 )
 
         # Computing frequency grids for the AO corrected and uncorrected regions
         self.kx_AO = pdims( self.kx[corrected_ROI], -1 )
@@ -355,7 +345,7 @@ class TipTorch_new(torch.nn.Module):
             ids = np.array( [[i, j] for i in range(-n_times_y+1, n_times_y) for j in range(-n_times_x+1, n_times_x) if i != 0 or j != 0] )
             
             # The 0-th dimension is used to store shifted spatial frequency
-            # This is thing is 4D: (aliasing samples) x (atmo. layers) x (kx) x (ky)
+            # This is thing is 4D: (aliased combs) x (atmo. layers) x (kx) x (ky)
             m = self.make_tensor(ids[:,0])
             n = self.make_tensor(ids[:,1])
             self.N_combs = m.shape[0]
@@ -373,10 +363,8 @@ class TipTorch_new(torch.nn.Module):
         self.center_aligner = torch.exp( 1j * torch.pi * (self.U + self.V) * (1 - self.N_pix%2))
 
         # since only half of PSD is used, the padding of AO-corrected PSD component is done only on the left
-        # pad_left, pad_right, pad_top, pad_bottom
-        self.PSD_padder = torch.nn.ZeroPad2d( (a:=((self.nOtf-self.nOtf_AO)//2), 0, a, a) )
+        self.PSD_padder = torch.nn.ZeroPad2d( (a:=((self.nOtf-self.nOtf_AO)//2), 0, a, a) ) # pad_left, pad_right, pad_top, pad_bottom
 
-        # if self.piston_filter is None:
         self.piston_filter = self.PistonFilter(self.k_AO)
         
         # To avoid reinitializing it without a need
@@ -416,6 +404,9 @@ class TipTorch_new(torch.nn.Module):
 
 
     def Update(self, config=None, init_grids=False, init_pupils=False, init_tomography=False):
+        # Update the model with a new configuration. To ensure optimal performance, different
+        # components can be updated independently when needed. By default, only values are updated
+        
         if config is not None:
             self.config = config
         
@@ -432,10 +423,13 @@ class TipTorch_new(torch.nn.Module):
         
         # If the number of sources have changed, reinitialize the tomography projector
         if (self.tomography and init_tomography) or (self.tomography and init_grids):
-            if self.on_axis: # Tomographic src to DM projector for on-axis is just ones
+            if self.on_axis:
+                # Tomographic src to DM projector for on-axis is just an identity matrix
                 self.P_beta_DM = torch.ones([self.N_src, self.nOtf_AO_y, self.nOtf_AO_x, 1, self.N_DM], dtype=torch.complex64, device=self.device) * pdims(self.mask_corrected_AO, 2)
-
-            self.OptimalDMProjector()
+                # TODO: comment
+                self.P_opt = torch.ones([self.N_src_tomo, self.nOtf_AO_y, self.nOtf_AO_x, 1, self.nL], dtype=torch.complex64, device=self.device)
+            else:
+                self.OptimalDMProjector()
     
 
     def _initialize_PSDs_settings(self, PSD_include):
@@ -477,9 +471,7 @@ class TipTorch_new(torch.nn.Module):
         self.oversampling = oversampling
         self.pupil = pupil
         self.is_float = False
-        
-        # self.auto_update = True
-        
+                
         self.AO_type = AO_type
         self.tomography = True if self.AO_type in ['LTAO', 'MCAO', 'GLAO'] else False # TODO: automatic regime selection
 
@@ -538,10 +530,6 @@ class TipTorch_new(torch.nn.Module):
     def DMProjector(self):
         """ Projects correction in the direction of science target(s). Must be updated only when target coordinates were changed """
         
-        # if self.on_axis:
-            # self.P_beta_DM = torch.ones([self.N_src, self.nOtf_AO_y, self.nOtf_AO_x, 1, self.N_DM], dtype=torch.complex64, device=self.device) * pdims(self.mask_corrected_AO, 2)
-            # return
-            
         kx = pdims(self.kx_AO, 1) # [1 x nOtf_AO x nOtf_AO x 1]
         ky = pdims(self.ky_AO, 1) # [1 x nOtf_AO x nOtf_AO x 1]
         h_DM = self.h_DM.view(self.N_src_tomo, 1, 1, self.N_DM) # [N_src_tomo x 1 x 1 x N_DM]
@@ -554,12 +542,8 @@ class TipTorch_new(torch.nn.Module):
         self.P_beta_DM = torch.exp( 2j*torch.pi*h_DM * f ).unsqueeze(-2) # [N_src x nOtf_AO x nOtf_AO x 1 x N_L]
 
 
-    # TODO: input atmospheric params externaly to account user-assumed atmospheric layers instead of simulated ones
+    # TODO: allow to input the atmospheric params externaly to account user-assumed atmospheric layers instead of simulated ones
     def OptimalDMProjector(self):
-        if self.on_axis:
-            self.P_opt = torch.ones([self.N_src_tomo, self.nOtf_AO_y, self.nOtf_AO_x, 1, self.nL], dtype=torch.complex64, device=self.device)
-            return
-        
         h_dm = self.h_DM.view(1, 1, 1, self.N_DM)
         h    = self.h.view(self.N_src_tomo, 1, 1, 1, self.nL)
         opt_w = self.DM_opt_weight.view(self.N_src_tomo, 1, 1, self.N_optdir, 1, 1) 
@@ -632,7 +616,7 @@ class TipTorch_new(torch.nn.Module):
         delay    = self.HOloop_delay # latency between the measurement and the correction
         loopGain = self.HOloop_gain
         
-        #TODO: implement nTh to incorparate wind uncertainty
+        #TODO: implement nTh to incorparate the uncertainty in wind direction
         thetaWind = self.zero_gpu #torch.linspace(0, 2*torch.pi-2*torch.pi/nTh, nTh)
         costh = torch.cos(thetaWind) # stays for the uncertainty in the wind diirection
 
@@ -670,8 +654,8 @@ class TipTorch_new(torch.nn.Module):
         gPSD = torch.abs(self.SxAv)**2 + torch.abs(self.SyAv)**2 + MV*W_n/self.W_atm / pdims(self.wvl_atm/WFS_wvl, 2)**2
         self.Rx = torch.conj(self.SxAv) / gPSD
         self.Ry = torch.conj(self.SyAv) / gPSD
-        # TODO: do we need this?
-        self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-9 # For numerical stability
+        
+        self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-9 # For numerical stability TODO: do we need this, though?
         self.Ry[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-9
 
     '''
@@ -705,7 +689,7 @@ class TipTorch_new(torch.nn.Module):
     
     def SpatioTemporalPSD(self):
         if not self.tomography:
-            #TODO: fix it. "A" should be initialized differently
+            #TODO: fix it. "A" should be initialized differently? Wait, what does it mean even? Leave it like this.
             A = torch.ones([self.W_atm.shape[0], self.nOtf_AO_y, self.nOtf_AO_x], device=self.device)
             Ff = self.Rx*self.SxAv + self.Ry*self.SyAv
             psd_ST = (1 + Ff.abs()**2 * self.h2 - 2*torch.real(Ff*self.h1*A)) * self.W_atm * self.mask_corrected_AO
@@ -757,17 +741,18 @@ class TipTorch_new(torch.nn.Module):
         Rx1 = (2j*torch.pi*self.WFS_d_sub * self.Rx).unsqueeze(0)
         Ry1 = (2j*torch.pi*self.WFS_d_sub * self.Ry).unsqueeze(0)
 
+        # Compute von Karman spectrum for aliased spatial frequencies
         W_mn = self.VonKarmanSpectrum(self.r0.abs().unsqueeze(0), self.L0.abs().unsqueeze(0), self.km**2 + self.kn**2) * self.PR
         
         Q = (Rx1*self.km + Ry1*self.kn) * torch.sinc(self.WFS_d_sub*self.km) * torch.sinc(self.WFS_d_sub*self.kn)
         tf = self.h1.unsqueeze(0).unsqueeze(-1) # [N_combs x N_src x nOtf_AO x n_Otf_AO x nL]
 
         # Add aliasing dimension and more
-        vx = self.vx.view(1, self.N_src, 1, 1, self.nL)
-        vy = self.vy.view(1, self.N_src, 1, 1, self.nL)
+        vx = self.vx.view(1, self.N_src_tomo, 1, 1, self.nL)
+        vy = self.vy.view(1, self.N_src_tomo, 1, 1, self.nL)
         Cn2_weights = self.Cn2_weights.view(1, self.N_src_tomo, 1, 1, self.nL)
         
-        # Add atmo layers dimension
+        # Adds  atmospheric layers dimension
         km, kn = self.km.unsqueeze(-1), self.kn.unsqueeze(-1)
 
         avr = (Cn2_weights * tf * torch.sinc(km*vx*T) * torch.sinc(kn*vy*T) * \
@@ -787,7 +772,6 @@ class TipTorch_new(torch.nn.Module):
 
 
     def ChromatismPSD(self):
-        # GS_wvl maaay depend on the filter for SCAO
         n2 = self.IOR_GS_wvl.view(self.N_src, 1, 1, 1)
         n1 = self.IOR_src_wvl.view(1, self.N_wvl, 1, 1)
         
@@ -817,7 +801,7 @@ class TipTorch_new(torch.nn.Module):
         V_prime = self.U * sin_theta + self.V * cos_theta
 
         Djitter = pdims(self.u_max.pow(2) * self.jitter_norm_fact, 2) * ( (Jx*U_prime)**2 + (Jy*V_prime)**2 )
-        return torch.exp(-0.5 * Djitter) #TODO: cover Nyquist sampled case?
+        return torch.exp(-0.5 * Djitter) #TODO: cover the Nyquist sampled case? But shouldn't it be automatic, already?
     
 
     def NoiseVariance(self):
@@ -836,7 +820,7 @@ class TipTorch_new(torch.nn.Module):
         varShot =  self.var_Shot_const / (2*WFS_Nph)  * (nT/nD).pow(2).unsqueeze(-1)
         
         # Noise variance calculation
-        varNoise = self.WFS_excessive_factor * (varRON+varShot) * (self.wvl_atm/WFS_wvl).pow(2).unsqueeze(-1)
+        varNoise = self.WFS_excessive_factor * (varRON + varShot) * (self.wvl_atm / WFS_wvl).pow(2).unsqueeze(-1) # Also rescale to the atmospgeric wavelength
 
         return varNoise
 
@@ -870,12 +854,11 @@ class TipTorch_new(torch.nn.Module):
     '''
 
     def TomographicReconstructors(self, WFS_noise_var, inv_method='lstsq'):
-        
-        # Note that if all simulated sources use the same atmospheric profile, r0, L0, and noise variance,
-        # then it's possible to compute one tomographic reconstructor for all sources.
-        # For example, this is possible if objects are within one FoV and belong to one observation
-                
-        # h = self.h.view(self.N_src, 1, 1, 1, self.nL)
+        '''        
+        Note that if all simulated sources use the same atmospheric profile, r0, L0, and noise variance,
+        then it's possible to compute one tomographic reconstructor for all simulated sources.
+        For example, this is the case when all objects are within one FoV and belong to one observation
+        '''
         h = self.h.view(self.N_src_tomo, 1, 1, 1, self.nL)
         
         kx = pdims(self.kx_AO, 2)
@@ -895,7 +878,7 @@ class TipTorch_new(torch.nn.Module):
         
         # Note, that size of WFS_noise_var == N_src_tomo
         WFS_noise_variance = WFS_noise_var.to(dtype=MP.dtype)
-        # Well, if the same tomo reconstructor is used for all targets, then WFS_noise_variance also must be the same for all targets
+        # As previosuly mentioned, if the same tomo reconstructor is used for all targets, then WFS_noise_variance also must be the same for all targets
         self.C_b = fix_dims( WFS_noise_variance[:self.N_src_tomo], self.N_GS )
         kernel = self.VonKarmanSpectrum(self.r0.abs().to(dtype=MP.dtype), self.L0.abs(), self.k2_AO) * self.piston_filter
         self.C_phi = pdims(kernel, 2) * fix_dims(self.Cn2_weights, self.nL)
@@ -948,7 +931,7 @@ class TipTorch_new(torch.nn.Module):
 
         uu = rxx*uxx + rxy*uxy + ryy*uyy
 
-        V = (1.0+uu)**(-beta) # Moffat shape
+        V = (1.0+uu)**(-beta) # defines the shape of the Moffat
 
         removeInside = 0.0
         E = (beta-1) / (torch.pi*ax*ay)
@@ -962,6 +945,7 @@ class TipTorch_new(torch.nn.Module):
 
     
     def DLPSF(self):
+        #Diffraction-limited PSF
         self.PSF_DL = self.OTF2PSF(self.OTF_static_default) / self.norm_scale
         return self.PSF_DL
 
@@ -997,14 +981,7 @@ class TipTorch_new(torch.nn.Module):
                 if not self.on_axis:
                     self.DMProjector()
 
-        # All PSD components are computed in [rad^2] at the atmospheric wavelength
-        dk = 2*self.kc / self.nOtf_AO
-        PSD_norm = lambda wvl: (dk*wvl*1e9/2/torch.pi)**2
-
-        # Most contributors are computed for the atmospheric wavelength, wavelengths-dependant inputs as well are assumed for the atmospheric wavelength
-        # But WFS operates on another wavelength, so this PSD components is normalized for WFSing wvl 
         # Put all contributiors together and sum up the resulting PSD
-
         self.PSDs = {entry: self.zero_gpu for entry in self.PSD_include}
 
         if self.PSD_include['fitting']:
@@ -1037,10 +1014,15 @@ class TipTorch_new(torch.nn.Module):
               self.PSDs['aliasing'] + \
               self.PSDs['chromatism'] + \
               self.PSDs['Moffat'] + \
-              self.PSDs['diff. refract']) # [N_scr x N_wvl x nOtf_AO x nOtf_AO]
-                
-        self.PSD = PSD * PSD_norm(self.wvl_atm) # [nm^2]
-        return self.half_PSD_to_full(self.PSD)
+              self.PSDs['diff. refract'])
+        # Resulting dimensions are: [N_scr x N_wvl x nOtf_AO x nOtf_AO]
+      
+        # All PSDs are computed in [rad^2] at the atmospheric wvls and then normalized to [nm^2] OPD at tscience wvl
+        PSD_norm = (self.dk*self.wvl_atm*1e9/2/torch.pi)**2
+        # Recover the full-size PSD from the half-sized one
+        self.PSD = self.half_PSD_to_full(PSD * PSD_norm) # [nm^2]
+        
+        return self.PSD
     
     
     def half_PSD_to_full(self, half_PSD):
@@ -1048,7 +1030,7 @@ class TipTorch_new(torch.nn.Module):
         return torch.cat([
             half_PSD,
             # torch.flip(half_PSD[..., :, :n_cols_half-n_cols_half % 2], dims=(-2,-1))
-            torch.flip(half_PSD[..., :, :-1], dims=(-2,-1)) # Works only for odd num.pixels
+            torch.flip(half_PSD[..., :, :-1], dims=(-2,-1)) # Works only for odd num. of pixels
         ], dim=-1)
     
     

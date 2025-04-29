@@ -9,30 +9,27 @@ import pandas as pd
 from photutils.detection import find_peaks
 
 
-def detect_sources(data_src, threshold, box_size, verbose=False):
+def detect_sources(data_src, threshold, box_size, eps=2, verbose=False):
     
     sources = find_peaks(data_src, threshold=threshold, box_size=box_size)
     if verbose: print(f"Detected {len(sources)} sources")
 
-    def merge_sources(sources, eps=2):
-        ''' Helps in the case if a single source was detected as multiple peaks '''
-        positions = np.transpose((sources['x_peak'], sources['y_peak']))
-        
-        db = DBSCAN(eps=eps, min_samples=1).fit(positions)
-
-        unique_labels = set(db.labels_)
-        merged_positions = np.array([ positions[db.labels_ == label].mean(axis=0) for label in unique_labels ])
-        merged_fluxes    = np.array([ data_src[int(pos[1]), int(pos[0])] for pos in merged_positions ])
-
-        merged_sources = pd.DataFrame(merged_positions, columns=['x_peak', 'y_peak'])
-        merged_sources['peak_value'] = merged_fluxes
-        return merged_sources
-
-    sources = merge_sources(sources, eps=2)
-
-    if verbose: print(f"Merged to {len(sources)} sources")
+    # Helps in the case if a single source was detected as multiple peaks
+    positions = np.transpose((sources['x_peak'], sources['y_peak']))
     
-    return sources
+    db = DBSCAN(eps=eps, min_samples=1).fit(positions)
+
+    unique_labels = set(db.labels_)
+    merged_positions = np.array([ positions[db.labels_ == label].mean(axis=0) for label in unique_labels ])
+    merged_fluxes    = np.array([ data_src[int(pos[1]), int(pos[0])] for pos in merged_positions ])
+
+    merged_sources = pd.DataFrame(merged_positions, columns=['x_peak', 'y_peak'])
+    merged_sources['peak_value'] = merged_fluxes
+
+    if verbose:
+        print(f"Merged to {len(merged_sources)} sources")
+    
+    return merged_sources
 
 
 def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
@@ -107,13 +104,54 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
     return ROIs, roi_local_coords, roi_global_coords, valid_ids
 
 
-def add_ROIs(image, ROIs, local_coords, global_coords):    
-    for roi, local_idx, global_idx in zip(ROIs, local_coords, global_coords):
-        (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_idx
-        (y_min_img, y_max_img), (x_min_img, x_max_img) = global_idx
-
-        image[:, y_min_img:y_max_img, x_min_img:x_max_img] += roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+def extract_ROIs_from_coords(image, roi_local_coords, roi_global_coords, PSF_size):
     
+    torch_flag = False
+    if isinstance(image, np.ndarray):
+        xp = np
+    elif isinstance(image, torch.Tensor):
+        xp = torch
+        torch_flag = True
+    else:
+        raise TypeError("Unexpected image data type")
+        
+    ROIs = []
+    D = image.shape[0]  # Depth dimension
+
+    for local_coord, global_coord in zip(roi_local_coords, roi_global_coords):
+        (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_coord
+        (y_min_img, y_max_img), (x_min_img, x_max_img) = global_coord
+
+        # Create a blank 3D box filled with zeros
+        if torch_flag:
+            roi = torch.zeros((D, PSF_size, PSF_size), dtype=image.dtype, device=image.device)
+        else:
+            roi = xp.full((D, PSF_size, PSF_size), dtype=image.dtype, device=image.device)
+        
+        roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi] = image[:, y_min_img:y_max_img, x_min_img:x_max_img]
+        ROIs.append(roi)
+
+    return ROIs
+
+
+def add_ROIs(image, ROIs, local_coords, global_coords):    
+    # If ROIs is a torch tensor with ROIs in the 0th dimension
+    if isinstance(ROIs, torch.Tensor) and ROIs.ndim == 4:  # [num_rois, channels, height, width]
+        for i in range(ROIs.shape[0]):
+            roi = ROIs[i]
+        
+            (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_coords[i]
+            (y_min_img, y_max_img), (x_min_img, x_max_img) = global_coords[i]
+
+            image[:, y_min_img:y_max_img, x_min_img:x_max_img] += roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+    else:
+        # Original implementation for list of ROIs
+        for roi, local_idx, global_idx in zip(ROIs, local_coords, global_coords):
+            (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_idx
+            (y_min_img, y_max_img), (x_min_img, x_max_img) = global_idx
+    
+            image[:, y_min_img:y_max_img, x_min_img:x_max_img] += roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+
     return image
 
 

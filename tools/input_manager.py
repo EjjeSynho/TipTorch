@@ -228,6 +228,8 @@ class InputsManager:
 
         """Stack the parameters into a single tensor."""
         args_dict = {name: param.value for name, param in self.parameters.items() if param.optimizable}
+        if len(args_dict) == 0:
+            return None
         return self.inputs_transformer.stack(args_dict)
 
     def unstack(self, x: torch.Tensor, include_all=True, update=True):
@@ -340,6 +342,9 @@ class InputsManagersUnion:
     """
     Union of multiple InputsManager objects that can be stacked and unstacked together
     while preserving the original dimensions.
+
+    This class provides similar functionality to InputsManager for accessing and
+    manipulating parameters across multiple InputsManager instances.
     """
     
     def __init__(self, input_managers: list):
@@ -426,3 +431,196 @@ class InputsManagersUnion:
                 result.update(unstacked)
         
         return result
+
+    def get_value(self, name: str) -> Any:
+        """Get the value of a parameter from the first manager that contains it.
+
+        Args:
+            name: Parameter name to look for
+
+        Returns:
+            The parameter value
+
+        Raises:
+            KeyError: If parameter is not found in any manager
+        """
+        for manager in self.input_managers:
+            if name in manager.parameters:
+                return manager.parameters[name].value
+        raise KeyError(f"Parameter '{name}' not found in any input manager")
+
+    def get_transform(self, name: str) -> Any:
+        """Get the transform of a parameter from the first manager that contains it.
+
+        Args:
+            name: Parameter name to look for
+
+        Returns:
+            The parameter transform
+
+        Raises:
+            KeyError: If parameter is not found in any manager
+        """
+        for manager in self.input_managers:
+            if name in manager.parameters:
+                return manager.parameters[name].transform
+        raise KeyError(f"Parameter '{name}' not found in any input manager")
+
+    def set_optimizable(self, names: Union[str, list], optimizable: bool):
+        """Set optimizable status for a parameter or list of parameters across all input managers.
+
+        Args:
+            names: Either a single parameter name (str) or a list of parameter names
+            optimizable: Boolean flag to set optimizable status
+        """
+        name_list = [names] if isinstance(names, str) else names
+
+        for manager in self.input_managers:
+            for name in name_list:
+                if name in manager.parameters:
+                    manager.set_optimizable(name, optimizable)
+
+    def is_optimizable(self, name: str) -> bool:
+        """Check if parameter is optimizable in the first manager that contains it.
+
+        Args:
+            name: Parameter name to look for
+
+        Returns:
+            Boolean indicating if parameter is optimizable
+
+        Raises:
+            KeyError: If parameter is not found in any manager
+        """
+        for manager in self.input_managers:
+            if name in manager.parameters:
+                return manager.parameters[name].optimizable
+        raise KeyError(f"Parameter '{name}' not found in any input manager")
+
+    def to_dict(self) -> dict:
+        """Convert all parameters from all managers to a dictionary.
+
+        Returns:
+            dict: Combined dictionary of all parameters
+        """
+        result = {}
+        for manager in self.input_managers:
+            result.update(manager.to_dict())
+        return result
+
+    def __getitem__(self, item):
+        """Get a parameter value using dictionary-like access.
+
+        Args:
+            item: Parameter name
+
+        Returns:
+            Parameter value
+        """
+        return self.get_value(item)
+
+    def __setitem__(self, key, value):
+        """Set a parameter value using dictionary-like access.
+        Sets the value in all managers that contain the parameter.
+
+        Args:
+            key: Parameter name
+            value: New value
+        """
+        for manager in self.input_managers:
+            if key in manager.parameters:
+                manager.parameters[key].value = value
+
+    def to(self, device: torch.device):
+        """Move all parameters to the specified device.
+
+        Args:
+            device: Target device
+        """
+        for manager in self.input_managers:
+            manager.to(device)
+
+    def to_float(self):
+        """Convert all parameter values to float32."""
+        for manager in self.input_managers:
+            manager.to_float()
+
+    def to_double(self):
+        """Convert all parameter values to float64."""
+        for manager in self.input_managers:
+            manager.to_double()
+
+    def delete(self, name: str):
+        """Delete a parameter from all managers that contain it."""
+        for manager in self.input_managers:
+            if name in manager.parameters:
+                manager.delete(name)
+          
+    def update(self, other: Union[dict, OrderedDict]):
+        """Update the parameters with a new dictionary of values."""
+        for manager in self.input_managers:
+            for name, value in other.items():
+                if name in manager.parameters:
+                    manager.parameters[name].value = value
+
+    def __str__(self) -> str:
+        """Pretty print the InputsManagersUnion contents."""
+        if not self.input_managers:
+            return "InputsManagersUnion: No input managers defined"
+
+        # Collect all parameters from all managers
+        all_params = {}
+        manager_has_param = {}  # Track which managers have which parameters
+
+        for i, manager in enumerate(self.input_managers):
+            for name, param in manager.parameters.items():
+                if name not in all_params:
+                    all_params[name] = param
+                    manager_has_param[name] = []
+                manager_has_param[name].append(i)
+
+        if not all_params:
+            return "InputsManagersUnion: No parameters defined in any manager"
+
+        # Prepare table headers and data
+        headers = ["Parameter", "Shape", "Device", "Dtype", "Optimizable", "Transform", "Managers"]
+        rows = []
+
+        for name, param in all_params.items():
+            value = param.value
+            # Get shape, device, and dtype info
+            shape = tuple(value.shape) if hasattr(value, 'shape') else 'N/A'
+            device = value.device if hasattr(value, 'device') else 'N/A'
+            dtype = value.dtype if hasattr(value, 'dtype') else 'N/A'
+            # Get transform info
+            transform_name = type(param.transform.transforms[0]).__name__ if param.transform and param.transform.transforms else 'None'
+            # Which managers have this parameter
+            manager_indices = manager_has_param[name]
+
+            rows.append([
+                name,
+                str(shape),
+                str(device),
+                str(dtype),
+                '✓' if param.optimizable else '✗',
+                transform_name,
+                str(manager_indices)
+            ])
+
+        # Create the table
+        table = tabulate(rows, headers=headers, tablefmt="pretty")
+
+        # Add header and footer
+        total_params = len(all_params)
+        optimizable_params = sum(1 for param in all_params.values() if param.optimizable)
+
+        header = f"InputsManagersUnion Summary ({len(self.input_managers)} managers)\n" + "="*len(table.split('\n')[0]) + "\n"
+        footer = f"\nTotal unique parameters: {total_params} (Optimizable: {optimizable_params})"
+
+        # Warning if some parameters were redefined in multiple managers
+        redefined_params = [name for name, indices in manager_has_param.items() if len(indices) > 1]
+        if redefined_params:
+            footer += "\n\n (!) Warning: The following parameters were redefined in multiple managers:\n" + ", ".join(redefined_params) + \
+                      "\nOnly the last definition will be used. The shape is displayed for the first definition."
+
+        return header + table + footer

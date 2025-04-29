@@ -399,6 +399,7 @@ def are_equal(a, b, tolerance):
     else:
         return a == b
 
+
 def CompareConfigs(dict1, dict2, tolerance=1e-6, path=""):
     """Recursively compare two dictionaries and return a list of differences."""
     differences = []
