@@ -3,11 +3,18 @@ import torch
 from matplotlib import pyplot as plt
 from astropy.visualization import simple_norm
 from astropy.visualization import LinearStretch, ImageNormalize
-from .utils import plot_radial_profiles_new
+from tools.utils import plot_radial_profiles_new
 from sklearn.cluster import DBSCAN
 import pandas as pd
 from photutils.detection import find_peaks
 
+"""
+This module is used to manage the multi-source simulations. It contains functions to 
+- detect sources in an image,
+- extract multiple source images from a single image/cube with multiple sources,
+- merge multiple images into a single image,
+- visualize sources.
+"""
 
 def detect_sources(data_src, threshold, box_size, eps=2, verbose=False):
     

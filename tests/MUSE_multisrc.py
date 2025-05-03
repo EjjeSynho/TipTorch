@@ -24,9 +24,9 @@ from photutils.detection import find_peaks
 from photutils.aperture import CircularAperture, RectangularAperture
 from sklearn.cluster import DBSCAN
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
-from tools.parameter_parser import ParameterParser
+from managers.parameter_parser import ParameterParser
 from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle
-from tools.config_manager import ConfigManager
+from managers.config_manager import ConfigManager
 from data_processing.normalizers import CreateTransformSequenceFromFile, InputsTransformer
 from tqdm import tqdm
 from project_globals import MUSE_DATA_FOLDER, device

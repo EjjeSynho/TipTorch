@@ -24,7 +24,10 @@ import requests
 from io import StringIO
 from photutils.background import Background2D, MedianBackground
 
-import cupy as xp
+try:
+    import cupy as xp
+except ImportError:
+    xp = np
 
 GPU_flag = True
 

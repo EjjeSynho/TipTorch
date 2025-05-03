@@ -18,10 +18,10 @@ from data_processing.MUSE_preproc_utils import GetMUSEonsky
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
 from astropy.stats import sigma_clipped_stats
-from tools.parameter_parser import ParameterParser
-from tools.config_manager import ConfigManager
+from managers.parameter_parser import ParameterParser
+from managers.config_manager import ConfigManager
 from data_processing.normalizers import TransformSequence, Uniform, LineModel, QuadraticModel
-from tools.input_manager import InputsTransformer
+from managers.input_manager import InputsTransformer
 from data_processing.MUSE_preproc_utils_old import MUSEcube
 from tqdm import tqdm
 from scipy.ndimage import rotate

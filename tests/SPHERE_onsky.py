@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle, GradientLoss, OptimizableLO, ZernikeLO
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds, process_mask
-from tools.config_manager import GetSPHEREonsky
+from managers.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
 from torchmin import minimize
 

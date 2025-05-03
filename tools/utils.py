@@ -1,14 +1,10 @@
 #%%
 import numpy as np
 import torch
-from torch import optim, nn
+from torch import nn
 import torch.nn.functional as F
-from astropy.io import fits
 from scipy.ndimage import center_of_mass
-from scipy.optimize import least_squares
 from math import prod
-from graphviz import Digraph
-from skimage.transform import resize
 import matplotlib.pyplot as plt
 from matplotlib import cm
 from scipy.ndimage import label
@@ -16,9 +12,19 @@ import seaborn as sns
 from photutils.centroids import centroid_quadratic, centroid_com
 from photutils.profiles import RadialProfile
 from astropy.modeling import models, fitting
-from astropy.nddata import Cutout2D
-from photutils.centroids import centroid_2dg, centroid_com, centroid_quadratic
+from photutils.centroids import centroid_com, centroid_quadratic
 import torchvision.transforms.functional as TF
+
+try:
+    from graphviz import Digraph
+except:
+    class Digraph:
+        def __init__(self, *args, **kwargs):
+            print("Warning: graphviz is not installed. Graph visualization will not be available.")
+            pass   
+        def node(self, *args, **kwargs): pass
+        def edge(self, *args, **kwargs): pass
+
 
 rad2mas  = 3600 * 180 * 1000 / np.pi
 rad2arc  = rad2mas / 1000

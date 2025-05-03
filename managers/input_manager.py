@@ -8,8 +8,17 @@ import pickle
 import numpy as np
 from data_processing.normalizers import TransformSequence, LoadTransforms
 
+"""
+This module contains classes to manage the input data for the TipTorch PSF model. 
+"""
 
 class InputsTransformer:
+    """
+    A class to manage the input data for the TipTorch PSF model. It allows for the stacking of input dictionaries
+    of into a single tensor and and unstacking it back. This is useful for non-linear optimization routines and when
+    packing data to input into a NN. It also allow to standartize/normalize/transform model inputs. The class also
+    provides methods for saving and loading the transformer.
+    """
     def __init__(self, transforms: Union[OrderedDict, dict] = OrderedDict()):
         # Store the transforms provided as a dictionary
         self.transforms = OrderedDict(transforms) if type(transforms) is dict else transforms
@@ -22,9 +31,9 @@ class InputsTransformer:
         if len(self.transforms) == 0:
             raise ValueError("No transforms provided for stacking.")
         """
-        Constructs a joint tensor from provided keyword arguments,
-        applying the corresponding transforms to each.
-        Keeps track of each tensor's size for later decomposition.
+        Constructs a joint tensor from provided keyword arguments, applying the corresponding transforms to each.
+        Keeps track of each tensor's size for later unstacking. NOTE: The order of the arguments is important.
+        Another NOTE: The 0th dimension is allocated to sources. Meaning that the tensor is of shape (n_sources, n_features)
         """
         self.slices = OrderedDict()
         self._packed_size = None
@@ -159,6 +168,11 @@ class InputParameter:
     optimizable: bool = True
 
 class InputsManager:
+    """
+    The wrapper over the InputsTransformer claass. It allows for more convenient management of the model inputs,
+    enabling to add or delete them, as well as to control which inputs are stacker into a single tensor and which
+    are not. It also allows for easy displaying of stored model inputs.
+    """
     def __init__(self):
         self.parameters = OrderedDict()
         self.inputs_transformer = InputsTransformer()
@@ -208,12 +222,15 @@ class InputsManager:
         if set(optimizable_names) != set(self.inputs_transformer.slices.keys()):
             self.stack()
     
-    def update(self, other: Union[dict, OrderedDict]):
+    def update(self, other: Union[dict, OrderedDict], selected_ids: Any = None):
         """Update the parameters with a new dictionary of values."""
         for name, value in other.items():
             if name in self.parameters:
-                self.parameters[name].value = value       
-    
+                if selected_ids is not None:
+                    self.parameters[name].value[selected_ids] = value[selected_ids]
+                else:
+                    self.parameters[name].value = value
+
     def delete(self, name: str):
         """Delete a parameter by name."""
         if name in self.parameters:
@@ -230,8 +247,10 @@ class InputsManager:
         args_dict = {name: param.value for name, param in self.parameters.items() if param.optimizable}
         if len(args_dict) == 0:
             return None
+        
         return self.inputs_transformer.stack(args_dict)
 
+        
     def unstack(self, x: torch.Tensor, include_all=True, update=True):
         if self.inputs_transformer.transforms == {} or self.parameters == {}:
             return None
@@ -287,9 +306,10 @@ class InputsManager:
         # Rebuild parameters dictionary
         for name, param in self.parameters.items():
             new_manager.parameters[name] = InputParameter(
-                value=deepcopy(param.value),
-                transform=deepcopy(param.transform),
-                optimizable=param.optimizable
+                # value = deepcopy(param.value),
+                value = param.value.clone() if isinstance(param.value, torch.Tensor) else deepcopy(param.value),
+                transform = deepcopy(param.transform),
+                optimizable = param.optimizable
             )
         # Copy the inputs_transformer
         new_manager.inputs_transformer = deepcopy(self.inputs_transformer)
@@ -340,26 +360,32 @@ class InputsManager:
 
 class InputsManagersUnion:
     """
-    Union of multiple InputsManager objects that can be stacked and unstacked together
-    while preserving the original dimensions.
-
-    This class provides similar functionality to InputsManager for accessing and
-    manipulating parameters across multiple InputsManager instances.
+    This class provides similar functionality to InputsManager for accessing and manipulating parameters across
+    multiple InputsManager instances. Using multiple InputsManager objects can be useful for example when working with
+    multiple models or when you want to keep track of different sets of parameters separately.
     """
     
-    def __init__(self, input_managers: list):
+    def __init__(self, input_managers: Union[dict, list] = {}) -> None:
         """
-        Initialize with a list of InputsManager objects.
+        Initialize with a dictionary of InputsManager objects.
 
         Args:
-            input_managers (list): List of InputsManager objects. Order matters -
-                                  the latter input manager will overwrite the former
-                                  values during unstacking.
+            input_managers (Union[dict, list]): Dictionary of InputsManager objects where keys
+                                              are identifiers and values are InputsManager instances.
+                                              Can also accept a list for backward compatibility.
+                                              Order matters - the latter input manager will
+                                              overwrite the former values during unstacking.
         """
-        self.input_managers = input_managers
+        # Convert list to dictionary if needed
+        if isinstance(input_managers, list):
+            self.input_managers = {i: manager for i, manager in enumerate(input_managers)}
+        else:
+            self.input_managers = input_managers
+
         self.slices = OrderedDict()
         self.shapes = OrderedDict()  # Store original shapes
         self._stacked_size = None
+        
     
     def stack(self) -> torch.Tensor:
         """
@@ -370,21 +396,22 @@ class InputsManagersUnion:
         """
         self.slices = OrderedDict()
         self.shapes = OrderedDict()  # Reset shapes
+        
         vectors = []
         current_idx = 0
         
-        for i, manager in enumerate(self.input_managers):
+        for key, manager in self.input_managers.items():
             stacked = manager.stack()
             if stacked is None:
                 continue
                 
             # Store original shape
-            self.shapes[i] = stacked.shape
+            self.shapes[key] = stacked.shape
             stacked_flat = stacked.flatten()
 
             # Store slice for this manager
             next_idx = current_idx + stacked_flat.shape[-1]
-            self.slices[i] = slice(current_idx, next_idx)
+            self.slices[key] = slice(current_idx, next_idx)
             current_idx = next_idx
             
             vectors.append(stacked_flat)
@@ -403,7 +430,7 @@ class InputsManagersUnion:
 
         Args:
             vector (torch.Tensor): Stacked tensor to unstack.
-            include_all (bool): Whether to include all parameters or just optimizable ones.
+            include_all (bool): Whether to include all parameters stored in the manager(s) or just optimizable ones.
             update (bool): Whether to update InputsManager internal values.
 
         Returns:
@@ -417,9 +444,9 @@ class InputsManagersUnion:
             
         result = {}
         
-        for i, sl in self.slices.items():
-            manager = self.input_managers[i]
-            original_shape = self.shapes[i]
+        for key, sl in self.slices.items():
+            manager = self.input_managers[key]
+            original_shape = self.shapes[key]
 
             # Extract the flat vector for this manager and reshape to original dimensions
             manager_vector = vector[..., sl]
@@ -429,7 +456,14 @@ class InputsManagersUnion:
             unstacked = manager.unstack(manager_vector, include_all=include_all, update=update)
             if unstacked is not None:
                 result.update(unstacked)
-        
+                
+        # If not all managers were included in slices due to aabsence of optimizable parameters in them, add their
+        # contents into the resulting dictionary
+        if include_all and (len(self.slices) != len(self.input_managers)):
+            for key, manager in self.input_managers.items():
+                if key not in self.slices:
+                    result.update(manager.to_dict())
+            
         return result
 
     def get_value(self, name: str) -> Any:
@@ -444,7 +478,7 @@ class InputsManagersUnion:
         Raises:
             KeyError: If parameter is not found in any manager
         """
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             if name in manager.parameters:
                 return manager.parameters[name].value
         raise KeyError(f"Parameter '{name}' not found in any input manager")
@@ -461,7 +495,7 @@ class InputsManagersUnion:
         Raises:
             KeyError: If parameter is not found in any manager
         """
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             if name in manager.parameters:
                 return manager.parameters[name].transform
         raise KeyError(f"Parameter '{name}' not found in any input manager")
@@ -475,7 +509,7 @@ class InputsManagersUnion:
         """
         name_list = [names] if isinstance(names, str) else names
 
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             for name in name_list:
                 if name in manager.parameters:
                     manager.set_optimizable(name, optimizable)
@@ -492,7 +526,7 @@ class InputsManagersUnion:
         Raises:
             KeyError: If parameter is not found in any manager
         """
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             if name in manager.parameters:
                 return manager.parameters[name].optimizable
         raise KeyError(f"Parameter '{name}' not found in any input manager")
@@ -504,7 +538,7 @@ class InputsManagersUnion:
             dict: Combined dictionary of all parameters
         """
         result = {}
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             result.update(manager.to_dict())
         return result
 
@@ -527,7 +561,7 @@ class InputsManagersUnion:
             key: Parameter name
             value: New value
         """
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             if key in manager.parameters:
                 manager.parameters[key].value = value
 
@@ -537,31 +571,45 @@ class InputsManagersUnion:
         Args:
             device: Target device
         """
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             manager.to(device)
 
     def to_float(self):
         """Convert all parameter values to float32."""
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             manager.to_float()
 
     def to_double(self):
         """Convert all parameter values to float64."""
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             manager.to_double()
 
     def delete(self, name: str):
         """Delete a parameter from all managers that contain it."""
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             if name in manager.parameters:
                 manager.delete(name)
           
-    def update(self, other: Union[dict, OrderedDict]):
+    def update(self, other: Union[dict, OrderedDict], selected_ids: Any = None):
         """Update the parameters with a new dictionary of values."""
-        for manager in self.input_managers:
+        for manager in self.input_managers.values():
             for name, value in other.items():
                 if name in manager.parameters:
-                    manager.parameters[name].value = value
+                    if selected_ids is not None:
+                        manager.parameters[name].value[selected_ids] = value[selected_ids]
+                    else:
+                        manager.parameters[name].value = value
+
+    def copy(self) -> "InputsManagersUnion":
+        """Create a deep copy of the InputsManagersUnion."""
+        new_union = InputsManagersUnion()
+        for key, manager in self.input_managers.items():
+            new_union.input_managers[key] = manager.copy()
+        return new_union
+        
+    def clone(self) -> "InputsManagersUnion":
+        """Create a deep copy of the InputsManagersUnion."""
+        return self.copy()
 
     def __str__(self) -> str:
         """Pretty print the InputsManagersUnion contents."""
@@ -572,12 +620,12 @@ class InputsManagersUnion:
         all_params = {}
         manager_has_param = {}  # Track which managers have which parameters
 
-        for i, manager in enumerate(self.input_managers):
+        for key, manager in self.input_managers.items():
             for name, param in manager.parameters.items():
                 if name not in all_params:
                     all_params[name] = param
                     manager_has_param[name] = []
-                manager_has_param[name].append(i)
+                manager_has_param[name].append(key)
 
         if not all_params:
             return "InputsManagersUnion: No parameters defined in any manager"
@@ -595,7 +643,7 @@ class InputsManagersUnion:
             # Get transform info
             transform_name = type(param.transform.transforms[0]).__name__ if param.transform and param.transform.transforms else 'None'
             # Which managers have this parameter
-            manager_indices = manager_has_param[name]
+            manager_keys = manager_has_param[name][0]
 
             rows.append([
                 name,
@@ -604,7 +652,7 @@ class InputsManagersUnion:
                 str(dtype),
                 '✓' if param.optimizable else '✗',
                 transform_name,
-                str(manager_indices)
+                str(manager_keys)
             ])
 
         # Create the table
@@ -618,7 +666,7 @@ class InputsManagersUnion:
         footer = f"\nTotal unique parameters: {total_params} (Optimizable: {optimizable_params})"
 
         # Warning if some parameters were redefined in multiple managers
-        redefined_params = [name for name, indices in manager_has_param.items() if len(indices) > 1]
+        redefined_params = [name for name, keys in manager_has_param.items() if len(keys) > 1]
         if redefined_params:
             footer += "\n\n (!) Warning: The following parameters were redefined in multiple managers:\n" + ", ".join(redefined_params) + \
                       "\nOnly the last definition will be used. The shape is displayed for the first definition."

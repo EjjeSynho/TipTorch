@@ -14,11 +14,11 @@ from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsa
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
 from data_processing.normalizers import TransformSequence, Uniform, LineModel, QuadraticModel
-from tools.input_manager import InputsTransformer
+from managers.input_manager import InputsTransformer
 from project_globals import MUSE_DATA_FOLDER
 
 #%%
-from tools.config_manager import ConfigFromFile
+from managers.config_manager import ConfigFromFile
 from PSF_models.TipTorch import TipTorch_new
 
 config_file = ConfigFromFile('../data/parameter_files/muse_ltao_ang.ini', device)
@@ -971,7 +971,7 @@ import matplotlib.pyplot as plt
 from torch import nn, optim
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping, mask_circle
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds, process_mask
-from tools.config_manager import GetSPHEREonsky
+from managers.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
 from torchmin import minimize
 from astropy.stats import sigma_clipped_stats

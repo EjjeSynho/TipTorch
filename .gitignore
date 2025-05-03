@@ -11,3 +11,4 @@ data/*.predictor
 data/*.txt
 runs/
 data/models/
+environment.yml

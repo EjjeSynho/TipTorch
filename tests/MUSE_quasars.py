@@ -25,8 +25,9 @@ from photutils.aperture import CircularAperture, RectangularAperture
 from sklearn.cluster import DBSCAN
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
 from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle
-from tools.config_manager import ConfigManager
-from data_processing.normalizers import CreateTransformSequenceFromFile, InputsTransformer
+from managers.config_manager import ConfigManager
+from data_processing.normalizers import CreateTransformSequenceFromFile
+from managers.input_manager import InputsTransformer
 from tqdm import tqdm
 from project_globals import MUSE_DATA_FOLDER, device
 from astropy.io import fits
@@ -137,7 +138,7 @@ N_wvl = len(ids_wavelength_selected)
 data_sparse = data_onsky.clone()[ids_wavelength_selected,...]
 
 #%%
-from tools.multisrc import detect_sources
+from managers.multisrc_manager import detect_sources
 
 data_src = data_onsky.sum(dim=0).cpu().numpy()
 # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
@@ -161,10 +162,10 @@ apertures_box.plot(color='gold', lw=2, alpha=0.45)
 plt.show()
 
 #%%
-from tools.multisrc import extract_ROIs, add_ROIs
+from managers.multisrc_manager import extract_ROIs, add_ROIs
 
 
-ROIs, local_coords, global_coords = extract_ROIs(data_sparse, sources, box_size=PSF_size)
+ROIs, local_coords, global_coords, _ = extract_ROIs(data_sparse, sources, box_size=PSF_size)
 N_src = len(ROIs)
 # plot_ROIs_as_grid(ROIs, cols=np.ceil(np.sqrt(len(ROIs))).astype('uint'))  # Adjust the number of columns as needed
 
@@ -288,7 +289,8 @@ model.to(device)
 # PSF_1 = model()
 
 #%%
-from data_processing.normalizers import Uniform, InputsManager
+from data_processing.normalizers import Uniform
+from managers.input_manager import InputsManager
 
 df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
 df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/muse_df_fitted_transforms.pickle')
@@ -324,7 +326,6 @@ inputs_manager.to_float()
 inputs_manager.to(device)
 
 print(inputs_manager)
-
 
 
 inputs_manager_objs = InputsManager()
@@ -448,7 +449,7 @@ src_spectra_fitted = [GetSpectrum(model_sparse, sources.iloc[i], radius=flux_cor
 # plt.scatter(wavelength_selected.squeeze().cpu().numpy()*1e9, src_spectra_sparse[i_src].cpu().numpy())
 
 #%%
-from tools.multisrc import VisualizeSources, PlotSourcesProfiles
+from managers.multisrc_manager import VisualizeSources, PlotSourcesProfiles
 
 ROI_plot = np.s_[..., 125:225, 125:225]
 
@@ -811,6 +812,8 @@ for info in targets_info:
     plt.plot(λ, spectrum_full, linewidth=0.5, alpha=0.25, label=info['name'], color=info['color'])
     plt.plot(λ, spectrum_avg, linewidth=1, alpha=1, color=info['color'], linestyle='--')
     
+
+    
     
 plt.legend()
 # plt.ylim(0, None)
@@ -874,9 +877,9 @@ diff_rgb = plot_wavelength_rgb(
 )
 
 diff_rgb = plot_wavelength_rgb(
-    data_full[ROI_plot],
+    model_full[ROI_plot],
     wavelengths=λ_vis,
-    title=f"{reduced_name}\nObservation",
+    title=f"{reduced_name}\nModel",
     min_val=500, max_val=200000, show=True
 )
 

@@ -15,7 +15,7 @@ from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsa
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
 from data_processing.normalizers import CreateTransformSequenceFromFile
-from tools.input_manager import InputsTransformer
+from managers.input_manager import InputsTransformer
 from tqdm import tqdm
 from project_globals import MUSE_DATA_FOLDER
 from machine_learning.MUSE_onsky_df import *
@@ -206,7 +206,7 @@ plt.imshow(PSF_pred[0,...].mean(dim=0).log10().cpu().numpy(), vmin=0, vmax=0.01)
 plt.show()
 
 # %%
-from tools.config_manager import ConfigManager
+from managers.config_manager import ConfigManager
 from copy import deepcopy
 
 config_list = deepcopy(config_file)

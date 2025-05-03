@@ -1,0 +1,20 @@
+# Core libraries
+pillow
+astropy
+numpy>=1.26
+scipy
+astroquery
+pandas
+matplotlib
+seaborn
+scikit-image
+scikit-learn
+tabulate
+tqdm
+photutils
+
+# PyTorch & friends
+torch
+torchvision
+torchaudio
+pytorch-minimize

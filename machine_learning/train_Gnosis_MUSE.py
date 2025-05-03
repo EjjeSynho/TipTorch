@@ -15,11 +15,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from tools.utils import plot_radial_profiles_new, cropper, draw_PSF_stack
-from tools.config_manager import ConfigManager
+from managers.config_manager import ConfigManager
 from project_globals import MUSE_DATASET_FOLDER, MUSE_DATA_FOLDER, device
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from copy import copy, deepcopy
-from tools.input_manager import InputsTransformer
+from managers.input_manager import InputsTransformer
 
 
 from PSF_models.TipToy_MUSE_multisrc import TipTorch

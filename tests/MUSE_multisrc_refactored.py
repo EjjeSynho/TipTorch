@@ -18,20 +18,16 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from torchmin import minimize
 
-from astropy.stats import sigma_clipped_stats
-
-from photutils.detection import find_peaks
+from typing import Union
 from photutils.aperture import CircularAperture, RectangularAperture
-from sklearn.cluster import DBSCAN
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
 from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle, rad2mas
-from tools.config_manager import ConfigManager, MultipleTargetsInOneObservation
+from managers.config_manager import ConfigManager, MultipleTargetsInOneObservation
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
 from project_globals import MUSE_DATA_FOLDER, device
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
-from copy import deepcopy
 
 from machine_learning.MUSE_onsky_df import *
 
@@ -42,22 +38,17 @@ predict_phase_bump = True
 
 #%%
 # Load the FITS file
-
 cube_path = MUSE_DATA_FOLDER + "wide_field/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 
-test_fits = fits.open(cube_path)
+with fits.open(cube_path) as test_fits:
+    # Compute the mask of valid pixels
+    data_full = np.nan_to_num(test_fits[1].data, nan=0.0)
+    nan_mask = np.abs(np.nansum(test_fits[1].data, axis=0)) < 1e-12
+    nan_mask = binary_dilation(nan_mask, iterations=2, )
+    valid_mask = ~nan_mask
 
-data_full = np.nan_to_num(test_fits[1].data, nan=0.0)
-
-# Compute the mask of valid pixels
-nan_mask = np.abs(np.nansum(test_fits[1].data, axis=0)) < 1e-12
-nan_mask = binary_dilation(nan_mask, iterations=2, )
-valid_mask = ~nan_mask
-
-test_fits.close()
 
 data_full = data_full * valid_mask[np.newaxis, :, :]
-
 valid_mask = torch.tensor(valid_mask, device=device).float().unsqueeze(0)
 
 # Load processed data file
@@ -110,7 +101,7 @@ N_wvl = len(ids_wavelength_selected)
 data_sparse = data_onsky.clone()[ids_wavelength_selected,...]
 
 #%%
-from tools.multisrc import detect_sources
+from managers.multisrc_manager import detect_sources
 
 data_src = data_onsky.sum(dim=0).cpu().numpy()
 # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
@@ -122,6 +113,7 @@ thres = 1200000
 # thres = 2500000
 
 sources   = detect_sources(data_src, threshold=thres, box_size=11, verbose=True)
+sources   = sources.sort_values(by='peak_value', ascending=False)
 srcs_pos  = np.transpose((sources['x_peak'], sources['y_peak']))
 srcs_flux = sources['peak_value'].to_numpy()
 
@@ -137,14 +129,13 @@ plt.show()
 
 
 #%%
-from tools.multisrc import extract_ROIs, add_ROIs, extract_ROIs_from_coords
+from managers.multisrc_manager import extract_ROIs, add_ROIs, extract_ROIs_from_coords
 
 ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_sparse, sources, box_size=PSF_size)
 N_src = len(ROIs)
 # plot_ROIs_as_grid(ROIs, cols=np.ceil(np.sqrt(len(ROIs))).astype('uint'))  # Adjust the number of columns as needed
 
 sources_valid = sources.iloc[valid_srcs]
-# del sources
 
 yy, xx = torch.where(valid_mask.squeeze() > 0) # Compute center of mass for valid mask assuming it's the center of the field
 
@@ -240,7 +231,7 @@ PSD_include = {
 }
 
 model = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
-model.apodizer = model.make_tensor(1.0)
+# model_single.apodizer = model_single.make_tensor(1.0)
 
 model.to_float()
 model.to(device)
@@ -250,7 +241,8 @@ model.on_axis = False
 
 #%%
 from data_processing.normalizers import Uniform, Uniform
-from tools.input_manager import InputsManager, InputsManagersUnion
+from managers.input_manager import InputsManager, InputsManagersUnion
+
 
 df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
 df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/muse_df_fitted_transforms.pickle')
@@ -264,8 +256,8 @@ shared_inputs = InputsManager()
 shared_inputs.add('r0',    torch.tensor([model.r0[0].item()]), df_transforms_fitted['r0'])
 shared_inputs.add('F',     torch.tensor([[1.0,]*N_wvl]), df_transforms_fitted['F'])
 shared_inputs.add('bg',    torch.tensor([[0,]*N_wvl]),   df_transforms_fitted['bg'])
-shared_inputs.add('dx',    torch.tensor([[0.0,]*N_wvl]), df_transforms_fitted['dx'])
-shared_inputs.add('dy',    torch.tensor([[0.0,]*N_wvl]), df_transforms_fitted['dy'])
+# shared_inputs.add('dx',    torch.tensor([[0.0,]*N_wvl]), df_transforms_fitted['dx'])
+# shared_inputs.add('dy',    torch.tensor([[0.0,]*N_wvl]), df_transforms_fitted['dy'])
 shared_inputs.add('dn',    torch.tensor([1.5]),          df_transforms_fitted['dn'])
 shared_inputs.add('Jx',    torch.tensor([[10,]*N_wvl]),  df_transforms_fitted['Jx'])
 shared_inputs.add('Jy',    torch.tensor([[10,]*N_wvl]),  df_transforms_fitted['Jy'])
@@ -294,7 +286,6 @@ shared_inputs.set_optimizable(['Jxy'], False)
 shared_inputs.to_float()
 shared_inputs.to(device)
 
-# print(shared_inputs)
 
 individual_inputs = InputsManager()
 
@@ -313,14 +304,10 @@ individual_inputs.set_optimizable(['src_dirs_y'], False)
 
 # print(individual_inputs)
 
-all_inputs = InputsManagersUnion([shared_inputs, individual_inputs])
+model_inputs = InputsManagersUnion({ 'shared': shared_inputs,'individual': individual_inputs })
+print(model_inputs)
 
-# _ = inputs_managers_union.unstack(inputs_managers_union.stack())
-#%%
-print(all_inputs)
-
-
-
+model_inputs_copy = model_inputs.copy()
 
 #%%
 from machine_learning.calibrator import Calibrator, Gnosis
@@ -342,12 +329,10 @@ calibrator = Calibrator(
 
 calibrator.eval()
 
-#%%
-# pred_inputs = normalizer.unstack(net(NN_inp))
 pred_inputs = calibrator(df_norm[selected_entries_input].loc[0])
-# shared_inputs.update(pred_inputs)
-all_inputs.update(pred_inputs)
+model_inputs.update(pred_inputs)
 
+#%%
 with torch.no_grad():
     config_file['NumberSources'] = 1
     config_file['sensor_science']['FieldOfView'] = 511
@@ -370,60 +355,110 @@ core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radiu
 core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
 PSF_norm_factor = N_core_pixels / flux_λ_norm / core_flux_ratio / crop_ratio
 
-#%% --------------------------
-def func_dxdy(x_, i_src):
-    dxdy_inp = individual_inputs.unstack(x_.unsqueeze(0), update=False) # Don't update internal values
-    dxdy_inp['dx'] = dxdy_inp['dx'].repeat(1, N_wvl) # Extend to simulated number of wavelength
-    dxdy_inp['dy'] = dxdy_inp['dy'].repeat(1, N_wvl) # assuming the same shift for all wavelengths
-    dxdy_inp['src_dirs_x'] = dxdy_inp['src_dirs_x'][i_src].unsqueeze(0)
-    dxdy_inp['src_dirs_y'] = dxdy_inp['src_dirs_y'][i_src].unsqueeze(0)
+# Compute normalized sources images and corresponding fluxes per λ per source
+PSFs_data_norm, fluxes = [], []
 
-    return model(pred_inputs | dxdy_inp)
+for i in range(N_src):
+    PSF_data = torch.nan_to_num(ROIs[i].unsqueeze(0)) / src_spectra_sparse[i][None,:,None,None]
+    F_norm = (PSF_data * core_mask).sum(dim=(-2,-1), keepdim=True) / core_flux_ratio[None,:,None,None]
+    PSF_data /= F_norm
 
+    fluxes.append(F_norm.clone())
+    PSFs_data_norm.append(PSF_data.clone())
 
-
-def fit_dxdy(i_src, verbose=0):
-    if verbose > 0:
-        print(f'Predicting source {i_src}...')
-       
-    PSF_0 = torch.nan_to_num(ROIs[i_src].unsqueeze(0)) / src_spectra_sparse[i_src][None,:,None,None]
-    F_norm = (PSF_0 * core_mask).sum(dim=(-2,-1), keepdim=True) / core_flux_ratio[None,:,None,None]
-    PSF_0 /= F_norm
-
-    dxdy_0 = individual_inputs.stack()[i_src,:]
-
-    _ = func_dxdy(dxdy_0, i_src)
-    loss = lambda dxdy_: F.smooth_l1_loss(PSF_0, func_dxdy(dxdy_, i_src), reduction='sum')*1e3
-    result = minimize(loss, dxdy_0, max_iter=100, tol=1e-3, method='bfgs', disp=verbose)
-
-    dxdy_1 = individual_inputs.unstack(result.x.unsqueeze(0), update=False)
-    individual_inputs['dx'][i_src] = dxdy_1['dx'].flatten()
-    individual_inputs['dy'][i_src] = dxdy_1['dy'].flatten()
-
-    return PSF_0.clone(), func_dxdy(result.x, i_src).detach().clone(), result.x.clone(), F_norm.clone()
-
-
-#%%
-PSFs_data, PSFs_fitted, fluxes, dxdys = [], [], [], []
-
-for i in tqdm(range(N_src)):
-    PSF_0, PSF_1, dxdy, flux = fit_dxdy(i, verbose=0)
-    PSFs_data.append(PSF_0)
-    PSFs_fitted.append(PSF_1)
-    fluxes.append(flux)
-    dxdys.append(dxdy)
-
-PSFs_data = torch.vstack(PSFs_data)
-PSFs_fitted = torch.vstack(PSFs_fitted)
+PSFs_data_norm = torch.vstack(PSFs_data_norm)
 fluxes = torch.vstack(fluxes)
-dxdys  = torch.stack(dxdys)
 
+# Normalizing factors per λ per source
 norm_factors = torch.stack([src_spectra_sparse[i][:,None,None] * fluxes[i, ...] for i in range(N_src)])
 
+#%% --------------------------
+def select_sources(src_dict: dict, selected_ids: Union[list, int]) -> dict:
+    if isinstance(selected_ids, int):
+        selected_ids = [selected_ids]
+    result_dict = {}
+    for key, tensor in src_dict.items():
+        if hasattr(tensor, 'shape') and tensor.shape[0] == N_src:
+            result_dict[key] = tensor[selected_ids]
+        else:
+            result_dict[key] = tensor
+    return result_dict
+
+
+def run_model(PSF_model, inputs_manager, x_, i_src=None, update=False):
+    
+    inputs_dict = inputs_manager.unstack(x_.unsqueeze(0), update=update)
+    
+    if i_src is not None:
+        inputs_dict = select_sources(inputs_dict, i_src)
+    
+    GL_frac = nn.functional.tanh(inputs_dict['GL_frac'].abs()) #TODO: fix this ugly GL_frac conversion
+    inputs_dict['Cn2_weights'] = torch.stack([GL_frac, 1-GL_frac]).T
+   
+    # Extend to simulated number of wavelength assuming the same shift for all wavelengths
+    inputs_dict['dx'] = inputs_dict['dx'].view(-1,1).repeat(1, N_wvl) 
+    inputs_dict['dy'] = inputs_dict['dy'].view(-1,1).repeat(1, N_wvl)
+    
+    return PSF_model(inputs_dict) * inputs_dict['F_norm'].view(-1,1,1,1)
+
+
+def fit_individial_src(data, loss, x_init, i_src, verbose=0):
+    if verbose > 0:
+        print(f'Fitting source {i_src}...')
+    
+    loss_  = lambda x_: loss(data[i_src, ...].unsqueeze(0), run_model(model, model_inputs, x_, i_src))
+    result = minimize(loss_, x_init, max_iter=100, tol=1e-3, method='bfgs', disp=verbose)
+    
+    return run_model(model, model_inputs, result.x, i_src).detach().clone(), result.x.detach().clone()
+
+
+loss_L1 = lambda PSF_data, PSF_model: F.smooth_l1_loss(PSF_data, PSF_model, reduction='sum')*1e3
+
+model_inputs.set_optimizable(
+    ['r0', 'F', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'amp', 'b', 'alpha',
+     's_pow', 'GL_frac','LO_coefs', 'F_norm', 'src_dirs_x', 'src_dirs_y'],
+    False
+)
+model_inputs.set_optimizable(['dx', 'dy'], True)
+
+x0 = model_inputs.stack()
+
+PSFs_fitted = []
+for i in tqdm(range(N_src)):
+    PSF_fit, x0 = fit_individial_src(PSFs_data_norm, loss_L1, x0, i, verbose=0)
+    PSFs_fitted.append(PSF_fit)
+
+PSFs_fitted = torch.vstack(PSFs_fitted)
+_ = model_inputs.unstack(x0, update=True)
+
+model_inputs_copy = model_inputs.copy()
 #%%
+
+# model_inputs = model_inputs_copy.copy()
+
+# model_inputs.set_optimizable(
+#     ['dx', 'dy', 'F', 'bg','Jxy','s_pow', 'LO_coefs', 'src_dirs_x', 'src_dirs_y', 'F_norm'],
+#     False
+# )
+
+# model_inputs.set_optimizable(
+#     ['r0', 'dn', 'Jx', 'Jy', 'GL_frac', 'amp', 'b', 'alpha'],
+#     True
+# )
+
+# x1 = model_inputs.stack()
+
+# PSFs_fitted = []
+# for i in tqdm(range(N_src)):
+#     PSF_fit, x1 = fit_individial_src(PSFs_data_norm, loss_L1, x1, i, verbose=0)
+#     PSFs_fitted.append(PSF_fit)
+
+# PSFs_fitted = torch.vstack(PSFs_fitted)
+
+
 display_mask = mask_circle(PSF_size, 18)[None,...]
 
-PSFs_0_white = np.mean(PSFs_data.cpu().cpu().numpy(), axis=1) * display_mask
+PSFs_0_white = np.mean(PSFs_data_norm.cpu().cpu().numpy(), axis=1) * display_mask
 PSFs_1_white = np.mean(PSFs_fitted.cpu().cpu().numpy(), axis=1)
 
 plot_radial_profiles_new(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
@@ -448,7 +483,7 @@ model_sparse = add_ROIs(
 # plt.scatter(wavelength_selected.squeeze().cpu().numpy()*1e9, src_spectra_sparse[i_src].cpu().numpy())
 
 #%
-from tools.multisrc import VisualizeSources, PlotSourcesProfiles
+from managers.multisrc_manager import VisualizeSources, PlotSourcesProfiles
 
 # ROI_plot = np.s_[..., 125:225, 125:225]
 
@@ -462,70 +497,42 @@ merged_config = MultipleTargetsInOneObservation(config_file, N_src)
 # for key, value in sources_inputs.items():
 #     print(f'{key}: {value.shape}')
 
-def select_sources(src_dict: dict, selected_ids: list) -> dict:
-    result_dict = {}
-    for key, tensor in src_dict.items():
-        if hasattr(tensor, 'shape') and tensor.shape[0] == N_src:
-            result_dict[key] = tensor[selected_ids]
-        else:
-            result_dict[key] = tensor
-    return result_dict
-
-
-#%%
-'''
-shared_inputs.set_optimizable(['dx'], False)
-shared_inputs.set_optimizable(['dy'], False)
-shared_inputs.set_optimizable(['bg'], False)
-shared_inputs.set_optimizable(['s_pow'], False)
-# inputs_manager.set_optimizable(['theta'], False)
-# inputs_manager.set_optimizable(['ratio'], False)
-shared_inputs.set_optimizable(['amp'], False)
-shared_inputs.set_optimizable(['alpha'], False)
-shared_inputs.set_optimizable(['b'], False)
-shared_inputs.set_optimizable(['Jx'], False)
-shared_inputs.set_optimizable(['Jy'], False)
-shared_inputs.set_optimizable(['Jxy'], False)
-shared_inputs.set_optimizable(['GL_frac'], True)
-shared_inputs.set_optimizable(['F'], False)
-
-individual_inputs.set_optimizable(['F_norm'], True)
-individual_inputs.set_optimizable(['dx'], False)
-individual_inputs.set_optimizable(['dy'], False)
-'''
-
-all_inputs.set_optimizable(['dx', 'dy', 'bg', 's_pow', 'amp', 'alpha', 'b', 'Jx', 'Jy', 'Jxy', 'F'], False)
-all_inputs.set_optimizable(['GL_frac', 'F_norm'], True)
-
-#%%
-x0 = all_inputs.stack()
-empty_img   = torch.zeros([N_wvl, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) * 0 + 1
+# model_batch = TipTorch_new(merged_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+# model_batch.to_float()
+# model_batch.to(device)
+# model_batch.on_axis = False
 
 torch.cuda.empty_cache()
 model.Update(config=merged_config, init_grids=True, init_pupils=True, init_tomography=True)
 
 #%%
-def func_fit(x_):
-    sources_inputs = all_inputs.unstack(x_, update=False)
-    sources_inputs['dx'] = sources_inputs['dx'].unsqueeze(-1).repeat(1,N_wvl)
-    sources_inputs['dy'] = sources_inputs['dy'].unsqueeze(-1).repeat(1,N_wvl)
-    
-    GL_frac = nn.functional.tanh(sources_inputs['GL_frac'].abs())
-    sources_inputs['Cn2_weights'] = torch.stack([GL_frac, 1-GL_frac]).T
 
-    PSF_ = model(sources_inputs) * norm_factors * sources_inputs['F_norm'].view(-1,1,1,1)
-      
+model_inputs = model_inputs_copy.copy()
+
+#%%
+model_inputs.set_optimizable(['dx', 'dy', 'bg', 's_pow', 'amp', 'alpha', 'b', 'Jxy', 'F'], False)
+model_inputs.set_optimizable(['GL_frac', 'r0', 'F', 'dn'], False)
+model_inputs.set_optimizable(['F_norm', 'Jx', 'Jy'], True)
+
+# print(model_inputs)
+
+#%%
+x0 = model_inputs.stack()
+empty_img   = torch.zeros([N_wvl, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) * 0 + 1
+
+#%%
+def func_fit(x_):
+    PSF_ = run_model(model, model_inputs, x_) * norm_factors
     return add_ROIs( empty_img*0.0, PSF_, local_coords, global_coords )
 
 
 def loss_fit(x_):
     simulated_field = func_fit(x_)
-    
-    l1 = F.smooth_l1_loss(data_sparse*wvl_weights, simulated_field*wvl_weights, reduction='mean')
-    # l2 = F.mse_loss(data_sparse*wvl_weights, simulated_field*wvl_weights, reduction='mean')
-    return l1 * 1e-3 #+ l2 * 5e-6
-
+    # l1 = F.smooth_l1_loss(data_sparse*wvl_weights, simulated_field*wvl_weights, reduction='mean')
+    l2 = F.mse_loss(data_sparse*wvl_weights, simulated_field*wvl_weights, reduction='mean')
+    # return l1 * 1e-3 #+ l2 * 5e-6
+    return l2 * 1e-6
 
 #%%
 torch.cuda.empty_cache()
@@ -535,7 +542,7 @@ result_global = minimize(loss_fit, x0, max_iter=300, tol=1e-3, method='l-bfgs', 
 with torch.no_grad():
     x1 = result_global.x.clone()
     # x1 = x0
-    sources_inputs_fitted = all_inputs.unstack(x1, update=True)
+    sources_inputs_fitted = model_inputs.unstack(x1, update=True)
     field_fitted = func_fit(x1)
 
 
@@ -550,7 +557,7 @@ PlotSourcesProfiles(data_sparse, field_fitted, sources_valid, radius=16, title='
 #%% ------ Adam implementation
 
 # Convert to PyTorch parameters for optimization
-x0_param = nn.Parameter(all_inputs.stack().clone(), requires_grad=True)
+x0_param = nn.Parameter(model_inputs.stack().clone(), requires_grad=True)
 
 # Create Adam optimizer
 optimizer = optim.Adam([x0_param], lr=1e-3)
@@ -896,7 +903,7 @@ tiles = split_image_into_tiles(data_full.shape, n_tiles_x=4, n_tiles_y=4, border
 visualize_tiles(data_full.sum(axis=0), tiles, title='Image Tiles', norm=norm_field)
 
 #%%
-sources_inputs = all_inputs.unstack(all_inputs.stack())
+sources_inputs = model_inputs.unstack(model_inputs.stack())
 sources_inputs['dx'] = sources_inputs['dx'].unsqueeze(-1).repeat(1,N_wvl)
 sources_inputs['dy'] = sources_inputs['dy'].unsqueeze(-1).repeat(1,N_wvl)
 

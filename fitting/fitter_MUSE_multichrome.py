@@ -13,11 +13,11 @@ from tools.utils import SR, FitGauss2D, SausageFeature
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF, GetRadialBackround
 from project_globals import MUSE_DATA_FOLDER, MUSE_FITTING_FOLDER, device
-from tools.config_manager import ConfigManager
+from managers.config_manager import ConfigManager
 from torchmin import minimize
 
 from data_processing.normalizers import TransformSequence, Uniform
-from tools.input_manager import InputsTransformer
+from managers.input_manager import InputsTransformer
 from tqdm import tqdm
 
 import warnings

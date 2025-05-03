@@ -2,8 +2,8 @@ from project_globals import MUSE_DATA_FOLDER, device
 import pickle
 import torch
 import numpy as np
-from tools.parameter_parser import ParameterParser
-from tools.config_manager import ConfigManager
+from managers.parameter_parser import ParameterParser
+from managers.config_manager import ConfigManager
 from scipy.ndimage import rotate
 
 

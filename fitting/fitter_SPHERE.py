@@ -15,7 +15,7 @@ from tools.utils import cropper, FitGauss2D, LWE_basis, EarlyStopping
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
-from tools.config_manager import GetSPHEREonsky, ConfigManager
+from managers.config_manager import GetSPHEREonsky, ConfigManager
 from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
 from torch.autograd.functional import hessian
 from torchmin import minimize

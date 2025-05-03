@@ -13,7 +13,7 @@ from torch import nn, optim
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
-from tools.config_manager import GetSPHEREonsky
+from managers.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER, device
 
 
@@ -91,7 +91,7 @@ draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)
 # mask_out = toy.mask_rim_out.unsqueeze(1).float()
 
 '''
-from tools.config_manager import ConfigManager
+from managers.config_manager import ConfigManager
 import json
 from copy import deepcopy
 

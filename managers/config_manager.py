@@ -1,7 +1,7 @@
 import sys
 sys.path.insert(0, '..')
 
-from tools.parameter_parser import ParameterParser
+from managers.parameter_parser import ParameterParser
 
 import math
 import torch
@@ -15,8 +15,13 @@ except ImportError:
 from copy import deepcopy
 from functools import reduce
 import operator
-from pprint import pprint
 
+"""
+This module is used to manage the configuration files of TipTorch. Configuration files are used to set the up
+the initial state of the TipTorch simulation. This module is used to parse the configuration files and manipulate
+the configs, i.e., splitting and merging them, converting to different frameworks (NumPy, PyTorch, CuPy), etc.
+Since TipTorch configs support for multiple targets, splitting and joining different configs is necessary.
+"""
 
 class ConfigManager():
     def __init__(self, uniqualized_values=None):

@@ -8,8 +8,8 @@ import re
 import pickle
 from .SPHERE_data import LoadSPHEREsampleByID
 from tools.utils import mask_circle
-from tools.parameter_parser import ParameterParser
-from tools.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
+from managers.parameter_parser import ParameterParser
+from managers.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
 from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER #, device
 from tools.utils import rad2mas, pad_lists, cropper, gaussian_centroid

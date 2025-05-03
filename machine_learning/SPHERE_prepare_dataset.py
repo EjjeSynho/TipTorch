@@ -9,7 +9,7 @@ import pickle
 import torch
 import numpy as np
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
-from tools.config_manager import GetSPHEREonsky
+from managers.config_manager import GetSPHEREonsky
 from project_globals import SPHERE_DATA_FOLDER
 import pandas as pd
 from tqdm import tqdm
