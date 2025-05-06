@@ -60,7 +60,7 @@ sample_id = 768
 # sample_id = 1778 # -- eplicit wings
 
 
-PSF_data, _, merged_config = SPHERE_preprocess(
+PSF_data, data_sample, config_file = SPHERE_preprocess(
     sample_ids    = [sample_id],
     norm_regime   = 'sum',
     split_cube    = False,
@@ -76,12 +76,12 @@ norms    = PSF_data[0]['norm (mean)']
 del PSF_data
 
 
-merged_config['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
+config_file['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
 
-merged_config['NumberSources'] = merged_config['NumberSources'].int().item()
-merged_config['DM']['DmHeights'] = torch.tensor(merged_config['DM']['DmHeights'], device=device)
-merged_config['sources_HO']['Wavelength'] = merged_config['sources_HO']['Wavelength']
-merged_config['sources_HO']['Height'] = torch.inf
+config_file['NumberSources'] = config_file['NumberSources'].int().item()
+config_file['DM']['DmHeights'] = torch.tensor(config_file['DM']['DmHeights'], device=device)
+config_file['sources_HO']['Wavelength'] = config_file['sources_HO']['Wavelength']
+config_file['sources_HO']['Height'] = torch.inf
 
 
 # if psf_df.loc[sample_id]['Nph WFS'] < 10:
@@ -98,13 +98,24 @@ if psf_df.loc[sample_id]['Central hole'] == True:
     circ_mask = 1-mask_circle(PSF_0.shape[-1], 3, centered=True)
     PSF_mask *= torch.tensor(circ_mask[None, None, ...]).to(device)
 
+'''
+PSF_data = {
+    'PSF': PSF_0,
+    'mask': PSF_mask,
+    'config': config_file,
+    'ob.file': data_sample[0]['observation']['date']
+}
 
+import pickle
+with open('../data/samples/IRDIS_sample_data.pkl', 'wb') as f:
+    pickle.dump(PSF_data, f)
+'''
 # plt.imshow(circ_mask * np.squeeze(PSF_0[0,0,...].cpu().numpy()), norm=LogNorm())
 
 #%% Initialize model
-# from PSF_models.TipTorch import TipTorch_new
+# from PSF_models.TipTorch import TipTorch
 # from PSF_models.TipToy_SPHERE_multisrc import TipTorch
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 from tools.utils import LWE_basis
 
 # tiptorch = TipTorch(merged_config, None, device, oversampling=1)
@@ -119,7 +130,7 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          False
 }
-model = TipTorch_new(merged_config, 'SCAO', None, PSD_include, 'sum', device, oversampling=1)
+model = TipTorch(config_file, 'SCAO', None, PSD_include, 'sum', device, oversampling=1)
 model.to_float()
 
 basis = LWE_basis(model)
@@ -145,8 +156,10 @@ plt.imshow(C)
 plt.axis('off')
 
 #%% PSF fitting (no early-stopping)
-from data_processing.normalizers import InputsManager, Uniform
+from data_processing.normalizers import Uniform
 from tools.utils import OptimizableLO, ZernikeLO
+from managers.input_manager import InputsManager
+
 
 use_Zernike = False
 

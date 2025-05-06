@@ -16,7 +16,7 @@ from pathlib import Path
 import warnings
 
 #%%
-class TipTorch_new(torch.nn.Module): 
+class TipTorch(torch.nn.Module): 
     def InitPupils(self):       
         # If not provided externally, TipTorch tries to load pupil and apodizer from the config file
         if self.pupil is None:

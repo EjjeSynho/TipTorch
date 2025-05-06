@@ -13,7 +13,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, mask_circle
 # from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 from data_processing.MUSE_preproc_utils import GetMUSEonsky
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
@@ -94,7 +94,7 @@ dict_to_ini(merged_config_2, "C:/Users/akuznets/Projects/TipTorch/data/parameter
 # from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from tools.utils import SausageFeature
 
-toy = TipTorch_new(merged_config, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+toy = TipTorch(merged_config, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 
 #%%
 sausage_absorber = SausageFeature(toy)

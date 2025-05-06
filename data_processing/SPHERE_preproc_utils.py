@@ -220,14 +220,7 @@ def ProcessPSFCubes(data_samples, size):
     return PSF_data
 
 
-def SPHERE_preprocess(sample_ids, norm_regime, split_cube, PSF_loader, config_loader, framework, device):
-    """
-    This function outputs the PSF cubes corresponding to specific samples, while all configs are merged into a single config.
-    If only a single sample is inputted, the function by default will output a single PSF cube and a single config.
-    But you can split the PSF cube into multiple samples by using the 'split_cube' option.
-    'loader_func' specifies how and from where to load the data from.
-    'config_loader' specifies how to init TipTorch from input data samples. For example, synthetic data has a different config file than on-sky data
-    """
+def SPHERE_preprocess(sample_ids, split_cube, PSF_loader, config_loader, framework, device):
 
     make_tensor  = lambda x: torch.tensor(x, device=device) if type(x) is not torch.Tensor else x
 

@@ -14,7 +14,8 @@ from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_globals import MUSE_DATA_FOLDER, device
 from torchmin import minimize
-from data_processing.normalizers import Uniform, QuadraticModel, InputsCompressor, InputsManager
+from data_processing.normalizers import Uniform, QuadraticModel#, InputsCompressor, InputsManager
+from managers.input_manager import InputsManager
 from tqdm import tqdm
 from tools.utils import OptimizableLO, SausageFeature, PupilVLT, GradientLoss, CombinedLoss
 from warnings import warn
@@ -67,7 +68,7 @@ X_std_inv = torch.nan_to_num(1.0 / PSF_std)
 X_std_inv = torch.clip(X_std_inv, 0, max_threshold)**2 / max_threshold**2
 
 #%% Initialize the model
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 
 pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
 PSD_include = {
@@ -79,7 +80,7 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          Moffat_absorber
 }
-toy = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+toy = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 toy.apodizer = toy.make_tensor(1.0)
 
 LO_basis = OptimizableLO(toy, ignore_pupil=False)

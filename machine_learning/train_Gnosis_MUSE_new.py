@@ -22,7 +22,7 @@ from data_processing.normalizers import CreateTransformSequenceFromFile
 from copy import copy, deepcopy
 from managers.input_manager import InputsTransformer
 
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 from tools.utils import SausageFeature
 
 df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
@@ -103,7 +103,7 @@ PSD_include = {
     'Moffat':          predict_Moffat
 }
 
-tiptorch = TipTorch_new(init_config, pupil, PSD_include, 'sum', device, oversampling=1)
+tiptorch = TipTorch(init_config, pupil, PSD_include, 'sum', device, oversampling=1)
 tiptorch.to_float()
 
 if predict_sausage:

@@ -19,7 +19,7 @@ from project_globals import MUSE_DATA_FOLDER
 
 #%%
 from managers.config_manager import ConfigFromFile
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 
 config_file = ConfigFromFile('../data/parameter_files/muse_ltao_ang.ini', device)
 
@@ -37,7 +37,7 @@ PSD_include = {
     'Moffat':          False
 }
 
-tiptorch_half = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+tiptorch_half = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 tiptorch_half.to_float()
 
 
@@ -86,7 +86,7 @@ GL_fraction = 0.9
 
 #%% Initialize the model
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 
 
 toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
@@ -112,7 +112,7 @@ with torch.no_grad():
         'Moffat':          Moffat_absorber
     }
     
-    tiptorch_half = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+    tiptorch_half = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
     tiptorch_half.to_float()
     
     '''
@@ -278,7 +278,7 @@ b = tiptorch.ChromatismPSD()
 
 #%%
 from tqdm import tqdm
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 from matplotlib.colors import LogNorm
 
 sizes = [101 + 25*i for i in range(15)]
@@ -310,7 +310,7 @@ config_file['sources_science']['Wavelength'] = torch.tensor([[ \
 for size_ in tqdm(sizes):
     config_file['sensor_science']['FieldOfView'] = size_
     
-    tiptorch = TipTorch_new(config_file, None, device=device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+    tiptorch = TipTorch(config_file, None, device=device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
     PSF_1_torch = tiptorch(x=inputs)
     
     PSFs.append(PSF_1_torch.detach().cpu().numpy())
@@ -323,7 +323,7 @@ for size_ in tqdm(sizes):
     # sums.append(PSF_1_torch.sum().item())
     # OTF_energy.append(tiptorch.OTF.abs().sum().item())
 
-# tiptorch = TipTorch_new(config_file, None, device=device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+# tiptorch = TipTorch(config_file, None, device=device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 # PSF_1_torch = tiptorch(x=inputs)
 # aa = PSF_1_torch.squeeze().sum(dim=(-2,-1))
 # wvls = tiptorch.wvl.squeeze().cpu().numpy()
@@ -385,11 +385,11 @@ plt.plot(x, np.log(y))
 # print(tiptorch.OTF.abs().sum())
 
 #%%
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 
 config_file['sensor_science']['FieldOfView'] = 351
 
-tiptorch = TipTorch_new(config_file, None, device=device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+tiptorch = TipTorch(config_file, None, device=device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 PSF_1_torch = tiptorch(x=inputs)
 
 #%%
@@ -1027,7 +1027,7 @@ if psf_df.loc[sample_id]['Central hole'] == True:
 
 #%% Initialize model
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 # from tools.utils import LWE_basis
 
 over = 1
@@ -1058,12 +1058,12 @@ PSD_include = {
     'diff. refract':   False,
     'Moffat':          False
 }
-tiptorch_new = TipTorch_new(merged_config, 'SCAO', None, PSD_include, 'sum', device, oversampling=over)
-tiptorch_new.to_float()
+TipTorch = TipTorch(merged_config, 'SCAO', None, PSD_include, 'sum', device, oversampling=over)
+TipTorch.to_float()
 
-PSF_1_new = tiptorch_new()
+PSF_1_new = TipTorch()
 
-DL_new = tiptorch_new.DLPSF()
+DL_new = TipTorch.DLPSF()
 
 #%
 '''
@@ -1105,7 +1105,7 @@ x = {
 
 #%%
 PSF_1_old = tiptorch_old(x)
-PSF_1_new = tiptorch_new(x)
+PSF_1_new = TipTorch(x)
 
 # PSF_1_old = DL_old
 # PSF_1_new = DL_new
@@ -1122,21 +1122,21 @@ draw_PSF_stack(PSF_1_old*PSF_mask, PSF_1_new*PSF_mask, min_val=1e-6, average=Tru
 plt.show()
 #%%
 # PSD_old = tiptorch_old.PSDs['WFS noise']#.squeeze()
-# PSD_new = tiptorch_new.half_PSD_to_full(tiptorch_new.PSDs['WFS noise'])
+# PSD_new = TipTorch.half_PSD_to_full(TipTorch.PSDs['WFS noise'])
 
 # PSD_old = tiptorch_old.Rx.unsqueeze(0).imag
-# PSD_new = tiptorch_new.half_PSD_to_full(tiptorch_new.Rx.unsqueeze(0)).real
+# PSD_new = TipTorch.half_PSD_to_full(TipTorch.Rx.unsqueeze(0)).real
 
 # PSD_old = tiptorch_old.piston_filter.unsqueeze(0)
-# PSD_new = tiptorch_new.half_PSD_to_full(tiptorch_new.piston_filter.unsqueeze(0))
+# PSD_new = TipTorch.half_PSD_to_full(TipTorch.piston_filter.unsqueeze(0))
 
 
 # PSD_old = tiptorch_old.VonKarmanSpectrum(tiptorch_old.r0.abs(), tiptorch_old.L0.abs(), tiptorch_old.k2_AO) #* self.piston_filter
-# PSD_new = tiptorch_new.VonKarmanSpectrum(tiptorch_new.r0.abs(), tiptorch_new.L0.abs(), tiptorch_new.k2_AO) #* self.piston_filter
+# PSD_new = TipTorch.VonKarmanSpectrum(TipTorch.r0.abs(), TipTorch.L0.abs(), TipTorch.k2_AO) #* self.piston_filter
 
 PSD_old = tiptorch_old.kx
-PSD_new = tiptorch_new.kx
-PSD_new = tiptorch_new.half_PSD_to_full(PSD_new)
+PSD_new = TipTorch.kx
+PSD_new = TipTorch.half_PSD_to_full(PSD_new)
 
 plot_radial_profiles_new( PSD_old.cpu().numpy(), PSD_new.cpu().numpy(), 'Old', 'New', title='Left PSF')
 plt.show()
@@ -1150,15 +1150,15 @@ PSD_old
 #%%
 
 print( tiptorch_old.noise_gain )
-print( tiptorch_new.noise_gain )
+print( TipTorch.noise_gain )
 
 
 print( tiptorch_old.NoiseVariance(tiptorch_old.r0) )
-print( tiptorch_new.NoiseVariance() )
+print( TipTorch.NoiseVariance() )
 
 #%%
 
-plt.imshow(tiptorch_new.piston_filter.squeeze().cpu())
+plt.imshow(TipTorch.piston_filter.squeeze().cpu())
 
 
 
@@ -1170,7 +1170,7 @@ x['Jx'] *= 0
 x['Jy'] *= 0
 
 # PSF_1_old_blur = tiptorch_old(x)
-PSF_1_new_blur = tiptorch_new(x)
+PSF_1_new_blur = TipTorch(x)
 
 PSF_1_new_blur[0,0,...] = torch.tensor(gaussian_filter(PSF_1_new_blur[0,0,...].cpu().numpy(), sigma=2), device=device)
 PSF_1_new_blur[0,1,...] = torch.tensor(gaussian_filter(PSF_1_new_blur[0,1,...].cpu().numpy(), sigma=2), device=device)

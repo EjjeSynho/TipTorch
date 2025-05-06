@@ -12,7 +12,8 @@ from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
 from tools.utils import mask_circle
-from data_processing.normalizers import Uniform, InputsManager
+from data_processing.normalizers import Uniform
+from managers.input_manager import InputsManager
 from machine_learning.calibrator import Calibrator, Gnosis
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from project_globals import MUSE_DATA_FOLDER, MUSE_DATASET_FOLDER#, device
@@ -203,6 +204,42 @@ mean_shap_values = np.mean(shap_values, axis=-1)
 
 # shap.summary_plot(shap_values[...,3], X_test, max_display=61, feature_names=selected_entries_input)
 shap.summary_plot(mean_shap_values, X_test, max_display=61, feature_names=selected_entries_input)
+
+
+#%%
+# interaction_values = explainer.shap_interaction_values(X)
+cor_matrix = []
+for output_idx in range(shap_values.shape[-1]):
+    shap_slice = shap_values[:, :, output_idx]  # shape: (N_samples, N_features)
+    shap_df = pd.DataFrame(shap_slice, columns=selected_entries_input)
+    cor_matrix.append( shap_df.corr().values )
+
+cor_matrix = np.array(cor_matrix)
+# cor_matrix = np.mean(cor_matrix, axis=0)
+cor_matrix = cor_matrix[-1,...]
+
+#%
+# Plot heatmap
+# Plot heatmap using imshow with nearest interpolation
+plt.figure(figsize=(12, 10))
+plt.imshow(cor_matrix, cmap='coolwarm', interpolation='nearest', vmin=-1, vmax=1)
+plt.colorbar(label='Correlation')
+plt.title('SHAP Value Correlation Matrix')
+
+# Set ticks for both axes
+plt.xticks(range(len(selected_entries_input)), selected_entries_input, rotation=90, fontsize=8)
+plt.yticks(range(len(selected_entries_input)), selected_entries_input, fontsize=8)
+
+# Annotate each cell with the correlation value
+# for i in range(len(cor_matrix)):
+#     for j in range(len(cor_matrix)):
+#         text_color = 'white' if abs(cor_matrix.values[i, j]) > 0.5 else 'black'
+#         plt.text(j, i, f'{cor_matrix.values[i, j]:.2f}',
+#                  ha='center', va='center', color=text_color, fontsize=7)
+
+plt.tight_layout()
+plt.show()
+
 
 #%%
 # Define the features and targets for our MLP model

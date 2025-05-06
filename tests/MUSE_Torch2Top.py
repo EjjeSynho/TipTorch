@@ -66,7 +66,7 @@ var_mask  =  var_mask[..., ids_wavelength_selected, :, :]
 
 #%% Initialize the model
 # from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 from tools.utils import SausageFeature
 from tools.utils import PupilVLT
 
@@ -80,7 +80,7 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          True
 }
-PSF_model = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+PSF_model = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 PSF_model.to_float()
 
 sausage_absorber = SausageFeature(PSF_model)

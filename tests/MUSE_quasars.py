@@ -146,7 +146,6 @@ data_src = data_onsky.sum(dim=0).cpu().numpy()
 PSF_size = 111  # Define the size of each ROI (in pixels)
 thres = 50000
 
-
 sources   = detect_sources(data_src, threshold=thres, box_size=11, verbose=True)
 srcs_pos  = np.transpose((sources['x_peak'], sources['y_peak']))
 srcs_flux = sources['peak_value'].to_numpy()
@@ -212,7 +211,6 @@ src_spectra_sparse = [GetSpectrum(data_sparse, sources.iloc[i], radius=flux_core
 src_spectra_binned = [GetSpectrum(data_onsky,  sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
 src_spectra_full   = [GetSpectrum(data_full,   sources.iloc[i], radius=flux_core_radius) for i in range(N_src)]
 
-
 # STRANGE LINE IN THE FIRST SPECTRUM!!!!!
 #%%
 i_src = 1
@@ -265,7 +263,7 @@ config_file['sources_HO']['Wavelength'] = config_file['sources_HO']['Wavelength'
 #%%
 from tools.utils import PupilVLT, OptimizableLO
 # from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 # from tools.utils import SausageFeature
 
 LO_map_size = 31
@@ -280,7 +278,7 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          False
 }
-model = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+model = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 model.apodizer = model.make_tensor(1.0)
 
 model.to_float()

@@ -107,6 +107,7 @@ data_src = data_onsky.sum(dim=0).cpu().numpy()
 # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
 
 PSF_size = 111  # Define the size of each ROI (in pixels)
+# thres = 5000000
 thres = 1200000
 # thres = 1000000
 # thres = 700000
@@ -133,9 +134,9 @@ from managers.multisrc_manager import extract_ROIs, add_ROIs, extract_ROIs_from_
 
 ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_sparse, sources, box_size=PSF_size)
 N_src = len(ROIs)
-# plot_ROIs_as_grid(ROIs, cols=np.ceil(np.sqrt(len(ROIs))).astype('uint'))  # Adjust the number of columns as needed
 
 sources_valid = sources.iloc[valid_srcs]
+sources_valid = sources_valid.reset_index(drop=True)
 
 yy, xx = torch.where(valid_mask.squeeze() > 0) # Compute center of mass for valid mask assuming it's the center of the field
 
@@ -215,7 +216,7 @@ selected_entries_input = muse_df_norm.columns.values.tolist()
 
 #%%
 from tools.utils import PupilVLT, OptimizableLO
-from PSF_models.TipTorch import TipTorch_new
+from PSF_models.TipTorch import TipTorch
 
 LO_map_size = 31
 
@@ -230,7 +231,7 @@ PSD_include = {
     'Moffat':          predict_Moffat
 }
 
-model = TipTorch_new(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+model = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 # model_single.apodizer = model_single.make_tensor(1.0)
 
 model.to_float()
@@ -283,28 +284,27 @@ shared_inputs.set_optimizable(['alpha', 'amp', 'b'], predict_Moffat)
 shared_inputs.set_optimizable(['s_pow'], predict_phase_bump)
 shared_inputs.set_optimizable(['Jxy'], False)
 
-shared_inputs.to_float()
-shared_inputs.to(device)
-
 
 individual_inputs = InputsManager()
 
 individual_inputs.add('dx', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dx'])
 individual_inputs.add('dy', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dy'])
 individual_inputs.add('F_norm', torch.tensor([[1.0,]]*N_src), df_transforms_fitted['F'])
+# individual_inputs.add('F_norm', torch.ones([N_src, N_wvl]), df_transforms_fitted['F'])
 individual_inputs.add('src_dirs_x', torch.tensor(sources_coords[:,0]), df_transforms_src_coords)
 individual_inputs.add('src_dirs_y', torch.tensor(sources_coords[:,1]), df_transforms_src_coords)
 
-individual_inputs.to_float()
-individual_inputs.to(device)
-
-individual_inputs.set_optimizable(['F_norm'], False)
-individual_inputs.set_optimizable(['src_dirs_x'], False)
-individual_inputs.set_optimizable(['src_dirs_y'], False)
 
 # print(individual_inputs)
 
 model_inputs = InputsManagersUnion({ 'shared': shared_inputs,'individual': individual_inputs })
+model_inputs.to_float()
+model_inputs.to(device)
+
+model_inputs.set_optimizable(['F_norm'], False)
+model_inputs.set_optimizable(['src_dirs_x'], False)
+model_inputs.set_optimizable(['src_dirs_y'], False)
+
 print(model_inputs)
 
 model_inputs_copy = model_inputs.copy()
@@ -400,6 +400,7 @@ def run_model(PSF_model, inputs_manager, x_, i_src=None, update=False):
     inputs_dict['dy'] = inputs_dict['dy'].view(-1,1).repeat(1, N_wvl)
     
     return PSF_model(inputs_dict) * inputs_dict['F_norm'].view(-1,1,1,1)
+    # return PSF_model(inputs_dict) * inputs_dict['F_norm'].view(1,N_wvl,1,1)
 
 
 def fit_individial_src(data, loss, x_init, i_src, verbose=0):
@@ -423,6 +424,9 @@ model_inputs.set_optimizable(['dx', 'dy'], True)
 
 x0 = model_inputs.stack()
 
+_ = run_model(model, model_inputs, x0, i_src=0, update=False)
+
+#%%
 PSFs_fitted = []
 for i in tqdm(range(N_src)):
     PSF_fit, x0 = fit_individial_src(PSFs_data_norm, loss_L1, x0, i, verbose=0)
@@ -431,30 +435,36 @@ for i in tqdm(range(N_src)):
 PSFs_fitted = torch.vstack(PSFs_fitted)
 _ = model_inputs.unstack(x0, update=True)
 
+#%%
 model_inputs_copy = model_inputs.copy()
+
+#%%
+model_inputs = model_inputs_copy.copy()
+
 #%%
 
-# model_inputs = model_inputs_copy.copy()
+'''
+model_inputs = model_inputs_copy.copy()
 
-# model_inputs.set_optimizable(
-#     ['dx', 'dy', 'F', 'bg','Jxy','s_pow', 'LO_coefs', 'src_dirs_x', 'src_dirs_y', 'F_norm'],
-#     False
-# )
+model_inputs.set_optimizable(
+    ['dx', 'dy', 'F', 'bg','Jxy','s_pow', 'LO_coefs', 'src_dirs_x', 'src_dirs_y', 'F_norm'],
+    False
+)
 
-# model_inputs.set_optimizable(
-#     ['r0', 'dn', 'Jx', 'Jy', 'GL_frac', 'amp', 'b', 'alpha'],
-#     True
-# )
+model_inputs.set_optimizable(
+    ['r0', 'dn', 'Jx', 'Jy', 'GL_frac', 'amp', 'b', 'alpha'],
+    True
+)
 
-# x1 = model_inputs.stack()
+x1 = model_inputs.stack()
 
-# PSFs_fitted = []
-# for i in tqdm(range(N_src)):
-#     PSF_fit, x1 = fit_individial_src(PSFs_data_norm, loss_L1, x1, i, verbose=0)
-#     PSFs_fitted.append(PSF_fit)
+PSFs_fitted = []
+for i in tqdm(range(N_src)):
+    PSF_fit, x1 = fit_individial_src(PSFs_data_norm, loss_L1, x1, i, verbose=0)
+    PSFs_fitted.append(PSF_fit)
 
-# PSFs_fitted = torch.vstack(PSFs_fitted)
-
+PSFs_fitted = torch.vstack(PSFs_fitted)
+'''
 
 display_mask = mask_circle(PSF_size, 18)[None,...]
 
@@ -475,7 +485,7 @@ model_sparse = add_ROIs(
 # src_spectra_sparse = [GetSpectrum(data_sparse,  sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
 # src_spectra_fitted = [GetSpectrum(model_sparse, sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
 
-# STRANGE LINE IN THE FIRST SPECTRUM!!!!!
+
 #%
 # i_src = 1
 # plt.plot(λ, src_spectra_full[i_src], linewidth=0.25, alpha=0.3)
@@ -497,7 +507,7 @@ merged_config = MultipleTargetsInOneObservation(config_file, N_src)
 # for key, value in sources_inputs.items():
 #     print(f'{key}: {value.shape}')
 
-# model_batch = TipTorch_new(merged_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+# model_batch = TipTorch(merged_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 # model_batch.to_float()
 # model_batch.to(device)
 # model_batch.on_axis = False
@@ -506,13 +516,10 @@ torch.cuda.empty_cache()
 model.Update(config=merged_config, init_grids=True, init_pupils=True, init_tomography=True)
 
 #%%
-
-model_inputs = model_inputs_copy.copy()
-
-#%%
 model_inputs.set_optimizable(['dx', 'dy', 'bg', 's_pow', 'amp', 'alpha', 'b', 'Jxy', 'F'], False)
 model_inputs.set_optimizable(['GL_frac', 'r0', 'F', 'dn'], False)
-model_inputs.set_optimizable(['F_norm', 'Jx', 'Jy'], True)
+model_inputs.set_optimizable(['Jx', 'Jy'], False)
+model_inputs.set_optimizable(['F_norm'], True)
 
 # print(model_inputs)
 
@@ -530,7 +537,8 @@ def func_fit(x_):
 def loss_fit(x_):
     simulated_field = func_fit(x_)
     # l1 = F.smooth_l1_loss(data_sparse*wvl_weights, simulated_field*wvl_weights, reduction='mean')
-    l2 = F.mse_loss(data_sparse*wvl_weights, simulated_field*wvl_weights, reduction='mean')
+    # l2 = F.mse_loss(data_sparse*wvl_weights, simulated_field*wvl_weights, reduction='mean')
+    l2 = F.mse_loss(data_sparse, simulated_field, reduction='mean')
     # return l1 * 1e-3 #+ l2 * 5e-6
     return l2 * 1e-6
 

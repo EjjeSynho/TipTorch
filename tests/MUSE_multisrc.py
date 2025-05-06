@@ -325,7 +325,7 @@ NN_inp = torch.tensor(df_norm[selected_entries_input].loc[0].to_numpy()).to(devi
 
 #%%
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
-# from PSF_models.TipTorch import TipTorch_new
+# from PSF_models.TipTorch import TipTorch
 # from tools.utils import SausageFeature
 
 config_file, data_onsky = GetConfig(data_sample, data_onsky)
@@ -349,7 +349,7 @@ Moffat_absorber = True
 predict_Moffat = Moffat_absorber
 
 toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
-# toy = TipTorch_new(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+# toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 
 toy.PSD_include['fitting'] = True
 toy.PSD_include['WFS noise'] = True
