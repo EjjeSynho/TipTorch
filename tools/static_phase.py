@@ -3,7 +3,8 @@ import torch.nn.functional as F
 import torchvision.transforms.functional as TF
 import numpy as np
 import torch
-from .utils import mask_circle
+from scipy.io import loadmat
+from .utils import mask_circle, rad2mas
 
 
 decompose_WF = lambda WF, basis, pupil: WF[:, pupil > 0] @ basis[:, pupil > 0].T / pupil.sum()
@@ -68,7 +69,32 @@ def BuildPetalBasis(segmented_pupil, pytorch=True):
         return torch.from_numpy( basis ), torch.tensor(coefs)
 
 
-class ZernikeBasis:
+def decouple_LWE_modes(LWE_coefs, LWE_basis, pupil_border_offset=7):
+    """
+    Decouple LWE modes from the PTT modes (Piston, Tip, Tilt)
+    While piston is removed, tip and tilt are translated into the pixel shifts
+    """	
+    pupil = LWE_basis.model.pupil
+    PTT_basis = BuildPTTBasis(pupil.cpu().numpy(), True).to(LWE_basis.model.device).float()
+
+    TT_max = PTT_basis.abs()[1,...].max().item()
+    
+    pixel_shift = lambda coef: 2 * TT_max * rad2mas * 1e-9 * coef / LWE_basis.model.psInMas / LWE_basis.model.D  / (1-pupil_border_offset/pupil.shape[-1])
+
+    LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, LWE_basis.modal_basis)
+    PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, pupil)
+    PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, pupil)
+
+    LWE_OPD_subtracted   = LWE_OPD - PPT_OPD
+    LWE_coefs_subtracted = decompose_WF(LWE_OPD_subtracted, LWE_basis.modal_basis, pupil)
+    
+    shift_x = pixel_shift(PTT_coefs[:, 2]) # [pix], no, it's not a bug, tilt stays for the X-axis
+    shift_y = pixel_shift(PTT_coefs[:, 1]) # [pix]
+    
+    return LWE_coefs_subtracted, LWE_OPD_subtracted, shift_x, shift_y
+
+
+class ZernikeModes:
     def __init__(self, pupil, modes_num=1):
         self.nModes = modes_num
         self.modesFullRes = None
@@ -168,127 +194,131 @@ class ZernikeBasis:
         self.modesFullRes = np.reshape( self.modesFullRes, [resolution, resolution, self.nModes] )
 
 
+class PhaseMap:
+    """
+    Base class for any OPD→complex-field mapping.
+    Subclasses must implement compute_OPD(x) to return
+    an OPD tensor in meters of shape (N_src, N_wvl, H, W).
+    """
 
-class LWE_basis():
-    def __init__(self, model) -> None:
-        self.model = model
-        self.modal_basis, _ = BuildPetalBasis(self.model.pupil.cpu(), pytorch=True)
-        self.modal_basis = self.modal_basis.float().to(model.device)
-        
-    def forward(self, x):
-        OPD = torch.einsum('mn,nwh->mwh', x, self.modal_basis) * 1e-9
-        k = 2j * torch.pi / self.model.wvl.view(self.model.N_src, self.model.N_wvl, 1, 1)
-        
-        if self.ignore_pupil:
-            return torch.exp(k * OPD.unsqueeze(1))
-        else:
-            pupil_apod = (self.model.pupil * self.model.apodizer).unsqueeze(0).unsqueeze(0)
-            return pupil_apod * torch.exp(k * OPD.unsqueeze(1))
-    
-    def __call__(self, *args):
-        return self.forward(*args)
-
-
-class OptimizableLO():
     def __init__(self, model, ignore_pupil=True):
         self.model = model
         self.ignore_pupil = ignore_pupil
 
+    def compute_OPD(self, x):
+        raise NotImplementedError("Subclass must implement compute_OPD")
+
+    def forward(self, x):
+        # 1) Build OPD
+        OPD = self.compute_OPD(x)
+
+        # 2) Wave-number factor k = 2jπ / λ
+        k = 2j * torch.pi / self.model.wvl.view(self.model.N_src, self.model.N_wvl, 1, 1)
+
+        # 3) Phase term
+        phase = torch.exp(k * OPD)
+
+        # 4) Optionally multiply through by pupil × apodizer
+        if self.ignore_pupil:
+            return phase
+        
+        pupil_apod = (self.model.pupil * self.model.apodizer).unsqueeze(0).unsqueeze(0)
+        return pupil_apod * phase
+
+    __call__ = forward
+
+
+class LWEBasis(PhaseMap):
+    def __init__(self, model, ignore_pupil=False):
+        super().__init__(model, ignore_pupil)
+        # build petal (modal) basis once
+        modal_basis, _ = BuildPetalBasis(model.pupil.cpu(), pytorch=True)
+        self.modal_basis = modal_basis.float().to(model.device)
+
+    def compute_OPD(self, coeffs):
+        # coeffs shape: (N_src, N_wvl, n_modes)
+        # modal_basis shape: (n_modes, H, W)
+        # result: (N_src, N_wvl, H, W)
+        return torch.einsum('om,mhw->ohw', coeffs, self.modal_basis) * 1e-9
+
+
+class PixelmapBasis(PhaseMap):
+    def __init__(self, model, ignore_pupil=True):
+        super().__init__(model, ignore_pupil)
+
     def fft_upscale(self, x):
         h, w = x.shape[-2:]
         H, W = self.model.pupil.shape[-2:]
-
         X = torch.fft.fftshift(torch.fft.fft2(x))
+        pad_top = (H - h) // 2
+        pad_bot = H - h - pad_top
+        pad_left = (W - w) // 2
+        pad_right = W - w - pad_left
+        Xp = torch.pad(X, (pad_left, pad_right, pad_top, pad_bot), "constant", 0)
+        up = torch.fft.ifft2(torch.fft.ifftshift(Xp)) * (H * W / (h * w))
+        return up.abs().unsqueeze(1)
 
-        top_pad    = (H - h) // 2
-        bottom_pad =  H - h - top_pad
-        left_pad   = (W - w) // 2
-        right_pad  =  W - w - left_pad
-
-        padded_F = torch.pad(X, (left_pad, right_pad, top_pad, bottom_pad), mode='constant', value=0)
-        upscaled = torch.fft.ifft2(torch.fft.ifftshift(padded_F)) * (H * W / (h * w))
-        
-        return upscaled.abs().unsqueeze(1)
-
-    def interp_upscale(self, x, mode='bilinear'):
+    def interp_upscale(self, x, mode="bilinear"):
         return F.interpolate(
             x.unsqueeze(1),
-            size = (self.model.pupil.shape[-2], self.model.pupil.shape[-1]),
-            mode = mode,
-            align_corners = True
+            size=(self.model.pupil.shape[-2], self.model.pupil.shape[-1]),
+            mode=mode,
+            align_corners=True,
         )
 
-    def forward(self, x):
-        OPD = self.interp_upscale(x) * 1e-9
-        k = 2j * torch.pi / self.model.wvl.view(self.model.N_src, self.model.N_wvl, 1, 1)
-        if self.ignore_pupil:
-            return torch.exp(k*OPD)
-        else:
-            return (self.model.pupil * self.model.apodizer).unsqueeze(0).unsqueeze(0) * torch.exp(k*OPD)
-
-    def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
+    def compute_OPD(self, x):
+        return self.interp_upscale(x) * 1e-9 # x: coeffs in the low-res space
 
 
-
-class ZernikeLO():
+class ZernikeBasis(PhaseMap):
     def __init__(self, model, N_modes, ignore_pupil=True):
-        self.model = model
-        self.ignore_pupil = ignore_pupil
-        self.N_modes = N_modes
-        
-        if self.ignore_pupil:
-            pupil = mask_circle(N=self.model.pupil.shape[-1], r=self.model.pupil.shape[-1]//2)
+        super().__init__(model, ignore_pupil)
+       
+        # build a Zernike basis
+        if ignore_pupil:
+            pupil_mask = mask_circle(N=model.pupil.shape[-1], r=model.pupil.shape[-1] // 2)
         else:
-            pupil = self.model.pupil[0].cpu().numpy()
-        
-        Z = ZernikeBasis(pupil, N_modes)
-        Z.computeZernike()
-        
-        self.zernike_basis = torch.as_tensor(Z.modesFullRes, device=model.device, dtype=model.pupil.dtype).permute(2,0,1)
+            pupil_mask = model.pupil[0].cpu().numpy()
 
+        Z = ZernikeModes(pupil_mask, N_modes)
+        Z.computeZernike()
+        # store as (N_modes, H, W)
+        modes = torch.as_tensor(Z.modesFullRes, device=model.device, dtype=model.pupil.dtype)
+        self.zernike_basis = modes.permute(2, 0, 1)
+        self.N_modes = N_modes
 
     def compute_OPD(self, coefs):
+        # coefs: (N_src, N_wvl, N_modes)
+        # zernike_basis: (N_modes, H, W)
         return torch.einsum('om,mhw->ohw', coefs, self.zernike_basis) * 1e-9
 
 
-    def forward(self, x):
-        OPD = self.compute_OPD(x)
-        k = 2j * torch.pi / self.model.wvl.view(self.model.N_src, self.model.N_wvl, 1, 1)
-        if self.ignore_pupil:
-            return torch.exp(k*OPD)
-        else:
-            return (self.model.pupil * self.model.apodizer).unsqueeze(0).unsqueeze(0) * torch.exp(k*OPD)
-
-
-    def __call__(self, *args, **kwargs):
-        return self.forward(*args, **kwargs)
-
-
-class SausageFeature:
-    def __init__(self, model) -> None:
-        from torch.nn.functional import interpolate
-        from scipy.io import loadmat
-
-        self.model = model
-
-        # Load phase map obtained with calibration
-        DF_diff = loadmat('../data/calibrations/Muse_slopes/DelatRS2Phase.mat')['aa']
+class SausageFeature(PhaseMap):
+    def __init__(self, model):
+        # always apply pupil (ignore_pupil=False)
+        super().__init__(model, ignore_pupil=False)
         
-        # 1.6 comes from the max of the influence func
-        # 35 = SPARTA units per micron, 2 factor is due to WF reflection from the DM
-        self.OPD_map = torch.tensor(DF_diff).float().to(self.model.device) * 35*2 / 1.6 / 1e6 # [m
-        self.OPD_map = interpolate(self.OPD_map[None,None,...], size=(self.model.pupil.shape), mode='bilinear', align_corners=False)
+        # load calibration map and rescale to meters
+        mat = loadmat("../data/calibrations/Muse_slopes/DelatRS2Phase.mat")["aa"]
+        
+        OPD = torch.tensor(mat).float().to(model.device)
+        OPD *= 35 * 2 / 1.6 / 1e6  # [m]
+        
+        # up-sample to pupil resolution
+        self.OPD_map = F.interpolate(
+            OPD[None, None, ...],
+            size=model.pupil.shape[-2:],
+            mode="bilinear",
+            align_corners=False,
+        ).squeeze(0)
 
-    def forward(self, coef):
-        angle_rot = self.model.pupil_angle - 45.0 # Empirical values
+    def compute_OPD(self, coef):
+        # coef: (N_src, N_wvl)
+        # rotate and broadcast
+        angle = self.model.pupil_angle - 45.0
+        # make full batch of maps
+        batch_map = self.OPD_map.unsqueeze(0).unsqueeze(0).repeat(coef.shape + (1, 1))
+        batch_map = TF.rotate(batch_map, angle, interpolation=TF.InterpolationMode.BILINEAR)
+        # OPD = map * coef
+        return batch_map * coef.view(self.model.N_src, self.model.N_wvl, 1, 1)
 
-        OPD = self.OPD_map.repeat(coef.shape[0], 1, 1, 1)
-        OPD = TF.rotate(OPD, angle_rot, interpolation=TF.InterpolationMode.BILINEAR)
-
-        wvls  = self.model.wvl.view(1, -1, 1, 1)
-        pupil = self.model.pupil.view(1, 1, *self.model.pupil.shape)
-        return pupil * torch.exp(2j*np.pi/wvls*OPD*coef.view(-1, 1, 1, 1))
-
-    def __call__(self, *args):
-        return self.forward(*args)

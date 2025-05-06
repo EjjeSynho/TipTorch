@@ -10,7 +10,6 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas
-from data_processing.SPHERE_preproc_utils import process_mask
 from torchmin import minimize
 
 from project_globals import device
@@ -22,7 +21,6 @@ with open('../data/samples/IRDIS_sample_data.pkl', 'rb') as handle:
 config_file = sample_data['config']
 PSF_data    = sample_data['PSF']
 PSF_mask    = sample_data['mask']
-PSF_mask    = process_mask(PSF_mask)
 
 
 #%% Initialize model
@@ -50,7 +48,7 @@ model = TipTorch(
     oversampling = 1            # oversampling factor
 )
 
-# In float regime, model is faster and only marginally less accurate, so recommended
+# In float regime, the model is faster and only marginally less accurate, so recommended
 model.to_float()
 
 #%% Manage optimizable static phase
@@ -58,153 +56,174 @@ model.to_float()
 # However, this can be done by adding a new input to the model. For example, we can add Zernike-driven static
 # aberrations map. In addition to this, we can include quasi-static modes associated with Low Wind Effect (LWE).
 
-from tools.static_phase import ZernikeLO, LWE_basis
+from tools.static_phase import ZernikeBasis, LWEBasis
+
+# Pupil iis managed inside the PSF model, so we need to ignore it in the basis computation
+LWE_basis = LWEBasis(model=model, ignore_pupil=True)
+Z_basis = ZernikeBasis(model=model, N_modes=300, ignore_pupil=True)
+
+# Compute static phase from the modal coefficients
+def compute_static_phase(input_dict):
+    return Z_basis(input_dict['Z_coefs']) * LWE_basis(input_dict['LWE_coefs']) * model.pupil * model.apodizer
 
 
-LWE_static_phase = LWE_basis(model=model)
+#%% Managing model inputs
+# In this example, pytorch-minimize is used to optimize the model inputs. The inputs are managed by the InputsManager class.
+# InputsManager allows to normalize model inputs that mau take ildly different ranges of values. In addition, it allows to
+# easily stack inputs dictionary to a single vector/matrix for optimization and unstack it back to a dictionary.
 
-N_modes = 300
-LO_basis = ZernikeLO(model=model, N_modes=300, ignore_pupil=True)
-
-
-
-#%%
-
-PSF_pred = model()
-
-draw_PSF_stack(PSF_data*PSF_mask, PSF_pred*PSF_mask, average=True, min_val=1e-5, crop=80, scale='log')
-
-
-#%%
 from data_processing.normalizers import Uniform
 from managers.input_manager import InputsManager
 
 
-inputs_manager = InputsManager()
+model_inputs = InputsManager()
 
-inputs_manager.add('r0',  model.r0,                 Uniform(a=0.05,  b=0.5))
-inputs_manager.add('F',   torch.tensor([[1.0,]*2]), Uniform(a=0.0,   b=1.0))
-inputs_manager.add('dx',  torch.tensor([[0.0,]*2]), Uniform(a=-1,    b=1))
-inputs_manager.add('dy',  torch.tensor([[0.0,]*2]), Uniform(a=-1,    b=1))
-inputs_manager.add('bg',  torch.tensor([[0.0,]*2]), Uniform(a=-5e-6, b=5e-6))
-inputs_manager.add('dn',  torch.tensor([0.0]),      Uniform(a=-0.02, b=0.02))
-inputs_manager.add('Jx',  torch.tensor([[7.5]]),    Uniform(a=0,     b=40))
-inputs_manager.add('Jy',  torch.tensor([[7.5]]),    Uniform(a=0,     b=40))
-inputs_manager.add('Jxy', torch.tensor([[18]]),     Uniform(a=-180,  b=180))
+# The dimensiionality of inputs is very important, since PSF model doesn't do any checking itself
+model_inputs.add('r0',  model.r0,                 Uniform(a=0.05,  b=0.5))
+model_inputs.add('F',   torch.tensor([[1.0,]*2]), Uniform(a=0.0,   b=1.0))
+model_inputs.add('dx',  torch.tensor([[0.0,]*2]), Uniform(a=-1,    b=1))
+model_inputs.add('dy',  torch.tensor([[0.0,]*2]), Uniform(a=-1,    b=1))
+model_inputs.add('bg',  torch.tensor([[0.0,]*2]), Uniform(a=-5e-6, b=5e-6))
+model_inputs.add('dn',  torch.tensor([0.0]),      Uniform(a=-0.02, b=0.02))
+model_inputs.add('Jx',  torch.tensor([[7.5]]),    Uniform(a=0,     b=40))
+model_inputs.add('Jy',  torch.tensor([[7.5]]),    Uniform(a=0,     b=40))
+model_inputs.add('Jxy', torch.tensor([[18]]),     Uniform(a=-180,  b=180))
 
-inputs_manager.add('basis_coefs', torch.zeros([1,12]),    Uniform(a=-20,   b=20))
-inputs_manager.add('LO_coefs', torch.zeros([1, N_modes]), Uniform(a=-10,   b=10))
+model_inputs.add('LWE_coefs', torch.zeros([1,12]),    Uniform(a=-20,   b=20))
+model_inputs.add('Z_coefs',   torch.zeros([1, Z_basis.N_modes]), Uniform(a=-10,   b=10))
 
-inputs_manager.to_float()
-inputs_manager.to(device)
+model_inputs.to_float()
+model_inputs.to(device)
 
-print(inputs_manager)
+print(model_inputs)
+
+#%%
+# Simulates the PSF given the inputs stacked into a single vector. Used in the optimization process.
+def simulate(x_):
+    # Note, that every call to model_inputs.unstack() will update the internal state of model_inputs
+    # Switching the update off helps to leave the internal state of model_inputs intact
+    input_dict = model_inputs.unstack(x_, update=True)
+    # PSD = None means that the PSD will be computed inside the model and not provided from outside.
+    return model(x=input_dict, PSD=None, phase_generator=lambda: compute_static_phase(input_dict))
+
+x0 = model_inputs.stack()
+
+# Direct prediction without ay calibration or fitting. Should be fairly inaccurate
+PSF_pred = simulate(x0)
+
+draw_PSF_stack(PSF_data*PSF_mask, PSF_pred*PSF_mask, average=True, min_val=1e-5, crop=80, scale='log')
+
+#%%
+class LWERegularizer:
+    """
+    The purpose of this class is to regularize the optimization of LWE coefficients to avoid overfitting
+    """
+    # These initial values are completely empirical
+    def __init__(self, device, amplitude=50.0, gaussian_sigma_factor=2.0, gauss_penalty_weight=5.0, l2_weight=1e-4):
+        self.device = device
+        self.amplitude = amplitude
+        self.gaussian_sigma = amplitude / gaussian_sigma_factor
+        self.l2_weight = l2_weight
+        self.gauss_penalty_weight = gauss_penalty_weight
+
+        # Define patterns to avoid while optimizing because they are unlikely to appear physically and thus may mean overfitting
+        pattern_templates = [
+            [0,0,0,0,  0,-1,1,0,  1,0,0,-1],  # pattern_outwards
+            [0,0,0,0,  0,1,-1,0, -1,0,0, 1],  # pattern_inwards
+            [0,0,0,0,  0,-1,1,0, -1,0,0, 1],  # pattern_1
+            [0,0,0,0,  0,1,-1,0,  1,0,0,-1],  # pattern_2
+            [0,0,0,0,  1,0,0,-1,  0,1,-1,0],  # pattern_3
+            [0,0,0,0,  -1,0,0,1,  0,-1,1,0],  # pattern_4
+            [-1,1,1,-1,  0,0,0,0,  0,0,0,0],  # pattern_piston_horiz
+            [1,-1,-1,1,  0,0,0,0,  0,0,0,0]   # pattern_piston_vert
+        ]
+
+        # Create tensor patterns from templates
+        self.patterns = [torch.tensor([p]).to(device).float() * self.amplitude for p in pattern_templates]
+
+    def gaussian_penalty(self, amplitude, x, x_0, sigma):
+        # Calculate Gaussian penalty between coefficient vector and pattern template
+        return amplitude * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
+
+    def pattern_error(self, pattern, coefficients):
+        # Calculate error term for a specific pattern
+        return (pattern * self.gaussian_penalty(self.gauss_penalty_weight, coefficients, pattern, self.gaussian_sigma)).flatten().abs().sum()
+
+    def __call__(self, coefficients):
+        # Calculate the full LWE regularization loss for given coefficients
+        pattern_loss = sum(self.pattern_error(pattern, coefficients) for pattern in self.patterns)
+        # L2 regularization
+        l2_loss = (coefficients**2).mean() * self.l2_weight
+
+        return pattern_loss + l2_loss
+
+
+# Initialize the regularizer
+LWE_regularizer = LWERegularizer(device)
+
+L1_loss_custom = lambda x: ( (simulate(x)-PSF_data) * PSF_mask ).flatten().abs().sum()
+
+def loss_fn(x_):
+    # You can also update the models_inputs entries directly if needed
+    return L1_loss_custom(x_) + LWE_regularizer(model_inputs['LWE_coefs']) * float(model_inputs.is_optimizable('LWE_coefs'))
 
 
 #%%
-inputs_manager.set_optimizable('LO_coefs', False)
+# Switch off optimization of Zernike coefficients for now, so they are notstacked into the model inputs vector
+model_inputs.set_optimizable('Z_coefs', False)
 
-def func(x_):
-    model_inp = inputs_manager.unstack(x_)
-    if 'basis_coefs' in model_inp:
-        return model(model_inp, None, lambda: LWE_static_phase(model_inp['basis_coefs']))
-    else:
-        return model(model_inp)
-    
-img_loss = lambda x: ( (func(x)-PSF_data) * PSF_mask ).flatten().abs().sum()
+x0 = model_inputs.stack()
+# x0 += torch.randn_like(x0) * 1e-1 # Add random perturbations to the initial guess
 
-if LWE_flag:
-    A = 50.0
-    patterns = [
-        [0,0,0,0,  0,-1,1,0,  1,0,0,-1], # pattern_pos
-        [0,0,0,0,  0,1,-1,0, -1,0,0, 1], # pattern_neg
-        [0,0,0,0,  0,-1,1,0, -1,0,0, 1], # pattern_1
-        [0,0,0,0,  0,1,-1,0,  1,0,0,-1], # pattern_2
-        [0,0,0,0,  1,0,0,-1,  0,1,-1,0], # pattern_3
-        [0,0,0,0,  -1,0,0,1,  0,-1,1,0], # pattern_4
-        [-1,1,1,-1,  0,0,0,0,  0,0,0,0], # pattern_piston_horiz
-        [1,-1,-1,1,  0,0,0,0,  0,0,0,0]  # pattern_piston_vert
-    ]
-    patterns = [torch.tensor([p]).to(device).float() * A for p in patterns]
-    
-    gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
-    Gauss_err = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, A/2)).flatten().abs().sum()
-
-    LWE_regularizer = lambda c: sum(Gauss_err(pattern, c) for pattern in patterns)
-
-    def loss_fn(x_):
-        loss = img_loss(x_)
-        coefs_ = inputs_manager['basis_coefs']
-        loss += LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
-        return loss
-
-else:
-    def loss_fn(x_):
-        return img_loss(x_)
-
-
-x0 = inputs_manager.stack()
-
-# Add small random perturbation to initial guess
-# x0 += torch.randn_like(x0) * 1e-1
-
-#%%
 result = minimize(loss_fn, x0, max_iter=300, tol=1e-5, method='l-bfgs', disp=2)
 x0 = result.x
 
-PSF_1 = func(x0)
+PSF_fitted = simulate(x0)
 
 #%%
-from tools.utils import BuildPTTBasis, decompose_WF, project_WF
+from tools.static_phase import decouple_LWE_modes
 
-LWE_coefs = inputs_manager['basis_coefs']
-PTT_basis = BuildPTTBasis(model.pupil.cpu().numpy(), True).to(device).float()
+# LWE can absorb a bit of piiston and tip/tilt while fitting, so we need to decouple them
+LWE_coefs, LWE_OPD, shift_x, shift_y = decouple_LWE_modes(model_inputs['LWE_coefs'], LWE_basis)
 
-TT_max = PTT_basis.abs()[1,...].max().item()
-pixel_shift = lambda coef: 2 * TT_max * rad2mas * 1e-9 * coef / model.psInMas / model.D  / (1-7/model.pupil.shape[-1])
+model_inputs['dx'] -= shift_x
+model_inputs['dy'] -= shift_y
 
-LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, LWE_static_phase.modal_basis)
-PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, model.pupil)
-PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, model.pupil)
+PSF_fitted = simulate(model_inputs.stack())
+inputs_manager_new = model_inputs.copy()
 
-inputs_manager['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, LWE_static_phase.modal_basis, model.pupil)
-inputs_manager['dx'] -= pixel_shift(PTT_coefs[:, 2])
-inputs_manager['dy'] -= pixel_shift(PTT_coefs[:, 1])
-x0_new = inputs_manager.stack()
-PSF_1 = func(x0_new)
 
-inputs_manager_new = inputs_manager.copy()
-
-#%
-plt.imshow((LWE_OPD-PPT_OPD)[0,...].cpu().numpy())#, vmin=-0.05, vmax=0.05)
-# plt.imshow((LWE_OPD)[0,...].cpu().numpy())#, vmin=-0.05, vmax=0.05)
-# plt.imshow(PPT_OPD[0,...].cpu().numpy())#, vmin=-0.05, vmax=0.05)
-plt.colorbar()
+plt.imshow(LWE_OPD.squeeze().cpu().numpy())
+cbar = plt.colorbar()
+cbar.set_label('OPD [nm]')
+plt.title('Fitted LWE OPD map')
+plt.axis('off')
 plt.show()
+
 
 #%%
 fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-plot_radial_profiles_new( (PSF_data*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-plot_radial_profiles_new( (PSF_data*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+plot_radial_profiles_new( (PSF_data*PSF_mask)[:,0,...].cpu().numpy(), (PSF_fitted*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+plot_radial_profiles_new( (PSF_data*PSF_mask)[:,1,...].cpu().numpy(), (PSF_fitted*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
 plt.show()
 
-draw_PSF_stack(PSF_data*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
+draw_PSF_stack(PSF_data*PSF_mask, PSF_fitted*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
 
 #%%
-inputs_manager = inputs_manager_new.copy()
+model_inputs = inputs_manager_new.copy()
 
 #%%
 def func_LO(x_):
-    model_inp = inputs_manager.unstack(x_)
+    model_inp = model_inputs.unstack(x_)
     
     if use_Zernike:  
         phase_func = lambda: \
-            LWE_static_phase(inputs_manager['basis_coefs']) * \
-            LO_basis(inputs_manager['LO_coefs'])
+            LWE_basis(model_inputs['LWE_coefs']) * \
+            Z_basis(model_inputs['Z_coefs'])
     else:
         phase_func = lambda: \
-            LWE_static_phase(inputs_manager['basis_coefs']) * \
-            LO_basis(inputs_manager['LO_coefs'].view(1, LO_map_size, LO_map_size))
+            LWE_basis(model_inputs['LWE_coefs']) * \
+            Z_basis(model_inputs['Z_coefs'].view(1, LO_map_size, LO_map_size))
 
     return model(model_inp, None, phase_func)
 
@@ -218,35 +237,35 @@ def loss_fn_LO(x_):
     if use_Zernike:  
         grad_loss = 0.0
     else:  
-        grad_loss = grad_loss_fn(inputs_manager['LO_coefs'].view(1, 1, LO_map_size, LO_map_size)) * 1e-4
-    l2_loss = inputs_manager['LO_coefs'].pow(2).sum()*5e-9
+        grad_loss = grad_loss_fn(model_inputs['Z_coefs'].view(1, 1, LO_map_size, LO_map_size)) * 1e-4
+    l2_loss = model_inputs['Z_coefs'].pow(2).sum()*5e-9
     return loss+ l2_loss + grad_loss 
 
 
 if use_Zernike:  
-    inputs_manager.set_optimizable(['LO_coefs', 'basis_coefs'], True)
-    inputs_manager.set_optimizable([
+    model_inputs.set_optimizable(['Z_coefs', 'LWE_coefs'], True)
+    model_inputs.set_optimizable([
         'F','r0', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir'
     ], False)
 else:
-    inputs_manager.set_optimizable(['LO_coefs'], True)
-    inputs_manager.set_optimizable([
-        'F','r0', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'basis_coefs'
+    model_inputs.set_optimizable(['Z_coefs'], True)
+    model_inputs.set_optimizable([
+        'F','r0', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy', 'wind_dir', 'LWE_coefs'
     ], False)
 
 
-x1 = inputs_manager.stack()
+x1 = model_inputs.stack()
 
 #%%
 result = minimize(loss_fn_LO, x1, max_iter=300, tol=1e-5, method='l-bfgs', disp=2)
 x1 = result.x
 
-PSF_1 = func_LO(x1)
+PSF_fitted = func_LO(x1)
 #%%
 if use_Zernike:  
-    OPD_map = LO_basis.compute_OPD(inputs_manager['LO_coefs'])[0].detach().cpu().numpy() * 1e9
+    OPD_map = Z_basis.compute_OPD(model_inputs['Z_coefs'])[0].detach().cpu().numpy() * 1e9
 else:  
-    OPD_map = inputs_manager['LO_coefs'].view(1, LO_map_size, LO_map_size)[0].detach().cpu().numpy()
+    OPD_map = model_inputs['Z_coefs'].view(1, LO_map_size, LO_map_size)[0].detach().cpu().numpy()
 
 plt.imshow(OPD_map) #, cmap='RdBu')
 plt.colorbar()
@@ -254,42 +273,42 @@ plt.show()
 
 #%%
 fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-plot_radial_profiles_new( (PSF_data*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-plot_radial_profiles_new( (PSF_data*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+plot_radial_profiles_new( (PSF_data*PSF_mask)[:,0,...].cpu().numpy(), (PSF_fitted*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+plot_radial_profiles_new( (PSF_data*PSF_mask)[:,1,...].cpu().numpy(), (PSF_fitted*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
 plt.show()
 
-draw_PSF_stack(PSF_data*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
+draw_PSF_stack(PSF_data*PSF_mask, PSF_fitted*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
 
 
 #%%
-inputs_manager.set_optimizable([
+model_inputs.set_optimizable([
     'F','r0', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy'
 ], True)
-inputs_manager.set_optimizable(['LO_coefs', 'wind_dir', 'basis_coefs'], False)
+model_inputs.set_optimizable(['Z_coefs', 'wind_dir', 'LWE_coefs'], False)
 
-x2 = inputs_manager.stack()
+x2 = model_inputs.stack()
 
 #%%
 result = minimize(img_loss_LO, x2, max_iter=300, tol=1e-5, method='l-bfgs', disp=2)
 x2 = result.x
 
-PSF_1 = func_LO(x2)
+PSF_fitted = func_LO(x2)
 
 #%%
 fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-plot_radial_profiles_new( (PSF_data*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-plot_radial_profiles_new( (PSF_data*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+plot_radial_profiles_new( (PSF_data*PSF_mask)[:,0,...].cpu().numpy(), (PSF_fitted*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+plot_radial_profiles_new( (PSF_data*PSF_mask)[:,1,...].cpu().numpy(), (PSF_fitted*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
 plt.show()
 
-draw_PSF_stack(PSF_data*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
+draw_PSF_stack(PSF_data*PSF_mask, PSF_fitted*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
 
 #%%
 LWE_map = LWE_OPD-PPT_OPD
 
 if use_Zernike:
-    fitted_map = LO_basis.compute_OPD(inputs_manager['LO_coefs'])[0] * 1e9
+    fitted_map = Z_basis.compute_OPD(model_inputs['Z_coefs'])[0] * 1e9
 else:
-    fitted_map = LO_basis.interp_upscale(inputs_manager['LO_coefs'].view(1, LO_map_size, LO_map_size))
+    fitted_map = Z_basis.interp_upscale(model_inputs['Z_coefs'].view(1, LO_map_size, LO_map_size))
 
 summa = (model.pupil*(fitted_map+LWE_map)).cpu().numpy().squeeze()
 
@@ -320,7 +339,7 @@ print(model.WFS_Nph.item(), Nph_new.item())
 #%%
 from torch.autograd.functional import hessian, jacobian
 
-hessian_mat = hessian(lambda x_: loss_fn_all(func(x_), PSF_data).log(), x0).squeeze()
+hessian_mat = hessian(lambda x_: loss_fn_all(simulate(x_), PSF_data).log(), x0).squeeze()
 hessian_mat_ = hessian_mat.clone()
 hessian_mat_[1:,0] = hessian_mat_[0,1:]
 hessian_mat_[0,0] = 0.0
@@ -384,15 +403,15 @@ for eigenvalue_id in range(0, L.shape[0]):
 
 
 #%%
-print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
-draw_PSF_stack(PSF_data, PSF_1, average=True)
+print('\nStrehl ratio: ', SR(PSF_fitted, PSF_DL))
+draw_PSF_stack(PSF_data, PSF_fitted, average=True)
 
 destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
-plot_radial_profiles(destack(PSF_data), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+plot_radial_profiles(destack(PSF_data), destack(PSF_fitted), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
 
 #%%
 with torch.no_grad():
-    LWE_phase = torch.einsum('mn,nwh->mwh', LWE_static_phase.coefs, LWE_static_phase.modal_basis).cpu().numpy()[0,...]
+    LWE_phase = torch.einsum('mn,nwh->mwh', LWE_basis.coefs, LWE_basis.modal_basis).cpu().numpy()[0,...]
     plt.imshow(LWE_phase)
     plt.axis('off')
     cbar = plt.colorbar()
