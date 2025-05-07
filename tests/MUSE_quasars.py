@@ -6,34 +6,26 @@ import sys
 sys.path.insert(0, '..')
 
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
-import torch.optim as optim
 
 import numpy as np
 import pandas as pd
-import seaborn as sns
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from torchmin import minimize
 
-from astropy.stats import sigma_clipped_stats
-
-from photutils.detection import find_peaks
 from photutils.aperture import CircularAperture, RectangularAperture
-from sklearn.cluster import DBSCAN
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
-from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle
-from managers.config_manager import ConfigManager
+from tools.utils import mask_circle
 from data_processing.normalizers import CreateTransformSequenceFromFile
-from managers.input_manager import InputsTransformer
 from tqdm import tqdm
-from project_settings import MUSE_DATA_FOLDER, device
+from project_settings import device
+from data_processing.MUSE_data_settings import MUSE_DATA_FOLDER
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 
-from machine_learning.MUSE_onsky_df import *
+from data_processing.MUSE_onsky_df import *
 
 
 #%%
@@ -236,35 +228,9 @@ df_norm = df_norm.fillna(0)
 
 selected_entries_input = muse_df_norm.columns.values.tolist()
 
-
-#%
-'''
-config_file['DM']['OptimizationZenith']  = config_file['DM']['OptimizationZenith'].repeat(N_src)
-config_file['DM']['OptimizationAzimuth'] = config_file['DM']['OptimizationAzimuth'].repeat(N_src)
-
-config_file['RTC']['SensorFrameRate_HO'] = config_file['RTC']['SensorFrameRate_HO'].repeat(N_src)
-config_file['RTC']['LoopDelaySteps_HO'] = config_file['RTC']['LoopDelaySteps_HO'].repeat(N_src)
-config_file['RTC']['LoopGain_HO'] = config_file['RTC']['LoopGain_HO'].repeat(N_src)
-
-config_file['sensor_HO']['NumberPhotons'] = config_file['sensor_HO']['NumberPhotons'].repeat(N_src, 1)
-config_file['atmosphere']['Seeing'] = config_file['atmosphere']['Seeing'].repeat(N_src)
-
-config_file['atmosphere']['WindSpeed'] = config_file['atmosphere']['WindSpeed'].repeat(N_src, 1)
-config_file['atmosphere']['WindDirection'] = config_file['atmosphere']['WindDirection'].repeat(N_src, 1)
-# config_file['atmosphere']['Cn2Weights'] = config_file['atmosphere']['Cn2Weights'].repeat(N_src, 1)
-# config_file['atmosphere']['Cn2Heights'] = config_file['atmosphere']['Cn2Heights'].repeat(N_src, 1)
-
-config_file['sources_science']['Zenith'] = config_file['sources_science']['Zenith'].repeat(N_src)
-config_file['sources_science']['Azimuth'] = config_file['sources_science']['Azimuth'].repeat(N_src)
-config_file['sources_HO']['Wavelength'] = config_file['sources_HO']['Wavelength'].repeat(N_src, 1)
-'''
-
-
 #%%
-from tools.utils import PupilVLT, OptimizableLO
-# from PSF_models.TipToy_MUSE_multisrc import TipTorch
+from tools.utils import PupilVLT
 from PSF_models.TipTorch import TipTorch
-# from tools.utils import SausageFeature
 
 LO_map_size = 31
 
@@ -283,8 +249,7 @@ model.apodizer = model.make_tensor(1.0)
 
 model.to_float()
 model.to(device)
-#%
-# PSF_1 = model()
+
 
 #%%
 from data_processing.normalizers import Uniform
@@ -343,7 +308,6 @@ print(inputs_manager_objs)
 #%%
 from machine_learning.calibrator import Calibrator, Gnosis
 
-
 calibrator = Calibrator(
     inputs_manager=inputs_manager,
     predicted_values = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow', 'amp', 'b', 'alpha'],
@@ -358,9 +322,7 @@ calibrator = Calibrator(
         'weights_folder': '../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict'
     }
 )
-
 calibrator.eval()
-
 
 #%%
 # pred_inputs = normalizer.unstack(net(NN_inp))
@@ -391,7 +353,6 @@ core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), ke
 PSF_norm_factor = N_core_pixels / flux_λ_norm / core_flux_ratio / crop_ratio
 
 #%%
-
 def func_dxdy(x_):
     dxdy_inp = inputs_manager_objs.unstack(x_.unsqueeze(0), update=False) # Don't update interal values yet
     dxdy_inp['dx'] = dxdy_inp['dx'].repeat(1, N_wvl) # Extend to simulated number of wavelength
@@ -456,9 +417,9 @@ PlotSourcesProfiles(data_sparse, model_sparse, sources, radius=16, title='Predic
 
 
 #%% ====================================================== Fitting =======================================================
-from tools.utils import OptimizableLO
+from tools.static_phase import PixelmapBasis
 
-LO_basis = OptimizableLO(model, ignore_pupil=False)
+LO_basis = PixelmapBasis(model, ignore_pupil=False)
 
 inputs_manager.set_optimizable('LO_coefs', False)
 inputs_manager.set_optimizable('Jxy', False)
