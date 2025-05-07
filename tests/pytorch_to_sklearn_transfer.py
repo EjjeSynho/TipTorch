@@ -2,6 +2,7 @@
 %reload_ext autoreload
 %autoreload 2
 
+
 import pickle
 import os
 import numpy as np
@@ -16,9 +17,8 @@ from data_processing.normalizers import Uniform
 from managers.input_manager import InputsManager
 from machine_learning.calibrator import Calibrator, Gnosis
 from data_processing.normalizers import CreateTransformSequenceFromFile
-from project_globals import MUSE_DATA_FOLDER, MUSE_DATASET_FOLDER#, device
-from machine_learning.MUSE_onsky_df import *
-from data_processing.MUSE_preproc_utils import LoadMUSEsampleByID
+from data_processing.MUSE_data_settings import MUSE_DATA_FOLDER, MUSE_DATASET_FOLDER
+from data_processing.MUSE_onsky_df import *
 from tools.utils import rad2mas
 
 device = torch.device('cpu')

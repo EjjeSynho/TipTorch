@@ -8,7 +8,7 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from project_globals import MUSE_RAW_FOLDER, MUSE_DATA_FOLDER
+from .MUSE_data_settings import MUSE_RAW_FOLDER, MUSE_DATA_FOLDER
 import pandas as pd
 from tools.utils import GetJmag
 import seaborn as sns

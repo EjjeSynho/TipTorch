@@ -4,7 +4,7 @@ sys.path.append('..')
 
 import os
 import pickle
-from project_globals import MUSE_DATA_FOLDER
+from project_settings import MUSE_DATA_FOLDER
 import pandas as pd
 import seaborn as sns
 import numpy as np
@@ -195,7 +195,7 @@ plt.show()
 from tools.utils import SausageFeature
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
-from project_globals import device
+from project_settings import device
 import torch
 
 id = 396

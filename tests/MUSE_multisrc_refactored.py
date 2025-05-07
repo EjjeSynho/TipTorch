@@ -25,11 +25,12 @@ from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle, r
 from managers.config_manager import ConfigManager, MultipleTargetsInOneObservation
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
-from project_globals import MUSE_DATA_FOLDER, device
+from data_processing.MUSE_data_settings import MUSE_DATA_FOLDER
+from project_settings import device
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 
-from machine_learning.MUSE_onsky_df import *
+from data_processing.MUSE_onsky_df import *
 
 predict_Moffat = True
 predict_phase_bump = True
@@ -215,7 +216,7 @@ df_norm = df_norm.fillna(0)
 selected_entries_input = muse_df_norm.columns.values.tolist()
 
 #%%
-from tools.utils import PupilVLT, OptimizableLO
+from tools.utils import PupilVLT
 from PSF_models.TipTorch import TipTorch
 
 LO_map_size = 31

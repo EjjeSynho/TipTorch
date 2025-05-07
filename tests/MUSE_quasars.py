@@ -29,7 +29,7 @@ from managers.config_manager import ConfigManager
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from managers.input_manager import InputsTransformer
 from tqdm import tqdm
-from project_globals import MUSE_DATA_FOLDER, device
+from project_settings import MUSE_DATA_FOLDER, device
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 

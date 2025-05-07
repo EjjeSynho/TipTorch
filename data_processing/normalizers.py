@@ -1,7 +1,7 @@
 import pickle
 import torch
 from torch.distributions.normal import Normal
-from project_globals import device
+from project_settings import device
 import numpy as np
 from scipy import stats
 # from scipy.stats import boxcox, yeojohnson, norm

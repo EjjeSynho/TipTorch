@@ -10,15 +10,17 @@ import pickle
 import torch
 import numpy as np
 from torch import nn, optim
-from tools.utils import SR, pdims, BuildPTTBasis, decompose_WF, project_WF, calc_WFE, rad2mas
-from tools.utils import cropper, FitGauss2D, LWE_basis, EarlyStopping
-from PSF_models.TipToy_SPHERE_multisrc import TipTorch
+from tools.static_phase import SR, pdims, BuildPTTBasis, decompose_WF, project_WF, calc_WFE, rad2mas, LWEBasis
+from tools.utils import cropper, FitGauss2D
+from PSF_models.TipTorch import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
-from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
+from data_processing.normalizers import TransformSequence, Uniform,
+from managers.input_manager import InputsTransformer
 from managers.config_manager import GetSPHEREonsky, ConfigManager
-from project_globals import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER, device
+from data_processing.SPHERE_data_settings import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER
 from torch.autograd.functional import hessian
 from torchmin import minimize
+from project_settings import device
 
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, draw_PSF_stack
@@ -209,7 +211,7 @@ def load_and_fit_sample(id):
 
         PSF_DL = model.DLPSF()
 
-        basis = LWE_basis(model)
+        basis = LWEBasis(model)
 
         transformer = InputsTransformer({
             'r0':  norm_r0,

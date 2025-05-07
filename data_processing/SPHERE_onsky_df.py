@@ -3,7 +3,7 @@ import sys
 sys.path.append('..')
 
 import pickle
-from project_globals import SPHERE_DATA_FOLDER
+from project_settings import SPHERE_DATA_FOLDER
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt

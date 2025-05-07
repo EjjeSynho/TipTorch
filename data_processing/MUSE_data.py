@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from skimage.restoration import inpaint
 from tools.utils import GetROIaroundMax, wavelength_to_rgb, GetJmag
-from project_globals import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER, LIFT_PATH
+from MUSE_data_settings import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER, LIFT_PATH
 from datetime import datetime
 import datetime
 import pandas as pd

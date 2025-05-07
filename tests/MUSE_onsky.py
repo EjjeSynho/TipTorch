@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
-from project_globals import MUSE_DATA_FOLDER, device
+from project_settings import MUSE_DATA_FOLDER, device
 from torchmin import minimize
 from data_processing.normalizers import Uniform, QuadraticModel#, InputsCompressor, InputsManager
 from managers.input_manager import InputsManager

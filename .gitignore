@@ -3,8 +3,9 @@ __pycache__/
 _pycache_/
 .continue/
 data/temp
+data/misc
 data/weights
-global_config.json
+data/configs
 data/*.npy
 data/*.json
 data/*.predictor

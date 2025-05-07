@@ -20,7 +20,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error
-from project_globals import SPHERE_DATA_FOLDER, DATA_FOLDER, device
+from data_processing.SPHERE_data_settings import SPHERE_DATA_FOLDER, DATA_FOLDER
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -31,7 +31,6 @@ from astropy.io import fits
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from sklearn.inspection import permutation_importance
 from matplotlib.colors import LogNorm
-from project_globals import WEIGHTS_FOLDER
 
 
 def AnalyseImpurities(model, feature_names, X_test=None, y_test=None, save_dir=None):

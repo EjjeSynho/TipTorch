@@ -29,7 +29,7 @@ from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle
 from managers.config_manager import ConfigManager
 from data_processing.normalizers import CreateTransformSequenceFromFile, InputsTransformer
 from tqdm import tqdm
-from project_globals import MUSE_DATA_FOLDER, device
+from project_settings import MUSE_DATA_FOLDER, device
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 from astropy.wcs import WCS
@@ -38,7 +38,7 @@ import astropy.units as u
 from astroquery.simbad import Simbad
 from astroquery.gaia import Gaia
 
-from machine_learning.MUSE_onsky_df import *
+from data_processing.MUSE_onsky_df import *
 
 # Astrometric calibration fields
 # ESOrex and MPDAF for reduction

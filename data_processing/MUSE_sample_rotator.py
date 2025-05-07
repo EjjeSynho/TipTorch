@@ -5,7 +5,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk, font
 import os
 from PIL import Image, ImageTk
-from project_globals import MUSE_DATA_FOLDER
+from project_settings import MUSE_DATA_FOLDER
 import pickle
 import numpy as np
 from tqdm import tqdm

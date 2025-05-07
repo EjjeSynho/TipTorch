@@ -11,7 +11,7 @@ from tools.utils import mask_circle
 from managers.parameter_parser import ParameterParser
 from managers.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
-from project_globals import MAX_NDIT, SPHERE_DATA_FOLDER #, device
+from SPHERE_data_settings import MAX_NDIT, SPHERE_DATA_FOLDER
 from tools.utils import rad2mas, pad_lists, cropper, gaussian_centroid
 from astropy.stats import sigma_clipped_stats
 from photutils.background import Background2D, MedianBackground

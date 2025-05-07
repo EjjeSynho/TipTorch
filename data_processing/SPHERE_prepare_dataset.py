@@ -10,7 +10,7 @@ import torch
 import numpy as np
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from managers.config_manager import GetSPHEREonsky
-from project_globals import SPHERE_DATA_FOLDER
+from SPHERE_data_settings import SPHERE_DATA_FOLDER
 import pandas as pd
 from tqdm import tqdm
 

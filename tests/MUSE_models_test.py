@@ -11,11 +11,11 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, plot_radial_profiles_relative, draw_PSF_stack, mask_circle, PupilVLT
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
-from project_globals import MUSE_DATA_FOLDER, device
+from project_settings import MUSE_DATA_FOLDER, device
 from torchmin import minimize
 from data_processing.normalizers import TransformSequence, Uniform, LineModel, QuadraticModel
 from managers.input_manager import InputsTransformer
-from project_globals import MUSE_DATA_FOLDER
+from project_settings import MUSE_DATA_FOLDER
 
 #%%
 from managers.config_manager import ConfigFromFile
@@ -972,7 +972,7 @@ from torch import nn, optim
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping, mask_circle
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds, process_mask
 from managers.config_manager import GetSPHEREonsky
-from project_globals import SPHERE_DATA_FOLDER, device
+from project_settings import SPHERE_DATA_FOLDER, device
 from torchmin import minimize
 from astropy.stats import sigma_clipped_stats
 from matplotlib.colors import LogNorm

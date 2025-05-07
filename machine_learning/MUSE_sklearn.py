@@ -20,7 +20,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error
-from project_globals import MUSE_DATA_FOLDER
+from project_settings import MUSE_DATA_FOLDER
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -31,7 +31,7 @@ from astropy.io import fits
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from sklearn.inspection import permutation_importance
 from matplotlib.colors import LogNorm
-from project_globals import WEIGHTS_FOLDER
+from project_settings import WEIGHTS_FOLDER
 from sklearn.preprocessing import StandardScaler
 
 

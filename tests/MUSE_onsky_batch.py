@@ -15,7 +15,7 @@ from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, m
 # from PSF_models.TipToy_MUSE_multisrc import TipTorch
 from PSF_models.TipTorch import TipTorch
 from data_processing.MUSE_preproc_utils import GetMUSEonsky
-from project_globals import MUSE_DATA_FOLDER, device
+from project_settings import MUSE_DATA_FOLDER, device
 from torchmin import minimize
 from astropy.stats import sigma_clipped_stats
 from managers.parameter_parser import ParameterParser

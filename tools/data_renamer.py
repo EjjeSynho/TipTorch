@@ -3,7 +3,7 @@
 %autoreload 2
 
 import os
-from project_globals import SPHERE_DATA_FOLDER
+from project_settings import SPHERE_DATA_FOLDER
 
 
 with open(os.path.join(SPHERE_DATA_FOLDER, 'labels_old.txt'), 'r') as file:

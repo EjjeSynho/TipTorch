@@ -69,7 +69,7 @@ def BuildPetalBasis(segmented_pupil, pytorch=True):
         return torch.from_numpy( basis ), torch.tensor(coefs)
 
 
-def decouple_LWE_modes(LWE_coefs, LWE_basis, pupil_border_offset=7):
+def decouple_PTT_from_LWE(LWE_coefs, LWE_basis, pupil_border_offset=7):
     """
     Decouple LWE modes from the PTT modes (Piston, Tip, Tilt)
     While piston is removed, tip and tilt are translated into the pixel shifts

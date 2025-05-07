@@ -12,15 +12,15 @@ import matplotlib.pyplot as plt
 from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas
 from torchmin import minimize
 
-from project_globals import device
+from project_settings import device
 
 #%% Initialize data sample
 with open('../data/samples/IRDIS_sample_data.pkl', 'rb') as handle:
     sample_data = pickle.load(handle)
 
-config_file = sample_data['config']
-PSF_data    = sample_data['PSF']
-PSF_mask    = sample_data['mask']
+config   = sample_data['config']
+PSF_data = sample_data['PSF']
+PSF_mask = sample_data['mask']
 
 
 #%% Initialize model
@@ -39,17 +39,20 @@ PSD_include = {
 
 # Initialize the TipTorch PSF model with the loaded configuration
 model = TipTorch(
-    AO_config    = config_file, # configuration parameters dictionary
+    AO_config    = config, # configuration parameters dictionary
     AO_type      = 'SCAO',      # selected AO mode
     pupil        = None,        # using default pupil (and apodizer) defined in config
     PSD_include  = PSD_include, # which error terms to include
-    norm_regime  = 'sum',       # normalization to sum = 1 over the PSF
-    device       = device,      # device to run computations on
+    norm_regime  = 'sum',       # normalize PSFs to sum = 1 over the PSF
+    device       = device,      # device to run computations on (CPU or GPU)
     oversampling = 1            # oversampling factor
 )
 
 # In float regime, the model is faster and only marginally less accurate, so recommended
 model.to_float()
+
+# Running model with the parameters defined in the config. Values unspecifiiied in the config are just set to default values
+PSF_test = model()
 
 #%% Manage optimizable static phase
 # For practical reason, static phase in the pupil plane is managed externaly and not included in the model.
@@ -66,7 +69,6 @@ Z_basis = ZernikeBasis(model=model, N_modes=300, ignore_pupil=True)
 def compute_static_phase(input_dict):
     return Z_basis(input_dict['Z_coefs']) * LWE_basis(input_dict['LWE_coefs']) * model.pupil * model.apodizer
 
-
 #%% Managing model inputs
 # In this example, pytorch-minimize is used to optimize the model inputs. The inputs are managed by the InputsManager class.
 # InputsManager allows to normalize model inputs that mau take ildly different ranges of values. In addition, it allows to
@@ -77,8 +79,12 @@ from managers.input_manager import InputsManager
 
 
 model_inputs = InputsManager()
-
-# The dimensiionality of inputs is very important, since PSF model doesn't do any checking itself
+'''
+Note, that it is possible to add parameters with arbitrary shapes and names into the manager.
+The only ones which named the same as internakl variables of the model will be used in the model.
+Other parameters then must be handled manually by the user, like Z_coefs and LWE_coefs in this example.
+'''
+# The dimensionality of inputs is very important, since PSF model doesn't do any checking itself
 model_inputs.add('r0',  model.r0,                 Uniform(a=0.05,  b=0.5))
 model_inputs.add('F',   torch.tensor([[1.0,]*2]), Uniform(a=0.0,   b=1.0))
 model_inputs.add('dx',  torch.tensor([[0.0,]*2]), Uniform(a=-1,    b=1))
@@ -98,8 +104,14 @@ model_inputs.to(device)
 print(model_inputs)
 
 #%%
-# Simulates the PSF given the inputs stacked into a single vector. Used in the optimization process.
 def simulate(x_):
+    '''
+    Simulates the PSF given the inputs stacked into a single vector. Used in the optimization process.
+    Given this vector, it is correct to say that model is fully defined by:
+     -- the internal values pre-set with config during the initialization,
+     -- the input dictionary which overloads some of these parameters every time this function is called,
+     -- the external phase generator which is also called every time this function is called.
+    '''
     # Note, that every call to model_inputs.unstack() will update the internal state of model_inputs
     # Switching the update off helps to leave the internal state of model_inputs intact
     input_dict = model_inputs.unstack(x_, update=True)
@@ -108,7 +120,7 @@ def simulate(x_):
 
 x0 = model_inputs.stack()
 
-# Direct prediction without ay calibration or fitting. Should be fairly inaccurate
+# Direct prediction without any calibration or fitting, quite inaccurate
 PSF_pred = simulate(x0)
 
 draw_PSF_stack(PSF_data*PSF_mask, PSF_pred*PSF_mask, average=True, min_val=1e-5, crop=80, scale='log')
@@ -153,9 +165,9 @@ class LWERegularizer:
         # Calculate the full LWE regularization loss for given coefficients
         pattern_loss = sum(self.pattern_error(pattern, coefficients) for pattern in self.patterns)
         # L2 regularization
-        l2_loss = (coefficients**2).mean() * self.l2_weight
+        LWE_l2_loss = (coefficients**2).mean() * self.l2_weight
 
-        return pattern_loss + l2_loss
+        return pattern_loss + LWE_l2_loss
 
 
 # Initialize the regularizer
@@ -180,26 +192,6 @@ x0 = result.x
 
 PSF_fitted = simulate(x0)
 
-#%%
-from tools.static_phase import decouple_LWE_modes
-
-# LWE can absorb a bit of piiston and tip/tilt while fitting, so we need to decouple them
-LWE_coefs, LWE_OPD, shift_x, shift_y = decouple_LWE_modes(model_inputs['LWE_coefs'], LWE_basis)
-
-model_inputs['dx'] -= shift_x
-model_inputs['dy'] -= shift_y
-
-PSF_fitted = simulate(model_inputs.stack())
-inputs_manager_new = model_inputs.copy()
-
-
-plt.imshow(LWE_OPD.squeeze().cpu().numpy())
-cbar = plt.colorbar()
-cbar.set_label('OPD [nm]')
-plt.title('Fitted LWE OPD map')
-plt.axis('off')
-plt.show()
-
 
 #%%
 fig, ax = plt.subplots(1, 2, figsize=(10, 3))
@@ -210,7 +202,7 @@ plt.show()
 draw_PSF_stack(PSF_data*PSF_mask, PSF_fitted*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
 
 #%%
-model_inputs = inputs_manager_new.copy()
+model_inputs = model_inputs.copy()
 
 #%%
 def func_LO(x_):
