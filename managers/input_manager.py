@@ -32,8 +32,9 @@ class InputsTransformer:
             raise ValueError("No transforms provided for stacking.")
         """
         Constructs a joint tensor from provided keyword arguments, applying the corresponding transforms to each.
-        Keeps track of each tensor's size for later unstacking. NOTE: The order of the arguments is important.
-        Another NOTE: The 0th dimension is allocated to sources. Meaning that the tensor is of shape (n_sources, n_features)
+        Keeps track of each tensor's size for later unstacking by storing ciorresponding slices for each variable.
+        NOTE: As consequence, the order of the arguments is important.
+        NOTE: The 0th dimension is allocated to sources. Meaning that the tensor is of shape (n_sources, n_features)
         """
         self.slices = OrderedDict()
         self._packed_size = None

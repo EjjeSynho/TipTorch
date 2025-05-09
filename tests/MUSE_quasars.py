@@ -1,3 +1,4 @@
+
 #%%
 %reload_ext autoreload
 %autoreload 2
@@ -205,7 +206,7 @@ src_spectra_full   = [GetSpectrum(data_full,   sources.iloc[i], radius=flux_core
 
 # STRANGE LINE IN THE FIRST SPECTRUM!!!!!
 #%%
-i_src = 1
+i_src = 0
 
 plt.plot(λ, src_spectra_full[i_src], linewidth=0.25, alpha=0.3)
 plt.scatter(wavelength.squeeze().cpu().numpy()*1e9, src_spectra_binned[i_src].cpu().numpy())
@@ -484,11 +485,42 @@ x0 = result_global.x.clone()
 x_fit_dict = inputs_manager.unstack(x0.unsqueeze(0), include_all=False)
 
 #%% 
-# with torch.no_grad():
-model_fit = func_fit(result_global.x).detach()
+with torch.no_grad():
+    model_fit = func_fit(result_global.x).detach()
 
 VisualizeSources(data_sparse, model_fit, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(data_sparse, model_fit, sources, radius=16, title='Fitted PSFs')
+
+
+#%%
+def func_fit_single(x): # TODO: relative weights for different brigtness
+    PSFs_fit = []
+    for i in range(N_src):
+        params_dict = inputs_manager.unstack(x[:x_size].unsqueeze(0))
+        F_dxdy_dict = inputs_manager_objs.unstack(x[x_size:].view(N_src, -1))
+
+        phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_map_size, LO_map_size))
+
+        F_dxdy_dict['dx'] = F_dxdy_dict['dx'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # Extend to simulated number of wavelength
+        F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
+
+        inputs = params_dict | F_dxdy_dict
+        flux_norm = (src_spectra_sparse[i] * PSF_norm_factor)[:,None,None] * F_dxdy_dict['F_norm'][i]
+
+        PSFs_fit.append( model(inputs, phase_generator=phase_func).squeeze() )
+    return PSFs_fit
+
+PSFs_pred = func_fit_single(result_global.x)
+
+#%
+λ_sparse = wavelength_selected.flatten() * 1e9 # [nm]
+
+with torch.no_grad():
+    PSF_DL = model.DLPSF().squeeze()
+    Strehls_per_λ = PSFs_pred[0].amax(dim=(-2,-1)) / PSF_DL.amax(dim=(-2,-1))
+
+plt.plot(λ_sparse.cpu(), 100* Strehls_per_λ.cpu())
+
 
 
 #%% 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
@@ -513,7 +545,7 @@ F_curve_fit    = F_model (params_F)
 norm_curve_fit = norm_model(params_norm)
 
 
-#%%
+#%
 curve_inputs = InputsManager()
 
 curve_inputs.add('Jx_A', torch.tensor([params_Jx[0]]), Uniform(a=-5e-5, b=5e-5))
@@ -537,11 +569,9 @@ curve_inputs.set_optimizable(['norm_A', 'norm_B', 'norm_C'], False)
 curve_inputs.to_float()
 curve_inputs.to(device)
 
-x_0_curve = curve_inputs.stack()
-# print(x_0_curve.shape)
 
-#%%
-curve_params_ = curve_inputs.unstack(x_0_curve)
+#%
+curve_params_ = curve_inputs.unstack(curve_inputs.stack())
 
 curve_sample = lambda x, curve_p, p_name: Jx_model.quadratic_function(
     x,
@@ -651,8 +681,9 @@ x_curve_fit_dict = curve_inputs.unstack(x2[x_size_model:x_size_curve+x_size_mode
 flux_corrections = inputs_manager_objs['F_norm']
 
 #%% 
-model_fit_curves = func_fit_curve(result_global.x).detach()
-
+with torch.no_grad():
+    model_fit_curves = func_fit_curve(result_global.x).detach()
+    
 VisualizeSources(data_sparse, model_fit_curves, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(data_sparse, model_fit_curves, sources, radius=16, title='Fitted PSFs')
 
@@ -667,43 +698,44 @@ norms_new_full_λ = curve_sample(torch.as_tensor(λ, device=device), x_curve_fit
 
 model_full = []
 
-for batch_id in tqdm(range(len(λ_batches))):
-    batch_size = len(λ_batches[batch_id])
-    config_file['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
-    model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+with torch.no_grad():
+    for batch_id in tqdm(range(len(λ_batches))):
+        batch_size = len(λ_batches[batch_id])
+        config_file['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
+        model.Update(init_grids=True, init_pupils=True, init_tomography=True)
 
-    empty_img = torch.zeros([batch_size, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
-    PSF_batch = []
+        empty_img = torch.zeros([batch_size, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
+        PSF_batch = []
 
-    for i in range(N_src):
-        batch_ids = slice(batch_id*batch_size, (batch_id+1)*batch_size)
+        for i in range(N_src):
+            batch_ids = slice(batch_id*batch_size, (batch_id+1)*batch_size)
 
-        dict_selected = {
-            key: model_inputs_full_λ[key][:,batch_ids]
-            for key in model_inputs_full_λ.keys()
-        }
+            dict_selected = {
+                key: model_inputs_full_λ[key][:,batch_ids]
+                for key in model_inputs_full_λ.keys()
+            }
 
-        dxdy_dict = {
-            'dx': inputs_manager_objs['dx'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0), # Extend to simulated number of wavelength
-            'dy': inputs_manager_objs['dy'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0) # assuming the same shift for all wavelengths
-        }
+            dxdy_dict = {
+                'dx': inputs_manager_objs['dx'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0), # Extend to simulated number of wavelength
+                'dy': inputs_manager_objs['dy'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0) # assuming the same shift for all wavelengths
+            }
 
-        dict_selected = x_fit_dict | dict_selected | dxdy_dict
-        dict_selected['bg'] = torch.zeros([1, batch_size], device=device)
+            dict_selected = x_fit_dict | dict_selected | dxdy_dict
+            dict_selected['bg'] = torch.zeros([1, batch_size], device=device)
 
-        del dict_selected['LO_coefs']
+            del dict_selected['LO_coefs']
 
-        flux_norm = norms_new_full_λ[batch_ids]\
-            * flux_corrections[i]\
-            * torch.as_tensor(src_spectra_full[i][batch_ids], device=device) \
-            * flux_λ_norm
+            flux_norm = norms_new_full_λ[batch_ids]\
+                * flux_corrections[i]\
+                * torch.as_tensor(src_spectra_full[i][batch_ids], device=device) \
+                * flux_λ_norm
 
-        PSF_batch.append( (model(dict_selected).squeeze() * flux_norm[:,None,None]).detach() )
+            PSF_batch.append( (model(dict_selected).squeeze() * flux_norm[:,None,None]).detach() )
 
-    model_full.append( add_ROIs( empty_img*0.0, PSF_batch, local_coords, global_coords ).cpu().numpy() )
+        model_full.append( add_ROIs( empty_img*0.0, PSF_batch, local_coords, global_coords ).cpu().numpy() )
 
 model_full = np.vstack(model_full)
-
+torch.cuda.empty_cache()
 
 #%%
 norm_full = LogNorm(vmin=1e1, vmax=thres*10)
@@ -770,10 +802,8 @@ for info in targets_info:
     
     plt.plot(λ, spectrum_full, linewidth=0.5, alpha=0.25, label=info['name'], color=info['color'])
     plt.plot(λ, spectrum_avg, linewidth=1, alpha=1, color=info['color'], linestyle='--')
-    
 
-    
-    
+
 plt.legend()
 # plt.ylim(0, None)
 plt.xlim(λ.min(), λ.max())
@@ -841,7 +871,6 @@ diff_rgb = plot_wavelength_rgb(
     title=f"{reduced_name}\nModel",
     min_val=500, max_val=200000, show=True
 )
-
 
 
 # %%

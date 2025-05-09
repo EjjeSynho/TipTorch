@@ -280,6 +280,11 @@ class ConfigManager():
 
 
 def GetSPHEREonsky():
+    '''
+    This function composes the SPHERE config understandable by the TipTorch model. It converts the data from an external source
+    (modifier) and puts iit into the config. NOTE: to be refactored for clarity!
+    '''
+    
     conversion_table = [
         (['atmosphere','Seeing'],          ['seeing','SPARTA']        ),
         (['atmosphere','WindSpeed'],       ['Wind speed','header']    ),
