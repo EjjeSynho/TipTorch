@@ -1,17 +1,20 @@
 #%%
 import numpy as np
+import os
 import torch
+import gdown
 from torch import nn
 from scipy.ndimage import center_of_mass
 from math import prod
 
-import seaborn as sns
 from photutils.centroids import centroid_quadratic, centroid_com, centroid_com, centroid_quadratic
 from photutils.profiles import RadialProfile
 from astropy.modeling import models, fitting
 
 import matplotlib.pyplot as plt
+import seaborn as sns
 from matplotlib import cm
+from project_settings import xp, use_cupy
 
 try:
     from graphviz import Digraph
@@ -32,6 +35,38 @@ asec2rad = np.pi / 180 / 3600
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
+
+
+def DownloadFromDrive(share_url, output_path, overwrite=False, verbose=False):
+    """
+    Downloads a file from Google Drive using a shareable link.
+
+    Parameters:
+        share_url (str): URL to the shared file on Google Drive
+        output_path (str): Path where the file should be saved
+        overwrite (bool): If True, overwrites the file if it already exists.
+                          If False, skips download if file exists. Default is False.
+    """
+    # Check if the file exists and handle based on overwrite flag
+    if os.path.exists(output_path) and not overwrite:
+        print(f"File already exists at {output_path}. Set overwrite=True to replace it.")
+        return
+
+    os.makedirs(os.path.dirname(output_path), exist_ok=True) # Create file's directory if it doesn't exist
+    gdown.download(share_url, output_path, quiet=not verbose, fuzzy=True) # Download the file
+
+
+def check_framework(x):
+    # Determine whether an array is NumPy or CuPy.
+    
+    # Get the module from the array's class
+    if hasattr(x, '__module__'):
+        module_name = x.__module__.split('.')[0]
+        if   module_name == 'numpy': return np
+        elif module_name == 'cupy':  return xp
+
+    # Default to NumPy if not using GPU, otherwise CuPy
+    return np if not use_cupy else xp
 
 
 def to_little_endian(array):
@@ -1449,7 +1484,7 @@ class CombinedLoss:
 '''
 class Zernike:
     def __init__(self, modes_num=1):
-        global global_gpu_flag
+        global global_use_cupy
         self.nModes = modes_num
         self.modesFullRes = None
         self.pupil = None
@@ -1463,7 +1498,7 @@ class Zernike:
             'Secondary trefoil horiz', 'Secondary trefoil vert',
             'Pentafoil horiz', 'Pentafoil vert'
         ]
-        self.gpu = global_gpu_flag  
+        self.gpu = global_use_cupy  
 
 
     @property

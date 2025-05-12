@@ -2,6 +2,7 @@
 import sys
 sys.path.insert(0, '..')
 
+import torch
 import pickle
 import re
 import os
@@ -11,8 +12,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from skimage.restoration import inpaint
-from tools.utils import GetROIaroundMax, wavelength_to_rgb, GetJmag
-from MUSE_data_settings import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER, LIFT_PATH
+from tools.utils import GetROIaroundMax, wavelength_to_rgb, GetJmag, check_framework
+from .MUSE_data_settings import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER, LIFT_PATH
 from datetime import datetime
 import datetime
 import pandas as pd
@@ -23,27 +24,11 @@ from astropy.time import Time
 import requests
 from io import StringIO
 from photutils.background import Background2D, MedianBackground
+from project_settings import xp, use_cupy
 
-try:
-    import cupy as xp
-except ImportError:
-    xp = np
-
-GPU_flag = True
 
 find_closest = lambda λ, λs: xp.argmin(xp.abs(λs-λ)).astype('int')
 
-def check_framework(x):
-    if GPU_flag:
-        if xp.isnumpy(x): return np
-        else: return xp
-    else: return np
-
-def store(x):
-    if GPU_flag:
-        return xp.asarray(x)
-    else:
-        return x
 
 UT4_coords = ('24d37min37.36s', '-70d24m14.25s', 2635.43)
 UT4_location = EarthLocation.from_geodetic(lat=UT4_coords[0], lon=UT4_coords[1], height=UT4_coords[2]*u.m)
@@ -56,7 +41,6 @@ IRLOS_upgrade_date = pd.to_datetime('2021-03-20T00:00:00').tz_localize('UTC')
 
 # To get ASM data:
 # http://archive.eso.org/cms/eso-data/ambient-conditions/paranal-ambient-query-forms.html
-
 
 
 #%%
@@ -439,8 +423,61 @@ def GetLGSdata(hdul_cube, cube_name, start_time, fill_missing=False, verbose=Fal
 #     return check_framework(data).nansum(data[:, ids[0], ids[1]], axis=(1,2))
 
 
-def GetSpectrum(data, ids):
-    return check_framework(data).nansum(data[:, ids[0], ids[1]], axis=(1,2))
+# def GetSpectrum(data, ids):
+#     return check_framework(data).nansum(data[:, ids[0], ids[1]], axis=(1,2))
+
+# Extract the spectrum per target near the PSF peak
+def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
+    """
+    Extract spectral data from a 3D data cube at a specified point.
+
+    Parameters:
+    -----------
+    data : ndarray, torch.Tensor
+        The 3D data cube with shape (wavelength, y, x)
+    point : list, ndarray, pd.Series, torch.Tensor
+        The (x, y) coordinates of the point
+    radius : int, default=1
+        Radius of the region around the point to consider
+    debug_show_ROI : bool, default=False
+        If True, displays the ROI used for calculation
+
+    Returns:
+    --------
+    1D array of spectral data
+    """
+    # Determine the input type
+    if   type(point) == list:         point = np.array(point)
+    elif type(point) == pd.Series:    point = point.to_numpy()
+    elif type(point) == torch.Tensor: point = point.cpu().numpy()
+    else:
+        raise ValueError('Point must be a list, ndarray, pandas.Series, torch.Tensor, or CuPy array')
+
+    x, y = point[:2].astype('int')
+    
+    if radius == 0: # No averaging over a radius
+        return data[:, y, x]
+    
+    y_min = max(0, y - radius)
+    y_max = min(data.shape[1], y + radius + 1)
+    x_min = max(0, x - radius)
+    x_max = min(data.shape[2], x + radius + 1)
+
+    # Handle different array types
+    if torch.is_tensor(data):
+        if debug_show_ROI:
+            plt.imshow(torch.nansum(data[:, y_min:y_max, x_min:x_max], dim=0).cpu().numpy(), origin='lower')
+            plt.show()
+
+        return torch.nanmean(data[:, y_min:y_max, x_min:x_max], dim=(-2,-1))
+    else:
+        array_module = check_framework(data) # Check if data is a CuPy array
+
+        if debug_show_ROI:
+            plt.imshow(array_module.nansum(data[:, y_min:y_max, x_min:x_max], axis=0), origin='lower')
+            plt.show()
+
+        return np.nanmean(data[:, y_min:y_max, x_min:x_max], axis=(-2,-1))
 
 
 def range_overlap(v_min, v_max, h_min, h_max):
@@ -471,7 +508,7 @@ def GetImageSpectrumHeader(
     units = hdul_cube[1].header['BUNIT'] # flux units
 
     # Polychromatic image
-    if GPU_flag:
+    if use_cupy:
         if verbose: print('Transferring the MUSE cube to GPU...')
         cube_data = xp.array(hdul_cube[1].data)
         mempool = xp.get_default_memory_pool()
@@ -483,8 +520,8 @@ def GetImageSpectrumHeader(
 
     if extract_spectrum:
         if verbose: print('Extracting the target\'s spectrum...')
-        _, ids, _ = GetROIaroundMax(white, 10)
-        spectrum = GetSpectrum(cube_data, ids)
+        _, _, max_id = GetROIaroundMax(white, 10) # TODO: this function is redundant
+        spectrum = GetSpectrum(cube_data, max_id, radius=5)
     else:
         spectrum = xp.ones_like(λs)
 
@@ -543,7 +580,7 @@ def GetImageSpectrumHeader(
 
     # Loop over spectral bins
     if verbose:
-        processing_unit = "GPU" if GPU_flag else "CPU"
+        processing_unit = "GPU" if use_cupy else "CPU"
         print(f'Processing spectral bins on {processing_unit}...')
 
     for bin in progress_bar( range(len(bins_smart)-1) ):
@@ -573,7 +610,7 @@ def GetImageSpectrumHeader(
                     mask_inpaint[xp.where(layer < -1e3)] = 1
                     # mask_inpaint[xp.where(xp.abs(layer) < 1e-9)] = 1
                     # mask_inpaint[xp.where(layer >  5*l_std)] = 1
-                    if GPU_flag:
+                    if use_cupy:
                         chunk[i,:,:] = xp.array(
                             inpaint.inpaint_biharmonic(
                                 image = xp.asnumpy(layer),
@@ -593,7 +630,7 @@ def GetImageSpectrumHeader(
         flux[bin] = xp.nanmean(xp.array(flux_chunck))
 
     # Send back to RAM
-    if GPU_flag:
+    if use_cupy:
         λs           = xp.asnumpy(λs)
         valid_λs     = xp.asnumpy(valid_λs)
         spectrum     = xp.asnumpy(spectrum)
@@ -644,7 +681,7 @@ def GetImageSpectrumHeader(
 
     del cube_data
 
-    if GPU_flag:
+    if use_cupy:
         if verbose: print("Freeing GPU memory...")
         mempool.free_all_blocks()
         pinned_mempool.free_all_blocks()

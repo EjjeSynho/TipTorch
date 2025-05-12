@@ -221,7 +221,9 @@ def ProcessPSFCubes(data_samples, size):
 
 
 def SPHERE_preprocess(sample_ids, split_cube, PSF_loader, config_loader, framework, device):
-
+    """
+    Preprocess SPHERE data, i.e., PSFs and configs for TipTorch.
+    """	
     make_tensor  = lambda x: torch.tensor(x, device=device) if type(x) is not torch.Tensor else x
 
     if not isinstance(sample_ids, list):
@@ -243,6 +245,7 @@ def SPHERE_preprocess(sample_ids, split_cube, PSF_loader, config_loader, framewo
     config_file    = ParameterParser('../data/parameter_files/irdis.ini').params
     merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample, *config_loader()) for sample in data_samples])
 
+    # This is to ensure proper dimensionality
     merged_config['atmosphere']['Cn2Weights']    = pad_lists(merged_config['atmosphere']['Cn2Weights'], 0)
     merged_config['atmosphere']['Cn2Heights']    = pad_lists(merged_config['atmosphere']['Cn2Heights'], 1e4)
     merged_config['atmosphere']['WindDirection'] = pad_lists(merged_config['atmosphere']['WindDirection'], 0)

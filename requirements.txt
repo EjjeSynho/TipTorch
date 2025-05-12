@@ -11,6 +11,7 @@ scikit-image
 scikit-learn
 tabulate
 tqdm
+gdown
 photutils
 
 # PyTorch & friends

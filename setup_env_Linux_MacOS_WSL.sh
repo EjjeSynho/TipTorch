@@ -96,6 +96,7 @@ cat >> "$ENV_YML" <<'EOF'
   - scikit-image
   - tabulate
   - tqdm
+  - gdown
   - astropy
   - astroquery
   - photutils

@@ -92,7 +92,7 @@ def batch_config_and_images(ids):
 
 
 def batch_get_data_dicts(ids):
-    return { 
+    return {
         'fitted data': {
             'r0':    torch.from_numpy(r0_fitted_df.loc[ids].to_numpy()).float(),
             'F':     torch.from_numpy(F_fitted_df.loc[ids].to_numpy()).float(),

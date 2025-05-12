@@ -9,13 +9,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from MUSE_data_settings import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER
+from .MUSE_data_settings import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER
 
 import pandas as pd
 from astropy.coordinates import SkyCoord, AltAz
 from astropy.io import fits
 import astropy.units as u
-from .MUSE_data_utils import *
+from MUSE_data_utils import *
 
 
 #%%
@@ -87,7 +87,7 @@ def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
 
     return renamed_dir
 
-# _ = RenameMUSECubes(MUSE_CUBES_FOLDER, MUSE_DATA_FOLDER+'NFM_cubes/')
+_ = RenameMUSECubes(MUSE_CUBES_FOLDER, MUSE_DATA_FOLDER+'NFM_cubes/')
 
 #%%
 if not os.path.exists( match_path:=(MUSE_DATA_FOLDER+'files_matches.csv') ):
@@ -105,8 +105,8 @@ else:
     file_mismatches = pd.read_csv(MUSE_DATA_FOLDER+'file_mismatches.csv')
     file_mismatches.set_index('date', inplace=True)
 
-#%
-# import shutil
+#%%
+# import 
 # from tqdm import tqdm
 
 # # Move all files whoch are in file_mismatches raw column to a specified folder:

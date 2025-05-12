@@ -1,4 +1,3 @@
-
 #%%
 %reload_ext autoreload
 %autoreload 2
@@ -9,225 +8,277 @@ sys.path.insert(0, '..')
 import torch
 import torch.nn.functional as F
 
+import os
 import numpy as np
 import pandas as pd
+import gdown
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from torchmin import minimize
-
-from photutils.aperture import CircularAperture, RectangularAperture
-from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
-from tools.utils import mask_circle
-from data_processing.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
-from project_settings import device
+
+from photutils.aperture import RectangularAperture
+from tools.utils import mask_circle, DownloadFromDrive
+
+from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
+from data_processing.MUSE_data_utils import ProcessMUSEcube, GetSpectrum
 from data_processing.MUSE_data_settings import MUSE_DATA_FOLDER
+from data_processing.normalizers import CreateTransformSequenceFromFile
+from data_processing.MUSE_onsky_df import *
+
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 
-from data_processing.MUSE_onsky_df import *
+from project_settings import device
 
 
 #%%
-# Load the FITS file
+def DownloadMUSEcalibData():
+    print("Downloading MUSE calibrator model...")
+    DownloadFromDrive(
+        share_url = 'https://drive.google.com/file/d/1tSXlFGIqi_WnTVZ4JeblHBkmZxw50xgN/view?usp=drive_link',
+        output_path = '../data/weights/MUSE_calibrator_v1.dict'
+    )
 
-reduced_name = 'J0259_all'
-# reduced_name = 'J0259_2024-12-05T03_04_07.007'
-# reduced_name = 'J0259_2024-12-05T03_49_24.768'
-# reduced_name = 'J0259_2024-12-05T03_15_37.598'
+    print("Downloading necessary cached reduced telemetry data...")
+    DownloadFromDrive(
+        share_url = 'https://drive.google.com/file/d/1tSXlFGIqi_WnTVZ4JeblHBkmZxw50xgN/view?usp=drive_link',
+        output_path = '../data/weights/MUSE_calibrator_v1.dict'
+    )
 
-if reduced_name == 'J0259_all':
-    cube_path = MUSE_DATA_FOLDER + f"quasars/J0259_cubes/J0259-0901_all.fits"
-else:
-    cube_path = MUSE_DATA_FOLDER + f"quasars/J0259_cubes/J0259-0901_DATACUBE_FINAL_{reduced_name[6:]}.fits"
+    DownloadFromDrive(
+        share_url = 'https://drive.google.com/file/d/1KJDiLgX9XeXjvskOhYLLAhlDR0UOH4p_/view?usp=drive_link',
+        output_path = '../data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle'
+    )
 
-test_fits = fits.open(cube_path)
+    DownloadFromDrive(
+        share_url = 'https://drive.google.com/file/d/1pc7a8H4v_XzF9IT_LGrvM-OkV7jrw0D5/view?usp=drive_link',
+        output_path = '../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle'
+    )
 
-data_full = np.nan_to_num(test_fits[1].data, nan=0.0)
+    DownloadFromDrive(
+        share_url = 'https://drive.google.com/file/d/1BR9WtPVODV8R7oYaZSxn9ox_jfWJr9nF/view?usp=drive_link',
+        output_path = '../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle'
+    )
 
-# Compute the mask of valid pixels
-nan_mask = np.abs(np.nansum(test_fits[1].data, axis=0)) < 1e-12
-nan_mask = binary_dilation(nan_mask, iterations=2, )
-valid_mask = ~nan_mask
+    DownloadFromDrive(
+        share_url = 'https://drive.google.com/file/d/1iFnB30JEsKKy14282dJ95xuWtHEfXxBN/view?usp=drive_link',
+        output_path = '../data/reduced_telemetry/MUSE/muse_df.pickle'
+    )
 
-test_fits.close()
-
-data_full = data_full * valid_mask[np.newaxis, :, :]
-
-valid_mask = torch.tensor(valid_mask, device=device).float().unsqueeze(0)
-
-# Load processed data file
-with open(MUSE_DATA_FOLDER + f"quasars/J0259_reduced/{reduced_name}.pickle", 'rb') as f:
-    data_sample = pickle.load(f)
-
-# Compute wavelength data
-λ_min, λ_max, Δλ_full = data_sample['spectral data']['wvl range']
-λ_bins = data_sample['spectral data']['wvl bins']
-Δλ_binned = np.median(np.concatenate([np.diff(λ_bins[λ_bins < 589]), np.diff(λ_bins[λ_bins > 589])]))
-
-if hasattr(λ_max, 'item'): # To compensate for a small error in the data reduction routine
-    λ_max = λ_max.item()
-
-λ = np.linspace(λ_min, λ_max, np.round((λ_max-λ_min)/Δλ_full+1).astype('int'))
-assert len(λ) == data_full.shape[0]
-
-if reduced_name == 'J0259_2024-12-05T03_15_37.598':
-    host_coords  = [53, 37]
-    AGN_coords_1 = [47, 39]
-    bg_coords    = [56, 39]
-    AGN_coords_2 = [61, 37]
-    lens_coords  = [55, 65]
-    
-elif reduced_name == 'J0259_2024-12-05T03_49_24.768':
-    host_coords  = [44, 30]
-    AGN_coords_1 = [37, 28]
-    bg_coords    = [12, 62]
-    AGN_coords_2 = [52, 30]
-    lens_coords  = [46, 58]
-    
-elif reduced_name == 'J0259_2024-12-05T03_04_07.007':
-    host_coords  = [46, 37]
-    AGN_coords_1 = [38, 35]
-    bg_coords    = [10, 57]
-    AGN_coords_2 = [53, 36]
-    lens_coords  = [47, 65]
-  
-elif reduced_name == 'J0259_all':
-    host_coords  = [53, 37]
-    AGN_coords_1 = [46, 35]
-    bg_coords    = [10, 58]
-    AGN_coords_2 = [60, 37]
-    lens_coords  = [55, 66]
-else: 
-    print('No coordinates for this reduced_name')
-
-#%%
-data_onsky, _, _, _ = LoadImages(data_sample, device=device, subtract_background=False, normalize=False, convert_images=True)
-data_onsky = data_onsky.squeeze()
-data_onsky *= valid_mask
-
-# Correct the flux to match MUSE cube
-data_onsky = data_onsky * (data_full.sum(axis=0).max() /  data_onsky.sum(axis=0).max())
-
-# Extract config file and update it
-config_file, data_onsky = GetConfig(data_sample, data_onsky)
-data_onsky = data_onsky.squeeze()
-
-config_file['NumberSources'] = 1 #N_src
-# The bigger size of initialized PSF is needed to extract the flux loss due to cropping to the box_size later
-config_file['sensor_science']['FieldOfView'] = 511
-# Select only a subset of predicted wavelengths and modify the config file accordingly
-wavelength = config_file['sources_science']['Wavelength'].clone()
-# Assumes that we are not in the pupil tracking mode
-config_file['telescope']['PupilAngle'] = torch.zeros(1, device=device)
-
-ids_wavelength_selected = np.arange(0, wavelength.shape[-1], 2)
-wavelength_selected = wavelength[..., ids_wavelength_selected]
-config_file['sources_science']['Wavelength'] = wavelength_selected
-
-N_wvl = len(ids_wavelength_selected)
-
-data_sparse = data_onsky.clone()[ids_wavelength_selected,...]
-
-#%%
-from managers.multisrc_manager import detect_sources
-
-data_src = data_onsky.sum(dim=0).cpu().numpy()
-# mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
-
-PSF_size = 111  # Define the size of each ROI (in pixels)
-thres = 50000
-
-sources   = detect_sources(data_src, threshold=thres, box_size=11, verbose=True)
-srcs_pos  = np.transpose((sources['x_peak'], sources['y_peak']))
-srcs_flux = sources['peak_value'].to_numpy()
-
-# Draw the detected sources
-apertures = CircularAperture(srcs_pos, r=5)
-apertures_box = RectangularAperture(srcs_pos, PSF_size//2, PSF_size//2)
-
-norm_field = LogNorm(vmin=10, vmax=thres*10)
-
-plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
-apertures_box.plot(color='gold', lw=2, alpha=0.45)
-plt.show()
-
-#%%
-from managers.multisrc_manager import extract_ROIs, add_ROIs
+    DownloadFromDrive(
+        share_url = 'https://drive.google.com/file/d/1LMgmTSVBhvGOOUW0PZ1Zim5OPcP8L8NB/view?usp=drive_link',
+        output_path = '../data/reduced_telemetry/MUSE/MUSE_fitted_df.pkl'
+    )
 
 
-ROIs, local_coords, global_coords, _ = extract_ROIs(data_sparse, sources, box_size=PSF_size)
-N_src = len(ROIs)
-# plot_ROIs_as_grid(ROIs, cols=np.ceil(np.sqrt(len(ROIs))).astype('uint'))  # Adjust the number of columns as needed
+def LoadDataCache(raw_path, cube_path, cache_path, save_cache=True, verbose=False):
+    """
+    This function prepares the data to be understandable by the PSF model. It bins the NFM cube and
+    associates the necessary reduced telemetry data.
+    """
+    with fits.open(cube_path) as cube_fits: 
+        cube_full = cube_fits[1].data # Full spectral cubedirectly from the MUSE header
 
-# Extract the spectrum per target near the PSF peak
-def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
-    if type(point) == list:
-        point = np.array(point)
-    elif type(point) == pd.Series:
-        point = point.to_numpy()
-    elif type(point) == torch.Tensor:
-        point = point.cpu().numpy()
+    # Compute the mask of valid pixels
+    nan_mask = np.abs(np.nansum(cube_full, axis=0)) < 1e-12
+    nan_mask = binary_dilation(nan_mask, iterations=2, )
+    valid_mask = ~nan_mask
+    # Filter out NaN values
+    cube_full = np.nan_to_num(cube_full, nan=0.0) * valid_mask[np.newaxis, :, :]
+
+    valid_mask = torch.tensor(valid_mask, device=device).float().unsqueeze(0)
+
+    if os.path.exists(cache_path):
+        if verbose: print('Loading existing cached data cube...')
+        with open(cache_path, 'rb') as f:
+            data_cached = pickle.load(f)
     else:
-        raise ValueError('Point must be a list, ndarray, pandas Series, or torch Tensor')
+        if verbose: print('Generating new cached data cube...')
 
-    x, y = point[:2].astype('int')
-    
-    if radius == 0:
-        return data[:, y, x]
-    
-    y_min = max(0, y - radius)
-    y_max = min(data.shape[1], y + radius + 1)
-    x_min = max(0, x - radius)
-    x_max = min(data.shape[2], x + radius + 1)
+        # Check if the folder exists, if not, create it
+        if not os.path.exists(os.path.dirname(cache_path)):
+            os.makedirs(os.path.dirname(cache_path))
+            if verbose:
+                print(f"Folder '{os.path.dirname(cache_path)}' created.")
 
-    if torch.is_tensor(data):
-        if debug_show_ROI:
-            plt.imshow(data[:, y_min:y_max, x_min:x_max].sum(dim=0).cpu().numpy(), origin='lower')
-            plt.show()
-        return data[:, y_min:y_max, x_min:x_max].mean(dim=(1,2))
+        data_cached, _ = ProcessMUSEcube(
+            path_raw  = raw_path,
+            path_cube = cube_path,
+            crop=False,
+            get_IRLOS_phase=False,
+            derotate=False,
+            impaint_bad_pixels=False,
+            extract_spectrum=False,
+            plot_spectrum=False,
+            fill_missing_values=True,
+            verbose=verbose
+        )
+    
+    # Compute wavelength data
+    #TODO: fix uneven Δλ division!
+    λ_min, λ_max, Δλ_full = data_cached['spectral data']['wvl range']
+    λ_bins = data_cached['spectral data']['wvl bins']
+    Δλ_binned = np.median(np.concatenate([np.diff(λ_bins[λ_bins < 589]), np.diff(λ_bins[λ_bins > 589])]))
+
+    if hasattr(λ_max, 'item'): # To compensate for a small error in the data reduction routine
+        λ_max = λ_max.item()
+
+    λ_full = np.linspace(λ_min, λ_max, np.round((λ_max-λ_min)/Δλ_full+1).astype('int'))
+    assert len(λ_full) == cube_full.shape[0]
+
+    cube_binned, _, _, _ = LoadImages(data_cached, device=device, subtract_background=False, normalize=False, convert_images=True)
+    cube_binned = cube_binned.squeeze() * valid_mask
+
+    # Correct the flux to match MUSE cube
+    cube_binned = cube_binned * (cube_full.sum(axis=0).max() /  cube_binned.sum(axis=0).max())
+
+    # Extract config file and update it
+    model_config, cube_binned = GetConfig(data_cached, cube_binned)
+    cube_binned = cube_binned.squeeze()
+
+    model_config['NumberSources'] = 1
+    # The bigger size of initialized PSF is needed to extract the flux loss due to cropping to the box_size later
+    model_config['sensor_science']['FieldOfView'] = 111
+    # Select only a subset of predicted wavelengths and modify the config file accordingly
+    λ_binned = model_config['sources_science']['Wavelength'].clone()
+    # Assumes that we are not in the pupil tracking mode
+    model_config['telescope']['PupilAngle'] = torch.zeros(1, device=device)
+
+    # Select sparse wavelength set
+    # TODO: a code to select the specified number of spectral slices
+    ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 2)
+    λ_sparse = λ_binned[..., ids_λ_sparse]
+    model_config['sources_science']['Wavelength'] = λ_sparse
+
+    cube_sparse = cube_binned.clone()[ids_λ_sparse, ...] # Select the subset of λs
+
+    spectral_info = {
+        "λ_sparse":  λ_sparse.flatten() * 1e9, # [nm]
+        "λ_full":    λ_full, # [nm]
+        "Δλ_binned": Δλ_binned,
+        "Δλ_full":   Δλ_full
+    }
+
+    if save_cache:
+        try:
+            with open(cache_path, 'wb') as handle:
+                pickle.dump(data_cached, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+        except Exception as e:
+            print(f'Error: {e}')
+
+    spectral_cubes = {
+        "cube_full":   cube_full,   # this one contains all spectral slices
+        "cube_sparse": cube_sparse, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
+        "mask":        valid_mask   # this one contains the mask of the data cube
+    }
+
+    return spectral_cubes, spectral_info, data_cached, model_config
+
+
+raw_path   = MUSE_DATA_FOLDER + "quasars/J0259_raw/MUSE.2024-12-05T03_15_37.598.fits.fz"
+cube_path  = MUSE_DATA_FOLDER + "quasars/J0259_cubes/J0259-0901_all.fits"
+cache_path = MUSE_DATA_FOLDER + "quasars/J0259_cached/J0259-0901_all.pickle"
+
+# We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
+# You need to run this function at least ones to generate the cached data file
+spectral_cubes, spectral_info, data_cached, model_config = LoadDataCache(raw_path, cube_path, cache_path, save_cache=True, verbose=True)   
+# Extract full and binned spectral cubes
+cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
+
+N_wvl = cube_sparse.shape[0] # dims are [N_wvls, H, W]
+
+#%%
+from managers.multisrc_manager import detect_sources, extract_ROIs, add_ROIs, plot_ROIs_as_grid
+
+def DetectSources(data_cube, threshold, display=False, draw_win_size=None):
+
+    if isinstance(data_cube, torch.Tensor):
+        data_src = data_cube.sum(dim=0).cpu().numpy()
     else:
-        if debug_show_ROI:
-            plt.imshow(data[:, y_min:y_max, x_min:x_max].sum(axis=0), origin='lower')
-            plt.show()
-        return np.nanmean(data[:, y_min:y_max, x_min:x_max], axis=(1,2))
+        data_src = data_src.sum(axis=0)
+    
+    # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
+    sources_df = detect_sources(data_src, threshold=threshold, box_size=11, verbose=True)
+
+    # Draw the detected sources
+    if display and draw_win_size is not None:
+        # apertures = CircularAperture(srcs_pos, r=5)
+        srcs_pos  = np.transpose((sources_df['x_peak'], sources_df['y_peak']))
+        # srcs_flux = sources['peak_value'].to_numpy()
+        apertures_box = RectangularAperture(srcs_pos, draw_win_size, draw_win_size)
+        norm_field = LogNorm(vmin=10, vmax=threshold*10) # TODO: make it more statistical
+
+        plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
+        apertures_box.plot(color='gold', lw=2, alpha=0.45)
+        plt.show()
+
+    return sources_df
 
 
-flux_λ_norm = Δλ_full / Δλ_binned  # Correct for the difference in energy per λ bin
+def ExtractSourceImages(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
+    ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size)
+    sources_valid = sources.iloc[valid_srcs].reset_index(drop=True) if filter_sources else srcs_coords
+
+    if debug_draw:
+        N_cols = min(8, int(np.ceil(np.sqrt(len(ROIs))))) # Automatically adjusts the number of displayed  columns
+        plot_ROIs_as_grid(ROIs, cols=N_cols)
+
+    return {
+        "images": ROIs,
+        "coords": sources_valid,
+        "count": len(sources_valid),
+        "img_slices": global_coords,
+        "img_crops": local_coords
+    }
+
+PSF_size = 111  # Define the maximum size of each extracted PSF
+
+# NOTE: so far thresholding is a bit manual, but it should be automated in the future
+sources = DetectSources(cube_sparse, threshold=25000, display=True, draw_win_size=PSF_size)
+# Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
+srcs_image_data = ExtractSourceImages(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
+
+N_src   = srcs_image_data["count"]
+sources = srcs_image_data["coords"]
+ROIs    = srcs_image_data["images"]
+local_coords  = srcs_image_data["img_crops"]
+global_coords = srcs_image_data["img_slices"]
+
+#%%
+# Yes, this inconsistency in sparse and and binned is intended for proper energy normalization
+λ_full,   λ_sparse = spectral_info['λ_full'],  spectral_info['λ_sparse']
+Δλ_full, Δλ_binned = spectral_info['Δλ_full'], spectral_info['Δλ_binned']
+
+# Correct for the difference in energy per λ bin
+flux_λ_norm = Δλ_full / Δλ_binned # TODO: make it array per spectral slice
 
 flux_core_radius = 2  # [pix]
 N_core_pixels = (flux_core_radius*2 + 1)**2  # [pix^2]
 
 # It tells the average flux in the PSF core for each source
-src_spectra_sparse = [GetSpectrum(data_sparse, sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
-src_spectra_binned = [GetSpectrum(data_onsky,  sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
-src_spectra_full   = [GetSpectrum(data_full,   sources.iloc[i], radius=flux_core_radius) for i in range(N_src)]
+src_spectra_sparse = [GetSpectrum(cube_sparse, sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
+src_spectra_full   = [GetSpectrum(cube_full,   sources.iloc[i], radius=flux_core_radius) for i in range(N_src)]
 
-# STRANGE LINE IN THE FIRST SPECTRUM!!!!!
-#%%
-i_src = 0
+colors = [f'tab:{color}' for color in ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan'][:N_src]]
 
-plt.plot(λ, src_spectra_full[i_src], linewidth=0.25, alpha=0.3)
-plt.scatter(wavelength.squeeze().cpu().numpy()*1e9, src_spectra_binned[i_src].cpu().numpy())
-plt.scatter(wavelength_selected.squeeze().cpu().numpy()*1e9, src_spectra_sparse[i_src].cpu().numpy())
+plt.figure(figsize=(6, 4))
+for i_src in range(N_src):
+    plt.plot(λ_full, src_spectra_full[i_src], linewidth=0.25, alpha=0.3, color=colors[i_src],
+             label=f'Source {i_src+1} (full spectrum)')
+    plt.scatter(λ_sparse.cpu().numpy(), src_spectra_sparse[i_src].cpu().numpy(),
+                color=colors[i_src], marker='o', s=30, alpha=0.8,
+                label=f'Source {i_src+1} (sparse samples)')
 
-
-#%%
-with open(MUSE_DATA_FOLDER+'muse_df_norm_imputed.pickle', 'rb') as handle:
-    muse_df_norm = pickle.load(handle)
-
-df = data_sample['All data']
-df['ID'] = 0
-df.loc[0, 'Pupil angle'] = 0.0
-
-df_pruned  = prune_columns(df.copy())
-df_reduced = reduce_columns(df_pruned.copy())
-df_transforms = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
-df_norm = normalize_df(df_reduced, df_transforms)
-df_norm = df_norm.fillna(0)
-
-selected_entries_input = muse_df_norm.columns.values.tolist()
+plt.xlabel('Wavelength, [nm]')
+plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
+plt.title('Sources spectra preview')
+plt.legend()
+plt.grid(alpha=0.3)
+plt.tight_layout()
+plt.show()
 
 #%%
 from tools.utils import PupilVLT
@@ -245,19 +296,19 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          False
 }
-model = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 model.apodizer = model.make_tensor(1.0)
 
 model.to_float()
 model.to(device)
 
 
-#%%
+#%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
 from data_processing.normalizers import Uniform
 from managers.input_manager import InputsManager
 
-df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
-df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/muse_df_fitted_transforms.pickle')
+df_transforms_onsky  = CreateTransformSequenceFromFile('../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle')
+df_transforms_fitted = CreateTransformSequenceFromFile('../data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle')
 
 inputs_manager = InputsManager()
 
@@ -305,9 +356,31 @@ inputs_manager_objs.set_optimizable(['F_norm'], False)
 
 print(inputs_manager_objs)
 
-
 #%%
 from machine_learning.calibrator import Calibrator, Gnosis
+
+DownloadMUSEcalibData()
+
+def GetReducedTelemetryInputs(cached_data):
+    with open('../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle', 'rb') as handle:
+        muse_df_norm = pickle.load(handle)
+
+    df = cached_data['All data']
+    df['ID'] = 0
+    df.loc[0, 'Pupil angle'] = 0.0
+
+    df_pruned  = prune_columns(df.copy())
+    df_reduced = reduce_columns(df_pruned.copy())
+    df_transforms = CreateTransformSequenceFromFile('../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle')
+    df_norm = normalize_df(df_reduced, df_transforms)
+    df_norm = df_norm.fillna(0)
+
+    selected_entries_input = muse_df_norm.columns.values.tolist()
+    return df_norm[selected_entries_input].loc[0]
+
+
+telemetry_inputs = GetReducedTelemetryInputs(data_cached)
+
 
 calibrator = Calibrator(
     inputs_manager=inputs_manager,
@@ -315,7 +388,7 @@ calibrator = Calibrator(
     device=device,
     calibrator_network = {
         'artichitecture': Gnosis,
-        'inputs_size': len(selected_entries_input),
+        'inputs_size': len(telemetry_inputs),
         'NN_kwargs': {
             'hidden_size': 200,
             'dropout_p': 0.1
@@ -325,24 +398,23 @@ calibrator = Calibrator(
 )
 calibrator.eval()
 
-#%%
-# pred_inputs = normalizer.unstack(net(NN_inp))
-pred_inputs = calibrator(df_norm[selected_entries_input].loc[0])
+predicted_model_inputs = calibrator(telemetry_inputs)
+inputs_manager.update(predicted_model_inputs) # update the internal values of the inputs_manager class
 
+#%%
 with torch.no_grad():
-    PSF_pred_big = model(pred_inputs).clone() # First initial prediction of the "big" PSF
+    # Quasi-infinite PSF image to compute how much flux is lost while cropping
+    model_config['sensor_science']['FieldOfView'] = 511
+    model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+    PSF_pred_big = model(predicted_model_inputs).clone() # First initial prediction of the "big" PSF
 
-#%%
-config_file['sensor_science']['FieldOfView'] = PSF_size # Set the actual size of the simulated PSFs
-# model.Update(reinit_grids=True, reinit_pupils=True)
-model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+    # The actual size of the simulated PSFs
+    model_config['sensor_science']['FieldOfView'] = PSF_size
+    model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+    PSF_pred_small = model(predicted_model_inputs)
 
-with torch.no_grad():
-    PSF_pred_small = model(pred_inputs)
 
-inputs_manager.update(pred_inputs)
-
-#%%
+#%% Compute spectral flux normalization factor
 # How much flux is cropped by assuming the finite size of the PSF box (PSF_predbif is assumed to be quasi-infinite)
 crop_ratio = (PSF_pred_big.amax(dim=(-2,-1)) / PSF_pred_small.amax(dim=(-2,-1))).squeeze()
 
@@ -353,12 +425,10 @@ core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radiu
 core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
 PSF_norm_factor = N_core_pixels / flux_λ_norm / core_flux_ratio / crop_ratio
 
-#%%
+#%% Fine tunes sources astrometry but don't touch the PSF model parameters
 def func_dxdy(x_):
-    dxdy_inp = inputs_manager_objs.unstack(x_.unsqueeze(0), update=False) # Don't update interal values yet
-    dxdy_inp['dx'] = dxdy_inp['dx'].repeat(1, N_wvl) # Extend to simulated number of wavelength
-    dxdy_inp['dy'] = dxdy_inp['dy'].repeat(1, N_wvl) # assuming the same shift for all wavelengths
-    return model(pred_inputs | dxdy_inp)
+    dxdy_inp = inputs_manager_objs.unstack(x_.unsqueeze(0), update=False) # Don't update interal values
+    return model(predicted_model_inputs | dxdy_inp)
 
 
 def fit_dxdy(i_src, verbose=0):
@@ -389,35 +459,23 @@ for i in tqdm(range(N_src)):
 PSFs_fitted = torch.stack(PSFs_fitted, dim=0)
 
 
-#%%
+#%% Initial guess, will be inaccurate
+from managers.multisrc_manager import VisualizeSources, PlotSourcesProfiles
+
 model_sparse = add_ROIs(
-    torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device), # blanck baase image
+    torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device), # blanck baase image
     [PSFs_fitted[i,...] for i in range(N_src)], # predicted flux-normalized PSFs after coordinates tuning
     local_coords,
     global_coords
 )
 
-# It tells the average flux in the PSF core for each source
-src_spectra_sparse = [GetSpectrum(data_sparse,  sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
-src_spectra_fitted = [GetSpectrum(model_sparse, sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
-
-# STRANGE LINE IN THE FIRST SPECTRUM!!!!!
-#%
-# i_src = 1
-# plt.plot(λ, src_spectra_full[i_src], linewidth=0.25, alpha=0.3)
-# plt.scatter(wavelength_selected.squeeze().cpu().numpy()*1e9, src_spectra_fitted[i_src].cpu().numpy())
-# plt.scatter(wavelength_selected.squeeze().cpu().numpy()*1e9, src_spectra_sparse[i_src].cpu().numpy())
-
-#%%
-from managers.multisrc_manager import VisualizeSources, PlotSourcesProfiles
-
 ROI_plot = np.s_[..., 125:225, 125:225]
+norm_field = LogNorm(vmin=10, vmax=25000*10) # again, rather empirical values
 
-VisualizeSources(data_sparse, model_sparse, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
-PlotSourcesProfiles(data_sparse, model_sparse, sources, radius=16, title='Predicted PSFs')
+VisualizeSources(cube_sparse, model_sparse, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
+PlotSourcesProfiles(cube_sparse, model_sparse, sources, radius=16, title='Initiall guess')
 
-
-#%% ====================================================== Fitting =======================================================
+#%% Manage PSF model input params 
 from tools.static_phase import PixelmapBasis
 
 LO_basis = PixelmapBasis(model, ignore_pupil=False)
@@ -447,10 +505,9 @@ x0 = torch.cat([
 ])
 x_size = inputs_manager.get_stacked_size()
 
-empty_img   = torch.zeros([N_wvl, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
+empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
 wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) * 0 + 1
 
-#%%
 def func_fit(x): # TODO: relative weights for different brigtness
     PSFs_fit = []
     for i in range(N_src):
@@ -459,8 +516,8 @@ def func_fit(x): # TODO: relative weights for different brigtness
 
         phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_map_size, LO_map_size))
 
-        F_dxdy_dict['dx'] = F_dxdy_dict['dx'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # Extend to simulated number of wavelength
-        F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
+        F_dxdy_dict['dx'] = F_dxdy_dict['dx'][i].unsqueeze(-1).unsqueeze(0) # Extend to simulated number of wavelength
+        F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).unsqueeze(0) # assuming the same shift for all wavelengths
 
         inputs = params_dict | F_dxdy_dict
         flux_norm = (src_spectra_sparse[i] * PSF_norm_factor)[:,None,None] * F_dxdy_dict['F_norm'][i]
@@ -472,28 +529,26 @@ def func_fit(x): # TODO: relative weights for different brigtness
 
 def loss_fit(x_):
     PSFs_ = func_fit(x_)
-    l1 = F.smooth_l1_loss(data_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
-    l2 = F.mse_loss(data_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
+    l1 = F.smooth_l1_loss(cube_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
+    l2 = F.mse_loss(cube_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
     return l1 * 1e-3 + l2 * 5e-6
 
 
 _ = func_fit(x0)
 
-#%%
 result_global = minimize(loss_fit, x0, max_iter=300, tol=1e-3, method='bfgs', disp=2)
 x0 = result_global.x.clone()
 x_fit_dict = inputs_manager.unstack(x0.unsqueeze(0), include_all=False)
 
-#%% 
+#%%
 with torch.no_grad():
     model_fit = func_fit(result_global.x).detach()
 
-VisualizeSources(data_sparse, model_fit, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
-PlotSourcesProfiles(data_sparse, model_fit, sources, radius=16, title='Fitted PSFs')
+VisualizeSources(cube_sparse, model_fit, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
+PlotSourcesProfiles(cube_sparse, model_fit, sources, radius=16, title='Fitted PSFs')
 
-
-#%%
-def func_fit_single(x): # TODO: relative weights for different brigtness
+#%% Compute Strehl ratio
+def func_just_for_Strehl(x): # TODO: relative weights for different brigtness
     PSFs_fit = []
     for i in range(N_src):
         params_dict = inputs_manager.unstack(x[:x_size].unsqueeze(0))
@@ -505,29 +560,24 @@ def func_fit_single(x): # TODO: relative weights for different brigtness
         F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
 
         inputs = params_dict | F_dxdy_dict
-        flux_norm = (src_spectra_sparse[i] * PSF_norm_factor)[:,None,None] * F_dxdy_dict['F_norm'][i]
 
         PSFs_fit.append( model(inputs, phase_generator=phase_func).squeeze() )
     return PSFs_fit
 
-PSFs_pred = func_fit_single(result_global.x)
-
-#%
-λ_sparse = wavelength_selected.flatten() * 1e9 # [nm]
-
 with torch.no_grad():
+    PSFs_pred = func_just_for_Strehl(result_global.x)
     PSF_DL = model.DLPSF().squeeze()
     Strehls_per_λ = PSFs_pred[0].amax(dim=(-2,-1)) / PSF_DL.amax(dim=(-2,-1))
 
+plt.title('Strehl ratio vs. λ (for the 1st source)')
 plt.plot(λ_sparse.cpu(), 100* Strehls_per_λ.cpu())
+plt.ylabel('Strehl ratio [%]')
+plt.xlabel('Wavelength [nm]')
+plt.grid()
+plt.show()
 
-
-
-#%% 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+#%% Interpolate PSF model parameters over the full wavelengths range assuming they change smooth
 from tools.misc import QuadraticModel
-
-
-λ_sparse = wavelength_selected.flatten() * 1e9 # [nm]
 
 F_model    = QuadraticModel(λ_sparse)
 Jx_model   = QuadraticModel(λ_sparse)
@@ -544,8 +594,6 @@ Fy_curve_fit   = Jy_model(params_Jy)
 F_curve_fit    = F_model (params_F)
 norm_curve_fit = norm_model(params_norm)
 
-
-#%
 curve_inputs = InputsManager()
 
 curve_inputs.add('Jx_A', torch.tensor([params_Jx[0]]), Uniform(a=-5e-5, b=5e-5))
@@ -570,7 +618,6 @@ curve_inputs.to_float()
 curve_inputs.to(device)
 
 
-#%
 curve_params_ = curve_inputs.unstack(curve_inputs.stack())
 
 curve_sample = lambda x, curve_p, p_name: Jx_model.quadratic_function(
@@ -585,45 +632,45 @@ Jy_new   = curve_sample(λ_sparse, curve_params_, 'Jy')
 F_new    = curve_sample(λ_sparse, curve_params_, 'F')
 norm_new = curve_sample(λ_sparse, curve_params_, 'norm')
 
-#%
-plt.figure(figsize=(10, 6))
+if False:
+    plt.figure(figsize=(10, 6))
 
-plt.plot(λ_sparse.cpu(), inputs_manager['Jx'].flatten().cpu(), label='Data', color='tab:blue')
-plt.plot(λ_sparse.cpu(), Fx_curve_fit.cpu(), label='Fitted Quadratic Curve', linestyle='--', color='tab:blue')
-plt.scatter(λ_sparse.cpu(), Jx_new.cpu(), label='New Quadratic Curve', color='tab:blue', marker='x')
+    plt.plot(λ_sparse.cpu(), inputs_manager['Jx'].flatten().cpu(), label='Fitted Jx', color='tab:blue')
+    plt.plot(λ_sparse.cpu(), Fx_curve_fit.cpu(), label='Interpolated quadratic curve', linestyle='--', color='tab:blue')
+    plt.scatter(λ_sparse.cpu(), Jx_new.cpu(), label='Tuned quadratic curve', color='tab:blue', marker='x')
 
-plt.plot(λ_sparse.cpu(), inputs_manager['Jy'].flatten().cpu(), label='Data', color='tab:orange')
-plt.plot(λ_sparse.cpu(), Fy_curve_fit.cpu(), label='Fitted Quadratic Curve', linestyle='--', color='tab:orange')
-plt.scatter(λ_sparse.cpu(), Jy_new.cpu(), label='New Quadratic Curve', color='tab:orange', marker='x')
-plt.xlabel('Wavelength [nm]')
-plt.legend()
-plt.grid(True)
-plt.show()
+    plt.plot(λ_sparse.cpu(), inputs_manager['Jy'].flatten().cpu(), label='Fitted Jy', color='tab:orange')
+    plt.plot(λ_sparse.cpu(), Fy_curve_fit.cpu(), label='Interpolated quadratic curve', linestyle='--', color='tab:orange')
+    plt.scatter(λ_sparse.cpu(), Jy_new.cpu(), label='Tuned quadratic curve', color='tab:orange', marker='x')
+    plt.xlabel('Wavelength [nm]')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
-# plt.plot(λ_sparse.cpu(), inputs_manager['norm'].flatten().cpu(), label='Data', color='tab:orange')
-plt.plot(λ_sparse.cpu(), PSF_norm_factor.flatten().cpu(), label='Data', color='tab:orange')
-plt.plot(λ_sparse.cpu(), norm_curve_fit.cpu(), label='Fitted Quadratic Curve', linestyle='--', color='tab:orange')
-plt.scatter(λ_sparse.cpu(), norm_new.cpu(), label='New Quadratic Curve', color='tab:orange', marker='x')
-plt.xlabel('Wavelength [nm]')
-plt.legend()
-plt.grid(True)
-plt.show()
+    # plt.plot(λ_sparse.cpu(), inputs_manager['norm'].flatten().cpu(), label='Data', color='tab:orange')
+    plt.plot(λ_sparse.cpu(), PSF_norm_factor.flatten().cpu(), label='Flux normalization factor', color='tab:orange')
+    plt.plot(λ_sparse.cpu(), norm_curve_fit.cpu(), label='Interpolated quadratic curve', linestyle='--', color='tab:orange')
+    plt.scatter(λ_sparse.cpu(), norm_new.cpu(), label='Tuned quadratic curve', color='tab:orange', marker='x')
+    plt.xlabel('Wavelength [nm]')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
-plt.plot(λ_sparse.cpu(), inputs_manager['F'].flatten().cpu(), label='Data', color='tab:green')
-plt.plot(λ_sparse.cpu(), F_curve_fit.cpu(), label='Fitted Quadratic Curve', linestyle='--', color='tab:green')
-plt.scatter(λ_sparse.cpu(), F_new.cpu(), label='New Quadratic Curve', color='tab:green', marker='x')
-plt.xlabel('Wavelength [nm]')
-plt.legend()
-plt.grid(True)
-plt.show()
+    plt.plot(λ_sparse.cpu(), inputs_manager['F'].flatten().cpu(), label='PSF normalization factor', color='tab:green')
+    plt.plot(λ_sparse.cpu(), F_curve_fit.cpu(), label='Interpolated quadratic curve', linestyle='--', color='tab:green')
+    plt.scatter(λ_sparse.cpu(), F_new.cpu(), label='Tuned quadratic curve', color='tab:green', marker='x')
+    plt.xlabel('Wavelength [nm]')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
-#%%
+
+#%% Do fine-adjustment of the parameters extrapolators by fitting their parameters
 inputs_manager.set_optimizable(['F', 'Jx', 'Jy'],  False)
 inputs_manager_objs.set_optimizable(['dx', 'dy'], False)
 
 print(inputs_manager)
 
-#%%
 x_size_model = inputs_manager.get_stacked_size()
 x_size_curve = curve_inputs.get_stacked_size()
 x_size_total = x_size_curve + x_size_model
@@ -634,9 +681,7 @@ x2 = torch.cat([
     inputs_manager_objs.stack().flatten(),
 ])
 
-empty_img = torch.zeros([N_wvl, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
 
-#%%
 def func_fit_curve(x):
     PSFs_fit = []
     for i in range(N_src):
@@ -648,9 +693,6 @@ def func_fit_curve(x):
         
         phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_map_size, LO_map_size))
         
-        # F_dxdy_dict['dx'] = F_dxdy_dict['dx'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # Extend to simulated number of wavelength
-        # F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
-
         F_dxdy_dict['dx'] = inputs_manager_objs['dx'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # Extend to simulated number of wavelength
         F_dxdy_dict['dy'] = inputs_manager_objs['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
 
@@ -662,17 +704,17 @@ def func_fit_curve(x):
     return add_ROIs( empty_img*0.0, PSFs_fit, local_coords, global_coords )
 
 
-#%%
+#%
 def loss_fit_curve(x_):
     PSFs_ = func_fit_curve(x_)
-    l1 = F.smooth_l1_loss(data_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
-    l2 = F.mse_loss(data_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
+    l1 = F.smooth_l1_loss(cube_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
+    l2 = F.mse_loss(cube_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
     return l1 * 1e-3 + l2 * 5e-6
 
 
 _ = loss_fit_curve(x2)
     
-#%%
+#%
 result_global = minimize(loss_fit_curve, x2, max_iter=300, tol=1e-3, method='bfgs', disp=2)
 x2 = result_global.x.clone().detach()
 
@@ -680,31 +722,32 @@ x_fit_dict = inputs_manager.unstack(x2[:x_size_model].unsqueeze(0))
 x_curve_fit_dict = curve_inputs.unstack(x2[x_size_model:x_size_curve+x_size_model].unsqueeze(0))
 flux_corrections = inputs_manager_objs['F_norm']
 
-#%% 
-with torch.no_grad():
-    model_fit_curves = func_fit_curve(result_global.x).detach()
+#%
+# with torch.no_grad():
+#     model_fit_curves = func_fit_curve(result_global.x).detach()
     
-VisualizeSources(data_sparse, model_fit_curves, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
-PlotSourcesProfiles(data_sparse, model_fit_curves, sources, radius=16, title='Fitted PSFs')
+# VisualizeSources(cube_sparse, model_fit_curves, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
+# PlotSourcesProfiles(cube_sparse, model_fit_curves, sources, radius=16, title='Fitted PSFs')
 
-#%%
+#%% Predict over the full wavelengths range
 torch.cuda.empty_cache()
-model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ, device=device), x_curve_fit_dict, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
-norms_new_full_λ = curve_sample(torch.as_tensor(λ, device=device), x_curve_fit_dict, 'norm')
+
+model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
+norms_new_full_λ = curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, 'norm')
 
 λ_split_size = 100
 # Split λ array into batches
-λ_batches = [λ[i:i + λ_split_size] for i in range(0, len(λ), λ_split_size)]
+λ_batches = [λ_full[i:i + λ_split_size] for i in range(0, len(λ_full), λ_split_size)]
 
 model_full = []
 
 with torch.no_grad():
     for batch_id in tqdm(range(len(λ_batches))):
         batch_size = len(λ_batches[batch_id])
-        config_file['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
+        model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
         model.Update(init_grids=True, init_pupils=True, init_tomography=True)
 
-        empty_img = torch.zeros([batch_size, data_sparse.shape[-2], data_sparse.shape[-1]], device=device)
+        empty_img = torch.zeros([batch_size, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
         PSF_batch = []
 
         for i in range(N_src):
@@ -738,19 +781,24 @@ model_full = np.vstack(model_full)
 torch.cuda.empty_cache()
 
 #%%
-norm_full = LogNorm(vmin=1e1, vmax=thres*10)
+norm_full = LogNorm(vmin=1e1, vmax=25000*10)
 
-VisualizeSources(data_full, model_full, norm=norm_full, mask=valid_mask, ROI=ROI_plot)
-PlotSourcesProfiles(data_full, model_full, sources, radius=16, title='Fitted PSFs')
+VisualizeSources(cube_full, model_full, norm=norm_full, mask=valid_mask, ROI=ROI_plot)
+PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSFs')
 
-diff_img_full = (data_full - model_full) * valid_mask.cpu().numpy()
+diff_img_full = (cube_full - model_full) * valid_mask.cpu().numpy()
 
-#%%
+#%% Plotting the residual spectrum
 from astropy.convolution import convolve, Box1DKernel
 
+host_coords  = [53, 37]
+AGN_coords_1 = [46, 35]
+bg_coords    = [10, 58]
+AGN_coords_2 = [60, 37]
+lens_coords  = [55, 66]
 
-# Define the coordinates and their properties
-targets_info = [
+
+targets_diff_info = [
     {
         'coords': host_coords,
         'name': 'Host galaxy?',
@@ -763,12 +811,6 @@ targets_info = [
         'color': 'tab:orange',
         'radius': 5
     },
-    # {
-    #     'coords': AGN_coords_1,
-    #     'name': 'AGN im. #1 (after subtraction)',
-    #     'color': 'tab:red',
-    #     'radius': 1
-    # },
     {
         'coords': AGN_coords_2,
         'name': 'AGN im. #2 (after subtraction)',
@@ -783,46 +825,75 @@ targets_info = [
     }
 ]
 
-# Create kernel for convolution
-kernel = Box1DKernel(10)
-
-# Initialize the plot
+# Plots the spectra of the targets after subtraction
 fig, ax = plt.subplots(figsize=(10,6))
-
-labels, colors = [], []
-dict_store = {}
-# Loop through each spectrum
-for info in targets_info:
-    spectrum_full = GetSpectrum(diff_img_full[ROI_plot], info['coords'], radius=info['radius'], debug_show_ROI=False )
-    spectrum_avg = convolve(spectrum_full, kernel, boundary='extend')
-    dict_store[info['name']] = spectrum_full
-    
-    labels.append(info['name'])
-    colors.append(info['color'])
-    
-    plt.plot(λ, spectrum_full, linewidth=0.5, alpha=0.25, label=info['name'], color=info['color'])
-    plt.plot(λ, spectrum_avg, linewidth=1, alpha=1, color=info['color'], linestyle='--')
-
+for info in targets_diff_info:
+    spectrum_sharp = GetSpectrum(diff_img_full[ROI_plot], info['coords'], radius=info['radius'], debug_show_ROI=False )
+    spectrum_avg   = convolve(spectrum_sharp, Box1DKernel(10), boundary='extend')
+       
+    plt.plot(λ_full, spectrum_sharp, linewidth=0.5, alpha=0.25, color=info['color'], label=info['name'])
+    plt.plot(λ_full, spectrum_avg,   linewidth=1,   alpha=1,    color=info['color'], linestyle='--')
 
 plt.legend()
-# plt.ylim(0, None)
-plt.xlim(λ.min(), λ.max())
+plt.xlim(λ_full.min(), λ_full.max())
 plt.grid(alpha=0.2)
-# plt.title('Full-spectrum: (AGN, AGN residue, host(?), background)')
-plt.title('Full-spectrum: (AGN residue, Host(?), background)')
+plt.title('Spectra after subtraction')
 plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
 plt.xlabel('Wavelength, [nm]')
 plt.show()
 
-with open(MUSE_DATA_FOLDER+f'quasars/spectra/{reduced_name}.pkl', 'wb') as f:
-    pickle.dump(dict_store, f)
+#%% Plotting the actual spectrum
+
+targets_info = [
+    {
+        'coords': bg_coords,
+        'name': 'Background',
+        'color': 'tab:orange',
+        'radius': 5
+    },
+    {
+        'coords': AGN_coords_1,
+        'name': 'AGN im. #1',
+        'color': 'tab:red',
+        'radius': 1
+    },
+    {
+        'coords': AGN_coords_2,
+        'name': 'AGN im. #2',
+        'color': 'tab:green',
+        'radius': 2
+    },
+    {
+        'coords': lens_coords,
+        'name': 'Lens',
+        'color': 'tab:purple',
+        'radius': 2
+    }
+]
+
+# Plots the spectra of the targets after subtraction
+fig, ax = plt.subplots(figsize=(10,6))
+for info in targets_info:
+    spectrum_sharp = GetSpectrum(cube_full[ROI_plot], info['coords'], radius=info['radius'], debug_show_ROI=False )
+    spectrum_avg   = convolve(spectrum_sharp, Box1DKernel(10), boundary='extend')
+       
+    plt.plot(λ_full, spectrum_sharp, linewidth=0.5, alpha=0.25, color=info['color'], label=info['name'])
+    plt.plot(λ_full, spectrum_avg,   linewidth=1,   alpha=1,    color=info['color'], linestyle='--')
+
+plt.legend()
+plt.xlim(λ_full.min(), λ_full.max())
+plt.grid(alpha=0.2)
+plt.title('Spectra')
+plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
+plt.xlabel('Wavelength, [nm]')
+plt.show()
     
-#%%
+#%% Plot multispectral cubes as RGB images
 from tools.utils import wavelength_to_rgb
 
 λ_vis = np.linspace(440, 750, diff_img_full.shape[0])
 
-def plot_wavelength_rgb(image, wavelengths=None, min_val=1e-3, max_val=1e1, title=None, show=True):
+def plot_wavelength_rgb_log(image, wavelengths=None, min_val=1e-3, max_val=1e1, title=None, show=True):
     if torch.is_tensor(image):
         image = image.cpu().numpy()
         
@@ -850,30 +921,29 @@ def plot_wavelength_rgb(image, wavelengths=None, min_val=1e-3, max_val=1e1, titl
     return image_RGB
 
 
-diff_rgb = plot_wavelength_rgb(
+diff_rgb = plot_wavelength_rgb_log(
     diff_img_full[ROI_plot],
     wavelengths=λ_vis,
-    title=f"{reduced_name}\nDifference",
+    title="Difference",
     min_val=500, max_val=60000, show=True
 )
 
-
-diff_rgb = plot_wavelength_rgb(
-    data_full[ROI_plot],
+diff_rgb = plot_wavelength_rgb_log(
+    cube_full[ROI_plot],
     wavelengths=λ_vis,
-    title=f"{reduced_name}\nObservation",
+    title=f"Data",
     min_val=500, max_val=200000, show=True
 )
 
-diff_rgb = plot_wavelength_rgb(
+diff_rgb = plot_wavelength_rgb_log(
     model_full[ROI_plot],
     wavelengths=λ_vis,
-    title=f"{reduced_name}\nModel",
+    title=f"Model",
     min_val=500, max_val=200000, show=True
 )
 
-
-# %%
+#%%
+"""
 spectra_dicts = []
 
 reduced_names = ['J0259_all',  'J0259_2024-12-05T03_04_07.007',  'J0259_2024-12-05T03_49_24.768',  'J0259_2024-12-05T03_15_37.598']
@@ -882,8 +952,7 @@ for name in reduced_names:
         dict_spectrum = pickle.load(f)
     spectra_dicts.append(dict_spectrum)
 
-#%%
-
+#%
 # Define the targets and their plotting properties
 targets = [
     ('Host galaxy?', 'tab:blue'),
@@ -935,6 +1004,7 @@ plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$
 plt.xlabel('Wavelength, [nm]')
 plt.show()
 
-# %%
-with open(MUSE_DATA_FOLDER+f'quasars/spectra/wavelengths.pkl', 'wb') as f:
-    pickle.dump(λ, f)
+# %
+# with open(MUSE_DATA_FOLDER+f'quasars/spectra/wavelengths.pkl', 'wb') as f:
+#     pickle.dump(λ, f)
+"""

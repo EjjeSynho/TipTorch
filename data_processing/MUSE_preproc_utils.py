@@ -195,6 +195,7 @@ def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True)
     return config_file, PSF_0
 
 
+'''
 def GetConfigSolo(sample, PSF_data, wvl_id=None, device=device, convert_config=True):
 
     wvls_ = [(sample['spectral data']['wvls binned']*1e-9).tolist()]
@@ -299,7 +300,7 @@ def GetConfigSolo(sample, PSF_data, wvl_id=None, device=device, convert_config=T
         config_manager.Convert(config_file, framework='pytorch', device=device)
 
     return config_file, PSF_0
-
+'''
 
 
 def rotate_PSF(PSF_0, angle):
@@ -329,7 +330,8 @@ def GetMUSEonsky(ids, derotate_PSF=False, device=device):
     def load_sample(id):
         sample = LoadMUSEsampleByID(id)
         PSF_0, var_mask, norms, bgs = LoadImages(sample, convert_images=False)
-        config_file, PSF_0 = GetConfigSolo(sample, PSF_0, convert_config=False)
+        # config_file, PSF_0 = GetConfigSolo(sample, PSF_0, convert_config=False)
+        config_file, PSF_0 = GetConfig(sample, PSF_0, convert_config=False)
         return PSF_0, var_mask, norms, bgs, config_file, sample
 
     PSF_0, configs, norms, bgs = [], [], [], []

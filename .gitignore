@@ -2,7 +2,9 @@
 __pycache__/
 _pycache_/
 .continue/
+.vscode
 data/temp
+data/reduced_telemetry
 data/misc
 data/weights
 data/configs
