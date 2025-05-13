@@ -350,6 +350,80 @@ def plot_radial_profiles_relative(PSF_0,
         return p_err
     
 
+def draw_PSF_stack(
+    PSF_in, PSF_out,
+    average=False,
+    scale='log',
+    min_val=1e-16, max_val=1e16,
+    crop=None, ax=None):
+    
+    from matplotlib.colors import LogNorm
+    
+    if PSF_in.ndim == 2:  PSF_in  = PSF_in [None, None, ...]
+    if PSF_out.ndim == 2: PSF_out = PSF_out[None, None, ...]
+    
+    if PSF_in.ndim  == 3:  PSF_in = PSF_in [None, ...]
+    if PSF_out.ndim == 3: PSF_out = PSF_out[None, ...]
+    
+    if isinstance(PSF_in,  np.ndarray): PSF_in  = torch.tensor(PSF_in)
+    if isinstance(PSF_out, np.ndarray): PSF_out = torch.tensor(PSF_out)
+    
+    if crop is not None:
+        if PSF_in.shape[-2] < crop or PSF_in.shape[-1] < crop:
+            raise ValueError('Crop size is larger than the PSF size!')
+        ROI_x = slice(PSF_in.shape[-2]//2-crop//2, PSF_in.shape[-2]//2+crop//2)
+        ROI_y = slice(PSF_in.shape[-1]//2-crop//2, PSF_in.shape[-1]//2+crop//2)
+    else:
+        ROI_x, ROI_y = slice(None), slice(None)
+    
+
+    dPSF = (PSF_out - PSF_in).abs()
+    cut = lambda x: x.abs().detach().cpu().numpy()[..., ROI_x, ROI_y] if crop is not None else x.abs().detach().cpu().numpy()
+    
+    if average:
+        row = []
+        if ax is None:
+            fig = plt.figure(figsize=(6, 4), dpi=300)
+            ax  = fig.gca()
+            
+        for wvl in range(PSF_in.shape[1]):
+            row.append(
+                np.hstack([cut(PSF_in[:, wvl,...].mean(dim=0)),
+                           cut(PSF_out[:, wvl,...].mean(dim=0)),
+                           cut(dPSF[:, wvl,...].mean(dim=0))]) )
+        row  = np.vstack(row)
+        if scale == 'log':
+            norm = LogNorm(vmin=np.maximum(row.min(), min_val), vmax=np.minimum(row.max(), max_val))
+        else:
+            norm = None
+        
+        ax.imshow(row, norm=norm)
+        # ax.set_title('Sources average')
+        ax.axis('off')
+        # plt.show()
+
+    else:
+        for src in range(PSF_in.shape[0]):
+            if ax is None:
+                fig = plt.figure(figsize=(6, 4), dpi=300)
+                ax  = fig.gca()
+            
+            row = []
+            for wvl in range(PSF_in.shape[1]):
+                row.append( np.hstack([cut(PSF_in[src, wvl,...]), cut(PSF_out[src, wvl,...]), cut(dPSF[src, wvl,...])]) )
+            row  = np.vstack(row)
+            
+            if scale == 'log':
+                norm = LogNorm(vmin=np.maximum(row.min(), min_val), vmax=np.minimum(row.max(), max_val))
+            else:
+                norm = None
+                
+            ax.imshow(row, norm=norm)
+            # ax.set_title('Source %d' % src)
+            ax.axis('off')
+            plt.show()
+
+
 def hist_thresholded(
     datasets,
     threshold,

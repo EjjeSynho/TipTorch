@@ -16,7 +16,6 @@ from matplotlib.colors import LogNorm
 from torchmin import minimize
 from tqdm import tqdm
 
-from photutils.aperture import RectangularAperture
 from tools.utils import mask_circle, DownloadFromDrive
 
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
@@ -168,48 +167,7 @@ cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes
 N_wvl = cube_sparse.shape[0] # dims are [N_wvls, H, W]
 
 #%%
-from managers.multisrc_manager import detect_sources, extract_ROIs, add_ROIs, plot_ROIs_as_grid
-
-def DetectSources(data_cube, threshold, display=False, draw_win_size=None):
-
-    if isinstance(data_cube, torch.Tensor):
-        data_src = data_cube.sum(dim=0).cpu().numpy()
-    else:
-        data_src = data_src.sum(axis=0)
-    
-    # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
-    sources_df = detect_sources(data_src, threshold=threshold, box_size=11, verbose=True)
-
-    # Draw the detected sources
-    if display and draw_win_size is not None:
-        # apertures = CircularAperture(srcs_pos, r=5)
-        srcs_pos  = np.transpose((sources_df['x_peak'], sources_df['y_peak']))
-        # srcs_flux = sources['peak_value'].to_numpy()
-        apertures_box = RectangularAperture(srcs_pos, draw_win_size, draw_win_size)
-        norm_field = LogNorm(vmin=10, vmax=threshold*10) # TODO: make it more statistical
-
-        plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
-        apertures_box.plot(color='gold', lw=2, alpha=0.45)
-        plt.show()
-
-    return sources_df
-
-
-def ExtractSourceImages(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
-    ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size)
-    sources_valid = sources.iloc[valid_srcs].reset_index(drop=True) if filter_sources else srcs_coords
-
-    if debug_draw:
-        N_cols = min(8, int(np.ceil(np.sqrt(len(ROIs))))) # Automatically adjusts the number of displayed  columns
-        plot_ROIs_as_grid(ROIs, cols=N_cols)
-
-    return {
-        "images": ROIs,
-        "coords": sources_valid,
-        "count": len(sources_valid),
-        "img_slices": global_coords,
-        "img_crops": local_coords
-    }
+from managers.multisrc_manager import add_ROIs, DetectSources, ExtractSourceImages
 
 PSF_size = 111  # Define the maximum size of each extracted PSF
 
@@ -303,7 +261,6 @@ inputs_manager.add('beta',  torch.tensor([2.5]), df_transforms_fitted['beta'])
 inputs_manager.add('ratio', torch.tensor([1.0]), df_transforms_fitted['ratio'])
 inputs_manager.add('theta', torch.tensor([0.0]), df_transforms_fitted['theta']) 
 inputs_manager.add('s_pow', torch.tensor([0.0]), df_transforms_fitted['s_pow'])
-
 
 if LO_map_size is not None:
     inputs_manager.add('LO_coefs', torch.zeros([1, LO_map_size**2]), Uniform(a=-100, b=100))
@@ -531,8 +488,8 @@ def func_just_for_Strehl(x): # TODO: relative weights for different brigtness
 
         phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_map_size, LO_map_size))
 
-        F_dxdy_dict['dx'] = F_dxdy_dict['dx'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # Extend to simulated number of wavelength
-        F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
+        F_dxdy_dict['dx'] = F_dxdy_dict['dx'][i].unsqueeze(-1).unsqueeze(0) # Extend to simulated number of wavelength
+        F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).unsqueeze(0) # assuming the same shift for all wavelengths
 
         inputs = params_dict | F_dxdy_dict
 

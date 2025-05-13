@@ -7,6 +7,8 @@ from tools.plotting import plot_radial_profiles
 from sklearn.cluster import DBSCAN
 import pandas as pd
 from photutils.detection import find_peaks
+from photutils.aperture import RectangularAperture
+from matplotlib.colors import LogNorm
 
 """
 This module is used to manage the multi-source simulations. It contains functions to 
@@ -111,8 +113,46 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
     return ROIs, roi_local_coords, roi_global_coords, valid_ids
 
 
-def extract_ROIs_from_coords(image, roi_local_coords, roi_global_coords, PSF_size):
+def DetectSources(data_cube, threshold, display=False, draw_win_size=None):
+
+    data_src = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_src.sum(axis=0)
     
+    # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
+    sources_df = detect_sources(data_src, threshold=threshold, box_size=11, verbose=True)
+
+    # Draw the detected sources
+    if display and draw_win_size is not None:
+        # apertures = CircularAperture(srcs_pos, r=5)
+        srcs_pos  = np.transpose((sources_df['x_peak'], sources_df['y_peak']))
+        # srcs_flux = sources['peak_value'].to_numpy()
+        apertures_box = RectangularAperture(srcs_pos, draw_win_size, draw_win_size)
+        norm_field = LogNorm(vmin=10, vmax=threshold*10) # TODO: make it more statistical
+
+        plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
+        apertures_box.plot(color='gold', lw=2, alpha=0.45)
+        plt.show()
+
+    return sources_df
+
+
+def ExtractSourceImages(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
+    ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size)
+    sources_valid = srcs_coords.iloc[valid_srcs].reset_index(drop=True) if filter_sources else srcs_coords
+
+    if debug_draw:
+        N_cols = min(8, int(np.ceil(np.sqrt(len(ROIs))))) # Automatically adjusts the number of displayed  columns
+        plot_ROIs_as_grid(ROIs, cols=N_cols)
+
+    return {
+        "images": ROIs,
+        "coords": sources_valid,
+        "count": len(sources_valid),
+        "img_slices": global_coords,
+        "img_crops": local_coords
+    }
+
+
+def extract_ROIs_from_coords(image, roi_local_coords, roi_global_coords, PSF_size):
     torch_flag = False
     if isinstance(image, np.ndarray):
         xp = np
@@ -160,14 +200,6 @@ def add_ROIs(image, ROIs, local_coords, global_coords):
             image[:, y_min_img:y_max_img, x_min_img:x_max_img] += roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
 
     return image
-
-
-# def add_ROI(image, ROI, local_coord, global_coord):    
-#     (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_coord
-#     (y_min_img, y_max_img), (x_min_img, x_max_img) = global_coord
-#     image[:, y_min_img:y_max_img, x_min_img:x_max_img] += ROI[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
-    
-#     return image
 
 
 def plot_ROIs_as_grid(ROIs, cols=5):
