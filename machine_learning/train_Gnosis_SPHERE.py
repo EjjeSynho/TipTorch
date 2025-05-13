@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from tools.utils import plot_radial_profiles_new, LWE_basis, cropper, draw_PSF_stack
+from tools.plotting import plot_radial_profiles, LWE_basis, cropper, draw_PSF_stack
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from managers.config_manager import GetSPHEREonsky, ConfigManager
@@ -245,7 +245,7 @@ fitted_dict = get_fixed_inputs(batch_data, fitted_entries)
 
 PSF_1 = run_model(toy, batch_data, {}, fixed_inputs=fitted_dict).cpu().numpy()
 
-p_0, p_1, p_err = plot_radial_profiles_new(
+p_0, p_1, p_err = plot_radial_profiles(
     PSF_0[:,0,...], PSF_1[:,0,...], return_profiles=True, suppress_plot=True
 )    
 
@@ -658,9 +658,9 @@ with torch.no_grad():
 
         if calculate_plots:
             fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-            plot_radial_profiles_new(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
-            plot_radial_profiles_new(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
-            # plot_radial_profiles_new(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[2])
+            plot_radial_profiles(PSFs_0_val, PSFs_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
+            plot_radial_profiles(PSFs_0_val, PSFs_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
+            # plot_radial_profiles(PSFs_0_val, PSFs_3_val, 'Data', 'TipTorch', title='Fitted', ax=ax[2])
             fig.suptitle(f'λ = {wvl} [nm]')
             plt.tight_layout()
             if save_plots:
@@ -679,11 +679,11 @@ PSFs_2_val_poly = get_PSF_cube(PSFs_2_val_all)
 PSFs_3_val_poly = get_PSF_cube(PSFs_3_val_all)
 
 fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-plot_radial_profiles_new(PSFs_0_val_poly, PSFs_2_val_poly, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
+plot_radial_profiles(PSFs_0_val_poly, PSFs_2_val_poly, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
 if fitted_or_pred == 'pred':
-    plot_radial_profiles_new(PSFs_0_val_poly, PSFs_1_val_poly, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
+    plot_radial_profiles(PSFs_0_val_poly, PSFs_1_val_poly, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
 elif fitted_or_pred == 'fitted':
-    plot_radial_profiles_new(PSFs_0_val_poly, PSFs_3_val_poly, 'Data', 'TipTorch', title='Fitted', ax=ax[1])
+    plot_radial_profiles(PSFs_0_val_poly, PSFs_3_val_poly, 'Data', 'TipTorch', title='Fitted', ax=ax[1])
 
 fig.suptitle(f'Polychromatic')
 plt.tight_layout()
@@ -752,11 +752,11 @@ with torch.no_grad():
 PSFs_data   = torch.cat(PSFs_data,   dim=0)[:,0,...].numpy()
 PSFs_fitted = torch.cat(PSFs_fitted, dim=0)[:,0,...].numpy()
 
-# plot_radial_profiles_new(PSFs_data, PSFs_fitted, 'Data', 'TipTorch', title='Fitted')
+# plot_radial_profiles(PSFs_data, PSFs_fitted, 'Data', 'TipTorch', title='Fitted')
 
 index_ = batch_data['IDs'].index(2818)
 
-plot_radial_profiles_new(PSFs_data[index_,...], PSFs_fitted[index_,...], 'Data', 'TipTorch', title='Fitted')
+plot_radial_profiles(PSFs_data[index_,...], PSFs_fitted[index_,...], 'Data', 'TipTorch', title='Fitted')
 plt.show()
 
 # draw_PSF_stack(PSFs_data[index_,...], PSFs_fitted[index_,...], average=True, crop=40, min_val=1e-6, max_val=1e-1)
@@ -801,7 +801,7 @@ _ = toy()
 PSF_test = toy(new_dict, None, lambda: basis(new_dict['basis_coefs'].float())).cpu().numpy()[index_,0,...]
 
 #%%
-plot_radial_profiles_new(PSFs_data[index_,...], PSF_test, 'Data', 'TipTorch', title='Fitted')
+plot_radial_profiles(PSFs_data[index_,...], PSF_test, 'Data', 'TipTorch', title='Fitted')
 plt.show()
 
 
@@ -815,7 +815,7 @@ B = PSFs_fitted[index_,...]
 # plt.show()
 
 # draw_PSF_stack(A, B, average=True, crop=40, min_val=1e-6, max_val=1e-1)
-plot_radial_profiles_new(A, B, 'Data', 'TipTorch', title='Fitted')
+plot_radial_profiles(A, B, 'Data', 'TipTorch', title='Fitted')
 plt.show()
 
 #%%
@@ -1150,7 +1150,7 @@ save_stack_GIF('diff_direct')
 
 #%%
 # fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-# plot_radial_profiles_new(PSF_0_val, PSF_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
+# plot_radial_profiles(PSF_0_val, PSF_2_val, 'Data', 'TipTorch', title='Direct prediction',     ax=ax[0])
 # plot_radial_profil(PSF_0_val, PSF_1_val, 'Data', 'TipTorch', title='Calibrated prediction', ax=ax[1])
 # fig.suptitle(f'λ = {wvl} [nm]')
 # plt.show()

@@ -23,7 +23,7 @@ from torchmin import minimize
 from project_settings import device
 
 import matplotlib.pyplot as plt
-from tools.utils import plot_radial_profiles_new, draw_PSF_stack
+from tools.plotting import plot_radial_profiles, draw_PSF_stack
 
 import warnings
 
@@ -329,8 +329,8 @@ def load_and_fit_sample(id):
         with torch.no_grad():
             PSF_1 = func(x0)
             fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-            plot_radial_profiles_new( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-            plot_radial_profiles_new( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+            plot_radial_profiles( PSF_0[:,0,...].cpu().numpy(), PSF_1[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+            plot_radial_profiles( PSF_0[:,1,...].cpu().numpy(), PSF_1[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
             plt.show()
         
             draw_PSF_stack(PSF_0, PSF_1, average=True, crop=80)

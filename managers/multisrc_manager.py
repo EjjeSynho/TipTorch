@@ -3,7 +3,7 @@ import torch
 from matplotlib import pyplot as plt
 from astropy.visualization import simple_norm
 from astropy.visualization import LinearStretch, ImageNormalize
-from tools.utils import plot_radial_profiles_new
+from tools.plotting import plot_radial_profiles
 from sklearn.cluster import DBSCAN
 import pandas as pd
 from photutils.detection import find_peaks
@@ -260,5 +260,5 @@ def PlotSourcesProfiles(data, model, sources, radius, title=''):
     else:
         PSFs_1_white = np.mean(np.stack(ROIs_1), axis=1)
     
-    plot_radial_profiles_new(PSFs_0_white, PSFs_1_white, 'Data', 'Model', title=title, cutoff=radius, y_min=5e-2)
+    plot_radial_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'Model', title=title, cutoff=radius, y_min=5e-2)
     plt.show()

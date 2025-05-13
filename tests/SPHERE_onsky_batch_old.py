@@ -10,7 +10,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
-from tools.utils import plot_radial_profiles_new, SR, draw_PSF_stack, rad2mas, cropper
+from tools.plotting import plot_radial_profiles, SR, draw_PSF_stack, rad2mas, cropper
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from managers.config_manager import GetSPHEREonsky
@@ -204,7 +204,7 @@ decomposed_variables = transformer.unstack(x0)
 
 with torch.no_grad():
     PSF_1_joint = func(x0)
-    plot_radial_profiles_new(
+    plot_radial_profiles(
         PSF_0[:,0,...].cpu().numpy(),
         PSF_1_joint[:,0,...].cpu().numpy(),
         'Data', 'TipToy', title='IRDIS PSF', dpi=200

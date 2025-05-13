@@ -10,8 +10,6 @@ import torch.nn.functional as F
 
 import os
 import numpy as np
-import pandas as pd
-import gdown
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
@@ -35,42 +33,21 @@ from project_settings import device
 
 #%%
 def DownloadMUSEcalibData():
-    print("Downloading MUSE calibrator model...")
-    DownloadFromDrive(
-        share_url = 'https://drive.google.com/file/d/1tSXlFGIqi_WnTVZ4JeblHBkmZxw50xgN/view?usp=drive_link',
-        output_path = '../data/weights/MUSE_calibrator_v1.dict'
-    )
+    tmp1, tmp2 = 'https://drive.google.com/file/d/', '/view?usp=drive_link'
 
-    print("Downloading necessary cached reduced telemetry data...")
-    DownloadFromDrive(
-        share_url = 'https://drive.google.com/file/d/1tSXlFGIqi_WnTVZ4JeblHBkmZxw50xgN/view?usp=drive_link',
-        output_path = '../data/weights/MUSE_calibrator_v1.dict'
-    )
+    downloads = [
+        ("Downloading MUSE calibrator model...", f'{tmp1}1tSXlFGIqi_WnTVZ4JeblHBkmZxw50xgN{tmp2}', '../data/weights/MUSE_calibrator_v1.dict'),
+        ("Downloading necessary cached reduced telemetry data...", f'{tmp1}1tSXlFGIqi_WnTVZ4JeblHBkmZxw50xgN{tmp2}', '../data/weights/MUSE_calibrator_v1.dict'),
+        (None, f'{tmp1}1KJDiLgX9XeXjvskOhYLLAhlDR0UOH4p_{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle'),
+        (None, f'{tmp1}1pc7a8H4v_XzF9IT_LGrvM-OkV7jrw0D5{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle'),
+        (None, f'{tmp1}1BR9WtPVODV8R7oYaZSxn9ox_jfWJr9nF{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle'),
+        (None, f'{tmp1}1iFnB30JEsKKy14282dJ95xuWtHEfXxBN{tmp2}', '../data/reduced_telemetry/MUSE/muse_df.pickle'),
+        (None, f'{tmp1}1LMgmTSVBhvGOOUW0PZ1Zim5OPcP8L8NB{tmp2}', '../data/reduced_telemetry/MUSE/MUSE_fitted_df.pkl')
+    ]
 
-    DownloadFromDrive(
-        share_url = 'https://drive.google.com/file/d/1KJDiLgX9XeXjvskOhYLLAhlDR0UOH4p_/view?usp=drive_link',
-        output_path = '../data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle'
-    )
-
-    DownloadFromDrive(
-        share_url = 'https://drive.google.com/file/d/1pc7a8H4v_XzF9IT_LGrvM-OkV7jrw0D5/view?usp=drive_link',
-        output_path = '../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle'
-    )
-
-    DownloadFromDrive(
-        share_url = 'https://drive.google.com/file/d/1BR9WtPVODV8R7oYaZSxn9ox_jfWJr9nF/view?usp=drive_link',
-        output_path = '../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle'
-    )
-
-    DownloadFromDrive(
-        share_url = 'https://drive.google.com/file/d/1iFnB30JEsKKy14282dJ95xuWtHEfXxBN/view?usp=drive_link',
-        output_path = '../data/reduced_telemetry/MUSE/muse_df.pickle'
-    )
-
-    DownloadFromDrive(
-        share_url = 'https://drive.google.com/file/d/1LMgmTSVBhvGOOUW0PZ1Zim5OPcP8L8NB/view?usp=drive_link',
-        output_path = '../data/reduced_telemetry/MUSE/MUSE_fitted_df.pkl'
-    )
+    for message, url, output_path in downloads:
+        if message: print(message)
+        DownloadFromDrive(share_url=url, output_path=output_path)
 
 
 def LoadDataCache(raw_path, cube_path, cache_path, save_cache=True, verbose=False):
@@ -244,8 +221,6 @@ srcs_image_data = ExtractSourceImages(cube_sparse, sources, box_size=PSF_size, f
 N_src   = srcs_image_data["count"]
 sources = srcs_image_data["coords"]
 ROIs    = srcs_image_data["images"]
-local_coords  = srcs_image_data["img_crops"]
-global_coords = srcs_image_data["img_slices"]
 
 #%%
 # Yes, this inconsistency in sparse and and binned is intended for proper energy normalization
@@ -465,8 +440,8 @@ from managers.multisrc_manager import VisualizeSources, PlotSourcesProfiles
 model_sparse = add_ROIs(
     torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device), # blanck baase image
     [PSFs_fitted[i,...] for i in range(N_src)], # predicted flux-normalized PSFs after coordinates tuning
-    local_coords,
-    global_coords
+    srcs_image_data["img_crops"],
+    srcs_image_data["img_slices"]
 )
 
 ROI_plot = np.s_[..., 125:225, 125:225]
@@ -524,7 +499,7 @@ def func_fit(x): # TODO: relative weights for different brigtness
 
         PSFs_fit.append( model(inputs, phase_generator=phase_func).squeeze() * flux_norm )
         
-    return add_ROIs( empty_img*0.0, PSFs_fit, local_coords, global_coords )
+    return add_ROIs( empty_img*0.0, PSFs_fit, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
 
 def loss_fit(x_):
@@ -701,7 +676,7 @@ def func_fit_curve(x):
         
         PSFs_fit.append( model(inputs, phase_generator=phase_func).squeeze() * flux_norm )
     
-    return add_ROIs( empty_img*0.0, PSFs_fit, local_coords, global_coords )
+    return add_ROIs( empty_img*0.0, PSFs_fit, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
 
 #%
@@ -721,13 +696,6 @@ x2 = result_global.x.clone().detach()
 x_fit_dict = inputs_manager.unstack(x2[:x_size_model].unsqueeze(0))
 x_curve_fit_dict = curve_inputs.unstack(x2[x_size_model:x_size_curve+x_size_model].unsqueeze(0))
 flux_corrections = inputs_manager_objs['F_norm']
-
-#%
-# with torch.no_grad():
-#     model_fit_curves = func_fit_curve(result_global.x).detach()
-    
-# VisualizeSources(cube_sparse, model_fit_curves, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
-# PlotSourcesProfiles(cube_sparse, model_fit_curves, sources, radius=16, title='Fitted PSFs')
 
 #%% Predict over the full wavelengths range
 torch.cuda.empty_cache()
@@ -775,7 +743,7 @@ with torch.no_grad():
 
             PSF_batch.append( (model(dict_selected).squeeze() * flux_norm[:,None,None]).detach() )
 
-        model_full.append( add_ROIs( empty_img*0.0, PSF_batch, local_coords, global_coords ).cpu().numpy() )
+        model_full.append( add_ROIs( empty_img*0.0, PSF_batch, srcs_image_data["img_crops"], srcs_image_data["img_slices"] ).cpu().numpy() )
 
 model_full = np.vstack(model_full)
 torch.cuda.empty_cache()
@@ -889,36 +857,9 @@ plt.xlabel('Wavelength, [nm]')
 plt.show()
     
 #%% Plot multispectral cubes as RGB images
-from tools.utils import wavelength_to_rgb
+from tools.plotting import wavelength_to_rgb, plot_wavelength_rgb_log
 
 λ_vis = np.linspace(440, 750, diff_img_full.shape[0])
-
-def plot_wavelength_rgb_log(image, wavelengths=None, min_val=1e-3, max_val=1e1, title=None, show=True):
-    if torch.is_tensor(image):
-        image = image.cpu().numpy()
-        
-    wavelengths = np.asarray(wavelengths)
-    rgb_weights = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths]).T
-
-    weighted = rgb_weights[:, :, None, None] * image[None, :, :, :]
-    image_RGB = np.abs(weighted.sum(axis=1))  # shape: (3, height, width)
-    image_RGB = np.moveaxis(image_RGB, 0, -1)
-
-    log_min, log_max = np.log10(min_val), np.log10(max_val)
-    image_log = np.log10(image_RGB+1e-10)
-
-    image_clipped = np.clip(image_log, log_min, log_max)
-    norm_image = (image_clipped - log_min) / (log_max - log_min)
-
-    if show:
-        plt.figure()
-        plt.imshow(norm_image, origin="lower")
-        if title:
-            plt.title(title)
-        plt.axis('off')
-        plt.show()
-
-    return image_RGB
 
 
 diff_rgb = plot_wavelength_rgb_log(

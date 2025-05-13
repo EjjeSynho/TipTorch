@@ -21,7 +21,7 @@ from torchmin import minimize
 from typing import Union
 from photutils.aperture import CircularAperture, RectangularAperture
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
-from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle, rad2mas
+from tools.plotting import plot_radial_profiles, draw_PSF_stack, mask_circle, rad2mas
 from managers.config_manager import ConfigManager, MultipleTargetsInOneObservation
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
@@ -471,7 +471,7 @@ display_mask = mask_circle(PSF_size, 18)[None,...]
 PSFs_0_white = np.mean(PSFs_data_norm.cpu().cpu().numpy(), axis=1) * display_mask
 PSFs_1_white = np.mean(PSFs_fitted.cpu().cpu().numpy(), axis=1)
 
-plot_radial_profiles_new(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
+plot_radial_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
 
 #%% ---------------------------
 model_sparse = add_ROIs(

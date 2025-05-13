@@ -25,7 +25,7 @@ from photutils.aperture import CircularAperture, RectangularAperture
 from sklearn.cluster import DBSCAN
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
 from managers.parameter_parser import ParameterParser
-from tools.utils import plot_radial_profiles_new, draw_PSF_stack, mask_circle
+from tools.plotting import plot_radial_profiles, draw_PSF_stack, mask_circle
 from managers.config_manager import ConfigManager
 from data_processing.normalizers import CreateTransformSequenceFromFile, InputsTransformer
 from tqdm import tqdm
@@ -571,7 +571,7 @@ display_mask = mask_circle(box_size, 18)[None,...]
 PSFs_0_white = np.mean(PSFs_0.cpu().cpu().numpy(), axis=1) * display_mask
 PSFs_1_white = np.mean(PSFs_1.cpu().cpu().numpy(), axis=1)
 
-plot_radial_profiles_new(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
+plot_radial_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
 
 # folder_write = 'C:/Users/akuznets/Desktop/wide_field_results/presentation/'
 
@@ -623,7 +623,7 @@ PSFs_2 = torch.nan_to_num(torch.stack(ROIs_1) / fluxes * ratio_crop, nan=0.0)
 PSFs_0_white = np.mean(PSFs_0.cpu().cpu().numpy(), axis=1) * display_mask
 PSFs_2_white = np.mean(PSFs_2.cpu().cpu().numpy(), axis=1)
 
-plot_radial_profiles_new(PSFs_0_white, PSFs_2_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
+plot_radial_profiles(PSFs_0_white, PSFs_2_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
 
 #%%
 PSFs_0_white = np.mean(PSFs_0.cpu().cpu().numpy(), axis=1)
@@ -735,7 +735,7 @@ PSFs_0_white = np.mean(PSFs_0.cpu().cpu().numpy(), axis=1) * display_mask
 # PSFs_2_white = np.mean(PSFs_2.cpu().cpu().numpy(), axis=1) #*0.9
 PSFs_2_white = np.mean((PSFs_2*ratio_crop).cpu().cpu().numpy(), axis=1)#*0.9
 
-plot_radial_profiles_new(PSFs_0_white, PSFs_2_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
+plot_radial_profiles(PSFs_0_white, PSFs_2_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
 plt.savefig(folder_write + 'profiles_fit.pdf', dpi=300)
 
 #%%
