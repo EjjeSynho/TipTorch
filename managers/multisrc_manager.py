@@ -294,3 +294,15 @@ def PlotSourcesProfiles(data, model, sources, radius, title=''):
     
     plot_radial_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'Model', title=title, cutoff=radius, y_min=5e-2)
     plt.show()
+
+
+def select_sources(src_dict: dict, selected_ids: Union[list, int]) -> dict:
+    if isinstance(selected_ids, int):
+        selected_ids = [selected_ids]
+    result_dict = {}
+    for key, tensor in src_dict.items():
+        if hasattr(tensor, 'shape') and tensor.shape[0] == N_src:
+            result_dict[key] = tensor[selected_ids]
+        else:
+            result_dict[key] = tensor
+    return result_dict

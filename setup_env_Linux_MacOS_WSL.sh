@@ -1,6 +1,36 @@
 #!/usr/bin/env bash
 set -e
 
+# ─── Usage / Argument Parsing ───────────────────────────────────────────────
+USE_MAMBA=false
+
+function usage() {
+  echo "Usage: $0 [--no-mamba] [-h|--help]"
+  echo
+  echo "Options:"
+  echo "  --no-mamba    Skip installing and using mamba; force use of conda"
+  echo "  -h, --help    Show this help message and exit"
+  exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --no-mamba)
+      USE_MAMBA=false
+      shift
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      echo "Unknown option: $1"
+      usage
+      ;;
+  esac
+done
+
+echo "→ USE_MAMBA set to: $USE_MAMBA"
+
 # ─── Abort on Windows ────────────────────────────────────────────────────────
 UNAME="$(uname | tr '[:upper:]' '[:lower:]')"
 if [[ "$UNAME" == msys* || "$UNAME" == mingw* || "$UNAME" == cygwin* ]]; then
@@ -8,17 +38,19 @@ if [[ "$UNAME" == msys* || "$UNAME" == mingw* || "$UNAME" == cygwin* ]]; then
   exit 1
 fi
 
-# ─── Install mamba if missing ───────────────────────────────────────────────
-if ! command -v mamba &>/dev/null; then
-  echo "→ mamba not found in PATH. Installing into base…"
-  # ensure conda is initialized in this shell
-  # source "$(conda info --base)/etc/profile.d/conda.sh"
-  conda install -n base mamba -c conda-forge -y
-  echo "→ mamba installed."
+# ─── Install mamba if missing (unless skipped) ────────────────────────────────
+if [[ "$USE_MAMBA" == "true" ]]; then
+  if ! command -v mamba &>/dev/null; then
+    echo "→ mamba not found in PATH. Installing into base…"
+    # ensure conda is initialized in this shell
+    # source "$(conda info --base)/etc/profile.d/conda.sh"
+    conda install -n base mamba -c conda-forge -y
+    echo "→ mamba installed."
+  fi
 fi
 
 # ─── Pick the solver ─────────────────────────────────────────────────────────
-if command -v mamba &>/dev/null; then
+if [[ "$USE_MAMBA" == "true" && $(command -v mamba &>/dev/null; echo $?) -eq 0 ]]; then
   SOLVER="mamba"
 else
   SOLVER="conda"

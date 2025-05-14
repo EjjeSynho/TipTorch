@@ -21,7 +21,8 @@ from torchmin import minimize
 from typing import Union
 from photutils.aperture import CircularAperture, RectangularAperture
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
-from tools.plotting import plot_radial_profiles, draw_PSF_stack, mask_circle, rad2mas
+from tools.plotting import plot_radial_profiles, draw_PSF_stack
+from tools.utils import mask_circle, rad2mas
 from managers.config_manager import ConfigManager, MultipleTargetsInOneObservation
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
@@ -291,12 +292,9 @@ individual_inputs = InputsManager()
 individual_inputs.add('dx', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dx'])
 individual_inputs.add('dy', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dy'])
 individual_inputs.add('F_norm', torch.tensor([[1.0,]]*N_src), df_transforms_fitted['F'])
-# individual_inputs.add('F_norm', torch.ones([N_src, N_wvl]), df_transforms_fitted['F'])
 individual_inputs.add('src_dirs_x', torch.tensor(sources_coords[:,0]), df_transforms_src_coords)
 individual_inputs.add('src_dirs_y', torch.tensor(sources_coords[:,1]), df_transforms_src_coords)
 
-
-# print(individual_inputs)
 
 model_inputs = InputsManagersUnion({ 'shared': shared_inputs,'individual': individual_inputs })
 model_inputs.to_float()
@@ -374,17 +372,6 @@ fluxes = torch.vstack(fluxes)
 norm_factors = torch.stack([src_spectra_sparse[i][:,None,None] * fluxes[i, ...] for i in range(N_src)])
 
 #%% --------------------------
-def select_sources(src_dict: dict, selected_ids: Union[list, int]) -> dict:
-    if isinstance(selected_ids, int):
-        selected_ids = [selected_ids]
-    result_dict = {}
-    for key, tensor in src_dict.items():
-        if hasattr(tensor, 'shape') and tensor.shape[0] == N_src:
-            result_dict[key] = tensor[selected_ids]
-        else:
-            result_dict[key] = tensor
-    return result_dict
-
 
 def run_model(PSF_model, inputs_manager, x_, i_src=None, update=False):
     
