@@ -9,6 +9,8 @@ import pandas as pd
 from photutils.detection import find_peaks
 from photutils.aperture import RectangularAperture
 from matplotlib.colors import LogNorm
+from typing import Union
+
 
 """
 This module is used to manage the multi-source simulations. It contains functions to 
@@ -135,7 +137,7 @@ def DetectSources(data_cube, threshold, display=False, draw_win_size=None):
     return sources_df
 
 
-def ExtractSourceImages(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
+def ExtractSources(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
     ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size)
     sources_valid = srcs_coords.iloc[valid_srcs].reset_index(drop=True) if filter_sources else srcs_coords
 
@@ -301,7 +303,7 @@ def select_sources(src_dict: dict, selected_ids: Union[list, int]) -> dict:
         selected_ids = [selected_ids]
     result_dict = {}
     for key, tensor in src_dict.items():
-        if hasattr(tensor, 'shape') and tensor.shape[0] == N_src:
+        if hasattr(tensor, 'shape') and tensor.shape[0] > 1:
             result_dict[key] = tensor[selected_ids]
         else:
             result_dict[key] = tensor

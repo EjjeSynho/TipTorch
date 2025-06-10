@@ -1077,13 +1077,19 @@ class TipTorch(torch.nn.Module):
 
 
     def PSD2PSF(self, PSD, OTF_static):
-        F   = pdims(self.F,   2) # TODO: move it from here to down
-        bg  = pdims(self.bg,  2) # TODO: move it from here to downW
-        dx  = pdims(self.dx,  2)
-        dy  = pdims(self.dy,  2)
-        Jx  = pdims(self.Jx,  3) if self.Jx.ndim  == 1 else pdims(self.Jx,  2)
-        Jy  = pdims(self.Jy,  3) if self.Jy.ndim  == 1 else pdims(self.Jy,  2)
-        Jxy = pdims(self.Jxy, 3) if self.Jxy.ndim == 1 else pdims(self.Jxy, 2)
+        # Ensure that wavelength dimension is present
+        F   = pdims(min_2d(self.F),  2)
+        bg  = pdims(min_2d(self.bg), 2)
+        dx  = pdims(min_2d(self.dx), 2)
+        dy  = pdims(min_2d(self.dy), 2)
+        Jx  = pdims(min_2d(self.Jx ), 2)
+        Jy  = pdims(min_2d(self.Jy ), 2)
+        Jxy = pdims(min_2d(self.Jxy), 2)
+                
+        # F   = pdims(self.F,   2)
+        # Jx  = pdims(self.Jx,  3) if self.Jx.ndim  == 1 else pdims(self.Jx,  2)
+        # Jy  = pdims(self.Jy,  3) if self.Jy.ndim  == 1 else pdims(self.Jy,  2)
+        # Jxy = pdims(self.Jxy, 3) if self.Jxy.ndim == 1 else pdims(self.Jxy, 2)
 
         # Removing the DC component
         PSD[..., self.nOtf_y//2, self.nOtf_x] = 0.0

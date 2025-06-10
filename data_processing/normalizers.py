@@ -6,7 +6,7 @@ import numpy as np
 from scipy import stats
 # from scipy.stats import boxcox, yeojohnson, norm
 from scipy.optimize import curve_fit
-
+from typing import Any, Optional, Union
 
 class DataTransform:
     def __init__(self, data=None):
@@ -32,6 +32,17 @@ class DataTransform:
     def store(self):
         # Unified store method: return a tuple with the class name and parameters.
         return (self.__class__.__name__, self.get_params())
+
+
+class Identity(DataTransform):
+    def fit(self, data):
+        return self
+
+    def forward(self, x):
+        return x
+
+    def backward(self, y):
+        return y
 
 
 class YeoJohnson(DataTransform):
@@ -75,6 +86,7 @@ class YeoJohnson(DataTransform):
             x[neg] = -(xp.exp(-y[neg]) - 1)
         return x
 
+
 class BoxCox(DataTransform):
     def __init__(self, data=None, lmbda=None) -> None:
         self.lmbda = lmbda
@@ -91,6 +103,7 @@ class BoxCox(DataTransform):
     def backward(self, y):
         xp = torch if isinstance(y, torch.Tensor) else np
         return xp.exp(y) if abs(self.lmbda) < 1e-6 else (self.lmbda * xp.abs(y) + 1) ** (1 / self.lmbda)
+
 
 class Gaussify(DataTransform):
     def __init__(self, data=None) -> None:
@@ -113,6 +126,7 @@ class Gaussify(DataTransform):
     def backward(self, y):
         return self.cdf(self.ppf(y))
 
+
 class Uniform(DataTransform):
     def __init__(self, data=None, a=None, b=None):
         self.a = a
@@ -131,6 +145,7 @@ class Uniform(DataTransform):
     
     def backward(self, y):
         return self.inv_uniform_scaler(y, self.a, self.b)
+
 
 class Uniform0_1(DataTransform):
     def __init__(self, data=None, a=None, b=None):
@@ -151,6 +166,7 @@ class Uniform0_1(DataTransform):
     def backward(self, y):
         return self.inv_uniform_scaler(y, self.a, self.b)
 
+
 class Gauss(DataTransform):
     def __init__(self, data=None, mu=None, std=None):
         self.mu = mu
@@ -166,6 +182,27 @@ class Gauss(DataTransform):
     
     def backward(self, y):
         return y * self.std + self.mu
+
+
+class Atanh(DataTransform):
+    def __init__(self, data=None):
+        pass
+
+    def fit(self, data):
+        pass
+
+    def forward(self, x):
+        if isinstance(x, torch.Tensor):
+            return torch.atanh(x) / 2.0
+        else:
+            return np.arctanh(x) / 2.0
+
+    def backward(self, y):
+        if isinstance(y, torch.Tensor):
+            return torch.tanh(2*y)
+        else:
+            return np.tanh(2*y)
+
 
 class Invert(DataTransform):
     def __init__(self, data=None):
@@ -200,9 +237,15 @@ class Logify(DataTransform):
             return np.exp(y)
         
 class TransformSequence:
-    def __init__(self, transforms=None):
-        self.transforms = [transforms] if type(transforms) is DataTransform else transforms
-        # self.transforms = transforms
+    def __init__(self, transforms: Union[DataTransform, list, None] = None):
+        if transforms is None:
+            self.transforms = []
+        elif issubclass(transforms.__class__, DataTransform):
+            self.transforms = [transforms]
+        elif isinstance(transforms, list) and all(issubclass(t.__class__, DataTransform) for t in transforms):
+            self.transforms = transforms
+        else:
+            raise TypeError("transforms must be a DataTransform instance, a list of DataTransform instances, or None")
 
     def add(self, transform):
         self.transforms.append(transform)
@@ -228,7 +271,7 @@ class TransformSequence:
 
     def get_params(self):
         return {'type': 'TransformSequence', 'transforms': [t.get_params() for t in self.transforms]}
-    
+
 
 def LoadTransforms(state):
     transforms = []

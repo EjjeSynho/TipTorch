@@ -1,35 +1,49 @@
 #%%
+# %reload_ext autoreload
+# %autoreload 2
+
 import sys
+
+# sys.path.insert(0, '.')
 sys.path.insert(0, '..')
+
+# for filename in os.listdir(directory):
+#     if filename.endswith(".fits.fz") or filename.endswith(".fits"):
+#         new_filename = re.sub(r'(?<=T\d{2})_(?=\d{2})|(?<=\d{2})_(?=\d{2})', '-', filename)
+#         os.rename(os.path.join(directory, filename), os.path.join(directory, new_filename))
+#         print(f"Renamed: {filename} -> {new_filename}")
 
 import torch
 import pickle
 import re
 import os
-import gc
-from os import path
-import numpy as np
-import matplotlib.pyplot as plt
 from tqdm import tqdm
 from skimage.restoration import inpaint
-from tools.utils import GetROIaroundMax, GetJmag, check_framework
 from tools.plotting import wavelength_to_rgb
-from .MUSE_data_settings import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER, LIFT_PATH
-from datetime import datetime
 import datetime
+import requests
 import pandas as pd
+import numpy as np
+import astropy.units as u
+import matplotlib.pyplot as plt
+from datetime import datetime
 from astropy.coordinates import SkyCoord, AltAz, EarthLocation
 from astropy.io import fits
-import astropy.units as u
 from astropy.time import Time
-import requests
 from io import StringIO
 from photutils.background import Background2D, MedianBackground
 from project_settings import xp, use_cupy
+from astropy.io import fits
+from scipy.ndimage import binary_dilation
 
+from MUSE_data_settings import MUSE_RAW_FOLDER, MUSE_DATA_FOLDER, LIFT_PATH
+from MUSE_preproc_utils import GetConfig, LoadImages
+
+from tools.utils import GetROIaroundMax, GetJmag, check_framework, DownloadFromDrive
 
 find_closest = lambda λ, λs: xp.argmin(xp.abs(λs-λ)).astype('int')
 
+from project_settings import device
 
 UT4_coords = ('24d37min37.36s', '-70d24m14.25s', 2635.43)
 UT4_location = EarthLocation.from_geodetic(lat=UT4_coords[0], lon=UT4_coords[1], height=UT4_coords[2]*u.m)
@@ -439,7 +453,7 @@ def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
     point : list, ndarray, pd.Series, torch.Tensor
         The (x, y) coordinates of the point
     radius : int, default=1
-        Radius of the region around the point to consider
+        Radius of the region around the point to compute the spectrum from. Despite the naming, it's a square region
     debug_show_ROI : bool, default=False
         If True, displays the ROI used for calculation
 
@@ -1286,3 +1300,124 @@ def RenderDataSample(data_dict, file_name):
     ax[1].set_axis_off()
     plt.tight_layout()
 
+
+def DownloadMUSEcalibData():
+    tmp1, tmp2 = 'https://drive.google.com/file/d/', '/view?usp=drive_link'
+
+    downloads = [
+        ("Downloading MUSE calibrator and reduced telemetry data...", f'{tmp1}1NdfkmVYxdXgkJbHIlxDv1XTO-ABj6ox8{tmp2}', '../data/weights/MUSE_calibrator.dict'),
+        (None, f'{tmp1}1KJDiLgX9XeXjvskOhYLLAhlDR0UOH4p_{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle'),
+        (None, f'{tmp1}1pc7a8H4v_XzF9IT_LGrvM-OkV7jrw0D5{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle'),
+        (None, f'{tmp1}1BR9WtPVODV8R7oYaZSxn9ox_jfWJr9nF{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle'),
+        (None, f'{tmp1}1iFnB30JEsKKy14282dJ95xuWtHEfXxBN{tmp2}', '../data/reduced_telemetry/MUSE/muse_df.pickle'),
+        (None, f'{tmp1}1LMgmTSVBhvGOOUW0PZ1Zim5OPcP8L8NB{tmp2}', '../data/reduced_telemetry/MUSE/MUSE_fitted_df.pkl')
+    ]
+    
+    for message, url, output_path in downloads:
+        if message: print(message)
+        DownloadFromDrive(share_url=url, output_path=output_path)
+
+
+def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=False):
+    """
+    This function prepares the data to be understandable by the PSF model. It bins the NFM cube and
+    associates the necessary reduced telemetry data.
+    """
+    with fits.open(cube_path) as cube_fits: 
+        cube_full = cube_fits[1].data # Full spectral cube taken directly from the MUSE ITS
+
+    # Compute the mask of valid pixels
+    nan_mask = np.abs(np.nansum(cube_full, axis=0)) < 1e-12
+    nan_mask = binary_dilation(nan_mask, iterations=2, )
+    valid_mask = ~nan_mask
+    # Filter out NaN values
+    cube_full = np.nan_to_num(cube_full, nan=0.0) * valid_mask[np.newaxis, :, :]
+
+    valid_mask = torch.tensor(valid_mask, device=device).float().unsqueeze(0)
+
+    if os.path.exists(cache_path):
+        if verbose: print('Loading existing cached data cube...')
+        with open(cache_path, 'rb') as f:
+            data_cached = pickle.load(f)
+    else:
+        if verbose: print('Generating new cached data cube...')
+
+        # Check if the folder exists, if not, create it
+        if not os.path.exists(os.path.dirname(cache_path)):
+            os.makedirs(os.path.dirname(cache_path))
+            if verbose:
+                print(f"Folder '{os.path.dirname(cache_path)}' created.")
+
+        data_cached, _ = ProcessMUSEcube(
+            path_raw  = raw_path,
+            path_cube = cube_path,
+            crop = False,
+            get_IRLOS_phase = False,
+            derotate = False,
+            impaint_bad_pixels = False,
+            extract_spectrum = False,
+            plot_spectrum = False,
+            fill_missing_values = True,
+            verbose = verbose
+        )
+    
+    # Compute wavelength data
+    #TODO: fix uneven Δλ division!
+    λ_min, λ_max, Δλ_full = data_cached['spectral data']['wvl range']
+    λ_bins = data_cached['spectral data']['wvl bins']
+    Δλ_binned = np.median(np.concatenate([np.diff(λ_bins[λ_bins < 589]), np.diff(λ_bins[λ_bins > 589])]))
+
+    if hasattr(λ_max, 'item'): # To compensate for a small error in the data reduction routine
+        λ_max = λ_max.item()
+
+    λ_full = np.linspace(λ_min, λ_max, np.round((λ_max-λ_min)/Δλ_full+1).astype('int'))
+    assert len(λ_full) == cube_full.shape[0]
+
+    cube_binned, _, _, _ = LoadImages(data_cached, device=device, subtract_background=False, normalize=False, convert_images=True)
+    cube_binned = cube_binned.squeeze() * valid_mask
+
+    # Correct the flux to match MUSE cube
+    cube_binned = cube_binned * (cube_full.sum(axis=0).max() /  cube_binned.sum(axis=0).max())
+
+    # Extract config file and update it
+    model_config, cube_binned = GetConfig(data_cached, cube_binned)
+    cube_binned = cube_binned.squeeze()
+
+    model_config['NumberSources'] = 1
+    # The bigger size of initialized PSF is needed to extract the flux loss due to cropping to the box_size later
+    model_config['sensor_science']['FieldOfView'] = 111
+    # Select only a subset of predicted wavelengths and modify the config file accordingly
+    λ_binned = model_config['sources_science']['Wavelength'].clone()
+    # Assumes that we are not in the pupil tracking mode
+    model_config['telescope']['PupilAngle'] = torch.zeros(1, device=device)
+
+    # Select sparse wavelength set
+    # TODO: a code to select the specified number of spectral slices
+    ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 2)
+    λ_sparse = λ_binned[..., ids_λ_sparse]
+    model_config['sources_science']['Wavelength'] = λ_sparse
+
+    cube_sparse = cube_binned.clone()[ids_λ_sparse, ...] # Select the subset of λs
+
+    spectral_info = {
+        "λ_sparse":  λ_sparse.flatten() * 1e9, # [nm]
+        "λ_full":    λ_full, # [nm]
+        "Δλ_binned": Δλ_binned,
+        "Δλ_full":   Δλ_full
+    }
+
+    if save_cache:
+        try:
+            with open(cache_path, 'wb') as handle:
+                pickle.dump(data_cached, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+        except Exception as e:
+            print(f'Error: {e}')
+
+    spectral_cubes = {
+        "cube_full":   cube_full,   # this one contains all spectral slices
+        "cube_sparse": cube_sparse, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
+        "mask":        valid_mask   # this one contains the mask of the data cube
+    }
+
+    return spectral_cubes, spectral_info, data_cached, model_config

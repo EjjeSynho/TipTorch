@@ -1,6 +1,7 @@
 #%%
 import sys
-sys.path.insert(0, '..')
+# sys.path.insert(0, '.')
+# sys.path.insert(0, '..')
 
 import pickle
 import os
@@ -9,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from .MUSE_data_settings import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER
+from MUSE_data_settings import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER
 
 import pandas as pd
 from astropy.coordinates import SkyCoord, AltAz

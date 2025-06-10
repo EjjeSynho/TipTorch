@@ -4,6 +4,7 @@
 
 import sys
 sys.path.insert(0, '..')
+sys.path.insert(0, '../data_processing')
 
 import torch
 import torch.nn.functional as F
@@ -16,165 +17,39 @@ from matplotlib.colors import LogNorm
 from torchmin import minimize
 from tqdm import tqdm
 
-from tools.utils import mask_circle, DownloadFromDrive
-
-from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
-from data_processing.MUSE_data_utils import ProcessMUSEcube, GetSpectrum
+from tools.utils import mask_circle
+from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, DownloadMUSEcalibData
 from data_processing.MUSE_data_settings import MUSE_DATA_FOLDER
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from data_processing.MUSE_onsky_df import *
-
-from astropy.io import fits
-from scipy.ndimage import binary_dilation
+from tools.utils import DownloadFromDrive
 
 from project_settings import device
 
 
 #%%
-def DownloadMUSEcalibData():
-    tmp1, tmp2 = 'https://drive.google.com/file/d/', '/view?usp=drive_link'
-
-    downloads = [
-        ("Downloading MUSE calibrator model...", f'{tmp1}1tSXlFGIqi_WnTVZ4JeblHBkmZxw50xgN{tmp2}', '../data/weights/MUSE_calibrator_v1.dict'),
-        ("Downloading necessary cached reduced telemetry data...", f'{tmp1}1tSXlFGIqi_WnTVZ4JeblHBkmZxw50xgN{tmp2}', '../data/weights/MUSE_calibrator_v1.dict'),
-        (None, f'{tmp1}1KJDiLgX9XeXjvskOhYLLAhlDR0UOH4p_{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle'),
-        (None, f'{tmp1}1pc7a8H4v_XzF9IT_LGrvM-OkV7jrw0D5{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle'),
-        (None, f'{tmp1}1BR9WtPVODV8R7oYaZSxn9ox_jfWJr9nF{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle'),
-        (None, f'{tmp1}1iFnB30JEsKKy14282dJ95xuWtHEfXxBN{tmp2}', '../data/reduced_telemetry/MUSE/muse_df.pickle'),
-        (None, f'{tmp1}1LMgmTSVBhvGOOUW0PZ1Zim5OPcP8L8NB{tmp2}', '../data/reduced_telemetry/MUSE/MUSE_fitted_df.pkl')
-    ]
-
-    for message, url, output_path in downloads:
-        if message: print(message)
-        DownloadFromDrive(share_url=url, output_path=output_path)
-
-
-def LoadDataCache(raw_path, cube_path, cache_path, save_cache=True, verbose=False):
-    """
-    This function prepares the data to be understandable by the PSF model. It bins the NFM cube and
-    associates the necessary reduced telemetry data.
-    """
-    with fits.open(cube_path) as cube_fits: 
-        cube_full = cube_fits[1].data # Full spectral cubedirectly from the MUSE header
-
-    # Compute the mask of valid pixels
-    nan_mask = np.abs(np.nansum(cube_full, axis=0)) < 1e-12
-    nan_mask = binary_dilation(nan_mask, iterations=2, )
-    valid_mask = ~nan_mask
-    # Filter out NaN values
-    cube_full = np.nan_to_num(cube_full, nan=0.0) * valid_mask[np.newaxis, :, :]
-
-    valid_mask = torch.tensor(valid_mask, device=device).float().unsqueeze(0)
-
-    if os.path.exists(cache_path):
-        if verbose: print('Loading existing cached data cube...')
-        with open(cache_path, 'rb') as f:
-            data_cached = pickle.load(f)
-    else:
-        if verbose: print('Generating new cached data cube...')
-
-        # Check if the folder exists, if not, create it
-        if not os.path.exists(os.path.dirname(cache_path)):
-            os.makedirs(os.path.dirname(cache_path))
-            if verbose:
-                print(f"Folder '{os.path.dirname(cache_path)}' created.")
-
-        data_cached, _ = ProcessMUSEcube(
-            path_raw  = raw_path,
-            path_cube = cube_path,
-            crop=False,
-            get_IRLOS_phase=False,
-            derotate=False,
-            impaint_bad_pixels=False,
-            extract_spectrum=False,
-            plot_spectrum=False,
-            fill_missing_values=True,
-            verbose=verbose
-        )
-    
-    # Compute wavelength data
-    #TODO: fix uneven Δλ division!
-    λ_min, λ_max, Δλ_full = data_cached['spectral data']['wvl range']
-    λ_bins = data_cached['spectral data']['wvl bins']
-    Δλ_binned = np.median(np.concatenate([np.diff(λ_bins[λ_bins < 589]), np.diff(λ_bins[λ_bins > 589])]))
-
-    if hasattr(λ_max, 'item'): # To compensate for a small error in the data reduction routine
-        λ_max = λ_max.item()
-
-    λ_full = np.linspace(λ_min, λ_max, np.round((λ_max-λ_min)/Δλ_full+1).astype('int'))
-    assert len(λ_full) == cube_full.shape[0]
-
-    cube_binned, _, _, _ = LoadImages(data_cached, device=device, subtract_background=False, normalize=False, convert_images=True)
-    cube_binned = cube_binned.squeeze() * valid_mask
-
-    # Correct the flux to match MUSE cube
-    cube_binned = cube_binned * (cube_full.sum(axis=0).max() /  cube_binned.sum(axis=0).max())
-
-    # Extract config file and update it
-    model_config, cube_binned = GetConfig(data_cached, cube_binned)
-    cube_binned = cube_binned.squeeze()
-
-    model_config['NumberSources'] = 1
-    # The bigger size of initialized PSF is needed to extract the flux loss due to cropping to the box_size later
-    model_config['sensor_science']['FieldOfView'] = 111
-    # Select only a subset of predicted wavelengths and modify the config file accordingly
-    λ_binned = model_config['sources_science']['Wavelength'].clone()
-    # Assumes that we are not in the pupil tracking mode
-    model_config['telescope']['PupilAngle'] = torch.zeros(1, device=device)
-
-    # Select sparse wavelength set
-    # TODO: a code to select the specified number of spectral slices
-    ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 2)
-    λ_sparse = λ_binned[..., ids_λ_sparse]
-    model_config['sources_science']['Wavelength'] = λ_sparse
-
-    cube_sparse = cube_binned.clone()[ids_λ_sparse, ...] # Select the subset of λs
-
-    spectral_info = {
-        "λ_sparse":  λ_sparse.flatten() * 1e9, # [nm]
-        "λ_full":    λ_full, # [nm]
-        "Δλ_binned": Δλ_binned,
-        "Δλ_full":   Δλ_full
-    }
-
-    if save_cache:
-        try:
-            with open(cache_path, 'wb') as handle:
-                pickle.dump(data_cached, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-        except Exception as e:
-            print(f'Error: {e}')
-
-    spectral_cubes = {
-        "cube_full":   cube_full,   # this one contains all spectral slices
-        "cube_sparse": cube_sparse, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
-        "mask":        valid_mask   # this one contains the mask of the data cube
-    }
-
-    return spectral_cubes, spectral_info, data_cached, model_config
-
-
+# Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
 raw_path   = MUSE_DATA_FOLDER + "quasars/J0259_raw/MUSE.2024-12-05T03_15_37.598.fits.fz"
 cube_path  = MUSE_DATA_FOLDER + "quasars/J0259_cubes/J0259-0901_all.fits"
 cache_path = MUSE_DATA_FOLDER + "quasars/J0259_cached/J0259-0901_all.pickle"
 
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
-# You need to run this function at least ones to generate the cached data file
-spectral_cubes, spectral_info, data_cached, model_config = LoadDataCache(raw_path, cube_path, cache_path, save_cache=True, verbose=True)   
-# Extract full and binned spectral cubes
+# You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
+spectral_cubes, spectral_info, data_cached, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, verbose=True)   
+# Extract full and binned spectral cubes. Sparse cube selects a set of 7 binned wavelengths ranges
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
 
 N_wvl = cube_sparse.shape[0] # dims are [N_wvls, H, W]
 
 #%%
-from managers.multisrc_manager import add_ROIs, DetectSources, ExtractSourceImages
+from managers.multisrc_manager import add_ROIs, DetectSources, ExtractSources
 
 PSF_size = 111  # Define the maximum size of each extracted PSF
 
 # NOTE: so far thresholding is a bit manual, but it should be automated in the future
 sources = DetectSources(cube_sparse, threshold=25000, display=True, draw_win_size=PSF_size)
 # Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
-srcs_image_data = ExtractSourceImages(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
+srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
 N_src   = srcs_image_data["count"]
 sources = srcs_image_data["coords"]
@@ -186,7 +61,7 @@ ROIs    = srcs_image_data["images"]
 Δλ_full, Δλ_binned = spectral_info['Δλ_full'], spectral_info['Δλ_binned']
 
 # Correct for the difference in energy per λ bin
-flux_λ_norm = Δλ_full / Δλ_binned # TODO: make it array per spectral slice
+flux_λ_norm = Δλ_full / Δλ_binned # TODO: make it an array per spectral slice since every spoectral bin has different span
 
 flux_core_radius = 2  # [pix]
 N_core_pixels = (flux_core_radius*2 + 1)**2  # [pix^2]
@@ -219,6 +94,7 @@ from PSF_models.TipTorch import TipTorch
 
 LO_map_size = 31
 
+# Initialize the PSF model
 pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
 PSD_include = {
     'fitting':         True,
@@ -240,7 +116,6 @@ model.to(device)
 from data_processing.normalizers import Uniform
 from managers.input_manager import InputsManager
 
-df_transforms_onsky  = CreateTransformSequenceFromFile('../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle')
 df_transforms_fitted = CreateTransformSequenceFromFile('../data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle')
 
 inputs_manager = InputsManager()
@@ -289,9 +164,19 @@ inputs_manager_objs.set_optimizable(['F_norm'], False)
 print(inputs_manager_objs)
 
 #%%
+import pickle
+
+with open('../data/weights/MUSE_calibrator_v1.dict', 'rb') as handle:
+    calibrator_network = pickle.load(handle)
+
+#%%
 from machine_learning.calibrator import Calibrator, Gnosis
 
 DownloadMUSEcalibData()
+
+# DownloadFromDrive
+
+# gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg
 
 def GetReducedTelemetryInputs(cached_data):
     with open('../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle', 'rb') as handle:
@@ -325,7 +210,8 @@ calibrator = Calibrator(
             'hidden_size': 200,
             'dropout_p': 0.1
         },
-        'weights_folder': '../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict'
+        'weights_folder': '../data/weights/MUSE_calibrator.dict'
+        # 'weights_folder': '../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict'
     }
 )
 calibrator.eval()
@@ -357,6 +243,9 @@ core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radiu
 core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
 PSF_norm_factor = N_core_pixels / flux_λ_norm / core_flux_ratio / crop_ratio
 
+norm_transform = Uniform(PSF_norm_factor.min().int().item(),  PSF_norm_factor.max().int().item())
+inputs_manager.add('PSF_norm_factor', PSF_norm_factor.float().to(device), norm_transform, False)
+
 #%% Fine tunes sources astrometry but don't touch the PSF model parameters
 def func_dxdy(x_):
     dxdy_inp = inputs_manager_objs.unstack(x_.unsqueeze(0), update=False) # Don't update interal values
@@ -386,7 +275,7 @@ PSFs_fitted = []
 # To do so, we need to account for: 1. the flux normalization factor, 2. the crop ratio, 3. the core to wings flux ratio.
 for i in tqdm(range(N_src)):
     PSF_fitted, dxdy = fit_dxdy(i, verbose=0)
-    PSFs_fitted.append(PSF_fitted * (src_spectra_sparse[i] * PSF_norm_factor)[:,None,None])
+    PSFs_fitted.append(PSF_fitted * (src_spectra_sparse[i] * inputs_manager['PSF_norm_factor'])[:,None,None])
     
 PSFs_fitted = torch.stack(PSFs_fitted, dim=0)
 
@@ -654,14 +543,14 @@ x_fit_dict = inputs_manager.unstack(x2[:x_size_model].unsqueeze(0))
 x_curve_fit_dict = curve_inputs.unstack(x2[x_size_model:x_size_curve+x_size_model].unsqueeze(0))
 flux_corrections = inputs_manager_objs['F_norm']
 
-#%% Predict over the full wavelengths range
+#%% Predict PSFs over the full wavelengths range
 torch.cuda.empty_cache()
 
 model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
 norms_new_full_λ = curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, 'norm')
 
-λ_split_size = 100
 # Split λ array into batches
+λ_split_size = 100
 λ_batches = [λ_full[i:i + λ_split_size] for i in range(0, len(λ_full), λ_split_size)]
 
 model_full = []
@@ -725,10 +614,10 @@ lens_coords  = [55, 66]
 
 targets_diff_info = [
     {
-        'coords': host_coords,
-        'name': 'Host galaxy?',
-        'color': 'tab:blue',
-        'radius': 2
+        'coords': host_coords, # defines coordinates in pixels
+        'name': 'Host galaxy?', # target's label
+        'color': 'tab:blue', # display color
+        'radius': 2 # radius of the region around the window to compute the spectrum from, the full size of this win is 2*radius + 1
     },
     {
         'coords': bg_coords,
@@ -814,7 +703,7 @@ plt.xlabel('Wavelength, [nm]')
 plt.show()
     
 #%% Plot multispectral cubes as RGB images
-from tools.plotting import wavelength_to_rgb, plot_wavelength_rgb_log
+from tools.plotting import plot_wavelength_rgb_log
 
 λ_vis = np.linspace(440, 750, diff_img_full.shape[0])
 
@@ -840,69 +729,3 @@ diff_rgb = plot_wavelength_rgb_log(
     min_val=500, max_val=200000, show=True
 )
 
-#%%
-"""
-spectra_dicts = []
-
-reduced_names = ['J0259_all',  'J0259_2024-12-05T03_04_07.007',  'J0259_2024-12-05T03_49_24.768',  'J0259_2024-12-05T03_15_37.598']
-for name in reduced_names:
-    with open(MUSE_DATA_FOLDER+f'quasars/spectra/{name}.pkl', 'rb') as f:
-        dict_spectrum = pickle.load(f)
-    spectra_dicts.append(dict_spectrum)
-
-#%
-# Define the targets and their plotting properties
-targets = [
-    ('Host galaxy?', 'tab:blue'),
-    ('Background', 'tab:orange'),
-    ('AGN im. #2 (after subtraction)', 'tab:green'),
-    ('Lens', 'tab:purple')
-]
-
-# Initialize dictionaries to store means and stds
-means = {}
-stds = {}
-
-# Calculate means and standard deviations for each target
-for target, _ in targets:
-    spectra = [spectra_dicts[i][target] for i in range(len(spectra_dicts))]
-    means[target] = np.mean(spectra, axis=0)
-    stds[target] = np.std(spectra, axis=0)
-
-
-# no_smooth = True
-no_smooth = False
-
-# Create the plot
-plt.figure()
-for target, color in targets:
-    if no_smooth:
-        plt.plot(λ, means[target], label=target, color=color, linewidth=0.25)
-        plt.fill_between(λ,
-                        means[target] - stds[target],
-                        means[target] + stds[target],
-                        color=color, alpha=0.2)
-    else:
-        spectrum_avg = convolve(means[target], kernel, boundary='extend')
-
-        plt.plot(λ, means[target], label=target, color=color, linewidth=0.5, alpha=0.25)
-        plt.plot(λ, spectrum_avg, label=target+' (smoothed)', color=color, linewidth=1)
-        
-plt.xlim(λ.min(), λ.max())
-plt.ylim(-7, 12.5)  
-plt.legend()
-plt.grid(alpha=0.2)
-
-if no_smooth:
-    plt.title('Mean spectra with std')
-else:
-    plt.title('Mean spectra (smoothed)')
-
-plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
-plt.xlabel('Wavelength, [nm]')
-plt.show()
-
-# %
-# with open(MUSE_DATA_FOLDER+f'quasars/spectra/wavelengths.pkl', 'wb') as f:
-#     pickle.dump(λ, f)
-"""

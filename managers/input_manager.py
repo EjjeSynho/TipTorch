@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 from typing import Any, Optional, Union
-from tabulate import tabulate  # For pretty table formatting
+from tabulate import tabulate
 from copy import deepcopy
 from collections import OrderedDict
 import torch
 import pickle
 import numpy as np
-from data_processing.normalizers import TransformSequence, LoadTransforms
+from data_processing.normalizers import TransformSequence, DataTransform, Identity, LoadTransforms
 
 """
 This module contains classes to manage the input data for the TipTorch PSF model. 
@@ -170,7 +170,7 @@ class InputParameter:
 
 class InputsManager:
     """
-    The wrapper over the InputsTransformer claass. It allows for more convenient management of the model inputs,
+    The wrapper over the InputsTransformer class. It allows for more convenient management of the model inputs,
     enabling to add or delete them, as well as to control which inputs are stacker into a single tensor and which
     are not. It also allows for easy displaying of stored model inputs.
     """
@@ -178,10 +178,15 @@ class InputsManager:
         self.parameters = OrderedDict()
         self.inputs_transformer = InputsTransformer()
 
-    def add(self, name: str, default_val: Any, transform: Any = None, optimizable: bool = True):
+    def add(self,
+            name: str,
+            default_val: Any,
+            transform: Union[DataTransform, TransformSequence] = Identity(),
+            optimizable: bool = True):
+
         self.parameters[name] = InputParameter(
             value       = default_val,
-            transform   = TransformSequence(transforms=[transform]) if type(transform) is not TransformSequence else transform,
+            transform   = TransformSequence(transform) if not isinstance(transform, TransformSequence) else transform,
             optimizable = optimizable
         )
 

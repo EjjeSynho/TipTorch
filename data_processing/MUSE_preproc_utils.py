@@ -1,4 +1,4 @@
-from .MUSE_data_settings import MUSE_DATA_FOLDER
+from MUSE_data_settings import MUSE_DATA_FOLDER
 from project_settings import device
 import pickle
 import torch
