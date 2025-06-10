@@ -26,7 +26,7 @@ import pandas as pd
 import numpy as np
 import astropy.units as u
 import matplotlib.pyplot as plt
-from datetime import datetime
+# from datetime import datetime
 from astropy.coordinates import SkyCoord, AltAz, EarthLocation
 from astropy.io import fits
 from astropy.time import Time
@@ -729,16 +729,22 @@ def GetImageSpectrumHeader(
     def format_dms(degrees, minutes, seconds):
         return f"{degrees:+03}d{minutes:02}m{seconds:06.3f}s"
 
-    alpha = hdul_cube[0].header[h+'AOS NGS ALPHA'] # Alpha coordinate for the NGS, [hms]
-    delta = hdul_cube[0].header[h+'AOS NGS DELTA'] # Delta coordinate for the NGS, [dms]
+    # Try reading NGS coordinate
+    try:
+        alpha = hdul_cube[0].header[h+'AOS NGS ALPHA'] # Alpha coordinate for the NGS, [hms]
+        delta = hdul_cube[0].header[h+'AOS NGS DELTA'] # Delta coordinate for the NGS, [dms]
 
-    # Convert numerical format to [hms] and [dms] string format
-    alpha_hms = f"{int(alpha // 10000):02}h{int((alpha % 10000) // 100):02}m{alpha % 100:06.3f}s"
-    delta_dms = format_dms(*convert_to_dms(delta))
+        # Convert numerical format to [hms] and [dms] string format
+        alpha_hms = f"{int(alpha // 10000):02}h{int((alpha % 10000) // 100):02}m{alpha % 100:06.3f}s"
+        delta_dms = format_dms(*convert_to_dms(delta))
 
-    coord_NGS = SkyCoord(alpha_hms, delta_dms, frame='icrs')
+        coord_NGS = SkyCoord(alpha_hms, delta_dms, frame='icrs')
 
-    ra_NGS, dec_NGS = (coord_NGS.ra.deg, coord_NGS.dec.deg)
+        ra_NGS, dec_NGS = (coord_NGS.ra.deg, coord_NGS.dec.deg)
+        
+    except:
+        ra_NGS, dec_NGS = (None, None)
+
 
     '''
     ra_sci  = hdul_cube[0].header['RA']
@@ -1268,6 +1274,9 @@ def ProcessMUSEcube(
         'All data': flat_df,
         'spectral data': spectral_info,
     }
+    
+    print(f'Success!')
+    
     return data_store, cube_name
 
 

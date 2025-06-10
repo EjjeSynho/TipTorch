@@ -22,7 +22,6 @@ from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, Dow
 from data_processing.MUSE_data_settings import MUSE_DATA_FOLDER
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from data_processing.MUSE_onsky_df import *
-from tools.utils import DownloadFromDrive
 
 from project_settings import device
 
@@ -32,6 +31,10 @@ from project_settings import device
 raw_path   = MUSE_DATA_FOLDER + "quasars/J0259_raw/MUSE.2024-12-05T03_15_37.598.fits.fz"
 cube_path  = MUSE_DATA_FOLDER + "quasars/J0259_cubes/J0259-0901_all.fits"
 cache_path = MUSE_DATA_FOLDER + "quasars/J0259_cached/J0259-0901_all.pickle"
+
+# raw_path   = MUSE_DATA_FOLDER + "quasars/J0957_raw/MUSE.2024-12-24T05_49_48.906.fits.fz"
+# cube_path  = MUSE_DATA_FOLDER + "quasars/J0957_cubes/J0957_804.fits"
+# cache_path = MUSE_DATA_FOLDER + "quasars/J0957_cached/J0957_804.pickle"
 
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
 # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
@@ -164,19 +167,9 @@ inputs_manager_objs.set_optimizable(['F_norm'], False)
 print(inputs_manager_objs)
 
 #%%
-import pickle
-
-with open('../data/weights/MUSE_calibrator_v1.dict', 'rb') as handle:
-    calibrator_network = pickle.load(handle)
-
-#%%
 from machine_learning.calibrator import Calibrator, Gnosis
 
 DownloadMUSEcalibData()
-
-# DownloadFromDrive
-
-# gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg
 
 def GetReducedTelemetryInputs(cached_data):
     with open('../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle', 'rb') as handle:
@@ -301,6 +294,7 @@ from tools.static_phase import PixelmapBasis
 
 LO_basis = PixelmapBasis(model, ignore_pupil=False)
 
+# inputs_manager.set_optimizable('LO_coefs', False)
 inputs_manager.set_optimizable('LO_coefs', False)
 inputs_manager.set_optimizable('Jxy', False)
 
@@ -525,7 +519,6 @@ def func_fit_curve(x):
     return add_ROIs( empty_img*0.0, PSFs_fit, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
 
-#%
 def loss_fit_curve(x_):
     PSFs_ = func_fit_curve(x_)
     l1 = F.smooth_l1_loss(cube_sparse*wvl_weights, PSFs_*wvl_weights, reduction='mean')
@@ -534,8 +527,7 @@ def loss_fit_curve(x_):
 
 
 _ = loss_fit_curve(x2)
-    
-#%
+
 result_global = minimize(loss_fit_curve, x2, max_iter=300, tol=1e-3, method='bfgs', disp=2)
 x2 = result_global.x.clone().detach()
 
@@ -602,9 +594,11 @@ PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSF
 
 diff_img_full = (cube_full - model_full) * valid_mask.cpu().numpy()
 
-#%% Plotting the residual spectrum
+#%% ============== Plotting the residual spectrum ===================
+
 from astropy.convolution import convolve, Box1DKernel
 
+# NOTE: these coords are hard-coded for J0529 obs
 host_coords  = [53, 37]
 AGN_coords_1 = [46, 35]
 bg_coords    = [10, 58]
