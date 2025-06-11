@@ -41,19 +41,18 @@ LIFT_PATH          = Path(project_settings["LIFT_path"])
 # Set up the device used by PyTorch in the project
 DEVICE = project_settings["device"]
 
-
-
-if torch.cuda.is_available():
-    device = torch.device(DEVICE)
-else:
-    if platform.system() == "Darwin":
-        try:
-            if torch.backends.mps.is_available():
-                device = torch.device('mps')
-        except AttributeError:
-            pass
-
-    device = torch.device('cpu')
+if DEVICE != "cpu":
+    if torch.cuda.is_available() and 'cuda' in DEVICE:
+        device = torch.device(DEVICE)
+    else:
+        if platform.system() == "Darwin":
+            try:
+                if torch.backends.mps.is_available():
+                    device = torch.device('mps')
+            except AttributeError:
+                device = torch.device('cpu')
+        else:
+            device = torch.device('cpu')
 
 
 # Check if GPU is available and has sufficient VRAM to use CuPy

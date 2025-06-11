@@ -59,6 +59,11 @@ N_src   = srcs_image_data["count"]
 sources = srcs_image_data["coords"]
 ROIs    = srcs_image_data["images"]
 
+def get_src_coords_in_pixels(src_idx):
+    return \
+        np.round(sources['x_peak'].iloc[src_idx]).astype(int),\
+        np.round(sources['y_peak'].iloc[src_idx]).astype(int)
+    
 #%%
 # Yes, this inconsistency in sparse and and binned is intended for proper energy normalization
 λ_full,   λ_sparse = spectral_info['λ_full'],  spectral_info['λ_sparse']
@@ -592,16 +597,14 @@ PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSF
 diff_img_full = (cube_full - model_full) * valid_mask.cpu().numpy()
 
 #%% ============== Plotting the residual spectrum ===================
-
 from astropy.convolution import convolve, Box1DKernel
 
 # NOTE: these coords are hard-coded for J0529 obs
-host_coords  = [53, 37]
-AGN_coords_1 = [46, 35]
-bg_coords    = [10, 58]
-AGN_coords_2 = [60, 37]
-lens_coords  = [55, 66]
-
+host_coords  = [178, 162]
+AGN_coords_1 = list(get_src_coords_in_pixels(0))
+AGN_coords_2 = list(get_src_coords_in_pixels(1))
+bg_coords    = [135, 183]
+lens_coords  = [180, 191]
 
 targets_diff_info = [
     {
@@ -633,7 +636,7 @@ targets_diff_info = [
 # Plots the spectra of the targets after subtraction
 fig, ax = plt.subplots(figsize=(10,6))
 for info in targets_diff_info:
-    spectrum_sharp = GetSpectrum(diff_img_full[ROI_plot], info['coords'], radius=info['radius'], debug_show_ROI=False )
+    spectrum_sharp = GetSpectrum(diff_img_full, info['coords'], radius=info['radius'], debug_show_ROI=False )
     spectrum_avg   = convolve(spectrum_sharp, Box1DKernel(10), boundary='extend')
        
     plt.plot(λ_full, spectrum_sharp, linewidth=0.5, alpha=0.25, color=info['color'], label=info['name'])
@@ -679,7 +682,7 @@ targets_info = [
 # Plots the spectra of the targets after subtraction
 fig, ax = plt.subplots(figsize=(10,6))
 for info in targets_info:
-    spectrum_sharp = GetSpectrum(cube_full[ROI_plot], info['coords'], radius=info['radius'], debug_show_ROI=False )
+    spectrum_sharp = GetSpectrum(cube_full, info['coords'], radius=info['radius'], debug_show_ROI=False )
     spectrum_avg   = convolve(spectrum_sharp, Box1DKernel(10), boundary='extend')
        
     plt.plot(λ_full, spectrum_sharp, linewidth=0.5, alpha=0.25, color=info['color'], label=info['name'])
@@ -696,8 +699,8 @@ plt.show()
 #%% Plot multispectral cubes as RGB images
 from tools.plotting import plot_wavelength_rgb_log
 
+# Mapping MUSE λs range to visible spectrum range for RGB conversion
 λ_vis = np.linspace(440, 750, diff_img_full.shape[0])
-
 
 diff_rgb = plot_wavelength_rgb_log(
     diff_img_full[ROI_plot],
