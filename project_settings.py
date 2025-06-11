@@ -38,22 +38,37 @@ MUSE_DATA_FOLDER   = Path(project_settings["MUSE_data_folder"])
 SPHERE_DATA_FOLDER = Path(project_settings["SPHERE_data_folder"])
 LIFT_PATH          = Path(project_settings["LIFT_path"])
 
-# Set up the device used by PyTorch in the project
-DEVICE = project_settings["device"]
 
-if DEVICE != "cpu":
-    if torch.cuda.is_available() and 'cuda' in DEVICE:
-        device = torch.device(DEVICE)
-    else:
-        if platform.system() == "Darwin":
-            try:
-                if torch.backends.mps.is_available():
-                    device = torch.device('mps')
-            except AttributeError:
-                device = torch.device('cpu')
-        else:
-            device = torch.device('cpu')
+def resolve_device(preferred: str) -> torch.device:
+    """
+    Resolve a torch.device by:
+      1. Trying the user-preferred device string.
+      2. Falling back to CUDA if available.
+      3. On macOS, falling back to MPS if available.
+      4. Otherwise, using CPU.
+    """
+    preferred = preferred.lower()
+    # 1) Try the config value if it makes sense
+    if preferred != "cpu":
+        # a) CUDA case
+        if "cuda" in preferred and torch.cuda.is_available():
+            return torch.device(preferred)
+        # b) MPS case (macOS)
+        if preferred in ("mps", "metal") and platform.system() == "Darwin":
+            if getattr(torch.backends.mps, "is_available", lambda: False)():
+                return torch.device("mps")
 
+    # 2) Config choice didn’t work → pick best on this machine
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    
+    if platform.system() == "Darwin" and getattr(torch.backends.mps, "is_available", lambda: False)():
+        return torch.device("mps")
+
+    # 3) Give up and fall back to CPU
+    return torch.device("cpu")
+
+device = resolve_device(project_settings["device"])
 
 # Check if GPU is available and has sufficient VRAM to use CuPy
 #TODO: do the same memory check for PyTorch
