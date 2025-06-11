@@ -14,7 +14,7 @@ PROJECT_PATH = Path(__file__).parent.resolve()
 if not os.path.exists(path_to_config := Path(PROJECT_PATH) / Path("project_config.json")):
     DownloadFromRemote(
         share_url   = 'https://drive.google.com/file/d/1VJbqGtxISYzRlirHfe-dS4Urx3u7wYO2/view?usp=sharing',
-        output_path = path_to_config,
+        output_path = os.path.normpath(path_to_config).replace('\\','/'),
         overwrite   = False,
         verbose     = False
     )
@@ -44,7 +44,7 @@ try:
     total_memory = device_info["totalGlobalMem"] / (1024**3) # Total memory in bytes, convert to GB
     # mempool = xp.get_default_memory_pool() 
     # used_memory = mempool.used_bytes() / (1024**3) # Get current memory usage
-    available_memory = total_memory #- used_memory   # Calculate available memory
+    available_memory = total_memory #- used_memory   # Calculate available memory TODO: fix it
 
     use_cupy = available_memory > 2.0  # Set GPU flag based on available memory
 
