@@ -234,18 +234,22 @@ class ConfigManager():
     def Convert(self, config, framework='pytorch', device=None):
         """Converts all values in a config file to a specified framework"""
         if framework.lower() == 'pytorch' or framework.lower() == 'torch':
-            if device is None: device = torch.device('cpu')
+            
+            if device is None:
+                device = torch.device('cpu')
             
             def convert_value(x):
                 if isinstance(x, torch.Tensor):
-                    # return x.clone().to(device).float()
-                    return x.to(device).float() if x.device != device else x.float()
+                    return x.float().to(device) if x.device != device else x.float()
+                
                 elif isinstance(x, list) and all(isinstance(i, torch.Tensor) for i in x):
-                    return torch.stack(x).to(device).float()
+                    return torch.stack(x).float().to(device)
+                
                 elif isinstance(x, str):
-                    pass #return x
+                    pass
+                
                 else:
-                    return torch.tensor(x, device=device).float()
+                    return torch.as_tensor(x, dtype=torch.float32, device=device)
                             
             
         elif framework.lower() == 'numpy':
@@ -268,15 +272,91 @@ class ConfigManager():
             raise NotImplementedError(f'Unsupported framework "{framework}"!')
 
         zero_d = lambda x: x if type(x) == float else convert_value(x)
+        
         for entry in config:
             value = config[entry]
             if isinstance(value, dict):
-                self.Convert(value, framework, device)
+                self.Convert(value, framework, device)  
             elif isinstance(value, str) or not self.is_valid(value):
                 pass
             else:
                 value = zero_d(value)
+                
             config[entry] = value
+
+
+'''
+    def Convert(self, config, framework='pytorch', device=None, convert_to_float=True):
+        """Converts all values in a config file to a specified framework"""
+        if framework.lower() == 'pytorch' or framework.lower() == 'torch':
+            if device is None: device = torch.device('cpu')
+
+            if getattr(torch.backends.mps, "is_available", lambda: False)():
+                convert_to_float = True  # MPS only supports float32
+
+            # Define a helper function to convert values to arraays of the correct type and framework
+            def convert_value(x):
+                if isinstance(x, torch.Tensor):
+                    if convert_to_float:
+                        return x.to(device=device, dtype=torch.float32)
+                    else:
+                        return x.to(device=device)
+                    
+                elif isinstance(x, list) and all(isinstance(i, torch.Tensor) for i in x):
+                    if convert_to_float:
+                        return torch.stack(x).to(device=device, dtype=torch.float32)
+                    else:
+                        return torch.stack(x).to(device=device)
+                    
+                elif isinstance(x, str):
+                    return x
+                
+                else:
+                    if convert_to_float:
+                        return torch.as_tensor(x, device=device, dtype=torch.float32)
+                    else:
+                        return torch.as_tensor(x, device=device)
+
+        elif framework.lower() == 'numpy':
+            def convert_value(x):
+                if isinstance(x, torch.Tensor):
+                    arr = x.cpu().numpy()
+                    return arr.astype(np.float32) if convert_to_float else arr
+                else:
+                    arr = np.array(x)
+                    return arr.astype(np.float32) if convert_to_float else arr
+
+        elif framework.lower() == 'cupy':
+            def convert_value(x):
+                if isinstance(x, torch.Tensor):
+                    arr = cp.array(x.cpu().numpy())
+                    return arr.astype(cp.float32) if convert_to_float else arr
+                else:
+                    arr = cp.array(x)
+                    return arr.astype(cp.float32) if convert_to_float else arr
+
+        elif framework.lower() == 'list':
+            def convert_value(x):
+                if   isinstance(x, torch.Tensor): return x.cpu().tolist()
+                elif isinstance(x, np.ndarray):   return x.tolist()
+                elif isinstance(x, cp.ndarray):   return cp.asnumpy(x).tolist()+
+                else: return x
+        else:
+            raise NotImplementedError(f'Unsupported framework "{framework}"!')
+
+        zero_d = lambda x: x if isinstance(x, float) else convert_value(x)
+
+        for entry in config:
+            value = config[entry]
+            if isinstance(value, dict):
+                self.Convert(value, framework, device, convert_to_float) # use recursion to convert nested dictionaries
+                
+            elif isinstance(value, str) or not self.is_valid(value):
+                pass
+            
+            else:
+                config[entry] = zero_d(value)
+'''
 
 
 def GetSPHEREonsky():

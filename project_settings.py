@@ -56,13 +56,15 @@ def resolve_device(preferred: str) -> torch.device:
         # b) MPS case (macOS)
         if preferred in ("mps", "metal") and platform.system() == "Darwin":
             if getattr(torch.backends.mps, "is_available", lambda: False)():
+                torch.set_default_dtype(torch.float32) # MPS only supports float32
                 return torch.device("mps")
 
-    # 2) Config choice didn’t work → pick best on this machine
+    # 2) If config choice didn't work -> pick best on this machine
     if torch.cuda.is_available():
         return torch.device("cuda")
     
     if platform.system() == "Darwin" and getattr(torch.backends.mps, "is_available", lambda: False)():
+        torch.set_default_dtype(torch.float32) # MPS only supports float32
         return torch.device("mps")
 
     # 3) Give up and fall back to CPU

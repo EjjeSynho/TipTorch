@@ -8,6 +8,7 @@ except NameError:
     pass
 
 import sys, os
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from project_settings import PROJECT_PATH, MUSE_DATA_FOLDER, device
@@ -20,6 +21,8 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from torchmin import minimize
 from tqdm import tqdm
+from pathlib import Path
+
 from tools.utils import mask_circle
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 from data_processing.normalizers import CreateTransformSequenceFromFile
@@ -29,6 +32,10 @@ from data_processing.MUSE_onsky_df import *
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
 data_folder = MUSE_DATA_FOLDER # change to your actual path with the MUSE NFM data
+
+if not isinstance(data_folder, Path):
+    data_folder = Path(data_folder)
+
 raw_path    = data_folder / "quasars/J0259_raw/MUSE.2024-12-05T03_15_37.598.fits.fz"
 cube_path   = data_folder / "quasars/J0259_cubes/J0259-0901_all.fits"
 cache_path  = data_folder / "quasars/J0259_cached/J0259-0901_all.pickle"
@@ -217,12 +224,12 @@ inputs_manager.update(predicted_model_inputs) # update the internal values of th
 with torch.no_grad():
     # Quasi-infinite PSF image to compute how much flux is lost while cropping
     model_config['sensor_science']['FieldOfView'] = 511
-    model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+    model.Update(config=model_config, init_grids=True, init_pupils=True, init_tomography=True)
     PSF_pred_big = model(predicted_model_inputs).clone() # First initial prediction of the "big" PSF
 
     # The actual size of the simulated PSFs
     model_config['sensor_science']['FieldOfView'] = PSF_size
-    model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+    model.Update(config=model_config, init_grids=True, init_pupils=True, init_tomography=True)
     PSF_pred_small = model(predicted_model_inputs)
 
 
