@@ -1,22 +1,23 @@
 #%%
+from multiprocessing import process
 import sys
 sys.path.insert(0, '..')
 
 import pickle
-import re
+# import re
 import os
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from .MUSE_data_settings import MUSE_RAW_FOLDER, MUSE_DATA_FOLDER
+from project_settings import MUSE_DATA_FOLDER, DATA_FOLDER
 import pandas as pd
-from tools.utils import GetJmag
 import seaborn as sns
+
+# from tools.utils import GetJmag
 
 
 #%%
 def prune_columns(df):
-    
     df.loc[df['SLODAR_FRACGL_300'] < 1e-12, 'SLODAR_FRACGL_300'] = np.nan
     df.loc[df['SLODAR_FRACGL_500'] < 1e-12, 'SLODAR_FRACGL_500'] = np.nan
     df.loc[df['SLODAR_TOTAL_CN2']  < 1e-12, 'SLODAR_TOTAL_CN2'] = np.nan
@@ -381,13 +382,13 @@ def plot_data_filling(df):
 if __name__ == "__main__":
     
     # Load sample labels information   
-    if not os.path.exists(MUSE_RAW_FOLDER+'../muse_df.pickle'):
+    if not os.path.exists(DATA_FOLDER / 'reduced_telemetry/MUSE/muse_df.pickle'):
         # Load labels information
         all_labels = []
         labels_df  = { 'ID': [], 'Filename': [] }
-
-        if os.path.exists(MUSE_DATA_FOLDER+'labels.txt'):
-            with open(MUSE_DATA_FOLDER+'labels.txt', 'r') as f:
+        
+        if os.path.exists(labels_path := MUSE_DATA_FOLDER / 'standart_stars/labels.txt'):
+            with open(labels_path, 'r') as f:
                 for line in f:
                     filename, labels = line.strip().split(': ')
 
@@ -422,8 +423,8 @@ if __name__ == "__main__":
             'Pupil angle': []
         }
 
-        if os.path.exists(MUSE_DATA_FOLDER+'angles.txt'):
-            with open(MUSE_DATA_FOLDER+'angles.txt', 'r') as f:
+        if os.path.exists(angles_path := MUSE_DATA_FOLDER / 'standart_stars/angles.txt'):
+            with open(angles_path, 'r') as f:
                 for line in f:
                     filename, angle = line.strip().split(': ')
 
@@ -440,13 +441,12 @@ if __name__ == "__main__":
         angles_df.set_index('ID', inplace=True)
         angles_df.sort_index(inplace=True)
 
-
         # Read flattened DataFrames and concatenate them
         muse_df = []
-        files = os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')
+        files = os.listdir(processed_path := MUSE_DATA_FOLDER / 'standart_stars/NFM_STD_processed/')
 
         for file in tqdm(files):
-            with open(MUSE_RAW_FOLDER+'../DATA_reduced/'+file, 'rb') as f:
+            with open(processed_path / file, 'rb') as f:
                 data_sample = pickle.load(f)
                 df_ = data_sample['All data']
                 df_['ID'] = int(file.split('_')[0])
@@ -459,16 +459,12 @@ if __name__ == "__main__":
 
         for i in angles_df.index:
             muse_df.loc[i, 'Pupil angle'] = angles_df.loc[i, 'Pupil angle']
-            
-        # Check if muse_df exists
-        
-        # Save as pickle
-        with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'wb') as handle:
+    
+        with open(DATA_FOLDER / 'reduced_telemetry/MUSE/muse_df.pickle', 'wb') as handle:
             pickle.dump(muse_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     else:
-        # Open pickle file
-        with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'rb') as handle:
+        with open(DATA_FOLDER / 'reduced_telemetry/MUSE/muse_df.pickle', 'rb') as handle:
             muse_df = pickle.load(handle)
 
 #%%
@@ -496,20 +492,21 @@ if __name__ == "__main__":
 
     plot_data_filling(muse_df_normalized_new)
 
-    # Store data
-    with open('../data/temp/imputer.pickle', 'wb') as handle:
+    # TODO: make it just one single file?
+    # Store the data
+    with open(DATA_FOLDER / 'reduced_telemetry/MUSE/imputer.pickle', 'wb') as handle:
         pickle.dump(imputer, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    with open('../data/temp/muse_df_norm.pickle', 'wb') as handle:
+    with open(DATA_FOLDER / 'reduced_telemetry/MUSE/muse_df_norm.pickle', 'wb') as handle:
         pickle.dump(muse_df_normalized, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    with open('../data/temp/muse_df_norm_transforms.pickle', 'wb') as handle:
+    with open(DATA_FOLDER / 'reduced_telemetry/MUSE/muse_df_norm_transforms.pickle', 'wb') as handle:
         df_transforms_store = {}
         for entry in df_transforms:
             df_transforms_store[entry] = df_transforms[entry].store()
         pickle.dump(df_transforms_store, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-    with open(MUSE_RAW_FOLDER+'../muse_df_norm_imputed.pickle', 'wb') as handle:
+    with open(DATA_FOLDER / 'reduced_telemetry/MUSE/muse_df_norm_imputed.pickle', 'wb') as handle:
         pickle.dump(muse_df_normalized_new, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 

@@ -20,7 +20,7 @@ from tools.plotting import plot_radial_profiles, draw_PSF_stack
 from tools.utils import cropper, PupilVLT
 from tools.static_phase import SausageFeature
 from managers.config_manager import ConfigManager
-from data_processing.MUSE_data_settings import MUSE_DATASET_FOLDER, MUSE_DATA_FOLDER
+from data_processing.project_settings import MUSE_DATASET_FOLDER, MUSE_DATA_FOLDER
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from managers.input_manager import InputsTransformer
 from PSF_models.TipTorch import TipTorch

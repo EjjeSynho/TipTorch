@@ -17,7 +17,7 @@ from data_processing.normalizers import Uniform
 from managers.input_manager import InputsManager
 from machine_learning.calibrator import Calibrator, Gnosis
 from data_processing.normalizers import CreateTransformSequenceFromFile
-from data_processing.MUSE_data_settings import MUSE_DATA_FOLDER, MUSE_DATASET_FOLDER
+from data_processing.project_settings import MUSE_DATA_FOLDER, MUSE_DATASET_FOLDER
 from data_processing.MUSE_onsky_df import *
 from tools.utils import rad2mas
 

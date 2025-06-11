@@ -4,7 +4,7 @@ sys.path.append('..')
 
 import os
 import pickle
-from SPHERE_data_settings import SPHERE_DATA_FOLDER
+from project_settings import SPHERE_DATA_FOLDER
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt

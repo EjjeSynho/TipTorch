@@ -1,5 +1,4 @@
-from MUSE_data_settings import MUSE_DATA_FOLDER
-from project_settings import device
+from project_settings import DATA_FOLDER, MUSE_DATA_FOLDER, device
 import pickle
 import torch
 import numpy as np
@@ -10,11 +9,11 @@ from scipy.ndimage import rotate
 
 #%% My new process
 def LoadMUSEsampleByID(id): # searches for the sample with the specified ID in
-    with open(MUSE_DATA_FOLDER+'muse_df.pickle', 'rb') as handle:
+    with open(DATA_FOLDER / 'reduced_telemetry/MUSE/muse_df.pickle', 'rb') as handle:
         muse_df = pickle.load(handle)
 
     file = muse_df.loc[muse_df.index == id]['Filename'].values[0]
-    full_filename = MUSE_DATA_FOLDER + f'DATA_reduced/{id}_{file}.pickle'
+    full_filename = MUSE_DATA_FOLDER / f'standart_stars/NFM_STD_processed/{id}_{file}.pickle'
 
     with open(full_filename, 'rb') as handle:
         data_sample = pickle.load(handle)
@@ -74,12 +73,6 @@ def LoadImages(sample, device=device, subtract_background=True, normalize=True, 
 # 'SLODAR data',
 # 'All data',
 # 'spectral data'
-
-# x0s = []
-# PSF_1s = []
-
-# Manage config files
-# for wvl_id in tqdm(range(N_wvl_)):
 
 
 def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True):

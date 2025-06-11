@@ -5,18 +5,18 @@ import torch
 import gdown
 from torch import nn
 from scipy.ndimage import center_of_mass
-from math import prod
+from photutils.centroids import centroid_quadratic, centroid_com, centroid_com, centroid_quadratic
 from astropy.modeling import models, fitting
 import matplotlib.pyplot as plt
 import seaborn as sns
-from project_settings import xp, use_cupy
+import warnings
 
 try:
     from graphviz import Digraph
 except:
     class Digraph:
         def __init__(self, *args, **kwargs):
-            print("Warning: graphviz is not installed. Graph visualization will not be available.")
+            warnings.warn("Graphviz package is not installed. Graph visualization will not be available.")
             pass   
         def node(self, *args, **kwargs): pass
         def edge(self, *args, **kwargs): pass
@@ -29,10 +29,10 @@ asec2rad = np.pi / 180 / 3600
 
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
-r0 = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
+r0     = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
 
-def DownloadFromDrive(share_url, output_path, overwrite=False, verbose=False):
+def DownloadFromRemote(share_url, output_path, overwrite=False, verbose=False):
     """
     Downloads a file from Google Drive using a shareable link.
 
@@ -49,19 +49,6 @@ def DownloadFromDrive(share_url, output_path, overwrite=False, verbose=False):
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True) # Create file's directory if it doesn't exist
     gdown.download(share_url, output_path, quiet=not verbose, fuzzy=True) # Download the file
-
-
-def check_framework(x):
-    # Determine whether an array is NumPy or CuPy.
-    
-    # Get the module from the array's class
-    if hasattr(x, '__module__'):
-        module_name = x.__module__.split('.')[0]
-        if   module_name == 'numpy': return np
-        elif module_name == 'cupy':  return xp
-
-    # Default to NumPy if not using GPU, otherwise CuPy
-    return np if not use_cupy else xp
 
 
 def to_little_endian(array):
@@ -152,6 +139,15 @@ def cropper(x, win, center=None):
                 np.round(center[1]).astype(int)-win//2 : np.round(center[1]).astype(int) + win//2 + win%2]
 
 
+def safe_centroid(data):       
+    xycen = centroid_quadratic(np.abs(data))
+    
+    if np.any(np.isnan(xycen)): xycen = centroid_com(np.abs(data))
+    if np.any(np.isnan(xycen)): xycen = np.array(data.shape)//2
+    
+    return xycen
+
+
 def gaussian_centroid(img):
     x_, y_ = safe_centroid(img)
     try:
@@ -168,8 +164,6 @@ def gaussian_centroid(img):
         return fitted_gaussian.x_mean.value - size//2 + x_, fitted_gaussian.y_mean.value - size//2 + y_
     except:
         return x_, y_
-
-    
 
 
 def mask_circle(N, r, center=(0,0), centered=True):

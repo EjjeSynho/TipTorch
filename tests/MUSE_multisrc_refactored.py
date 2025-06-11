@@ -26,7 +26,7 @@ from tools.utils import mask_circle, rad2mas
 from managers.config_manager import ConfigManager, MultipleTargetsInOneObservation
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
-from data_processing.MUSE_data_settings import MUSE_DATA_FOLDER
+from data_processing.project_settings import MUSE_DATA_FOLDER
 from data_processing.MUSE_data_utils import ProcessMUSEcube, GetSpectrum
 from project_settings import device
 from astropy.io import fits

@@ -9,7 +9,7 @@ sys.path.insert(0, '..')
 import pickle
 import torch
 import numpy as np
-from .MUSE_data_settings import MUSE_DATA_FOLDER
+from .project_settings import MUSE_DATA_FOLDER
 from tqdm import tqdm
 from data_processing.MUSE_preproc_utils import GetMUSEonsky
 import pandas as pd

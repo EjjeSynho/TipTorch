@@ -17,7 +17,7 @@ from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from data_processing.normalizers import TransformSequence, Uniform,
 from managers.input_manager import InputsTransformer
 from managers.config_manager import GetSPHEREonsky, ConfigManager
-from data_processing.SPHERE_data_settings import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER
+from data_processing.project_settings import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER
 from torch.autograd.functional import hessian
 from torchmin import minimize
 from project_settings import device

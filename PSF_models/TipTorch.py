@@ -513,7 +513,8 @@ class TipTorch(torch.nn.Module):
         self.piston_filter = None # piston mode filter in the AO-corrected freq. domain
         self.PR = None # piston mode filter in alised freq. domain
         self.apodizer = None
-        
+        # self.apodizer = self.make_tensor(1.0) # default apodizer
+
         # self.compute_PSF_DL = False # set to "True" to compute the diffraction-limited PSF
         
         # Read data and initialize AO system

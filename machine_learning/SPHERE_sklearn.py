@@ -20,7 +20,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error
-from data_processing.SPHERE_data_settings import SPHERE_DATA_FOLDER, DATA_FOLDER
+from data_processing.project_settings import SPHERE_DATA_FOLDER, DATA_FOLDER
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt

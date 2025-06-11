@@ -1,49 +1,46 @@
 #%%
-# %reload_ext autoreload
-# %autoreload 2
-
 import sys
 
-# sys.path.insert(0, '.')
+from matplotlib.font_manager import weight_dict
 sys.path.insert(0, '..')
 
-# for filename in os.listdir(directory):
-#     if filename.endswith(".fits.fz") or filename.endswith(".fits"):
-#         new_filename = re.sub(r'(?<=T\d{2})_(?=\d{2})|(?<=\d{2})_(?=\d{2})', '-', filename)
-#         os.rename(os.path.join(directory, filename), os.path.join(directory, new_filename))
-#         print(f"Renamed: {filename} -> {new_filename}")
-
-import torch
 import pickle
 import re
 import os
-from tqdm import tqdm
-from skimage.restoration import inpaint
-from tools.plotting import wavelength_to_rgb
 import datetime
 import requests
+import torch
 import pandas as pd
 import numpy as np
 import astropy.units as u
 import matplotlib.pyplot as plt
-# from datetime import datetime
-from astropy.coordinates import SkyCoord, AltAz, EarthLocation
+from astropy.coordinates import SkyCoord, EarthLocation
+from tqdm import tqdm
 from astropy.io import fits
-from astropy.time import Time
 from io import StringIO
+from skimage.restoration import inpaint
 from photutils.background import Background2D, MedianBackground
-from project_settings import xp, use_cupy
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 
-from MUSE_data_settings import MUSE_RAW_FOLDER, MUSE_DATA_FOLDER, LIFT_PATH
+from project_settings import device, xp, use_cupy, DATA_FOLDER, WEIGHTS_FOLDER
 from MUSE_preproc_utils import GetConfig, LoadImages
+from tools.utils import GetROIaroundMax, GetJmag, DownloadFromRemote
+from tools.plotting import wavelength_to_rgb
 
-from tools.utils import GetROIaroundMax, GetJmag, check_framework, DownloadFromDrive
+find_closest_λ = lambda λ, λs: xp.argmin(xp.abs(λs-λ)).astype('int')
 
-find_closest = lambda λ, λs: xp.argmin(xp.abs(λs-λ)).astype('int')
+def check_framework(x):
+    # Determine whether an array is NumPy or CuPy.
+    
+    # Get the module from the array's class
+    if hasattr(x, '__module__'):
+        module_name = x.__module__.split('.')[0]
+        if   module_name == 'numpy': return np
+        elif module_name == 'cupy':  return xp
 
-from project_settings import device
+    # Default to NumPy if not using GPU, otherwise CuPy
+    return np if not use_cupy else xp
 
 UT4_coords = ('24d37min37.36s', '-70d24m14.25s', 2635.43)
 UT4_location = EarthLocation.from_geodetic(lat=UT4_coords[0], lon=UT4_coords[1], height=UT4_coords[2]*u.m)
@@ -56,6 +53,50 @@ IRLOS_upgrade_date = pd.to_datetime('2021-03-20T00:00:00').tz_localize('UTC')
 
 # To get ASM data:
 # http://archive.eso.org/cms/eso-data/ambient-conditions/paranal-ambient-query-forms.html
+
+
+def DownloadMUSEcalibData(verbose=False):
+    import logging
+    logger = logging.getLogger(__name__)
+
+    data_folder_path = str(DATA_FOLDER).replace('\\', '/')
+    weights_folder_path = str(WEIGHTS_FOLDER).replace('\\', '/')
+    tmp1, tmp2, tmp3 = 'https://drive.google.com/file/d/', '/view?usp=drive_link', f'{data_folder_path}/reduced_telemetry/MUSE/'
+
+    data_to_download = [
+        (
+            "Downloading MUSE NFM calibrator...",
+            f'{tmp1}1NdfkmVYxdXgkJbHIlxDv1XTO-ABj6ox8{tmp2}',
+            f'{weights_folder_path}/MUSE_calibrator.dict'
+        ),
+        (
+            "Downloading MUSE NFM reduced telemetry data...",
+            f'{tmp1}1KJDiLgX9XeXjvskOhYLLAhlDR0UOH4p_{tmp2}',
+            f'{tmp3}muse_df_fitted_transforms.pickle'
+        ),
+        (None, f'{tmp1}1pc7a8H4v_XzF9IT_LGrvM-OkV7jrw0D5{tmp2}', f'{tmp3}muse_df_norm_imputed.pickle'),
+        (None, f'{tmp1}1BR9WtPVODV8R7oYaZSxn9ox_jfWJr9nF{tmp2}', f'{tmp3}muse_df_norm_transforms.pickle'),
+        (None, f'{tmp1}1iFnB30JEsKKy14282dJ95xuWtHEfXxBN{tmp2}', f'{tmp3}muse_df.pickle'),
+        (None, f'{tmp1}1LMgmTSVBhvGOOUW0PZ1Zim5OPcP8L8NB{tmp2}', f'{tmp3}MUSE_fitted_df.pkl'),
+        (
+            "Downloading related NFM data...",
+            f'{tmp1}1YwiJLlSj_pBlGYhTfpDIBulzpxGZTewG{tmp2}',
+            f'{tmp3}IRLOS_commands.csv'
+        ),
+        (None, f'{tmp1}1tz2RAxUMe_axaBjP9VHL3NqN8oJxlAgE{tmp2}', f'{tmp3}LGS_flux.csv'),
+        (None, f'{tmp1}1zk4m9y82Movp0Ytn2z4_hsnyL8AoW58x{tmp2}', f'{tmp3}LGS_slopes.csv')
+    ]
+    
+    for message, url, output_path in data_to_download:
+        if message:
+            if verbose:
+                logger.info(message)
+            else:
+                logger.debug(message)
+        
+        DownloadFromRemote(share_url=url, output_path=output_path, overwrite=False, verbose=verbose)
+
+DownloadMUSEcalibData(verbose=True)
 
 
 #%%
@@ -130,7 +171,6 @@ def GetExposureTimes(include_dirs_cubes, verbose=False):
     return df_exptime
 
 
-
 #%%
 # ----------------- Read the dataset with IRLOS data ---------------------------------------
 def GetIRLOSInfo(IRLOS_cms_folder):
@@ -149,6 +189,9 @@ def GetIRLOSInfo(IRLOS_cms_folder):
     pattern = r'(\d+x\d+_SmallScale_\d+Hz_\w+Gain)|(\d+x\d+_\d+Hz_\w+Gain)|(\d+x\d+_SmallScale)'
     IRLOS_cmds = IRLOS_cmds[IRLOS_cmds['command'].str.contains(pattern, regex=True)]
 
+    # Read the pre-fetched IRLOS commands file
+    IRLOS_df = GetIRLOSInfo(DATA_FOLDER / 'reduced_telemetry/MUSE/IRLOS_commands.csv')
+
     pattern = r'(?P<window>\d+x\d+)(?:_(?P<scale>SmallScale))?(?:_(?P<frequency>\d+Hz))?(?:_(?P<gain>\w+Gain))?'
     IRLOS_df = IRLOS_cmds['command'].str.extract(pattern)
 
@@ -166,12 +209,6 @@ def GetIRLOSInfo(IRLOS_cms_folder):
 
     return IRLOS_df
 
-
-IRLOS_df = GetIRLOSInfo(MUSE_RAW_FOLDER+'../IRLOS_commands.csv')
-
-# ----------------- Read the dataset with the LGS WFSs data ---------------------------------------
-LGS_flux_df   = pd.read_csv(MUSE_RAW_FOLDER + '../LGS_flux.csv',   index_col=0)
-LGS_slopes_df = pd.read_csv(MUSE_RAW_FOLDER + '../LGS_slopes.csv', index_col=0)
 
 #%% ------------------ Read the raw data from the FITS files and from ESO archive ---------------------------------------
 def time_from_sec_usec(sec, usec):
@@ -363,6 +400,12 @@ def GetLGSphotons(flux_LGS, HO_gain):
 def GetLGSdata(hdul_cube, cube_name, start_time, fill_missing=False, verbose=False):
     # AOS LGSi FLUX: [ADU] Median flux in subapertures /
     # Median of the LGSi flux in all subapertures with 0.17 photons/ADU when the camera gain is 100.
+    
+    # Read the pre-fetched dataset with the LGS WFSs data
+    LGS_flux_df   = pd.read_csv(DATA_FOLDER / 'reduced_telemetry/MUSE/LGS_flux.csv',   index_col=0)
+    LGS_slopes_df = pd.read_csv(DATA_FOLDER / 'reduced_telemetry/MUSE/LGS_slopes.csv', index_col=0)
+        
+    # Select the relevant LGS data
     LGS_data_df = LGS_flux_df[LGS_flux_df['filename'] == cube_name].copy()
     LGS_data_df.rename(columns = { f'LGS{i} flux': f'LGS{i} flux, [ADU/frame]' for i in range(1,5) }, inplace=True)
 
@@ -544,7 +587,7 @@ def GetImageSpectrumHeader(
 
     # Pre-defined bad wavelengths ranges
     bad_wvls = xp.array([[450, 478], [577, 606]])
-    bad_ids  = xp.array([find_closest(wvl, λs) for wvl in bad_wvls.flatten()], dtype='int').reshape(bad_wvls.shape)
+    bad_ids  = xp.array([find_closest_λ(wvl, λs) for wvl in bad_wvls.flatten()], dtype='int').reshape(bad_wvls.shape)
     valid_λs = xp.ones_like(λs)
 
     for i in range(len(bad_ids)):
@@ -560,12 +603,12 @@ def GetImageSpectrumHeader(
         if verbose: print('Generating smart wavelength bins...')
         λ_bin = (bad_wvls[1][0]-bad_wvls[0][1])/3.0
         λ_bins_before = bad_wvls[0][1] + xp.arange(4)*λ_bin
-        bin_ids_before = [find_closest(wvl, λs) for wvl in λ_bins_before]
+        bin_ids_before = [find_closest_λ(wvl, λs) for wvl in λ_bins_before]
 
         # After the sodium filter
         λ_bins_num    = (λ_max-bad_wvls[1][1]) / xp.diff(λ_bins_before).mean()
         λ_bins_after  = bad_wvls[1][1] + xp.arange(λ_bins_num+1)*λ_bin
-        bin_ids_after = [find_closest(wvl, λs) for wvl in λ_bins_after]
+        bin_ids_after = [find_closest_λ(wvl, λs) for wvl in λ_bins_after]
         bins_smart    = bin_ids_before + bin_ids_after
         λ_bins_smart  = λs[bins_smart]
 
@@ -1070,7 +1113,7 @@ def get_PSF_rotation(MUSE_images, derot_angle):
     PSF_0 = PSF_0 / PSF_0.sum(axis=(-2,-1))[:,None,None]
     PSF_0 = PSF_0.mean(axis=0)[1:,1:]
 
-    PSF_1 = np.load(MUSE_DATA_FOLDER + 'PSF_default.npy').mean(axis=0)
+    PSF_1 = np.load(DATA_FOLDER / 'reduced_telemetry/MUSE/NFM_PSF_default.npy').mean(axis=0)
     PSF_1 = PSF_1[cropper(PSF_1, PSF_0.shape[-1])]
 
     # Get streaks mask
@@ -1153,6 +1196,7 @@ def get_PSF_rotation(MUSE_images, derot_angle):
 
 def get_IRLOS_phase(cube):
     try:
+        from project_settings import LIFT_PATH
         # Add dependencies to the path
         for path in ['', 'DIP', 'LIFT', 'LIFT/modules', 'experimental']:
             path_new = f'{LIFT_PATH}{path}/..'
@@ -1308,23 +1352,6 @@ def RenderDataSample(data_dict, file_name):
     ax[0].set_axis_off()
     ax[1].set_axis_off()
     plt.tight_layout()
-
-
-def DownloadMUSEcalibData():
-    tmp1, tmp2 = 'https://drive.google.com/file/d/', '/view?usp=drive_link'
-
-    downloads = [
-        ("Downloading MUSE calibrator and reduced telemetry data...", f'{tmp1}1NdfkmVYxdXgkJbHIlxDv1XTO-ABj6ox8{tmp2}', '../data/weights/MUSE_calibrator.dict'),
-        (None, f'{tmp1}1KJDiLgX9XeXjvskOhYLLAhlDR0UOH4p_{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle'),
-        (None, f'{tmp1}1pc7a8H4v_XzF9IT_LGrvM-OkV7jrw0D5{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle'),
-        (None, f'{tmp1}1BR9WtPVODV8R7oYaZSxn9ox_jfWJr9nF{tmp2}', '../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle'),
-        (None, f'{tmp1}1iFnB30JEsKKy14282dJ95xuWtHEfXxBN{tmp2}', '../data/reduced_telemetry/MUSE/muse_df.pickle'),
-        (None, f'{tmp1}1LMgmTSVBhvGOOUW0PZ1Zim5OPcP8L8NB{tmp2}', '../data/reduced_telemetry/MUSE/MUSE_fitted_df.pkl')
-    ]
-    
-    for message, url, output_path in downloads:
-        if message: print(message)
-        DownloadFromDrive(share_url=url, output_path=output_path)
 
 
 def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=False):

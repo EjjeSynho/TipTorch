@@ -23,7 +23,7 @@ try:
 except:
     pass
 
-from SPHERE_data_settings import SPHERE_DATA_FOLDER
+from project_settings import SPHERE_DATA_FOLDER
 
 ROOT      = Path(SPHERE_DATA_FOLDER + 'IRDIS_RAW')
 path_dtts = Path(SPHERE_DATA_FOLDER + 'DTTS/')

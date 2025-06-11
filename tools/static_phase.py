@@ -4,12 +4,12 @@ import torchvision.transforms.functional as TF
 import numpy as np
 import torch
 from scipy.io import loadmat
-from .utils import mask_circle, rad2mas
-
+from utils import mask_circle, rad2mas, pdims
 
 decompose_WF = lambda WF, basis, pupil: WF[:, pupil > 0] @ basis[:, pupil > 0].T / pupil.sum()
 project_WF   = lambda WF, basis, pupil: torch.einsum('mn,nwh->mwh', decompose_WF(WF, basis, pupil), basis)
 calc_WFE     = lambda WF, pupil: WF[:, pupil > 0].std()
+
 
 def separate_islands(binary_image):
     # Label each connected component (each "island") with a unique integer
@@ -209,7 +209,7 @@ class PhaseMap:
         raise NotImplementedError("Subclass must implement compute_OPD")
 
     def forward(self, x):
-        # 1) Build OPD
+        # 1) Build OPD map in [m]
         OPD = self.compute_OPD(x)
 
         # 2) Wave-number factor k = 2jπ / λ
@@ -222,7 +222,7 @@ class PhaseMap:
         if self.ignore_pupil:
             return phase
         
-        pupil_apod = (self.model.pupil * self.model.apodizer).unsqueeze(0).unsqueeze(0)
+        pupil_apod = pdims(self.model.pupil * self.model.apodizer, -2) if self.model.apodizer is not None else pdims(self.model.pupil, -2)
         return pupil_apod * phase
 
     __call__ = forward

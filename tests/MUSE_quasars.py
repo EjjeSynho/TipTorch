@@ -5,6 +5,7 @@
 import sys
 sys.path.insert(0, '..')
 sys.path.insert(0, '../data_processing')
+sys.path.insert(0, '../tools')
 
 import torch
 import torch.nn.functional as F
@@ -19,22 +20,22 @@ from tqdm import tqdm
 
 from tools.utils import mask_circle
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, DownloadMUSEcalibData
-from data_processing.MUSE_data_settings import MUSE_DATA_FOLDER
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from data_processing.MUSE_onsky_df import *
 
-from project_settings import device
+from project_settings import device, MUSE_DATA_FOLDER
 
 
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
-raw_path   = MUSE_DATA_FOLDER + "quasars/J0259_raw/MUSE.2024-12-05T03_15_37.598.fits.fz"
-cube_path  = MUSE_DATA_FOLDER + "quasars/J0259_cubes/J0259-0901_all.fits"
-cache_path = MUSE_DATA_FOLDER + "quasars/J0259_cached/J0259-0901_all.pickle"
+data_folder = MUSE_DATA_FOLDER # change to your actual path with the MUSE NFM data
+raw_path    = data_folder / "quasars/J0259_raw/MUSE.2024-12-05T03_15_37.598.fits.fz"
+cube_path   = data_folder / "quasars/J0259_cubes/J0259-0901_all.fits"
+cache_path  = data_folder / "quasars/J0259_cached/J0259-0901_all.pickle"
 
-# raw_path   = MUSE_DATA_FOLDER + "quasars/J0957_raw/MUSE.2024-12-24T05_49_48.906.fits.fz"
-# cube_path  = MUSE_DATA_FOLDER + "quasars/J0957_cubes/J0957_804.fits"
-# cache_path = MUSE_DATA_FOLDER + "quasars/J0957_cached/J0957_804.pickle"
+# raw_path   = data_folder / "quasars/J0957_raw/MUSE.2024-12-24T05_49_48.906.fits.fz"
+# cube_path  = data_folder / "quasars/J0957_cubes/J0957_804.fits"
+# cache_path = data_folder / "quasars/J0957_cached/J0957_804.pickle"
 
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
 # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
@@ -109,8 +110,6 @@ PSD_include = {
     'Moffat':          False
 }
 model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
-model.apodizer = model.make_tensor(1.0)
-
 model.to_float()
 model.to(device)
 
@@ -168,8 +167,6 @@ print(inputs_manager_objs)
 
 #%%
 from machine_learning.calibrator import Calibrator, Gnosis
-
-DownloadMUSEcalibData()
 
 def GetReducedTelemetryInputs(cached_data):
     with open('../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle', 'rb') as handle:
@@ -231,7 +228,7 @@ crop_ratio = (PSF_pred_big.amax(dim=(-2,-1)) / PSF_pred_small.amax(dim=(-2,-1)))
 
 core_mask     = torch.tensor(mask_circle(PSF_size, flux_core_radius+1)[None,None,...]).to(device).float()
 core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...]).to(device).float()
- 
+
 # How much flux is spread out of the PSF core because PSF is not a single pixel but rather "a blob"
 core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
 PSF_norm_factor = N_core_pixels / flux_λ_norm / core_flux_ratio / crop_ratio

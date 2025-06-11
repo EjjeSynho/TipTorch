@@ -5,6 +5,7 @@ import tkinter as tk
 from tkinter import messagebox, ttk, font
 import os
 from PIL import Image, ImageTk
+from project_settings import DATA_FOLDER
 from project_settings import MUSE_DATA_FOLDER
 import pickle
 import numpy as np
@@ -24,7 +25,7 @@ class ImageLabeller:
         self.mask = 1 - mask_circle(200, 25)
 
         # Load the default PSF image
-        self.PSF_default = np.load(MUSE_DATA_FOLDER + 'PSF_default.npy').mean(axis=0)
+        self.PSF_default = np.load(DATA_FOLDER / 'reduced_telemetry/MUSE/NFM_PSF_default.npy').mean(axis=0)
         self.PSF_default = 1 + np.log10(np.abs(self.PSF_default))
         self.PSF_default *= 1 - mask_circle(self.PSF_default.shape[0], 25)
         self.PSF_default -= self.PSF_default.min()
@@ -237,8 +238,8 @@ if __name__ == "__main__":
     default_font = font.nametofont("TkDefaultFont")
     default_font.configure(family="Helvetica", size=13)
 
-    reduced_folder = MUSE_DATA_FOLDER + 'DATA_reduced/'
-    pickle_files = [os.path.join(reduced_folder, f) for f in os.listdir(reduced_folder) if f.endswith('.pickle')]
+    processed_cubes_folder = MUSE_DATA_FOLDER / 'NFM_STD_processed/'
+    pickle_files = [os.path.join(processed_cubes_folder, f) for f in os.listdir(processed_cubes_folder) if f.endswith('.pickle')]
     labels_file = os.path.join(MUSE_DATA_FOLDER, 'angles.txt')
     app = ImageLabeller(root, pickle_files, labels_file)
     root.mainloop()

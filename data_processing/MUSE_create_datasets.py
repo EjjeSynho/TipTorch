@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from MUSE_data_settings import MUSE_CUBES_FOLDER, MUSE_RAW_FOLDER, MUSE_DATA_FOLDER
+from project_settings import  MUSE_DATA_FOLDER
 
 import pandas as pd
 from astropy.coordinates import SkyCoord, AltAz
@@ -18,6 +18,8 @@ from astropy.io import fits
 import astropy.units as u
 from MUSE_data_utils import *
 
+MUSE_CUBES_FOLDER = MUSE_DATA_FOLDER + 'standart_stars/NFM_STD_cubes/'
+MUSE_RAW_FOLDER   = MUSE_DATA_FOLDER + 'standart_stars/NFM_STD_raw/'
 
 #%%
 include_dirs_cubes = [
@@ -88,7 +90,7 @@ def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
 
     return renamed_dir
 
-_ = RenameMUSECubes(MUSE_CUBES_FOLDER, MUSE_DATA_FOLDER+'NFM_cubes/')
+# _ = RenameMUSECubes(MUSE_CUBES_FOLDER, MUSE_DATA_FOLDER+'NFM_cubes_temp/')
 
 #%%
 if not os.path.exists( match_path:=(MUSE_DATA_FOLDER+'files_matches.csv') ):

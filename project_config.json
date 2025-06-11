@@ -1,5 +1,0 @@
-{
-    "device": "cuda:0",
-    "model_weights_folder": "./data/weights/",
-    "project_data_folder":  "./data/"
-}
