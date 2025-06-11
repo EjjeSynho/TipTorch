@@ -19,15 +19,14 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from torchmin import minimize
 
-from photutils.aperture import CircularAperture, RectangularAperture
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
-from tools.plotting import plot_radial_profiles, draw_PSF_stack
+from tools.plotting import plot_radial_profiles
 from tools.utils import mask_circle, rad2mas
-from managers.config_manager import ConfigManager, MultipleTargetsInOneObservation
+from managers.config_manager import MultipleTargetsInOneObservation
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
-from data_processing.project_settings import MUSE_DATA_FOLDER
-from data_processing.MUSE_data_utils import ProcessMUSEcube, GetSpectrum
+from project_settings import MUSE_DATA_FOLDER
+from data_processing.MUSE_data_utils import GetSpectrum
 from project_settings import device
 from astropy.io import fits
 from scipy.ndimage import binary_dilation

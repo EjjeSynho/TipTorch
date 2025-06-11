@@ -39,7 +39,7 @@ cache_path  = data_folder / "quasars/J0259_cached/J0259-0901_all.pickle"
 
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
 # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
-spectral_cubes, spectral_info, data_cached, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, verbose=True)   
+spectral_cubes, spectral_info, data_cached, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 # Extract full and binned spectral cubes. Sparse cube selects a set of 7 binned wavelengths ranges
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
 

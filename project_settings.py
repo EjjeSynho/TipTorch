@@ -6,6 +6,7 @@ import torch
 from pathlib import Path
 from tools.utils import DownloadFromRemote
 import warnings
+import platform
 # warnings.filterwarnings("ignore", category=UserWarning)
 
 PROJECT_PATH = Path(__file__).parent.resolve()
@@ -39,10 +40,24 @@ LIFT_PATH          = Path(project_settings["LIFT_path"])
 
 # Set up the device used by PyTorch in the project
 DEVICE = project_settings["device"]
-device = torch.device(DEVICE) if torch.cuda.is_available else torch.device('cpu')
+
+
+
+if torch.cuda.is_available():
+    device = torch.device(DEVICE)
+else:
+    if platform.system() == "Darwin":
+        try:
+            if torch.backends.mps.is_available():
+                device = torch.device('mps')
+        except AttributeError:
+            pass
+
+    device = torch.device('cpu')
+
 
 # Check if GPU is available and has sufficient VRAM to use CuPy
-#TODO: do the same for PyTorch
+#TODO: do the same memory check for PyTorch
 try:
     import cupy as xp
     # Check if GPU is available and has sufficient VRAM
