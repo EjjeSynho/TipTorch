@@ -7,6 +7,9 @@ try:
 except NameError:
     pass
 
+import sys, os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from project_settings import PROJECT_PATH, MUSE_DATA_FOLDER, device
 
 import torch
