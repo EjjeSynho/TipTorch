@@ -1,29 +1,26 @@
 #%%
-%reload_ext autoreload
-%autoreload 2
+try:
+    ipy = get_ipython()        # NameError if not running under IPython
+    if ipy:
+        ipy.run_line_magic('reload_ext', 'autoreload')
+        ipy.run_line_magic('autoreload', '2')
+except NameError:
+    pass
 
-import sys
-sys.path.insert(0, '..')
-sys.path.insert(0, '../data_processing')
-sys.path.insert(0, '../tools')
+from project_settings import PROJECT_PATH, MUSE_DATA_FOLDER, device
 
 import torch
 import torch.nn.functional as F
-
-import os
 import numpy as np
-
 import matplotlib.pyplot as plt
+
 from matplotlib.colors import LogNorm
 from torchmin import minimize
 from tqdm import tqdm
-
 from tools.utils import mask_circle
-from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, DownloadMUSEcalibData
+from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from data_processing.MUSE_onsky_df import *
-
-from project_settings import device, MUSE_DATA_FOLDER
 
 
 #%%
@@ -118,7 +115,7 @@ model.to(device)
 from data_processing.normalizers import Uniform
 from managers.input_manager import InputsManager
 
-df_transforms_fitted = CreateTransformSequenceFromFile('../data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle')
+df_transforms_fitted = CreateTransformSequenceFromFile(PROJECT_PATH / 'data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle')
 
 inputs_manager = InputsManager()
 
@@ -169,7 +166,7 @@ print(inputs_manager_objs)
 from machine_learning.calibrator import Calibrator, Gnosis
 
 def GetReducedTelemetryInputs(cached_data):
-    with open('../data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle', 'rb') as handle:
+    with open(PROJECT_PATH / 'data/reduced_telemetry/MUSE/muse_df_norm_imputed.pickle', 'rb') as handle:
         muse_df_norm = pickle.load(handle)
 
     df = cached_data['All data']
@@ -178,7 +175,7 @@ def GetReducedTelemetryInputs(cached_data):
 
     df_pruned  = prune_columns(df.copy())
     df_reduced = reduce_columns(df_pruned.copy())
-    df_transforms = CreateTransformSequenceFromFile('../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle')
+    df_transforms = CreateTransformSequenceFromFile(PROJECT_PATH / 'data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle')
     df_norm = normalize_df(df_reduced, df_transforms)
     df_norm = df_norm.fillna(0)
 
@@ -200,8 +197,7 @@ calibrator = Calibrator(
             'hidden_size': 200,
             'dropout_p': 0.1
         },
-        'weights_folder': '../data/weights/MUSE_calibrator.dict'
-        # 'weights_folder': '../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict'
+        'weights_folder': PROJECT_PATH / 'data/weights/MUSE_calibrator.dict'
     }
 )
 calibrator.eval()
@@ -533,6 +529,7 @@ x_curve_fit_dict = curve_inputs.unstack(x2[x_size_model:x_size_curve+x_size_mode
 flux_corrections = inputs_manager_objs['F_norm']
 
 #%% Predict PSFs over the full wavelengths range
+print('Extending the prediction over the whole wavelengths range...')
 torch.cuda.empty_cache()
 
 model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
@@ -720,3 +717,19 @@ diff_rgb = plot_wavelength_rgb_log(
     min_val=500, max_val=200000, show=True
 )
 
+
+# %%
+'''
+from astropy.io import fits
+import numpy as np
+import os
+
+# Convert model_full to float32 to save space
+# Create primary HDU
+hdu = fits.PrimaryHDU(model_full.astype(np.float32))
+
+# Create HDUList
+hdul = fits.HDUList([hdu])
+output_path = MUSE_DATA_FOLDER / 'J0259_modeled_cube.fits'
+hdul.writeto(output_path, overwrite=True)
+'''

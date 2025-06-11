@@ -9,7 +9,7 @@ sys.path.insert(0, '..')
 import pickle
 import torch
 import numpy as np
-from .project_settings import MUSE_DATA_FOLDER
+from project_settings import MUSE_DATA_FOLDER, PROJECT_PATH
 from tqdm import tqdm
 from data_processing.MUSE_preproc_utils import GetMUSEonsky
 import pandas as pd
@@ -18,9 +18,6 @@ import pandas as pd
 #%%
 with open(MUSE_DATA_FOLDER+'muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
-
-# with open(MUSE_DATA_FOLDER+'fitted_df.pickle', 'rb') as handle:
-#     fitted_df = pickle.load(handle)
 
 # with open('../data/temp/fitted_df_norm.pickle', 'rb') as handle:
 #     fitted_df_norm = pickle.load(handle)

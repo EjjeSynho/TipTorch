@@ -1,8 +1,6 @@
 #%%
-import sys
-
-from matplotlib.font_manager import weight_dict
-sys.path.insert(0, '..')
+import sys, os
+from project_settings import device, xp, use_cupy, DATA_FOLDER, WEIGHTS_FOLDER
 
 import pickle
 import re
@@ -23,7 +21,6 @@ from photutils.background import Background2D, MedianBackground
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 
-from project_settings import device, xp, use_cupy, DATA_FOLDER, WEIGHTS_FOLDER
 from MUSE_preproc_utils import GetConfig, LoadImages
 from tools.utils import GetROIaroundMax, GetJmag, DownloadFromRemote
 from tools.plotting import wavelength_to_rgb

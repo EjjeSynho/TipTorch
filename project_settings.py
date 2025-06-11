@@ -1,6 +1,6 @@
 #%%
 from logging import warning
-import os
+import os, sys
 import json
 import torch
 from pathlib import Path
@@ -9,6 +9,12 @@ import warnings
 # warnings.filterwarnings("ignore", category=UserWarning)
 
 PROJECT_PATH = Path(__file__).parent.resolve()
+
+# Adding project folders to the system path so that the modules can be imported
+sys.path.insert(0, str(PROJECT_PATH) )
+sys.path.insert(0, str(PROJECT_PATH / 'tools/') )
+sys.path.insert(0, str(PROJECT_PATH / 'managers/') )
+sys.path.insert(0, str(PROJECT_PATH / 'data_processing/') )
 
 # Downloading default project settings if they are not found locally
 if not os.path.exists(path_to_config := Path(PROJECT_PATH) / Path("project_config.json")):

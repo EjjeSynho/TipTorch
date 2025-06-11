@@ -154,7 +154,7 @@ class TipTorch(torch.nn.Module):
         self.Jx  = torch.ones (self.N_src, device=self.device)
         self.Jy  = torch.ones (self.N_src, device=self.device)
         self.Jxy = torch.ones (self.N_src, device=self.device)*0.1
-
+        
         if self.PSD_include['Moffat']:
             self.amp   = torch.ones (self.N_src, device=self.device)*4.0  # Phase PSD Moffat amplitude [rad²]
             self.b     = torch.ones (self.N_src, device=self.device)*0.01 # Phase PSD background [rad² m²]

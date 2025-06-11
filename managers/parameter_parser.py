@@ -1,5 +1,4 @@
-import sys
-sys.path.insert(0, '..')
+from project_settings import PROJECT_PATH
 
 import os.path as ospath
 import warnings
@@ -8,51 +7,47 @@ from sys import path
 import numpy as np
 import os
 
-
 """
 Class to parse all the information about an AO system given in a .ini file.
 The parsed data is stored as dictionary that can be modified from inside the code
 """
-
 class ParameterParser():
     # Check for the existance of the file in the directory. If it is not found, initializes top-down search for it
-    def find_file(self, path_input):
-        path_check = os.path.normpath(path_input)
-        if path_check[0] == '\\' or path_check == '/':
-            path_check = os.path.normpath('..' + path_check)
-            
+    def find_file(self, path_input):       
+        path_check = str(path_input)
+        if path_check.startswith('$PROJECT_PATH$'):
+            path_check = str(PROJECT_PATH / path_check.replace('$PROJECT_PATH$/', ''))
+                    
         if os.path.isfile(path_check):
             return path_check
+        
         else:
-            file = os.path.split(path_check)[1]
-            warnings.warn('Warning: file \"'+file+'\"" is not found! Initializing the search...')
+            file = os.path.basename(path_check)
+            warnings.warn(f'Warning: file "{file}" is not found! Initializing the search...')
 
-            def scan_for_file(filename, search_path):
-                result = []
-                    # Walking top-down from the root
-                for root, _, files in os.walk(search_path):
-                    if filename in files:
-                        result.append(os.path.join(root, filename))
-                return result
-            
-            resulting_path = scan_for_file(file, "..")
-
-            if not len(resulting_path) or resulting_path is None:
-                warnings.warn('Warning: file \"'+file+'\" is not found!')
+            # Walking top-down from the root
+            for root, _, files in os.walk(PROJECT_PATH):
+                if file in files:
+                    return os.path.join(root, file)
+                
+                warnings.warn(f'Warning: file "{file}" is not found!')
                 return None
 
-            elif len(resulting_path) > 1:
-                warnings.warn('Warning: two files with the same name were found! Using the first one...')
-            
-            return resulting_path[0]
 
     def __init__(self, path_ini):
+        # if not isinstance(path_ini, str):
+        #     raise TypeError("The input must be a string representing a file path")
+        
         self.params = None
 
         # verify if the file exists
         path_ini = self.find_file(path_ini)
+        
+        if path_ini is None:
+            raise FileNotFoundError('File not found!')
+        
         if ospath.isfile(path_ini) == False:
-            raise ValueError('Cannot open \"'+path+'\"!')
+            raise FileNotFoundError(f'Cannot open \"{path_ini}\"!')
 
         # open the .ini file
         config = ConfigParser()

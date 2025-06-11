@@ -1,9 +1,8 @@
-import sys
-sys.path.insert(0, '..')
+import sys, os
+from project_settings import PROJECT_PATH, SPHERE_DATA_FOLDER
 
 import numpy as np
 import torch
-import os
 import re
 import pickle
 from .SPHERE_data import LoadSPHEREsampleByID
@@ -11,7 +10,6 @@ from tools.utils import mask_circle
 from managers.parameter_parser import ParameterParser
 from managers.config_manager import ConfigManager, GetSPHEREonsky, GetSPHEREsynth
 from copy import deepcopy
-from project_settings import MAX_NDIT, SPHERE_DATA_FOLDER
 from tools.utils import rad2mas, pad_lists, cropper, gaussian_centroid
 from astropy.stats import sigma_clipped_stats
 from photutils.background import Background2D, MedianBackground
@@ -242,7 +240,7 @@ def SPHERE_preprocess(sample_ids, split_cube, PSF_loader, config_loader, framewo
 
     # Manage config files
     config_manager = ConfigManager()
-    config_file    = ParameterParser('../data/parameter_files/irdis.ini').params
+    config_file    = ParameterParser(PROJECT_PATH / 'data/parameter_files/irdis.ini').params
     merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample, *config_loader()) for sample in data_samples])
 
     # This is to ensure proper dimensionality
