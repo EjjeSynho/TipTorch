@@ -288,8 +288,6 @@ x_muse, y_muse = wcs_m.world_to_pixel(muse_match)   # units: pixels
 # (b) Convert matched HST sky coords → HST pixel coords:
 x_hst, y_hst = wcs_h.world_to_pixel(hst_match)
 
-
-
 # pick a central RA/Dec somewhere near the field center:
 ra0 = muse_match.ra.mean()
 dec0 = muse_match.dec.mean()

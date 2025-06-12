@@ -218,7 +218,7 @@ class TipTorch(torch.nn.Module):
     def PistonFilter(self, f):
         ''' Piston mode filter for PSD '''
         x = torch.pi * self.D * f
-        R = torch.special.bessel_j1(x) / x
+        R = self.bessel_j1(x) / x
         piston_filter = 1.0 - 4*R.pow(2)
         piston_filter[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 1-self.nOtf_AO % 2
         return self._stabilize(piston_filter)
@@ -483,6 +483,12 @@ class TipTorch(torch.nn.Module):
         self._to_odd_arr = lambda arr: np.vectorize(self._to_odd)(arr)
 
         self._initialize_PSDs_settings(PSD_include)
+
+        # Define Bessel J1 function depending on the platform, torch.special.bessel_j1 is not supported on MPS
+        if self.device.type == "mps":
+            self.bessel_j1 = lambda x: torch.special.bessel_j1(x.to("cpu")).to(x.device, dtype=x.dtype)
+        else:
+            self.bessel_j1 = lambda x: torch.special.bessel_j1(x)
 
         # Initialize constants
         self.var_RON_const  = self.make_tensor(torch.pi**2/3)
