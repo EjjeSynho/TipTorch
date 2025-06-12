@@ -51,14 +51,38 @@ class Calibrator(nn.Module):
 
     def train(self):
         self.net.train()
-
+    
+    def forward(self, x):
+        # Handle conversion to tensor based on input type
+        if isinstance(x, (pd.DataFrame, pd.Series)):
+            NN_inp = torch.as_tensor(x.to_numpy(), device=self.device, dtype=self.dtype)
+        elif isinstance(x, (list, np.ndarray)):
+            NN_inp = torch.as_tensor(x, device=self.device, dtype=self.dtype)
+        elif isinstance(x, torch.Tensor):
+            # Only convert if needed
+            if x.device != self.device or x.dtype != self.dtype:
+                NN_inp = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
+            else:
+                NN_inp = x  # Use as is, no conversion needed
+        else:
+            raise ValueError('NN_inputs must be a pandas DataFrame, numpy array, list, or torch tensor')
+        
+        # Handle single floats or 1D arrays
+        if NN_inp.ndim == 1:
+            NN_inp = NN_inp.view(1, -1)
+        
+        # Process and return
+        # Scale the inputs back to the original range and pack them into the dictionary format
+        return self.normalizer.unstack(self.net(NN_inp))
+    
+    '''
     def forward(self, x):
         if type(x) is pd.DataFrame or type(x) is pd.Series:
             NN_inp = torch.as_tensor(x.to_numpy(), device=self.device, dtype=self.dtype)
         elif type(x) is list or type(x) is np.ndarray:
             NN_inp = torch.as_tensor(x, device=self.device, dtype=self.dtype)
         elif type(x) is torch.Tensor:
-            NN_inp = x.to(dtype=self.dtype)
+            NN_inp = x.to(self.device, dtype=self.dtype)
         else:
             raise ValueError('NN_inputs must be a pandas DataFrame, numpy array, list, or torch tensor')
 
@@ -66,3 +90,4 @@ class Calibrator(nn.Module):
 
         # Scale the inputs back to the original range and pack them into the dictionary format
         return self.normalizer.unstack(self.net(NN_inp))
+    '''

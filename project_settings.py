@@ -61,7 +61,8 @@ def resolve_device(preferred: str) -> torch.device:
             if getattr(torch.backends.mps, "is_available", lambda: False)():
                 torch.set_default_dtype(torch.float32) # MPS only supports float32
                 default_torch_type = torch.float32
-                return torch.device("mps")
+                # TODO: implement MPS support # return torch.device("mps")
+                return torch.device("cpu")
 
     # 2) If config choice didn't work -> pick best on this machine
     if torch.cuda.is_available():
@@ -70,12 +71,15 @@ def resolve_device(preferred: str) -> torch.device:
     if platform.system() == "Darwin" and getattr(torch.backends.mps, "is_available", lambda: False)():
         torch.set_default_dtype(torch.float32) # MPS only supports float32
         default_torch_type = torch.float32
-        return torch.device("mps")
+        # TODO: implement MPS support # return torch.device("mps")
+        # return torch.device("mps")
+        return torch.device("cpu")
 
     # 3) Give up and fall back to CPU
     return torch.device("cpu")
 
 device = resolve_device(project_settings["device"])
+# device = torch.device("cpu")
 
 # Check if GPU is available and has sufficient VRAM to use CuPy
 #TODO: do the same memory check for PyTorch

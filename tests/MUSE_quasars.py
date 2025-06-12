@@ -111,7 +111,7 @@ from PSF_models.TipTorch import TipTorch
 LO_map_size = 31
 
 # Initialize the PSF model
-pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
+pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device, dtype=default_torch_type)
 PSD_include = {
     'fitting':         True,
     'WFS noise':       True,
@@ -237,8 +237,8 @@ with torch.no_grad():
 # How much flux is cropped by assuming the finite size of the PSF box (PSF_predbif is assumed to be quasi-infinite)
 crop_ratio = (PSF_pred_big.amax(dim=(-2,-1)) / PSF_pred_small.amax(dim=(-2,-1))).squeeze()
 
-core_mask     = torch.tensor(mask_circle(PSF_size, flux_core_radius+1)[None,None,...]).to(device).float()
-core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...]).to(device).float()
+core_mask     = torch.tensor(mask_circle(PSF_size, flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
 
 # How much flux is spread out of the PSF core because PSF is not a single pixel but rather "a blob"
 core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
@@ -427,9 +427,9 @@ curve_inputs.add('Jy_A', torch.tensor([params_Jy[0]]), Uniform(a=-5e-5, b=5e-5))
 curve_inputs.add('Jy_B', torch.tensor([params_Jy[1]]), Uniform(a=-5e-2, b=5e-2))
 curve_inputs.add('Jy_C', torch.tensor([params_Jy[2]]), Uniform(a=30,    b=60))
 
-curve_inputs.add('F_A',   torch.tensor([params_F[0]]),  Uniform(a=5e-7,  b=10e-7))
-curve_inputs.add('F_B',   torch.tensor([params_F[1]]),  Uniform(a=-2e-3, b=0))
-curve_inputs.add('F_C',   torch.tensor([params_F[2]]),  Uniform(a=0,     b=2))
+curve_inputs.add('F_A',  torch.tensor([params_F[0]]),  Uniform(a=5e-7,  b=10e-7))
+curve_inputs.add('F_B',  torch.tensor([params_F[1]]),  Uniform(a=-2e-3, b=0))
+curve_inputs.add('F_C',  torch.tensor([params_F[2]]),  Uniform(a=0,     b=2))
 
 curve_inputs.add('norm_A', torch.tensor([params_norm[0]]), Uniform(a=0, b=2e-2))
 curve_inputs.add('norm_B', torch.tensor([params_norm[1]]), Uniform(a=50, b=-20))
@@ -732,7 +732,6 @@ diff_rgb = plot_wavelength_rgb_log(
 
 
 # %%
-
 from astropy.io import fits
 import numpy as np
 import os
