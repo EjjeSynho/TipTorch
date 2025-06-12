@@ -4,6 +4,8 @@ import os, sys
 import json
 import torch
 from pathlib import Path
+
+from traitlets import default
 from tools.utils import DownloadFromRemote
 import warnings
 import platform
@@ -38,6 +40,7 @@ MUSE_DATA_FOLDER   = Path(project_settings["MUSE_data_folder"])
 SPHERE_DATA_FOLDER = Path(project_settings["SPHERE_data_folder"])
 LIFT_PATH          = Path(project_settings["LIFT_path"])
 
+default_torch_type = torch.float32
 
 def resolve_device(preferred: str) -> torch.device:
     """
@@ -57,6 +60,7 @@ def resolve_device(preferred: str) -> torch.device:
         if preferred in ("mps", "metal") and platform.system() == "Darwin":
             if getattr(torch.backends.mps, "is_available", lambda: False)():
                 torch.set_default_dtype(torch.float32) # MPS only supports float32
+                default_torch_type = torch.float32
                 return torch.device("mps")
 
     # 2) If config choice didn't work -> pick best on this machine
@@ -65,6 +69,7 @@ def resolve_device(preferred: str) -> torch.device:
     
     if platform.system() == "Darwin" and getattr(torch.backends.mps, "is_available", lambda: False)():
         torch.set_default_dtype(torch.float32) # MPS only supports float32
+        default_torch_type = torch.float32
         return torch.device("mps")
 
     # 3) Give up and fall back to CPU

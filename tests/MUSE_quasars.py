@@ -11,7 +11,7 @@ import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from project_settings import PROJECT_PATH, MUSE_DATA_FOLDER, device
+from project_settings import PROJECT_PATH, MUSE_DATA_FOLDER, device, default_torch_type
 
 import torch
 import torch.nn.functional as F
@@ -121,10 +121,9 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          False
 }
-model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1, default_type=default_torch_type)
 model.to_float()
 model.to(device)
-
 
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
 from data_processing.normalizers import Uniform

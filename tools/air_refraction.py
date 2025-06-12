@@ -104,54 +104,54 @@ class AirRefractiveIndexCalculator:
         self.dtype = dtype
 
         # Create constants as tensors on the target device.
-        self.t_0   = torch.tensor(273.15, device=self.device, dtype=self.dtype)  # 0°C offset (Kelvin)
+        self.t_0   = torch.tensor(273.15,   device=self.device, dtype=self.dtype)  # 0°C offset (Kelvin)
         self.R     = torch.tensor(8.314510, device=self.device, dtype=self.dtype)  # Gas constant (J/(mol·K))
 
         # Refractivity coefficients.
-        self.k0 = torch.tensor(238.0185, device=self.device, dtype=self.dtype)
+        self.k0 = torch.tensor(238.0185,  device=self.device, dtype=self.dtype)
         self.k1 = torch.tensor(5792105.0, device=self.device, dtype=self.dtype)
-        self.k2 = torch.tensor(57.362, device=self.device, dtype=self.dtype)
-        self.k3 = torch.tensor(167917.0, device=self.device, dtype=self.dtype)
+        self.k2 = torch.tensor(57.362,    device=self.device, dtype=self.dtype)
+        self.k3 = torch.tensor(167917.0,  device=self.device, dtype=self.dtype)
 
-        self.w0 = torch.tensor(295.235, device=self.device, dtype=self.dtype)
-        self.w1 = torch.tensor(2.6422, device=self.device, dtype=self.dtype)
+        self.w0 = torch.tensor(295.235,   device=self.device, dtype=self.dtype)
+        self.w1 = torch.tensor(2.6422,    device=self.device, dtype=self.dtype)
         self.w2 = torch.tensor(-0.032380, device=self.device, dtype=self.dtype)
-        self.w3 = torch.tensor(0.004028, device=self.device, dtype=self.dtype)
+        self.w3 = torch.tensor(0.004028,  device=self.device, dtype=self.dtype)
 
-        self.A = torch.tensor(1.2378847e-5, device=self.device, dtype=self.dtype)
+        self.A = torch.tensor(1.2378847e-5,  device=self.device, dtype=self.dtype)
         self.B = torch.tensor(-1.9121316e-2, device=self.device, dtype=self.dtype)
-        self.C = torch.tensor(33.93711047, device=self.device, dtype=self.dtype)
-        self.D = torch.tensor(-6.3431645e3, device=self.device, dtype=self.dtype)
+        self.C = torch.tensor(33.93711047,   device=self.device, dtype=self.dtype)
+        self.D = torch.tensor(-6.3431645e3,  device=self.device, dtype=self.dtype)
 
         self.alpha = torch.tensor(1.00062, device=self.device, dtype=self.dtype)
         self.beta  = torch.tensor(3.14e-8, device=self.device, dtype=self.dtype)
-        self.gamma = torch.tensor(5.6e-7, device=self.device, dtype=self.dtype)
+        self.gamma = torch.tensor(5.6e-7,  device=self.device, dtype=self.dtype)
 
         # Coefficients for compressibility.
         self.a0 = torch.tensor(1.58123e-6, device=self.device, dtype=self.dtype)
         self.a1 = torch.tensor(-2.9331e-8, device=self.device, dtype=self.dtype)
         self.a2 = torch.tensor(1.1043e-10, device=self.device, dtype=self.dtype)
-        self.b0 = torch.tensor(5.707e-6, device=self.device, dtype=self.dtype)
-        self.b1 = torch.tensor(-2.051e-8, device=self.device, dtype=self.dtype)
-        self.c0 = torch.tensor(1.9898e-4, device=self.device, dtype=self.dtype)
-        self.c1 = torch.tensor(-2.376e-6, device=self.device, dtype=self.dtype)
-        self.d  = torch.tensor(1.83e-11, device=self.device, dtype=self.dtype)
-        self.e  = torch.tensor(-0.765e-8, device=self.device, dtype=self.dtype)
+        self.b0 = torch.tensor(5.707e-6,   device=self.device, dtype=self.dtype)
+        self.b1 = torch.tensor(-2.051e-8,  device=self.device, dtype=self.dtype)
+        self.c0 = torch.tensor(1.9898e-4,  device=self.device, dtype=self.dtype)
+        self.c1 = torch.tensor(-2.376e-6,  device=self.device, dtype=self.dtype)
+        self.d  = torch.tensor(1.83e-11,   device=self.device, dtype=self.dtype)
+        self.e  = torch.tensor(-0.765e-8,  device=self.device, dtype=self.dtype)
 
         # A constant for base-10 calculations.
         self.ten = torch.tensor(10.0, device=self.device, dtype=self.dtype)
 
         # Precompute standard-state compressibility factors.
         # Dry air: T = 288.15 K, p = 101325 Pa, xw = 0.
-        std_T_air = torch.tensor(288.15, device=self.device, dtype=self.dtype)
+        std_T_air = torch.tensor(288.15,   device=self.device, dtype=self.dtype)
         std_p_air = torch.tensor(101325.0, device=self.device, dtype=self.dtype)
-        std_xw_air = torch.tensor(0.0, device=self.device, dtype=self.dtype)
+        std_xw_air = torch.tensor(0.0,     device=self.device, dtype=self.dtype)
         self.Za = self._Z(std_T_air, std_p_air, std_xw_air)
 
         # Water vapor: T = 293.15 K, p = 1333 Pa, xw = 1.
         std_T_wv = torch.tensor(293.15, device=self.device, dtype=self.dtype)
         std_p_wv = torch.tensor(1333.0, device=self.device, dtype=self.dtype)
-        std_xw_wv = torch.tensor(1.0, device=self.device, dtype=self.dtype)
+        std_xw_wv = torch.tensor(1.0,   device=self.device, dtype=self.dtype)
         self.Zw = self._Z(std_T_wv, std_p_wv, std_xw_wv)
 
         # Precompute standard densities.
@@ -162,10 +162,10 @@ class AirRefractiveIndexCalculator:
         self.rhoaxs = std_p_air * self.Ma_std / (self.Za * self.R * std_T_air)
         self.rhows  = std_p_wv * self.Mw   / (self.Zw * self.R * std_T_wv)
         
-        self.t_def  = torch.tensor(20, device=self.device, dtype=self.dtype)
+        self.t_def  = torch.tensor(20,  device=self.device, dtype=self.dtype)
         self.p_def  = torch.tensor(1e5, device=self.device, dtype=self.dtype)
-        self.h_def  = torch.tensor(0, device=self.device, dtype=self.dtype)
-        self.xc_def = torch.tensor(0, device=self.device, dtype=self.dtype)
+        self.h_def  = torch.tensor(0,   device=self.device, dtype=self.dtype)
+        self.xc_def = torch.tensor(0,   device=self.device, dtype=self.dtype)
         
 
     def _Z(self, T, p, xw):
