@@ -498,7 +498,7 @@ class TipTorch(torch.nn.Module):
 
         self.n_air = AirRefractiveIndexCalculator(device=self.device, dtype=self.default_type)
 
-        if self.device.type != 'cpu':
+        if self.device.type == 'cuda':
             self.start = torch.cuda.Event(enable_timing=True)
             self.end   = torch.cuda.Event(enable_timing=True)
 
@@ -1174,22 +1174,20 @@ class TipTorch(torch.nn.Module):
         )
 
 
-    # TODO: timer as a separate class
+    # TODO: timer as a separate class?
     def StartTimer(self):
-        if self.device.type == 'cpu':
-            self.start = time.time()
-        else:
+        if self.device.type == 'cuda': 
             self.start.record()
-
+        else:
+            self.start = time.time()
 
     def EndTimer(self):
-        if self.device.type == 'cpu':
-            self.end = time.time()
-            return (self.end-self.start)*1000.0 # in [ms]
-        else:
+        if self.device.type == 'cuda':
             self.end.record()
             torch.cuda.synchronize()
             return self.start.elapsed_time(self.end)
-
-
+        else:
+            self.end = time.time()
+            return (self.end-self.start)*1000.0 # in [ms]
+        
 # %%
