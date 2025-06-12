@@ -24,10 +24,11 @@ class Gnosis(nn.Module):
 
 class Calibrator(nn.Module):
 
-    def __init__(self, inputs_manager, calibrator_network, predicted_values, device=torch.device('cpu')):
+    def __init__(self, inputs_manager, calibrator_network, predicted_values, device=torch.device('cpu'), dtype=torch.float32):
         super().__init__()
         self.device = device
         self.predicted_values = predicted_values
+        self.dtype = dtype
         
         # Initialiize inputs normalizer and staker/unstacker
         self.normalizer = InputsTransformer({ inp: inputs_manager.get_transform(inp) for inp in predicted_values })
@@ -41,8 +42,8 @@ class Calibrator(nn.Module):
         NN_kwargs      = calibrator_network['NN_kwargs']
 
         self.net = net_class(inputs_size, outputs_size, **NN_kwargs)
+        self.net.to(dtype=self.dtype)
         self.net.to(device)
-        self.net.float() # TODO: support double precision
         self.net.load_state_dict(torch.load(weights_folder, map_location=torch.device('cpu')))
 
     def eval(self):
@@ -53,17 +54,15 @@ class Calibrator(nn.Module):
 
     def forward(self, x):
         if type(x) is pd.DataFrame or type(x) is pd.Series:
-            NN_inp = torch.as_tensor(x.to_numpy(), device=self.device)
+            NN_inp = torch.as_tensor(x.to_numpy(), device=self.device, dtype=self.dtype)
         elif type(x) is list or type(x) is np.ndarray:
-            NN_inp = torch.as_tensor(x, device=self.device)
+            NN_inp = torch.as_tensor(x, device=self.device, dtype=self.dtype)
         elif type(x) is torch.Tensor:
-            NN_inp = x
+            NN_inp = x.to(dtype=self.dtype)
         else:
             raise ValueError('NN_inputs must be a pandas DataFrame, numpy array, list, or torch tensor')
 
         if NN_inp.ndim == 1: NN_inp = NN_inp.unsqueeze(0)
-
-        NN_inp = NN_inp.float() # TODO: support double precision
 
         # Scale the inputs back to the original range and pack them into the dictionary format
         return self.normalizer.unstack(self.net(NN_inp))

@@ -464,21 +464,21 @@ class TipTorch(torch.nn.Module):
         #TODO: an open-loop case
 
 
-    def __init__(self, AO_config, AO_type, pupil=None, PSD_include=None, norm_regime='sum', device=torch.device('cpu'), oversampling=1, default_type=torch.float64):
+    def __init__(self, AO_config, AO_type, pupil=None, PSD_include=None, norm_regime='sum', device=torch.device('cpu'), oversampling=1, dtype=torch.float32):
         super().__init__()
         
         self.device = device
         self.oversampling = oversampling
         self.pupil = pupil
         self.is_float = False
-        self.default_type = default_type
+        self.dtype = dtype
                
         self.AO_type = AO_type
         self.tomography = True if self.AO_type in ['LTAO', 'MCAO', 'GLAO'] else False # TODO: automatic regime selection
 
         # Useful lambda functions
         self.r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0).pow(6/5)
-        self.make_tensor = lambda x: torch.as_tensor(x, device=self.device, dtype=self.default_type) if type(x) is not torch.Tensor else x
+        self.make_tensor = lambda x: torch.as_tensor(x, device=self.device, dtype=self.dtype) if type(x) is not torch.Tensor else x
         self.interp = lambda x, sampling: interpolate(x, size=(self.nOtf,self.nOtf), mode='bilinear', align_corners=False) * sampling**2
         self._to_odd_arr = lambda arr: np.vectorize(self._to_odd)(arr)
 
@@ -502,7 +502,7 @@ class TipTorch(torch.nn.Module):
         self.cte = self.make_tensor( (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3))) )
         self.jitter_norm_fact = self.make_tensor( 2*np.sqrt(2*np.log(2)) ).pow(2)
 
-        self.n_air = AirRefractiveIndexCalculator(device=self.device, dtype=self.default_type)
+        self.n_air = AirRefractiveIndexCalculator(device=self.device, dtype=self.dtype)
 
         if self.device.type == 'cuda':
             self.start = torch.cuda.Event(enable_timing=True)

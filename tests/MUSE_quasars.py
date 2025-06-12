@@ -121,7 +121,7 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          False
 }
-model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1, default_type=default_torch_type)
+model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1, dtype=default_torch_type)
 model.to_float()
 model.to(device)
 
@@ -204,6 +204,7 @@ calibrator = Calibrator(
     inputs_manager=inputs_manager,
     predicted_values = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow', 'amp', 'b', 'alpha'],
     device=device,
+    dtype=default_torch_type,
     calibrator_network = {
         'artichitecture': Gnosis,
         'inputs_size': len(telemetry_inputs),
