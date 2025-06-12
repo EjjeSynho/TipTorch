@@ -731,7 +731,7 @@ diff_rgb = plot_wavelength_rgb_log(
 
 
 # %%
-'''
+
 from astropy.io import fits
 import numpy as np
 import os
@@ -742,6 +742,5 @@ hdu = fits.PrimaryHDU(model_full.astype(np.float32))
 
 # Create HDUList
 hdul = fits.HDUList([hdu])
-output_path = MUSE_DATA_FOLDER / 'J0259_modeled_cube.fits'
-hdul.writeto(output_path, overwrite=True)
-'''
+hdul.writeto(MUSE_DATA_FOLDER / 'J0259_modeled_cube.fits', overwrite=True)
+
