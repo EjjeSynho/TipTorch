@@ -68,7 +68,7 @@ ROIs    = srcs_image_data["images"]
 
 def get_src_coords_in_pixels(src_idx):
     return \
-        np.round(sources['x_peak'].iloc[src_idx]).astype(int),\
+        np.round(sources['x_peak'].iloc[src_idx]).astype(int), \
         np.round(sources['y_peak'].iloc[src_idx]).astype(int)
     
 #%%

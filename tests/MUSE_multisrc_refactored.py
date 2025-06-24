@@ -120,6 +120,7 @@ ROIs    = srcs_image_data["images"]
 
 yy, xx = torch.where(valid_mask.squeeze() > 0) # Compute center of mass for valid mask assuming it's the center of the field
 
+#TODO: welp, easier computation of the field's center?
 field_center    = np.stack([xx.float().mean().item(), yy.float().mean().item()])[None,...]
 sources_coords  = np.stack([sources['x_peak'].values, sources['y_peak'].values], axis=1)
 sources_coords -= field_center
