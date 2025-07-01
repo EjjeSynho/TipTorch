@@ -96,12 +96,13 @@ def plot_wavelength_rgb_log(image, wavelengths=None, min_val=1e-3, max_val=1e1, 
     image_clipped = np.clip(image_log, log_min, log_max)
     norm_image = (image_clipped - log_min) / (log_max - log_min)
 
+    plt.figure()
+    plt.imshow(norm_image, origin="lower")
+    if title:
+        plt.title(title)
+    plt.axis('off')
+    
     if show:
-        plt.figure()
-        plt.imshow(norm_image, origin="lower")
-        if title:
-            plt.title(title)
-        plt.axis('off')
         plt.show()
 
     return image_RGB

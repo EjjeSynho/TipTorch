@@ -1,15 +1,17 @@
 import numpy as np
 import torch
+from typing import Union
+from sklearn.cluster import DBSCAN
+import pandas as pd
 from matplotlib import pyplot as plt
 from astropy.visualization import simple_norm
 from astropy.visualization import LinearStretch, ImageNormalize
-from tools.plotting import plot_radial_profiles
-from sklearn.cluster import DBSCAN
-import pandas as pd
+from astropy.stats import sigma_clipped_stats
 from photutils.detection import find_peaks
 from photutils.aperture import RectangularAperture
 from matplotlib.colors import LogNorm
-from typing import Union
+from traitlets import Instance
+from tools.plotting import plot_radial_profiles
 
 
 """
@@ -115,9 +117,15 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
     return ROIs, roi_local_coords, roi_global_coords, valid_ids
 
 
-def DetectSources(data_cube, threshold, display=False, draw_win_size=None):
+def DetectSources(data_cube, threshold, nsigma=3.0, display=False, draw_win_size=None):
 
     data_src = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_src.sum(axis=0)
+    
+    _, median, std = sigma_clipped_stats(np.nan_to_num(data_src), sigma=nsigma)
+    
+    if threshold is None or threshold == 'auto':
+        threshold = median + nsigma * std
+        if display: print(f"[auto] using threshold = median + {nsigma}·std = {threshold:.2f}")
     
     # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
     sources_df = detect_sources(data_src, threshold=threshold, box_size=11, verbose=True)
@@ -128,7 +136,7 @@ def DetectSources(data_cube, threshold, display=False, draw_win_size=None):
         srcs_pos  = np.transpose((sources_df['x_peak'], sources_df['y_peak']))
         # srcs_flux = sources['peak_value'].to_numpy()
         apertures_box = RectangularAperture(srcs_pos, draw_win_size, draw_win_size)
-        norm_field = LogNorm(vmin=10, vmax=threshold*10) # TODO: make it more statistical
+        norm_field = LogNorm(vmin=median*0.9, vmax=threshold*10) # TODO: make it more statistical
 
         plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
         apertures_box.plot(color='gold', lw=2, alpha=0.45)
@@ -139,7 +147,8 @@ def DetectSources(data_cube, threshold, display=False, draw_win_size=None):
 
 def ExtractSources(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
     ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size)
-    sources_valid = srcs_coords.iloc[valid_srcs].reset_index(drop=True) if filter_sources else srcs_coords
+    # sources_valid = srcs_coords.iloc[valid_srcs].reset_index(drop=True) if filter_sources else srcs_coords
+    sources_valid = srcs_coords.iloc[valid_srcs] if filter_sources else srcs_coords
 
     if debug_draw:
         N_cols = min(8, int(np.ceil(np.sqrt(len(ROIs))))) # Automatically adjusts the number of displayed  columns
@@ -193,7 +202,7 @@ def add_ROIs(image, ROIs, local_coords, global_coords):
             (y_min_img, y_max_img), (x_min_img, x_max_img) = global_coords[i]
 
             image[:, y_min_img:y_max_img, x_min_img:x_max_img] += roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
-    else:
+    else:       
         # Original implementation for list of ROIs
         for roi, local_idx, global_idx in zip(ROIs, local_coords, global_coords):
             (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_idx
@@ -202,6 +211,34 @@ def add_ROIs(image, ROIs, local_coords, global_coords):
             image[:, y_min_img:y_max_img, x_min_img:x_max_img] += roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
 
     return image
+
+
+def add_ROIs_separately(image, ROIs, local_coords, global_coords):
+    # If ROIs is a torch tensor with ROIs in the 0th dimension
+    
+    # Repeat image for each ROI
+    if isinstance(image, torch.Tensor):
+        images = [image.clone() for _ in range(len(ROIs))]
+    else:
+        images = [image.copy() for _ in range(len(ROIs))]
+    
+    if isinstance(ROIs, torch.Tensor) and ROIs.ndim == 4:  # [num_rois, channels, height, width]
+        for i in range(ROIs.shape[0]):
+            roi = ROIs[i]
+        
+            (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_coords[i]
+            (y_min_img, y_max_img), (x_min_img, x_max_img) = global_coords[i]
+
+            images[i][:, y_min_img:y_max_img, x_min_img:x_max_img] += roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+    else:
+        # Original implementation for list of ROIs
+        for i, (roi, local_idx, global_idx) in enumerate(zip(ROIs, local_coords, global_coords)):
+            (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local_idx
+            (y_min_img, y_max_img), (x_min_img, x_max_img) = global_idx
+    
+            images[i][:, y_min_img:y_max_img, x_min_img:x_max_img] += roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi]
+
+    return torch.stack(images, dim=0)
 
 
 def plot_ROIs_as_grid(ROIs, cols=5):
@@ -228,7 +265,7 @@ def plot_ROIs_as_grid(ROIs, cols=5):
     
     
 
-def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None):
+def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
     """
     Visualize source data, model, and their difference.
 
@@ -275,9 +312,10 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None):
         plt.imshow(img, norm=norm, origin='lower')
         plt.title(title)
         plt.axis('off')
-        plt.show()
+        if show: plt.show()
 
     return diff_vis
+    
     
 def PlotSourcesProfiles(data, model, sources, radius, title=''):
 

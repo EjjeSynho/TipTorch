@@ -1398,7 +1398,8 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     #TODO: fix uneven Δλ division!
     λ_min, λ_max, Δλ_full = data_cached['spectral data']['wvl range']
     λ_bins = data_cached['spectral data']['wvl bins']
-    Δλ_binned = np.median(np.concatenate([np.diff(λ_bins[λ_bins < 589]), np.diff(λ_bins[λ_bins > 589])]))
+    # Δλ_binned = np.median(np.concatenate([np.diff(λ_bins[λ_bins < 589]), np.diff(λ_bins[λ_bins > 589])]))
+    Δλ_binned = np.concatenate([np.diff(λ_bins[λ_bins < 589]), np.diff(λ_bins[λ_bins > 589])])
 
     if hasattr(λ_max, 'item'): # To compensate for a small error in the data reduction routine
         λ_max = λ_max.item()
@@ -1427,7 +1428,8 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     # Select sparse wavelength set
     # TODO: a code to select the specified number of spectral slices
     ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 2)
-    λ_sparse = λ_binned[..., ids_λ_sparse]
+    λ_sparse  =  λ_binned[..., ids_λ_sparse]
+    Δλ_binned = Δλ_binned[..., ids_λ_sparse]
     model_config['sources_science']['Wavelength'] = λ_sparse
 
     cube_sparse = cube_binned.clone()[ids_λ_sparse, ...] # Select the subset of λs

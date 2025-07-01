@@ -3,6 +3,7 @@
 
 import os
 import glob
+import pickle
 from attr import s
 import pandas as pd
 from scipy.interpolate import interp1d
@@ -22,6 +23,7 @@ from tools.utils import Photometry
 
 cube_path   = MUSE_DATA_FOLDER / "omega_cluster/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 data_folder = MUSE_DATA_FOLDER / 'omega_cluster/OmegaCentaury_data/'
+
 #%%
 print("Loading the Astrometric part of the catalog...")
 t_astro = Table.read(str(data_folder / "astrometry.fits"))
@@ -78,7 +80,7 @@ mask = sep < radius                   # boolean array
 # 5) Extract only the matching sources
 sel_idx = np.nonzero(mask)[0]                 # indices into your 2M+ catalog
 df_sel  = df_astro.iloc[sel_idx].copy()
-df_mag  = df_phot .loc[df_sel.index]    
+df_mag  = df_phot.loc[df_sel.index]    
   
 # 6) Transform the selected sky coords into pixel coordinates
 #    (world_to_pixel returns floats)
@@ -134,7 +136,6 @@ ax.legend(loc='upper right')
 plt.tight_layout()
 plt.show()
 
-
 #%%
 import json
 
@@ -182,8 +183,6 @@ for filter_name in df_mag.columns:
     filters_data[filter_name] = (filter_data.pivot().value / 10, filter_data.fwhm().value / 10)
 
 #%%
-import pickle
-
 data_store = {
     'Astrometry': df_sel,
     'AB magnitudes': df_mag,
@@ -197,7 +196,22 @@ try:
         print(f'Data saved to {str(fname)}')
 except Exception as e:
     print(f'Error saving data: {e}')
+    
+#%%
+try:
+    with open(fname := data_folder / 'omega_selected_srcs.pkl', 'rb') as f:
+        data_store = pickle.load(f)
+        print(f'Data loaded from {str(fname)}')
+
+        # Extract data from the dictionary
+        df_sel = data_store['Astrometry']
+        df_mag = data_store['AB magnitudes']
+        df_flux = data_store['Fluxes (MUSE units):']
+        filters_data = data_store['Filters data (pivot, FWHM) [nm]']
         
+except Exception as e:
+    print(f'Error loading data: {e}')
+
 
 #%% ========================= Load MUSE data to detect and match sources =========================
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
@@ -380,7 +394,7 @@ df_HST_sources_filtered.rename(columns={'x': 'x, [asec]'}, inplace=True)
 df_HST_sources_filtered.rename(columns={'y': 'y, [asec]'}, inplace=True)
 
 try:
-    df_HST_sources_filtered.to_csv(fname := data_folder / 'HST_sources_in_FoV.csv', index=False)
+    df_HST_sources_filtered.to_csv(fname := data_folder / 'HST_sources_in_FoV.csv', index=True, index_label='ID')
     print("DataFrame saved successfully to", fname)
 except Exception as e:
     print(f"An error occurred while saving the DataFrame: {e}")
