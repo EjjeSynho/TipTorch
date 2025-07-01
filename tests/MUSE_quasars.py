@@ -113,7 +113,6 @@ if not isinstance(data_folder, Path):
 cube_path  = data_folder / "J0144/J0144-5745.fits"
 cache_path = data_folder / "J0144/J0144-5745_cache.pickle"
 raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
-PSFs_out_path = data_folder / "J0144/PSFs.pickle"
 
 #%
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
@@ -136,7 +135,7 @@ from managers.multisrc_manager import add_ROIs, DetectSources, ExtractSources
 
 PSF_size = 111  # Define the size of each extracted PSF
 
-sources = DetectSources(cube_sparse, threshold='auto', nsigma=10, display=True, draw_win_size=20)
+sources = DetectSources(cube_sparse, threshold='auto', nsigma=20, display=True, draw_win_size=20)
 # Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
 srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
@@ -438,7 +437,7 @@ def loss(x_, data, func):
     
     # Combine the loss terms
     # return l1 * 1e-3 + l2 * 5e-6 + negative_residual_penalty * 1e-2 * J_ratio_penalty * 0.1
-    return l1 + l2*0.25 + negative_residual_penalty*2 * J_ratio_penalty*0.1
+    return l1*1.5 + l2*0.25 + negative_residual_penalty*2 * J_ratio_penalty*0.05
 
 
 _ = func_fit(x0)
@@ -786,7 +785,7 @@ plt.xlabel('Wavelength, [nm]')
 plt.show()
     
 #%% Plot multispectral cubes as RGB images
-from tools.plotting import plot_wavelength_rgb_log
+from tools.plotting import plot_wavelength_rgb_log, plot_wavelength_rgb_linear
 from photutils.aperture import RectangularAperture
 
 # Mapping MUSE λs range to visible spectrum range for RGB conversion
@@ -833,14 +832,25 @@ if split_PSFs:
     # Create primary HDU
 
     hdu = fits.PrimaryHDU(model_full_split.astype(np.float32))
-    # Add wavelength information to the header
+
+    hdu.header['CRVAL1'] = 1                     # Reference pixel value for x axis
+    hdu.header['CDELT1'] = 1                     # Pixel step size for x axis
+    hdu.header['CUNIT1'] = 'pixel'               # Pixel unit for x axis
+    hdu.header['CTYPE1'] = 'PIXEL'                # Axis type is pixel for x axis
+    hdu.header['CRPIX1'] = 1                     # Reference pixel for x axis
+    
+    hdu.header['CRVAL2'] = 1                     # Reference pixel value for y axis
+    hdu.header['CDELT2'] = 1                     # Pixel step size for y axis
+    hdu.header['CUNIT2'] = 'pixel'               # Pixel unit for y axis
+    hdu.header['CTYPE2'] = 'PIXEL'                # Axis type is pixel for y axis
+    hdu.header['CRPIX2'] = 1                     # Reference pixel for y axis
+        
     hdu.header['CRVAL3'] = λ_full[0]             # Reference wavelength value
     hdu.header['CDELT3'] = λ_full[1] - λ_full[0] # Wavelength step size
     hdu.header['CUNIT3'] = 'nm'                  # Wavelength unit
     hdu.header['CTYPE3'] = 'WAVE'                # Axis type is wavelength
     hdu.header['CRPIX3'] = 1                     # Reference pixel
 
-    # Add object dimension information
     hdu.header['CTYPE4'] = 'OBJECT'              # Fourth dimension is for different objects
     hdu.header['CRPIX4'] = 1                     # Reference pixel for object dimension
     hdu.header['CRVAL4'] = 1                     # First object has index 1
@@ -855,12 +865,31 @@ if split_PSFs:
     print(f"Saved 4D model cube to {output_file}")
     
 else:
-    # Convert model_full to float32 to save space
     # Create primary HDU
     hdu = fits.PrimaryHDU(model_full.astype(np.float32))
+
+    hdu.header['CRVAL1'] = 1                     # Reference pixel value for x axis
+    hdu.header['CDELT1'] = 1                     # Pixel step size for x axis
+    hdu.header['CUNIT1'] = 'pixel'               # Pixel unit for x axis
+    hdu.header['CTYPE1'] = 'PIXEL'                # Axis type is pixel for x axis
+    hdu.header['CRPIX1'] = 1                     # Reference pixel for x axis
+    
+    hdu.header['CRVAL2'] = 1                     # Reference pixel value for y axis
+    hdu.header['CDELT2'] = 1                     # Pixel step size for y axis
+    hdu.header['CUNIT2'] = 'pixel'               # Pixel unit for y axis
+    hdu.header['CTYPE2'] = 'PIXEL'                # Axis type is pixel for y axis
+    hdu.header['CRPIX2'] = 1                     # Reference pixel for y axis
+        
+    hdu.header['CRVAL3'] = λ_full[0]             # Reference wavelength value
+    hdu.header['CDELT3'] = λ_full[1] - λ_full[0] # Wavelength step size
+    hdu.header['CUNIT3'] = 'nm'                  # Wavelength unit
+    hdu.header['CTYPE3'] = 'WAVE'                # Axis type is wavelength
+    hdu.header['CRPIX3'] = 1                     # Reference pixel
 
     # Create HDUList
     hdul = fits.HDUList([hdu])
     output_file = data_folder / f'{os.path.splitext(os.path.basename(cube_path))[0]}_modeled_cube.fits'
     hdul.writeto(output_file, overwrite=True)
 
+
+# %%

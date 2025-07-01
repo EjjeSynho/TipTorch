@@ -79,6 +79,67 @@ def render_spectral_PSF(spectral_cube, λs):
         plt.title(f'λ = {λs[id]:.2f} nm')
 
 
+def plot_wavelength_rgb_linear(image,
+                               wavelengths=None,
+                               min_val=0.0,
+                               max_val=1.0,
+                               title=None,
+                               show=True):
+    """
+    Map a multi-wavelength image into RGB by linearly scaling.
+    
+    Parameters
+    ----------
+    image : array-like, shape (N_waves, H, W) or torch.Tensor
+        Stacked wavelength slices.
+    wavelengths : sequence of length N_waves
+        Physical wavelengths corresponding to each image slice.
+    min_val : float
+        Minimum intensity (below this is clipped to 0).
+    max_val : float
+        Maximum intensity (above this is clipped to 1).
+    title : str, optional
+        Plot title.
+    show : bool
+        Whether to call plt.show() or not.
+    
+    Returns
+    -------
+    image_RGB : ndarray, shape (H, W, 3)
+        The raw RGB array (before normalization).
+    """
+    # move torch → numpy
+    if torch.is_tensor(image):
+        image = image.cpu().numpy()
+        
+    # build RGB weights for each wavelength
+    wavelengths = np.asarray(wavelengths)
+    rgb_weights = np.array([wavelength_to_rgb(λ, show_invisible=True)
+                             for λ in wavelengths]).T
+    
+    # apply weights and sum to get an RGB image
+    # weighted shape: (3, N_waves, H, W) → sum over axis=1 → (3, H, W)
+    weighted   = rgb_weights[:, :, None, None] * image[None, :, :, :]
+    image_RGB  = np.abs(weighted.sum(axis=1))        # (3, H, W)
+    image_RGB  = np.moveaxis(image_RGB, 0, -1)       # (H, W, 3)
+    
+    # linear clipping + normalization
+    image_clipped = np.clip(image_RGB, min_val, max_val)
+    norm_image    = (image_clipped - min_val) / (max_val - min_val)
+    
+    # display
+    plt.figure()
+    plt.imshow(norm_image, origin="lower")
+    if title:
+        plt.title(title)
+    plt.axis('off')
+    
+    if show:
+        plt.show()
+    
+    return image_RGB
+
+
 def plot_wavelength_rgb_log(image, wavelengths=None, min_val=1e-3, max_val=1e1, title=None, show=True):
     if torch.is_tensor(image):
         image = image.cpu().numpy()
