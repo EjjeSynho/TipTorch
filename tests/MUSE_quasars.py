@@ -436,8 +436,7 @@ def loss(x_, data, func):
     J_ratio_penalty = (1.0 - shared_inputs['Jx']/shared_inputs['Jy']).abs().mean()
     
     # Combine the loss terms
-    # return l1 * 1e-3 + l2 * 5e-6 + negative_residual_penalty * 1e-2 * J_ratio_penalty * 0.1
-    return l1*1.5 + l2*0.25 + negative_residual_penalty*2 * J_ratio_penalty*0.05
+    return l1*1.5 + l2*0.25 + negative_residual_penalty*3 * J_ratio_penalty*0.25
 
 
 _ = func_fit(x0)
