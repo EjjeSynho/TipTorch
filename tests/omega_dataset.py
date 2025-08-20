@@ -220,7 +220,7 @@ from project_settings import device
 raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.fits.fz"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
-spectral_cubes, spectral_info, data_cached, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, TELEMETRY_CACHEd, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
 
 #%%

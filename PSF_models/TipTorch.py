@@ -114,7 +114,7 @@ class TipTorch(torch.nn.Module):
         self.WFS_d_sub = self.config['sensor_HO']['SizeLenslets']
         self.WFS_n_sub = self.config['sensor_HO']['NumberLenslets']
 
-        self.WFS_det_clock_rate = self.config['sensor_HO']['ClockRate'].flatten() # TODO: what is exactly the clock rate?
+        self.WFS_det_clock_rate = self.config['sensor_HO']['ClockRate'].flatten() # TODO: what is exactly the clock rate is?
         self.WFS_FOV = self.config['sensor_HO']['FieldOfView']
         self.WFS_RON = self.config['sensor_HO']['SigmaRON']
         self.WFS_wvl = self.make_tensor(self.GS_wvl)
@@ -128,7 +128,7 @@ class TipTorch(torch.nn.Module):
         self.WFS_HO = {
             'd_sub': self.config['sensor_HO']['SizeLenslets'],
             'n_sub': self.config['sensor_HO']['NumberLenslets'],
-            'det_clock_rate': self.config['sensor_HO']['ClockRate'].flatten(),  # TODO: what is exactly the clock rate?
+            'det_clock_rate': self.config['sensor_HO']['ClockRate'].flatten(),  # TODO: what is exactly the clock rate is?
             'FOV': self.config['sensor_HO']['FieldOfView'],
             'RON': self.config['sensor_HO']['SigmaRON'],
             'wvl': torch.tensor(self.GS_wvl, device=self.device) if not isinstance(self.GS_wvl, torch.Tensor) else self.GS_wvl,
@@ -258,7 +258,6 @@ class TipTorch(torch.nn.Module):
             self.kx, self.ky = self._gen_grid(self.nOtf)
         
         self.kx, self.ky = self.kx * self.dk, self.ky * self.dk
-
         self.k2 = self.kx**2 + self.ky**2
         self.k = torch.sqrt(self.k2)
 
@@ -358,7 +357,7 @@ class TipTorch(torch.nn.Module):
         self.U, self.V = torch.meshgrid(UV_range, UV_range, indexing = 'ij')
         self.U, self.V = pdims(self.U, -2), pdims(self.V, -2)
         
-        self.u_max = self.sampling * self.D / self.wvl / self.rad2mas
+        self.u_max = (self.sampling * self.D / self.wvl / self.rad2mas)**2 # TODO: check 1/2 factor
         
         self.center_aligner = torch.exp( 1j * torch.pi * (self.U + self.V) * (1 - self.N_pix%2))
 
@@ -372,7 +371,7 @@ class TipTorch(torch.nn.Module):
             self.PR = self.PistonFilter(torch.hypot(self.km, self.kn))
   
     
-    def Phase2OTF(self, phase):    
+    def Phase2OTF(self, phase):
         '''
         Compute OTF from a phase screen.
         All phase screens are sampled equally for all wavelengths (re-scaling happens later when PSFs are computed)
@@ -407,19 +406,13 @@ class TipTorch(torch.nn.Module):
         # Update the model with a new configuration. To ensure optimal performance, different
         # components can be updated independently when needed. By default, only values are updated
         
-        if config is not None:
-            self.config = config
+        if config is not None: self.config = config
         
         self.InitValues()
 
-        if self.is_float:
-            self.to_float()
-
-        if init_grids:
-            self.InitGrids()
-            
-        if init_pupils:
-            self.InitPupils()
+        if self.is_float: self.to_float()
+        if init_grids:    self.InitGrids()
+        if init_pupils:   self.InitPupils()
         
         # If the number of sources have changed, reinitialize the tomography projector
         if (self.tomography and init_tomography) or (self.tomography and init_grids):
@@ -473,8 +466,9 @@ class TipTorch(torch.nn.Module):
         self.is_float = False
         self.dtype = dtype
                
+        # TODO: automatic regime selection
         self.AO_type = AO_type
-        self.tomography = True if self.AO_type in ['LTAO', 'MCAO', 'GLAO'] else False # TODO: automatic regime selection
+        self.tomography = True if self.AO_type in ['LTAO', 'MCAO', 'GLAO'] else False
 
         # Useful lambda functions
         self.r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0).pow(6/5)
@@ -500,7 +494,7 @@ class TipTorch(torch.nn.Module):
         self.rad2mas  = self.make_tensor(3600 * 180 * 1000 / torch.pi)
         self.rad2arc  = self.make_tensor(self.rad2mas / 1000)
         self.cte = self.make_tensor( (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3))) )
-        self.jitter_norm_fact = self.make_tensor( 2*np.sqrt(2*np.log(2)) ).pow(2)
+        self.jitter_norm_fact = self.make_tensor( 2*np.sqrt(2*np.log(2)) )**2
 
         self.n_air = AirRefractiveIndexCalculator(device=self.device, dtype=self.dtype)
 
@@ -518,9 +512,9 @@ class TipTorch(torch.nn.Module):
         
         # Piston filters           
         self.piston_filter = None # piston mode filter in the AO-corrected freq. domain
-        self.PR = None # piston mode filter in alised freq. domain
         self.apodizer = None
         # self.apodizer = self.make_tensor(1.0) # default apodizer
+        self.PR = None # piston mode filter in alised freqs domain
 
         # self.compute_PSF_DL = False # set to "True" to compute the diffraction-limited PSF
         
@@ -548,7 +542,7 @@ class TipTorch(torch.nn.Module):
         f = (beta_x*kx + beta_y*ky) * self.mask_corrected_AO.unsqueeze(-1)
 
         self.P_beta_DM = torch.exp( 2j*torch.pi*h_DM * f ).unsqueeze(-2) # [N_src x nOtf_AO x nOtf_AO x 1 x N_L]
-
+        #TODO: support multiple DMs?
 
     # TODO: allow to input the atmospheric params externaly to account user-assumed atmospheric layers instead of simulated ones
     def OptimalDMProjector(self):
@@ -716,7 +710,7 @@ class TipTorch(torch.nn.Module):
             proj = P_beta_L - self.P_beta_DM @ self.W_alpha
             proj_t = torch.conj(torch.permute(proj, (0,1,2,4,3)))
             psd_ST = torch.squeeze(torch.squeeze(torch.abs((proj @ self.C_phi @ proj_t)))) * self.piston_filter * self.mask_corrected_AO
-                
+
         return psd_ST
         
 
@@ -808,7 +802,7 @@ class TipTorch(torch.nn.Module):
         U_prime = self.U * cos_theta - self.V * sin_theta
         V_prime = self.U * sin_theta + self.V * cos_theta
 
-        Djitter = pdims(self.u_max.pow(2) * self.jitter_norm_fact, 2) * ( (Jx*U_prime)**2 + (Jy*V_prime)**2 )
+        Djitter = pdims(self.u_max * self.jitter_norm_fact, 2) * ( (Jx*U_prime)**2 + (Jy*V_prime)**2 )
         return torch.exp(-0.5 * Djitter) #TODO: cover the Nyquist sampled case? But shouldn't it be automatic, already?
     
 

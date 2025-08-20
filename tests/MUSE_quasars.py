@@ -11,7 +11,7 @@ import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from project_settings import PROJECT_PATH, MUSE_DATA_FOLDER, device, default_torch_type
+from project_settings import PROJECT_PATH, device, default_torch_type
 
 import torch
 import torch.nn.functional as F
@@ -24,7 +24,7 @@ from tqdm import tqdm
 from pathlib import Path
 
 from tools.utils import mask_circle
-from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
+from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from data_processing.MUSE_onsky_df import *
 
@@ -101,7 +101,6 @@ def fetch_raw_for_cube(cube_path, out_dir='.'):
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
 data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
-data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
 
 if not isinstance(data_folder, Path):
     data_folder = Path(data_folder)
@@ -117,7 +116,7 @@ raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
 #%
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
 # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
-spectral_cubes, spectral_info, data_cached, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, TELEMETRY_CACHEd, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 # Extract full and binned spectral cubes. Sparse cube selects a set of 7 binned wavelengths ranges
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
 
@@ -195,6 +194,11 @@ model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversa
 model.to_float()
 model.to(device)
 
+
+#%%
+
+_ = model()
+
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
 from data_processing.normalizers import Uniform
 from managers.input_manager import InputsManager, InputsManagersUnion
@@ -268,7 +272,7 @@ def GetReducedTelemetryInputs(cached_data):
     return df_norm[selected_entries_input].loc[0]
 
 
-telemetry_inputs = GetReducedTelemetryInputs(data_cached)
+telemetry_inputs = GetReducedTelemetryInputs(TELEMETRY_CACHEd)
 
 
 calibrator = Calibrator(

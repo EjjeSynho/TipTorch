@@ -1,6 +1,8 @@
 #%%
 import sys, os
-from project_settings import device, xp, use_cupy, DATA_FOLDER, WEIGHTS_FOLDER
+
+from project_settings import device, xp, use_cupy, default_torch_type
+from project_settings import WEIGHTS_FOLDER, PROJECT_PATH, TELEMETRY_CACHE # Import pathes
 
 import pickle
 import re
@@ -8,6 +10,7 @@ import os
 import datetime
 import requests
 import torch
+import json
 import pandas as pd
 import numpy as np
 import astropy.units as u
@@ -20,24 +23,64 @@ from skimage.restoration import inpaint
 from photutils.background import Background2D, MedianBackground
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
+from pathlib import Path
 
-from MUSE_preproc_utils import GetConfig, LoadImages
-from tools.utils import GetROIaroundMax, GetJmag, DownloadFromRemote
+
+from tools.utils import GetROIaroundMax, GetJmag, check_framework
+from tools.network import DownloadFromRemote
 from tools.plotting import wavelength_to_rgb
+from managers.parameter_parser import ParameterParser
+from managers.config_manager import ConfigManager
+from scipy.ndimage import rotate
+import logging
 
-find_closest_λ = lambda λ, λs: xp.argmin(xp.abs(λs-λ)).astype('int')
+from typing import Optional, Tuple, Callable
 
-def check_framework(x):
-    # Determine whether an array is NumPy or CuPy.
+datalab_available = False
+try:
+    import dlt
+    from elasticsearch import Elasticsearch
+    from elasticsearch_dsl import Search
     
-    # Get the module from the array's class
-    if hasattr(x, '__module__'):
-        module_name = x.__module__.split('.')[0]
-        if   module_name == 'numpy': return np
-        elif module_name == 'cupy':  return xp
+    es = Elasticsearch(hosts=['datalab.pl.eso.org'])
 
-    # Default to NumPy if not using GPU, otherwise CuPy
-    return np if not use_cupy else xp
+    es.info() # Test the connection to the Elasticearch server
+    datalab_available = True
+    logging.info('Succesfully connected to ESO datalab')
+    
+except ImportError:
+    logging.warning('Elasticsearch packages are not available: cannot read from datalab')
+    
+except Exception as e:
+    logging.warning(f'Cannot connect to datalab: {e}')
+    datalab_available = False
+
+
+#%%
+find_closest_λ   = lambda λ, λs: check_framework(λs).argmin(check_framework(λs).abs(λs-λ)).astype('int')
+pupil_angle_func = lambda par_ang: (45.0 - par_ang) % 360 # where par_ang is the parallactic angle
+
+with open(PROJECT_PATH / Path("project_config.json"), "r") as f:
+    project_settings = json.load(f)
+
+MUSE_DATA_FOLDER   = Path(project_settings["MUSE_data_folder"])
+
+default_IRLOS_config = '20x20_SmallScale_500Hz_HighGain'
+
+def time_from_sec_usec(sec, usec):
+    return [datetime.datetime.fromtimestamp(ts, tz=datetime.UTC) + datetime.timedelta(microseconds=int(us)) for ts, us in zip(sec, usec)]
+
+
+def read_secs_usecs(hdul, table_name):
+    return hdul[table_name].data['Sec'].astype(np.int32), hdul[table_name].data['USec'].astype(np.int32)
+
+
+def time_from_str(timestamp_strs):
+    if isinstance(timestamp_strs, str):
+        return datetime.datetime.strptime(timestamp_strs, '%Y-%m-%dT%H:%M:%S.%f')
+    else:
+        return [datetime.datetime.strptime(time_str, '%Y-%m-%dT%H:%M:%S.%f') for time_str in timestamp_strs]
+
 
 UT4_coords = ('24d37min37.36s', '-70d24m14.25s', 2635.43)
 UT4_location = EarthLocation.from_geodetic(lat=UT4_coords[0], lon=UT4_coords[1], height=UT4_coords[2]*u.m)
@@ -56,15 +99,15 @@ def DownloadMUSEcalibData(verbose=False):
     import logging
     logger = logging.getLogger(__name__)
 
-    data_folder_path = str(DATA_FOLDER).replace('\\', '/')
-    weights_folder_path = str(WEIGHTS_FOLDER).replace('\\', '/')
-    tmp1, tmp2, tmp3 = 'https://drive.google.com/file/d/', '/view?usp=drive_link', f'{data_folder_path}/reduced_telemetry/MUSE/'
+    tmp1 = 'https://drive.google.com/file/d/'
+    tmp2 = '/view?usp=drive_link'
+    tmp3 = f'{TELEMETRY_CACHE.absolute().as_posix()}/MUSE/'
 
     data_to_download = [
         (
             "Downloading MUSE NFM calibrator...",
             f'{tmp1}1NdfkmVYxdXgkJbHIlxDv1XTO-ABj6ox8{tmp2}',
-            f'{weights_folder_path}/MUSE_calibrator.dict'
+            f'{WEIGHTS_FOLDER.absolute().as_posix()}/MUSE_calibrator.dict'
         ),
         (
             "Downloading MUSE NFM reduced telemetry data...",
@@ -93,31 +136,34 @@ def DownloadMUSEcalibData(verbose=False):
         
         DownloadFromRemote(share_url=url, output_path=output_path, overwrite=False, verbose=verbose)
 
-DownloadMUSEcalibData(verbose=True)
 
+# DownloadMUSEcalibData(verbose=True)
 
 #%%
-def MatchRawWithReduced(include_dirs_raw, include_dirs_cubes, verbose=False):
-    ''' Create/read a matching table between the raw exposure files and reduced cubes '''
+def MatchRawWithCubes(
+        raw_folder:   str | os.PathLike,
+        cubes_folder: str | os.PathLike,
+        verbose: bool = False
+    ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    '''
+    Creates a matching table between specified raw MUSE files and reduced multispectral cubes.
+    Matching happens based on the date of observation.
+    '''
+    
+    raw_folder, cubes_folder = Path(raw_folder), Path(cubes_folder)
     cubes_obs_date_table, raw_obs_date_table = {}, {}
 
-    for folder_cubes, folder_raw in zip(include_dirs_cubes, include_dirs_raw):
-        cube_files = [f for f in os.listdir(folder_cubes) if f.endswith('.fits')]
-        raw_files  = [f for f in os.listdir(folder_raw) if f.endswith('.fits') or f.endswith('.fits.fz')]
+    if verbose: print(f'Scanning the cubes...')
+    for file in tqdm(os.listdir(cubes_folder)):
+        with fits.open(cubes_folder / file) as hdul_cube:
+            cubes_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
+    
+    if verbose: print(f'Scanning the raw files...')
+    for file in tqdm(os.listdir(raw_folder)):
+        with fits.open(raw_folder / file) as hdul_cube:
+            raw_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
 
-        if verbose: print(f'Scanning the cubes files in \"{folder_cubes}\"...')
-
-        for file in tqdm(cube_files):
-            with fits.open(os.path.join(folder_cubes, file)) as hdul_cube:
-                cubes_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
-        
-        if verbose: print(f'Scanning the raw files in \"{folder_raw}\"...')
-
-        for file in tqdm(raw_files):
-            with fits.open(os.path.join(folder_raw, file)) as hdul_cube:
-                raw_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
-
-        if verbose: print('-'*15)
+    if verbose: print('-'*15)
 
     df1 = pd.DataFrame(cubes_obs_date_table.items(), columns=['cube', 'date'])
     df2 = pd.DataFrame(raw_obs_date_table.items(),   columns=['raw',  'date'])
@@ -139,93 +185,312 @@ def MatchRawWithReduced(include_dirs_raw, include_dirs_cubes, verbose=False):
     if verbose:
         print(f"Found {len(files_matches)} matching entries between raw and reduced files")
         print(f"Found {len(in_raw_only)} raw files without corresponding reduced files")
+        
     return files_matches, in_raw_only
 
 
-def GetExposureTimes(include_dirs_cubes, verbose=False):
-    # ------------------ Create/read the dataset with exposure times ---------------------------------------
+def GetExposureTimesList(cubes_folder: str | os.PathLike, verbose: bool = False) -> pd.DataFrame:
+    """ Creates a table with observation start and exposure times for all cubes in the folder """
     exposure_times = {}
-    for folder_cubes in include_dirs_cubes:
-        cube_files = [f for f in os.listdir(folder_cubes) if f.endswith('.fits')]
+    cubes_folder = Path(cubes_folder)
 
-        if verbose: print(f'Scanning the cubes files in \"{folder_cubes}\"...')
+    if verbose: print(f'Processing {cubes_folder}...')
 
-        for file in tqdm(cube_files):
-            with fits.open(os.path.join(folder_cubes, file)) as hdul_cube:
-                exposure_times[file] = (hdul_cube[0].header['DATE-OBS'], hdul_cube[0].header['EXPTIME'])
+    for file in tqdm(os.listdir(cubes_folder)):
+        if not file.endswith('.fits'):
+            continue
+        
+        with fits.open(cubes_folder / file) as hdul_cube:
+            exposure_times[os.path.basename(file)] = (hdul_cube[0].header['DATE-OBS'], hdul_cube[0].header['EXPTIME'])
 
-        df_exptime = pd.DataFrame(exposure_times.items(), columns=['filename', 'obs_time'])
+    df_exptime = pd.DataFrame(exposure_times.items(), columns=['filename', 'obs_time'])
 
-        df_exptime['exposure_start'] = pd.to_datetime(df_exptime['obs_time'].apply(lambda x: x[0]))
-        df_exptime['exposure_time'] = df_exptime['obs_time'].apply(lambda x: x[1])
-        df_exptime.drop(columns=['obs_time'], inplace=True)
-        df_exptime['exposure_end'] = df_exptime['exposure_start'] + pd.to_timedelta(df_exptime['exposure_time'], unit='s')
-        df_exptime.drop(columns=['exposure_time'], inplace=True)
-        df_exptime.set_index('filename', inplace=True)
-        df_exptime['exposure_start'] = df_exptime['exposure_start'].dt.tz_localize('UTC')
-        df_exptime['exposure_end'] = df_exptime['exposure_end'].dt.tz_localize('UTC')
+    df_exptime['exposure_start'] = pd.to_datetime(df_exptime['obs_time'].apply(lambda x: x[0]))
+    df_exptime['exposure_time'] = df_exptime['obs_time'].apply(lambda x: x[1])
+    df_exptime.drop(columns=['obs_time'], inplace=True)
+    df_exptime['exposure_end'] = df_exptime['exposure_start'] + pd.to_timedelta(df_exptime['exposure_time'], unit='s')
+    df_exptime.drop(columns=['exposure_time'], inplace=True)
+    df_exptime.set_index('filename', inplace=True)
+    df_exptime['exposure_start'] = df_exptime['exposure_start'].dt.tz_localize('UTC')
+    df_exptime['exposure_end']   = df_exptime['exposure_end'].dt.tz_localize('UTC')
 
     return df_exptime
 
 
-#%%
-# ----------------- Read the dataset with IRLOS data ---------------------------------------
-def GetIRLOSInfo(IRLOS_cms_folder):
+def check_cached_data(
+    cache_path: Path,
+    start_time: datetime.datetime,
+    end_time:   datetime.datetime,
+    fetch_function: Optional[Callable[[datetime.datetime, datetime.datetime], pd.DataFrame]] = None,
+    parse_function: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = lambda x: x,
+    time_buffer_before: datetime.timedelta = datetime.timedelta(seconds=30),
+    time_buffer_after:  datetime.timedelta = datetime.timedelta(seconds=30),
+    verbose: bool = False
+) -> pd.DataFrame:
+    """
+    Get data from a cached CSV if available; otherwise fetch, parse, cache, and return.
 
-    IRLOS_cmds = pd.read_csv(IRLOS_cms_folder)
-    IRLOS_cmds.drop(columns=['Unnamed: 0'], inplace=True)
+    Parameters
+    ----------
+    cache_path : Path
+        Path to the CSV cache file.
+    start_time, end_time : datetime.datetime
+        Requested time range.
+    fetch_function : Optional[Callable]
+        Function to fetch data if not in cache. Accepts (start_time, end_time) and returns a DataFrame.
+    parse_function : Optional[Callable]
+        Function to parse the fetched data before caching. Defaults to identity.
+    time_buffer_before, time_buffer_after : datetime.timedelta
+        Buffers added to the requested range when *querying the cache* (not when fetching).
+    verbose : bool
+        Whether to print status messages.
 
-    IRLOS_cmds['timestamp'] = IRLOS_cmds['timestamp'].apply(lambda x: x[:-1] if x[-1] == 'Z' else x)
-    IRLOS_cmds['timestamp'] = pd.to_datetime(IRLOS_cmds['timestamp']).dt.tz_localize('UTC')
-    IRLOS_cmds.set_index('timestamp', inplace=True)
-    IRLOS_cmds = IRLOS_cmds.sort_values(by='timestamp')
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing rows within [start_time - buffer_before, end_time + buffer_after].
+        Returns empty DataFrame if nothing available and no fetching done/available.
+    """
 
-    IRLOS_cmds['command'] = IRLOS_cmds['command'].apply(lambda x: x.split(' ')[-1])
+    def _load_cache(path: Path) -> pd.DataFrame:
+        if not path.exists():
+            return pd.DataFrame()
+        try:
+            df = pd.read_csv(path, index_col=0)
+        except Exception:
+            # Corrupt or unreadable? Treat as empty.
+            return pd.DataFrame()
+        if df.empty:
+            return df
+        df.index = pd.to_datetime(df.index, format="mixed", utc=True)
+        df = df.sort_index()
+        # Drop duplicate index entries, keep the first (same as your original)
+        df = df[~df.index.duplicated(keep='first')]
+        return df
 
-    # Filter etries that don't look like IRLOS regimes
-    pattern = r'(\d+x\d+_SmallScale_\d+Hz_\w+Gain)|(\d+x\d+_\d+Hz_\w+Gain)|(\d+x\d+_SmallScale)'
-    IRLOS_cmds = IRLOS_cmds[IRLOS_cmds['command'].str.contains(pattern, regex=True)]
+    def _save_cache(path: Path, df: pd.DataFrame) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(path, index=True)
 
-    # Read the pre-fetched IRLOS commands file
-    IRLOS_df = GetIRLOSInfo(DATA_FOLDER / 'reduced_telemetry/MUSE/IRLOS_commands.csv')
+    # 1) Load cache (or empty)
+    cache_df = _load_cache(cache_path)
 
-    pattern = r'(?P<window>\d+x\d+)(?:_(?P<scale>SmallScale))?(?:_(?P<frequency>\d+Hz))?(?:_(?P<gain>\w+Gain))?'
-    IRLOS_df = IRLOS_cmds['command'].str.extract(pattern)
+    # 2) Try to satisfy from cache using buffer window
+    query_start = start_time - time_buffer_before
+    query_end   = end_time   + time_buffer_after
+
+    def _slice(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        return df.loc[(df.index >= query_start) & (df.index <= query_end)]
+
+    result_df = _slice(cache_df)
+
+    if not result_df.empty:
+        if verbose:
+            print(f"Serving {len(result_df)} rows from cache: {cache_path.name}")
+        return result_df
+
+    # 3) If cache didn’t cover it, fetch (if possible)
+    if fetch_function is None:
+        if verbose:
+            if cache_df.empty:
+                print("Cache file not found or empty, and no fetch function provided.")
+            else:
+                print("Requested range not in cache, and no fetch function provided.")
+        return pd.DataFrame()
+
+    if verbose:
+        if cache_df.empty and not cache_path.exists():
+            print(f"Cache file not found. Creating new cache: {cache_path.name}")
+        elif cache_df.empty:
+            print("Cache is empty. Fetching data...")
+        else:
+            print("Requested range not in cache. Fetching new data...")
+
+    fetched_df = fetch_function(query_start, query_end)
+
+    if fetched_df.empty:
+        if verbose:
+            print(f"No data found for requested time range: {start_time} to {end_time}")
+        return pd.DataFrame()
+
+    # 4) Parse, merge into cache, dedupe, save
+    parsed_df = parse_function(fetched_df) if parse_function else fetched_df
+
+    if not parsed_df.empty:
+        merged = pd.concat([cache_df, parsed_df])
+        merged.index = pd.to_datetime(merged.index, utc=True)
+        merged = merged.sort_index()
+        merged = merged[~merged.index.duplicated(keep='first')]
+        _save_cache(cache_path, merged)
+
+        if verbose:
+            first, last = merged.index[0], merged.index[-1]
+            print(f"Successfully fetched and updated cache: {cache_path.name} ({first} to {last})")
+
+        # 5) Return slice from merged cache
+        return _slice(merged)
+
+    # Parsed empty (unlikely)
+    if verbose:
+        print("Fetched data parsed to empty; nothing to cache/return.")
+    return pd.DataFrame()
+
+
+#%% -------------------------------- IRLOS realm ------------------------------------------------
+def FetchIRLOSlogsFromDatalab(timestamp_start, timestamp_end):
+    query = (Search(using=es, index='vltlog*')
+                .filter('range', **{'@timestamp': {
+                    'lt': timestamp_end.strftime('%Y-%m-%dT%H:%M:%S'),
+                    'gt': timestamp_start.strftime('%Y-%m-%dT%H:%M:%S'),
+                }})
+                .filter('term', envname__keyword='wmfsgw')
+                .query('match', logtext='IRLOS')
+                .sort('-@timestamp')
+                .params(preserve_order=True))
+
+    timestamps, logtexts = [], []
+    for result in query.scan():
+        timestamps.append(result['@timestamp'])
+        logtexts.append(result.logtext)
+
+    IRLOS_logs_dict = { timestamp: cmd for timestamp, cmd in zip(timestamps, logtexts) }
+    IRLOS_logs_df = pd.DataFrame(IRLOS_logs_dict.items(), columns=['timestamp', 'command'])
+    
+    IRLOS_logs_df['timestamp'] = IRLOS_logs_df['timestamp'].apply(lambda x: x[:-1] if x[-1] == 'Z' else x)
+    IRLOS_logs_df['timestamp'] = pd.to_datetime(IRLOS_logs_df['timestamp']).dt.tz_localize('UTC')
+    IRLOS_logs_df.set_index('timestamp', inplace=True)
+    IRLOS_logs_df = IRLOS_logs_df.sort_values(by='timestamp')
+    IRLOS_logs_df['command'] = IRLOS_logs_df['command'].apply(lambda x: x.split(' ')[-1])
+    
+    return IRLOS_logs_df
+
+
+def ParseIRLOSregimes(IRLOS_regimes_df: pd.DataFrame) -> pd.DataFrame:
+    '''Reads the timestamped IRLOS regimes list and returns a dataframe with the IRLOS regimes and their timestamps'''
+    # Then extract the regimes parameters using the command pattern
+    cmd_pattern = r'(?P<window>\d+x\d+)(?:_(?P<scale>SmallScale))?(?:_(?P<frequency>\d+Hz))?(?:_(?P<gain>\w+Gain))?'
+    IRLOS_df = IRLOS_regimes_df['command'].str.extract(cmd_pattern)
 
     IRLOS_df['window']    = IRLOS_df['window'].apply(lambda x: int(x.split('x')[0]))
     IRLOS_df['frequency'] = IRLOS_df['frequency'].apply(lambda x: int(x[:-2]) if pd.notna(x) else x)
-    IRLOS_df['gain']      = IRLOS_df['gain'].apply(lambda x: 68 if x == 'HighGain' else 1 if x == 'LowGain' else x)
-    IRLOS_df['scale']     = IRLOS_df['scale'].apply(lambda x: x.replace('Scale','') if pd.notna(x) else x)
-    IRLOS_df['scale']     = IRLOS_df['scale'].fillna('Small')
-
-    IRLOS_df['plate scale, [mas/pix]'] = IRLOS_df.apply(lambda row: 60  if row.name > IRLOS_upgrade_date and row['scale'] == 'Small' else 242 if row.name > IRLOS_upgrade_date and row['scale'] == 'Large' else 78 if row['scale'] == 'Small' else 324, axis=1)
-    IRLOS_df['conversion, [e-/ADU]']   = IRLOS_df.apply(lambda row: 9.8 if row.name > IRLOS_upgrade_date else 3, axis=1)
-
-    IRLOS_df['gain'] = IRLOS_df['gain'].fillna(1).astype('int')
     IRLOS_df['frequency'] = IRLOS_df['frequency'].fillna(200).astype('int')
+    IRLOS_df['gain']      = IRLOS_df['gain'].apply(lambda x: 68 if x == 'HighGain' else 1 if x == 'LowGain' else x)
+    IRLOS_df['gain']      = IRLOS_df['gain'].fillna(1).astype('int')
+    IRLOS_df['scale']     = IRLOS_df['scale'].apply(lambda x: x.replace('Scale','') if pd.notna(x) else x)
+    IRLOS_df['scale']     = IRLOS_df['scale'].fillna('Small') # Large scale is not used for obs, so it's safe to assume it
 
+    # Set plate scale accounting for the upgrade date
+    IRLOS_df['plate scale, [mas/pix]'] = IRLOS_df.apply(
+        lambda row: 78  if row.name > IRLOS_upgrade_date and row['scale'] == 'Small' else
+                    60  if row['scale'] == 'Small' else
+                    314 if row.name > IRLOS_upgrade_date and row['scale'] == 'Large' else
+                    242,
+        axis=1
+    )
+    # Set conversion factor based on upgrade date
+    IRLOS_df['conversion, [e-/ADU]'] = IRLOS_df.apply(lambda row: 9.8 if row.name > IRLOS_upgrade_date else 3, axis=1)
+    # Set read-out noise based on upgrade date
+    IRLOS_df['RON, [e-]'] = IRLOS_df.apply(lambda row: 1 if row.name > IRLOS_upgrade_date else 11, axis=1)
+    
     return IRLOS_df
 
 
-#%% ------------------ Read the raw data from the FITS files and from ESO archive ---------------------------------------
-def time_from_sec_usec(sec, usec):
-    return [datetime.datetime.fromtimestamp(ts, tz=datetime.UTC) + datetime.timedelta(microseconds=int(us)) for ts, us in zip(sec, usec)]
+def ParseIRLOSlogs(IRLOS_logs_df: pd.DataFrame) -> pd.DataFrame:
+    '''Reads the timestamped IRLOS commands list and returns a dataframe with the IRLOS regimes and their timestamps'''
+    # Filter entries that match IRLOS regimes patterns and extract components
+    regime_pattern = r'(\d+x\d+_SmallScale_\d+Hz_\w+Gain)|(\d+x\d+_\d+Hz_\w+Gain)|(\d+x\d+_SmallScale)'
+    # First extract only rows that match the IRLOS regime pattern
+    filtered_regimes_df = IRLOS_logs_df[IRLOS_logs_df['command'].str.match(regime_pattern)]
+    return ParseIRLOSregimes(filtered_regimes_df)
 
 
-def read_secs_usecs(hdul, table_name):
-    return hdul[table_name].data['Sec'].astype(np.int32), hdul[table_name].data['USec'].astype(np.int32)
+def FetchLGSslopesFromDatalab(timestamp_start, timestamp_end):
+    HO_slopes_RMS_keywords = [f'AOS.LGS{i}.SLOPERMS{coord}' for i,coord in zip([1,1,2,2,3,3,4,4], ['X','Y']*4)]
+    try:
+        slopes_RMS = []
+        for entry in HO_slopes_RMS_keywords:
+            slopes_RMS.append(dlt.query_ts('wmfsgw', entry, timestamp_start, timestamp_end))
+            
+        for j, df in enumerate(slopes_RMS):
+            df.rename(columns={'value': HO_slopes_RMS_keywords[j], 'time': 'timestamp'}, inplace=True)
+            df.set_index('timestamp', inplace=True)
+            
+        return pd.concat(slopes_RMS, axis=1)
+        
+    except Exception as e:
+        print(f'No LGS slopes data {e}')
+        return pd.DataFrame()
 
 
-def time_from_str(timestamp_strs):
-    if isinstance(timestamp_strs, str):
-        return datetime.datetime.strptime(timestamp_strs, '%Y-%m-%dT%H:%M:%S.%f')
-    else:
-        return [datetime.datetime.strptime(time_str, '%Y-%m-%dT%H:%M:%S.%f') for time_str in timestamp_strs]
+def FetchLGSfluxFromDatalab(timestamp_start, timestamp_end):
+    try:
+        # [ADU / frame / subaperture] Median flux per subaperture with 0.17 photons/ADU when the camera gain is 100
+        LGS_flux = [ dlt.query_ts('wmfsgw', f'AOS.LGS{j}.FLUX', timestamp_start, timestamp_end) for j in range(1,5) ]
 
-#-------------------------------- IRLOS realm ------------------------------------------------
+        for j, df in enumerate(LGS_flux):
+            df.rename(columns={'value': f'LGS{j+1} flux', 'time': 'timestamp'}, inplace=True)
+            df.set_index('timestamp', inplace=True)
+            
+        return pd.concat(LGS_flux, axis=1)
+    
+    except Exception as e:
+        print(f'No LGS flux data {e}')
+        return pd.DataFrame()
+
+
+#%
+# verbose = True
+
+# IRLOS_df = check_cached_data(
+#     cache_path = TELEMETRY_CACHE / 'MUSE/IRLOS_regimes_df.csv',
+#     start_time = exposure_start,
+#     end_time   = exposure_end,
+#     fetch_function = FetchIRLOSlogsFromDatalab if datalab_available else None,
+#     parse_function = ParseIRLOSlogs,
+#     time_buffer_after  = pd.Timedelta(seconds=10),
+#     time_buffer_before = pd.Timedelta(minutes=120), # Search 2 hours before the exposure to see if IRLOS config was changed before OB
+#     verbose=verbose
+# )
+
+# LGS_df = check_cached_data(
+#     cache_path = TELEMETRY_CACHE / 'MUSE/LGS_flux_df.csv',
+#     start_time = exposure_start,
+#     end_time   = exposure_end,
+#     fetch_function = FetchLGSfluxFromDatalab if datalab_available else None,
+#     time_buffer_after  = pd.Timedelta(minutes=1),
+#     time_buffer_before = pd.Timedelta(minutes=1),
+#     verbose=verbose
+# )
+
+# LGS_slopes_df = check_cached_data(
+#     cache_path = TELEMETRY_CACHE / 'MUSE/LGS_slopes_df.csv',
+#     start_time = exposure_start,
+#     end_time   = exposure_end,
+#     fetch_function = FetchLGSfluxFromDatalab if datalab_available else None,
+#     time_buffer_after  = pd.Timedelta(minutes=1),
+#     time_buffer_before = pd.Timedelta(minutes=1),
+#     verbose=verbose
+# )
+
+
+# Get closest IRLOS configuration to exposure start time (in the past)
+# if IRLOS_df.empty:
+#     IRLOS_record = None
+# else:
+#     IRLOS_df_before_exposure = IRLOS_df[IRLOS_df.index <= exposure_start]
+
+#     if IRLOS_df_before_exposure.empty:
+#         print("Warning: No IRLOS configuration found before the exposure start time")
+#         IRLOS_record = None
+#     else:
+#         closest_timestamp = IRLOS_df_before_exposure.index[np.argmin(np.abs(IRLOS_df_before_exposure.index - exposure_start))]
+#         IRLOS_record = pd.DataFrame(IRLOS_df.loc[closest_timestamp]).T
+
+
 def get_background(img, sigmas=1):
-    bkg_estimator = MedianBackground()
-    bkg = Background2D(img, (5,)*2, filter_size=(3,), bkg_estimator=bkg_estimator)
+    bkg = Background2D(img, (5,)*2, filter_size=(3,), bkg_estimator=MedianBackground())
 
     background = bkg.background
     background_rms = bkg.background_rms
@@ -237,8 +502,9 @@ def get_background(img, sigmas=1):
 
 
 # Get 2x2 images from the IRLOS cube
-def GetIRLOScube(hdul_raw):
+def GetIRLOScube(hdul_raw, verbose=False):
     if 'SPARTA_TT_CUBE' in hdul_raw:
+        if verbose: print('Found IRLOS cube in the FITS file...')
         IRLOS_cube = hdul_raw['SPARTA_TT_CUBE'].data.transpose(1,2,0)
         win_size = IRLOS_cube.shape[0] // 2
 
@@ -249,8 +515,8 @@ def GetIRLOScube(hdul_raw):
         quadrant_4 = np.s_[win_size+1:win_size*2-1, win_size+1:win_size*2-1, ...]
 
         IRLOS_cube_ = np.vstack([
-            np.hstack([IRLOS_cube[quadrant_1], IRLOS_cube[quadrant_2]]), # 1 2
-            np.hstack([IRLOS_cube[quadrant_3], IRLOS_cube[quadrant_4]]), # 3 4
+            np.hstack([IRLOS_cube[quadrant_1], IRLOS_cube[quadrant_2]]),
+            np.hstack([IRLOS_cube[quadrant_3], IRLOS_cube[quadrant_4]]),
         ])
 
         IRLOS_cube = IRLOS_cube_ - 200 # Minus constant ADU shift
@@ -260,89 +526,64 @@ def GetIRLOScube(hdul_raw):
         return IRLOS_cube, win_size # [ADU], [pix]
 
     else:
-        print('No IRLOS cubes found')
+        if verbose: print('No IRLOS cubes found')
         return None, None
 
 
 # Get IR loop parameters
-def GetIRLoopData(hdul, start_timestamp, verbose=False):
-    try:
-        LO_regime = hdul[0].header[h+'AOS MAIN MODES IRLOS']
-        if verbose: print( hdul[0].header[h+'AOS MAIN MODES IRLOS'] )
-
-        pattern = r"(\d+x\d+)_(\w+)_(\d+Hz)_(\w+)"
-        match   = re.match(pattern, LO_regime)
-
-        if match:
-            read_window, regime, LO_freq, LO_gain = match.groups()
-            read_window = tuple(map(int, read_window.split('x')))[0]
-
-            if   LO_gain == 'HighGain': LO_gain = 68
-            elif LO_gain == 'LowGain':  LO_gain = 1
-
-            LO_freq = int(LO_freq.replace('Hz', ''))
-            regime = regime.replace('Scale', '')
-
-            IRLOS_data_df = {
-                'window': read_window,
-                'scale': regime,
-                'frequency': LO_freq,
-                'gain': LO_gain,
-            }
-            if verbose: print('Retrieving IRLOS data from the header...')
-        else:
-            raise ValueError('No matching IRLOS regime found')
-
-    except:
-        def get_default_IRLOS_config():
-            return {
-                'window': 20,
-                'scale': 'Small',
-                'frequency': 200,
-                'gain': 1,
-            }
-
-        try:
-            selected_IRLOS_entry = IRLOS_df[IRLOS_df.index < start_timestamp].iloc[-1]
-            timedelta = pd.to_timedelta(start_timestamp - selected_IRLOS_entry.name)
-
-            if timedelta < pd.to_timedelta('32m'):
-                IRLOS_data_df = selected_IRLOS_entry.to_dict()
-                if verbose: print('Retrieving IRLOS data from logs...')
-            else:
-                IRLOS_data_df = get_default_IRLOS_config()
-                if verbose: print('Closest log is too far. Using default IRLOS config...')
-
-        except IndexError:
-            IRLOS_data_df = get_default_IRLOS_config()
-            if verbose: print('No IRLOS-related information found. Using default IRLOS config...')
-
-    if IRLOS_data_df['scale'] == 'Small':
-        IRLOS_data_df['plate scale, [mas/pix]'] = 78  if start_timestamp > IRLOS_upgrade_date else 60
+def GetIRLoopData(hdul_raw, exposure_start, exposure_end, verbose=False):
+    # Try reading IRLOS info from the header
+    if h+'AOS MAIN MODES IRLOS' in hdul_raw[0].header:
+        LO_regime = hdul_raw[0].header[h+'AOS MAIN MODES IRLOS']
+        if verbose: print(f'Found IRLOS info in FITS header: {LO_regime}')
+        regime_df_ = pd.DataFrame({'command': [LO_regime]}, index=[exposure_start])
+        IRLOS_record = ParseIRLOSregimes(regime_df_)
     else:
-        IRLOS_data_df['plate scale, [mas/pix]'] = 314 if start_timestamp > IRLOS_upgrade_date else 242
+        if verbose: print(f'Not Found IRLOS regime in FITS header, scanning archive')
+        IRLOS_df = check_cached_data(
+            cache_path = TELEMETRY_CACHE / 'MUSE/IRLOS_regimes_df.csv',
+            start_time = exposure_start,
+            end_time   = exposure_end,
+            fetch_function = FetchIRLOSlogsFromDatalab if datalab_available else None,
+            parse_function = ParseIRLOSlogs,
+            time_buffer_after  = pd.Timedelta(seconds=10),
+            time_buffer_before = pd.Timedelta(minutes=120), # Search 2 hours before the exposure to see if IRLOS config was changed before OB
+            verbose=verbose
+        )
+        if IRLOS_df.empty:
+            IRLOS_record = None
+        else:
+            # Selecting the reguime which was set the last before the exposure started
+            IRLOS_df_before_exposure = IRLOS_df[IRLOS_df.index <= exposure_start]
 
-    IRLOS_data_df['conversion, [e-/ADU]'] = 9.8 if start_timestamp > IRLOS_upgrade_date else 3
-    IRLOS_data_df['RON, [e-]'] = 1 if start_timestamp > IRLOS_upgrade_date else 11
+            if IRLOS_df_before_exposure.empty:
+                print("Warning: No IRLOS configuration found before the exposure start time")
+                IRLOS_record = None
+            else:
+                closest_timestamp = IRLOS_df_before_exposure.index[np.argmin(np.abs(IRLOS_df_before_exposure.index - exposure_start))]
+                IRLOS_record = pd.DataFrame(IRLOS_df.loc[closest_timestamp]).T
+              
+    if IRLOS_record is None:
+        print('No IRLOS information found. Setting to a default IRLOS regime')
+        IRLOS_record = ParseIRLOSregimes(pd.DataFrame({'command': default_IRLOS_config}, index=[exposure_start]))
 
-    return pd.DataFrame([IRLOS_data_df], index=[start_timestamp])
+    return IRLOS_record
 
 
-# Computes IRLOS photons at M1 level
 def GetIRLOSphotons(flux_ADU, LO_gain, LO_freq, convert_factor): #, [ADU], [1], [Hz], [e-/ADU]
+    """ Computes the number of photons corresponding to mesured ADUs at M1 level"""
     QE = 1.0 # [photons/e-]
     transmission = 0.4 # [1]
     M1_area = (8-1.12)**2 * np.pi / 4 # [m^2]
     return flux_ADU / QE * convert_factor / LO_gain * LO_freq / M1_area * transmission # [photons/s/m^2]
 
 
-def GetIRLOSdata(hdul_raw, hdul_cube, start_time, IRLOS_cube):
+def GetIRLOSdata(hdul_raw, hdul_cube, exposure_start, exposure_end, IRLOS_cube, verbose=False):
     # Read NGS loop parameters
-    IRLOS_data_df = GetIRLoopData(hdul_raw, start_time, verbose=False)
-
+    IRLOS_data_df = GetIRLoopData(hdul_raw, exposure_start, exposure_end, verbose)
     # Read NGS flux values
     try:
-        #[ADU/frame/sub aperture] * 4 sub apertures if 2x2 mode
+        # [ADU/frame/sub aperture] * 4 sub apertures if 2x2 mode
         IRLOS_flux_ADU_h = sum([hdul_cube[0].header[f'{h}AOS NGS{i+1} FLUX'] for i in range(4)]) * 4 # [ADU/frame]
         IRLOS_data_df['ADUs (header)'] = IRLOS_flux_ADU_h
 
@@ -379,13 +620,13 @@ def GetIRLOSdata(hdul_raw, hdul_cube, start_time, IRLOS_cube):
 
 
 # ------------------------ LGS realm ------------------------------------------------
-def GetLGSphotons(flux_LGS, HO_gain):
-    conversion_factor = 18 #[e-/ADU]
+def ComputeLGSphotons(flux_LGS, HO_gain):
+    conversion_factor = 18 # [e-/ADU]
     GALACSI_transmission = 0.31 #(with VLT) / 0.46 (without VLT), different from IRLOS!
-    HO_rate = 1000 #[Hz]
+    HO_rate = 1000 # [Hz]
     detector_DIT = (1-0.01982)*1e-3 # [s], 0.01982 [ms] for the frame transfer
     QE = 0.9 # [e-/photons]
-    # gain should always = 100 # Laser WFS gain
+    # Gain should always = 100 # Laser WFS gain
     num_subapertures = 1240
     M1_area = (8**2 - 1.12**2) * np.pi / 4 # [m^2]
 
@@ -394,94 +635,94 @@ def GetLGSphotons(flux_LGS, HO_gain):
         * HO_rate / M1_area # [photons/m^2/s]
 
 
-def GetLGSdata(hdul_cube, cube_name, start_time, fill_missing=False, verbose=False):
+def GetLGSdata(hdul_cube, exposure_start, exposure_end, fill_missing=False, verbose=False):
     # AOS LGSi FLUX: [ADU] Median flux in subapertures /
-    # Median of the LGSi flux in all subapertures with 0.17 photons/ADU when the camera gain is 100.
+    # Median of the LGS{i} flux in all subapertures with 0.17 photons/ADU when the camera gain is 100.
     
-    # Read the pre-fetched dataset with the LGS WFSs data
-    LGS_flux_df   = pd.read_csv(DATA_FOLDER / 'reduced_telemetry/MUSE/LGS_flux.csv',   index_col=0)
-    LGS_slopes_df = pd.read_csv(DATA_FOLDER / 'reduced_telemetry/MUSE/LGS_slopes.csv', index_col=0)
-        
-    # Select the relevant LGS data
-    LGS_data_df = LGS_flux_df[LGS_flux_df['filename'] == cube_name].copy()
-    LGS_data_df.rename(columns = { f'LGS{i} flux': f'LGS{i} flux, [ADU/frame]' for i in range(1,5) }, inplace=True)
+    # Read/fetch dataset with the LGS WFSs data
+    LGS_flux_df = check_cached_data(
+        cache_path = TELEMETRY_CACHE / 'MUSE/LGS_flux_df.csv',
+        start_time = exposure_start,
+        end_time   = exposure_end,
+        fetch_function = FetchLGSfluxFromDatalab if datalab_available else None,
+        time_buffer_after  = pd.Timedelta(minutes=1),
+        time_buffer_before = pd.Timedelta(minutes=1),
+        verbose=verbose
+    )
+    
+    LGS_slopes_df = check_cached_data(
+        cache_path = TELEMETRY_CACHE / 'MUSE/LGS_slopes_df.csv',
+        start_time = exposure_start,
+        end_time   = exposure_end,
+        fetch_function = FetchLGSslopesFromDatalab if datalab_available else None,
+        time_buffer_after  = pd.Timedelta(minutes=1),
+        time_buffer_before = pd.Timedelta(minutes=1),
+        verbose=verbose
+    )
 
-    if LGS_data_df.empty:
+    # Select the relevant LGS data
+    LGS_flux_df.rename(columns = { f'LGS{i} flux': f'LGS{i} flux, [ADU/frame]' for i in range(1,5) }, inplace=True)
+
+    if LGS_flux_df.empty:
         if verbose: print('No LGS flux data found. ', end='')
         # Create at least something if there is no data
-        LGS_data_df = {'filename': cube_name, 'time': start_time}
+        LGS_flux_df = {'time': exposure_start}
   
         if fill_missing:
-            if verbose: print('Filling with median values...')
-            flux_filler  = 880.0
-            works_filler = True
+            if verbose: print('Filling with median guess...')
+            flux_median  = 880.0
+            works_default_flag = True
         else:
             if verbose: print('Skipping...')
-            flux_filler  = None
-            works_filler = None
+            flux_median  = None
+            works_default_flag = None
     
         for i in range(1,5):
-            LGS_data_df[f'LGS{i} flux, [ADU/frame]'] = flux_filler  
-            LGS_data_df[f'LGS{i} works'] =works_filler
+            LGS_flux_df[f'LGS{i} flux, [ADU/frame]'] = flux_median  
+            LGS_flux_df[f'LGS{i} works'] = works_default_flag
             
-        LGS_data_df = pd.DataFrame(LGS_data_df, index=[-1])
-        LGS_data_df.set_index('time', inplace=True)
-    else:  
-        LGS_data_df.index = pd.to_datetime(LGS_data_df.index).tz_localize('UTC')
+        LGS_flux_df = pd.DataFrame(LGS_flux_df, index=[-1])
+        LGS_flux_df.set_index('time', inplace=True)
+    # else:  
+    #     LGS_flux_df.index = pd.to_datetime(LGS_flux_df.index).tz_convert('UTC')
 
     # Compute LGS photons
     HO_gains = np.array([hdul_cube[0].header[h+'AOS LGS'+str(i+1)+' DET GAIN'] for i in range(4)]) # must be the same value for all LGSs
     for i in range(1,5):
-        LGS_data_df.loc[:,f'LGS{i} photons, [photons/m^2/s]'] = GetLGSphotons(LGS_data_df[f'LGS{i} flux, [ADU/frame]'], HO_gains[i-1]).round().astype('uint32')
+        LGS_flux_df.loc[:,f'LGS{i} photons, [photons/m^2/s]'] = ComputeLGSphotons(LGS_flux_df[f'LGS{i} flux, [ADU/frame]'], HO_gains[i-1]).round().astype('uint32')
 
     # Correct laser shutter state based on the data from the cube header
     for i in range(1,5):
         if f'{h}LGS{i} LASR{i} SHUT STATE' in hdul_cube[0].header:
-            LGS_data_df.loc[:,f'LGS{i} works'] = hdul_cube[0].header[f'{h}LGS{i} LASR{i} SHUT STATE'] == 0
+            LGS_flux_df.loc[:,f'LGS{i} works'] = hdul_cube[0].header[f'{h}LGS{i} LASR{i} SHUT STATE'] == 0
         else:
-            LGS_data_df.loc[:,f'LGS{i} works'] = False
-
-    LGS_data_df.drop(columns=['filename'], inplace=True)
+            LGS_flux_df.loc[:,f'LGS{i} works'] = False
 
     # [pix] slopes RMS / Median of the Y slopes std dev measured in LGS WFSi subap (0.83 arcsec/pixel).
-    LGS_slopes_data_df = LGS_slopes_df[LGS_slopes_df['filename'] == cube_name].copy()
-    
-    if LGS_slopes_data_df.empty:
+    if LGS_slopes_df.empty:
         if verbose: print('No LGS WFS slopes data found. ', end='')
         # Create at least something if there is no data
-        LGS_slopes_data_df = {'filename': cube_name, 'time': start_time}
+        LGS_slopes_df = {'time': exposure_start}
         
         if fill_missing:
-            if verbose: print('Filling with median values...')
+            if verbose: print('Filling with median guess...')
             slopes_filler = 0.22
         else:
             if verbose: print('Skipping...')
             slopes_filler = None
-            
+        
         for i in range(1,5):
-            LGS_slopes_data_df[f'AOS.LGS{i}.SLOPERMSY'] = slopes_filler
-            LGS_slopes_data_df[f'AOS.LGS{i}.SLOPERMSX'] = slopes_filler
-                
-        LGS_slopes_data_df = pd.DataFrame(LGS_slopes_data_df, index=[-1])
-        LGS_slopes_data_df.set_index('time', inplace=True)
-    else:
-        LGS_slopes_data_df.index = pd.to_datetime(LGS_slopes_data_df.index).tz_localize('UTC')
-    
-    LGS_slopes_data_df.drop(columns=['filename'], inplace=True)
+            LGS_slopes_df[f'AOS.LGS{i}.SLOPERMSY'] = slopes_filler
+            LGS_slopes_df[f'AOS.LGS{i}.SLOPERMSX'] = slopes_filler
 
-    return pd.concat([LGS_data_df, LGS_slopes_data_df], axis=1)
+        LGS_slopes_df = pd.DataFrame(LGS_slopes_df, index=[-1])
+        LGS_slopes_df.set_index('time', inplace=True)
+    # else:
+    #     LGS_slopes_df.index = pd.to_datetime(LGS_slopes_df.index).tz_convert('UTC')
+
+    return pd.concat([LGS_flux_df, LGS_slopes_df], axis=1)
 
 
-#% ------------------------ Polychromatic cube realm-------------------------------------
-# def GetSpectrum(white, data, radius=5):
-#     _, ids, _ = GetROIaroundMax(white, radius*2)
-#     return check_framework(data).nansum(data[:, ids[0], ids[1]], axis=(1,2))
-
-
-# def GetSpectrum(data, ids):
-#     return check_framework(data).nansum(data[:, ids[0], ids[1]], axis=(1,2))
-
-# Extract the spectrum per target near the PSF peak
 def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
     """
     Extract spectral data from a 3D data cube at a specified point.
@@ -502,11 +743,16 @@ def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
     1D array of spectral data
     """
     # Determine the input type
-    if   type(point) == list:         point = np.array(point)
+    
+    if   type(point) == tuple:        point = list(point)
+    if   type(point) == list:         point = check_framework(point[0]).array(point)
     elif type(point) == pd.Series:    point = point.to_numpy()
     elif type(point) == torch.Tensor: point = point.cpu().numpy()
     else:
-        raise ValueError('Point must be a list, ndarray, pandas.Series, torch.Tensor, or CuPy array')
+        raise ValueError('Point must be a list, tuple, ndarray, pandas.Series, torch.Tensor, or CuPy array')
+
+    if hasattr(point, 'device'): # Detect CuPy array
+        point = point.get()
 
     x, y = point[:2].astype('int')
     
@@ -540,21 +786,229 @@ def range_overlap(v_min, v_max, h_min, h_max):
     return 0.0 if start_of_overlap > end_of_overlap else (end_of_overlap-start_of_overlap) / (v_max-v_min)
 
 
-def GetImageSpectrumHeader(
-    hdul_cube,
-    show_plots=False,
-    crop_cube=False,
-    extract_spectrum=False,
-    impaint=False,
-    verbose=False):
+def compute_wavelength_bins_old(λs, bad_wvls):
+    λ_max  = λs.max()
+    # Before the sodium filter
+    # if verbose: print('Generating smart wavelength bins...')
+    λ_bin = (bad_wvls[1][0]-bad_wvls[0][1])/3.0
+    λ_bins_before = bad_wvls[0][1] + np.arange(4)*λ_bin
+    bin_ids_before = [find_closest_λ(wvl, λs) for wvl in λ_bins_before]
+
+    # After the sodium filter
+    λ_bins_num    = (λ_max-bad_wvls[1][1]) / np.diff(λ_bins_before).mean()
+    λ_bins_after  = bad_wvls[1][1] + np.arange(λ_bins_num+1)*λ_bin
+    bin_ids_after = [find_closest_λ(wvl, λs) for wvl in λ_bins_after]
+    bins_smart    = bin_ids_before + bin_ids_after
+    λ_bins_smart  = λs[bins_smart]
+    return λ_bins_smart, bins_smart
+
+
+def compute_wavelength_bins(λs, bad_ranges, n_bins=None, target_width=None, min_ratio=0.1):
+    """
+    Build ~equal-width spectral bins over λs while excluding bad wavelength ranges.
+
+    Parameters
+    ----------
+    λs : 1D array (monotonic increasing), sampling grid
+    bad_ranges : array-like of shape (m, 2), [[λ_lo, λ_hi], ...], inclusive in wavelength units
+    n_bins : int, optional
+        Desired total number of bins over all *good* wavelengths.
+    target_width : float, optional
+        Target bin width in wavelength units (use this instead of n_bins).
+    min_ratio : float,
+        After snapping edges to λs, any bin narrower than (min_ratio * median_width)
+        will be repaired (merged with a neighbor).
+    xp : numpy-like module (e.g. numpy or cupy). If None, inferred from λs.__array_namespace__.
+
+    Returns
+    -------
+    λ_bins : 1D array of bin edges in wavelength units (length = nbins+1)
+    bin_ids : 1D array of indices into λs for those edges
+    """
+
+    if hasattr(bad_ranges, "device"):  bad_ranges = bad_ranges.get()
+    if hasattr(λs, "device"):  λs = bad_ranges.get()
+               
+    # --- sort & normalize bad ranges and clip to [λmin, λmax] ---
+    λmin, λmax = float(λs[0]), float(λs[-1])
+    if bad_ranges.size:
+        bad = bad_ranges.copy()
+        bad = bad[np.argsort(bad[:, 0])]
+        # merge overlapping/adjacent bad intervals
+        merged = []
+        cur_lo, cur_hi = float(bad[0,0]), float(bad[0,1])
+        for lo, hi in bad[1:]:
+            lo, hi = float(lo), float(hi)
+            if lo <= cur_hi:  # overlap/adjacent
+                cur_hi = max(cur_hi, hi)
+            else:
+                merged.append([cur_lo, cur_hi])
+                cur_lo, cur_hi = lo, hi
+        merged.append([cur_lo, cur_hi])
+        bad = np.asarray(merged, dtype=float)
+        # clip to global bounds
+        bad[:,0] = np.clip(bad[:,0], λmin, λmax)
+        bad[:,1] = np.clip(bad[:,1], λmin, λmax)
+    else:
+        bad = np.empty((0,2), dtype=float)
+
+    # --- compute good intervals by subtracting bad from [λmin, λmax] ---
+    good = []
+    cur = λmin
+    for lo, hi in bad:
+        lo, hi = float(lo), float(hi)
+        if cur < lo:
+            good.append([cur, lo])
+        cur = max(cur, hi)
+    if cur < λmax:
+        good.append([cur, λmax])
+    good = np.asarray(good, dtype=float)
+
+    # If everything is bad, return no bins
+    if good.size == 0:
+        return np.asarray([λmin, λmax]), np.asarray([0, λs.size-1])
+
+    # --- decide target width / number of bins ---
+    lengths = good[:,1] - good[:,0]
+    total_len = float(lengths.sum())
+
+    if target_width is not None and n_bins is not None:
+        # trust n_bins, treat target_width as a hint
+        target_width = total_len / int(n_bins)
+    elif target_width is not None:
+        n_bins = max(int(round(total_len / float(target_width))), 1)
+        target_width = total_len / n_bins
+    else:
+        if n_bins is None:
+            # heuristic: aim for ≈ one bin per ~50 samples of λs (tune as you like)
+            samples = λs.size
+            n_bins = max(int(round(samples / 50.0)), 1)
+        target_width = total_len / int(n_bins)
+
+    n_bins = int(max(n_bins, 1))
+
+    # --- allocate bin counts per good interval proportionally to length ---
+    # Start with floor allocation and distribute the remainder by largest fractional parts.
+    ideal = lengths / target_width
+    base = np.floor(ideal).astype(int)
+    base = np.maximum(base, 1)  # at least 1 bin per good segment
+    deficit = int(n_bins - int(base.sum()))
+
+    if deficit != 0:
+        frac = (ideal - base).astype(float)
+        order = np.argsort(-frac) if deficit > 0 else np.argsort(frac)  # add to largest frac, remove from smallest
+        i = 0
+        while deficit != 0 and i < order.size:
+            idx = int(order[i])
+            new_val = base[idx] + (1 if deficit > 0 else -1)
+            # keep at least 1 bin in each segment
+            if new_val >= 1:
+                base[idx] = new_val
+                deficit += (-1 if deficit > 0 else 1)
+            i += 1
+    per_seg_bins = base  # bins per good segment; sum equals n_bins
+
+    # --- make continuous edges in wavelength space, then snap to λs ---
+    edges = []
+    for (g0, g1), k in zip(good.tolist(), per_seg_bins.tolist()):
+        # k bins -> k+1 edges
+        seg_edges = np.linspace(g0, g1, k + 1)
+        if edges:
+            # drop the first edge to avoid duplication at segment joins
+            seg_edges = seg_edges[1:]
+        edges.append(seg_edges)
+    λ_bins = np.concatenate(edges)
+
+    # snap to nearest available λs and ensure strictly increasing indices
+    def closest_idx(vals, grid):
+        # vectorized nearest index
+        # assumes grid is sorted
+        import numpy as _np  # safe to use numpy ops on host for indexing math
+        grid_np = _np.asarray(grid)
+        vals_np = _np.asarray(vals)
+        idx = _np.searchsorted(grid_np, vals_np)
+        idx = _np.clip(idx, 1, grid_np.size - 1)
+        left = grid_np[idx - 1]
+        right = grid_np[idx]
+        choose_right = (vals_np - left) > (right - vals_np)
+        idx = idx + choose_right.astype(_np.int64) - 1
+        return idx
+
+    bin_ids = closest_idx(λ_bins, λs)
+    # enforce strictly increasing and unique edges
+    bin_ids = np.asarray(bin_ids, dtype=int)
+    bin_ids = np.maximum.accumulate(bin_ids)
+    # remove duplicates (zero-width after snapping)
+    keep = np.concatenate([np.asarray([True]), np.diff(bin_ids) > 0])
+    bin_ids = bin_ids[keep]
+    λ_bins = λs[bin_ids]
+
+    # --- repair: avoid any significantly thin bins after snapping ---
+    widths = np.diff(λ_bins)
+    if widths.size:
+        med_w = float(np.median(widths))
+        min_w = med_w * float(min_ratio)
+
+        # merge any bin that falls below min_w with its thinner neighbor side
+        # iterate until stable or single pass (single pass is usually enough)
+        changed = True
+        while changed and widths.size:
+            changed = False
+            too_thin = np.where(widths < min_w)[0]
+            if too_thin.size:
+                changed = True
+                i = int(too_thin[0])
+                # merge bin i with the neighbor that yields less distortion
+                if i == 0:
+                    # merge with right neighbor
+                    λ_bins = np.delete(λ_bins, i + 1)
+                elif i == widths.size - 1:
+                    # merge with left neighbor
+                    λ_bins = np.delete(λ_bins, i)
+                else:
+                    left_w = float(widths[i - 1])
+                    right_w = float(widths[i + 1])
+                    # prefer merging across the smaller adjacent width to smooth variation
+                    if right_w < left_w:
+                        λ_bins = np.delete(λ_bins, i + 1)  # remove right edge, merge with right
+                    else:
+                        λ_bins = np.delete(λ_bins, i)      # remove left edge, merge with left
+                # recompute
+                bin_ids = closest_idx(λ_bins, λs)
+                bin_ids = np.asarray(bin_ids, dtype=int)
+                bin_ids = np.maximum.accumulate(bin_ids)
+                keep = np.concatenate([np.asarray([True]), np.diff(bin_ids) > 0])
+                bin_ids = bin_ids[keep]
+                λ_bins = λs[bin_ids]
+                widths = np.diff(λ_bins)
+
+    # Ensure that the upper limit of Na-filter is covered
+    id_insert_binned = find_closest_λ(bad_ranges[-1][-1], λ_bins)
+    id_insert_full   = find_closest_λ(bad_ranges[-1][-1], λs)
+
+    λ_bins  = np.insert(λ_bins,  id_insert_binned, bad_ranges[-1][-1])
+    bin_ids = np.insert(bin_ids, id_insert_binned, id_insert_full)
+
+    return λ_bins, bin_ids
+
+
+def GetSpectralCubeAndHeaderData(
+    hdul_cube: fits.HDUList,
+    show_plots: bool = False,
+    crop_cube: bool | tuple[slice, slice] = False,
+    extract_spectrum: bool = False,
+    impaint: bool = False,
+    wvl_bins: np.ndarray | None = None,
+    verbose: bool = False
+) -> tuple[dict, pd.DataFrame, dict]:
 
     # Extract spectral range information
     start_spaxel = hdul_cube[1].header['CRPIX3']
     num_λs = int(hdul_cube[1].header['NAXIS3']-start_spaxel+1)
-    Δλ = hdul_cube[1].header['CD3_3' ] / 10.0
-    λ_min = hdul_cube[1].header['CRVAL3'] / 10.0
-    λs = xp.arange(num_λs)*Δλ + λ_min
-    λ_max = λs.max()
+    Δλ     = hdul_cube[1].header['CD3_3' ] / 10.0 # [nm]
+    λ_min  = hdul_cube[1].header['CRVAL3'] / 10.0 # [nm]
+    λs     = np.arange(num_λs) * Δλ + λ_min
+    λ_max  = λs.max()
 
     # 1 [erg] = 10^−7 [J]
     # 1 [Angstrom] = 10 [nm]
@@ -580,34 +1034,23 @@ def GetImageSpectrumHeader(
     else:
         spectrum = xp.ones_like(λs)
 
-    wvl_bins = None #np.array([478, 511, 544, 577, 606, 639, 672, 705, 738, 771, 804, 837, 870, 903, 935], dtype='float32')
-
     # Pre-defined bad wavelengths ranges
-    bad_wvls = xp.array([[450, 478], [577, 606]])
-    bad_ids  = xp.array([find_closest_λ(wvl, λs) for wvl in bad_wvls.flatten()], dtype='int').reshape(bad_wvls.shape)
-    valid_λs = xp.ones_like(λs)
+    bad_wvls = np.array([[450, 478], [577, 606]])
+    bad_ids  = np.array([find_closest_λ(wvl, λs) for wvl in bad_wvls.flatten()], dtype='int').reshape(bad_wvls.shape)
+    valid_λs = np.ones_like(λs)
 
     for i in range(len(bad_ids)):
         valid_λs[bad_ids[i,0]:bad_ids[i,1]+1] = 0
-        bad_wvls[i,:] = xp.array([λs[bad_ids[i,0]], λs[bad_ids[i,1]+1]])
+        bad_wvls[i,:] = np.array([λs[bad_ids[i,0]], λs[bad_ids[i,1]+1]])
 
     if wvl_bins is not None:
         if verbose: print('Using pre-defined wavelength bins...')
         λ_bins_smart = wvl_bins
+        bins_smart = np.array([find_closest_λ(wvl, λs) for wvl in λ_bins_smart.flatten()], dtype='int')
+        
     else:
-        # Bin data cubes
-        # Before the sodium filter
-        if verbose: print('Generating smart wavelength bins...')
-        λ_bin = (bad_wvls[1][0]-bad_wvls[0][1])/3.0
-        λ_bins_before = bad_wvls[0][1] + xp.arange(4)*λ_bin
-        bin_ids_before = [find_closest_λ(wvl, λs) for wvl in λ_bins_before]
-
-        # After the sodium filter
-        λ_bins_num    = (λ_max-bad_wvls[1][1]) / xp.diff(λ_bins_before).mean()
-        λ_bins_after  = bad_wvls[1][1] + xp.arange(λ_bins_num+1)*λ_bin
-        bin_ids_after = [find_closest_λ(wvl, λs) for wvl in λ_bins_after]
-        bins_smart    = bin_ids_before + bin_ids_after
-        λ_bins_smart  = λs[bins_smart]
+        if verbose: print('Computing wavelength bins...')
+        λ_bins_smart, bins_smart = compute_wavelength_bins(λs, bad_wvls, n_bins=30, min_ratio=0.1)
 
     if verbose:
         print('Wavelength bins, [nm]:')
@@ -622,21 +1065,20 @@ def GetImageSpectrumHeader(
 
     progress_bar = tqdm if verbose else lambda x: x
 
-    # Generate reduced cubes
+    # Generate binned cubes
     if verbose: print('Generating binned data cubes...')
-    data_reduced = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
-    std_reduced  = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
+    data_binned = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
+    std_binned  = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
     # Central λs at each spectral bin
     wavelengths  = xp.zeros(len(λ_bins_smart)-1)
     flux         = xp.zeros(len(λ_bins_smart)-1)
 
-    bad_layers = [] # list of spectral layers that are corrupted (excluding the sodium filter)
-    bins_to_ignore = [] # list of bins that are corrupted (including the sodium filter)
+    bad_layers     = [] # list of corrupted spectral slices (excluding the Na-filter)
+    bins_to_ignore = [] # list of corrupted spectral slices (including Na-filter)
 
     # Loop over spectral bins
     if verbose:
-        processing_unit = "GPU" if use_cupy else "CPU"
-        print(f'Processing spectral bins on {processing_unit}...')
+        print(f'Processing spectral bins on {"GPU" if use_cupy else "CPU"}...')
 
     for bin in progress_bar( range(len(bins_smart)-1) ):
         chunk = cube_data[ bins_smart[bin]:bins_smart[bin+1], ROI[0], ROI[1] ]
@@ -675,26 +1117,22 @@ def GetImageSpectrumHeader(
                         )
                     else:
                         chunk[i,:,:] = inpaint.inpaint_biharmonic(layer, mask_inpaint)
-
                 else:
                     chunk[i,:,:] = xp.nan_to_num(layer, nan=0.0)
 
-        data_reduced[bin,:,:] = xp.nansum(chunk, axis=0)
-        std_reduced [bin,:,:] = xp.nanstd(chunk, axis=0)
-        wavelengths[bin] = xp.nanmean(xp.array(wvl_chunck)) # central wavelength for this bin
-        flux[bin] = xp.nanmean(xp.array(flux_chunck))
+        data_binned[bin,:,:] = xp.nansum(chunk, axis=0)
+        std_binned [bin,:,:] = xp.nanstd(chunk, axis=0)
+        wavelengths[bin]     = xp.nanmean(xp.array(wvl_chunck)) # central wavelength for this bin
+        flux[bin]            = xp.nanmean(xp.array(flux_chunck))
 
     # Send back to RAM
     if use_cupy:
-        λs           = xp.asnumpy(λs)
-        valid_λs     = xp.asnumpy(valid_λs)
-        spectrum     = xp.asnumpy(spectrum)
-        λ_bins_smart = xp.asnumpy(λ_bins_smart)
-        data_reduced = xp.asnumpy(data_reduced)
-        std_reduced  = xp.asnumpy(std_reduced)
-        wavelengths  = xp.asnumpy(wavelengths)
-        flux         = xp.asnumpy(flux)
-        white        = xp.asnumpy(white)
+        spectrum    = xp.asnumpy(spectrum)
+        data_binned = xp.asnumpy(data_binned)
+        std_binned  = xp.asnumpy(std_binned)
+        wavelengths = xp.asnumpy(wavelengths)
+        flux        = xp.asnumpy(flux)
+        white       = xp.asnumpy(white)
 
     # Generate spectral plot (if applies)
     fig_handler = None
@@ -726,10 +1164,10 @@ def GetImageSpectrumHeader(
         ax = plt.gca()
 
 
-    data_reduced = np.delete(data_reduced, bins_to_ignore, axis=0)
-    std_reduced  = np.delete(std_reduced,  bins_to_ignore, axis=0)
-    wavelengths  = np.delete(wavelengths,  bins_to_ignore)
-    flux         = np.delete(flux,         bins_to_ignore)
+    data_binned = np.delete(data_binned, bins_to_ignore, axis=0)
+    std_binned  = np.delete(std_binned,  bins_to_ignore, axis=0)
+    wavelengths = np.delete(wavelengths,  bins_to_ignore)
+    flux        = np.delete(flux,         bins_to_ignore)
 
     if verbose:
         print(str(len(bad_layers))+'/'+str(cube_data.shape[0]), '('+str(xp.round(len(bad_layers)/cube_data.shape[0],2))+'%)', 'slices are corrupted')
@@ -737,13 +1175,11 @@ def GetImageSpectrumHeader(
     del cube_data
 
     if use_cupy:
-        if verbose: print("Freeing GPU memory...")
+        if verbose: print("Deallocating GPU memory...")
         mempool.free_all_blocks()
         pinned_mempool.free_all_blocks()
 
-
     # Collect the telemetry from the header
-    if verbose: print("Collecting data...")
     spectral_info = {
         'spectrum (full)': (λs, spectrum),
         'wvl range':       [λ_min, λ_max, Δλ],  # From header
@@ -819,6 +1255,8 @@ def GetImageSpectrumHeader(
     except:
         derot_ang = -0.5 * (parang + alt)
 
+    derot_ang += 360 if derot_ang < -180 else 0
+    derot_ang -= 360 if derot_ang >  180 else 0
 
     if h+'SEQ NGS MAG' in hdul_cube[0].header:
         NGS_mag = hdul_cube[0].header[h+'SEQ NGS MAG']
@@ -831,7 +1269,8 @@ def GetImageSpectrumHeader(
         'Tel. altitude': alt,
         'Tel. azimuth':  hdul_cube[0].header[h+'TEL AZ'],
         'Par. angle':    parang,
-        'Derot. angle':  derot_ang, # [deg], = -0.5*(par + alt)
+        'Pupil angle':   pupil_angle_func(parang),
+        'Derot. angle':  derot_ang
     }
 
     science_target = {
@@ -842,8 +1281,8 @@ def GetImageSpectrumHeader(
 
     from_header = {
         'Pixel scale (science)': hdul_cube[0].header[h+'OCS IPS PIXSCALE']*1000, #[mas/pixel]
-        'Airmass':               (hdul_cube[0].header[h+'TEL AIRM START'] + hdul_cube[0].header[h+'TEL AIRM END']) / 2.0,
-        'Seeing (header)':       (hdul_cube[0].header[h+'TEL AMBI FWHM START'] + hdul_cube[0].header[h+'TEL AMBI FWHM END']) / 2.0,
+        'Airmass':              (hdul_cube[0].header[h+'TEL AIRM START'] + hdul_cube[0].header[h+'TEL AIRM END']) / 2.0,
+        'Seeing (header)':      (hdul_cube[0].header[h+'TEL AMBI FWHM START'] + hdul_cube[0].header[h+'TEL AMBI FWHM END']) / 2.0,
         'Tau0 (header)':         hdul_cube[0].header[h+'TEL AMBI TAU0'],
         'Temperature (header)':  hdul_cube[0].header[h+'TEL AMBI TEMP'],
         'Wind dir (header)':     hdul_cube[0].header[h+'TEL AMBI WINDDIR'],
@@ -866,9 +1305,9 @@ def GetImageSpectrumHeader(
     else:
         from_header['Strehl (header)'] = np.nan
 
-    images = {
-        'cube':  data_reduced,
-        'std':   std_reduced,
+    multispectral_cubes = {
+        'cube':  data_binned,
+        'std':   std_binned,
         'white': white[ROI],
     }
 
@@ -880,13 +1319,15 @@ def GetImageSpectrumHeader(
     data_df.index = pd.to_datetime(data_df.index).tz_localize('UTC')
     if verbose: print('Finished processing spectral cube!')
 
-    return images, data_df, spectral_info
+    return multispectral_cubes, data_df, spectral_info
 
 
 # ------------------------------ Raw header realm ------------------------------------------
 def extract_countables_df(hdul, table_name, entry_pattern):
+    """ Function to work with header entries which are like SOMETHING_1, SOMETHING_2, ...SOMETHING_N"""
     keys_list = [x for x in hdul[table_name].header.values()]
-
+    max_countables_num = 50
+    
     if 'Sec' in keys_list:
         timestamps = pd.to_datetime(time_from_sec_usec(*read_secs_usecs(hdul, table_name)))
     else:
@@ -894,7 +1335,7 @@ def extract_countables_df(hdul, table_name, entry_pattern):
 
     values_dict = {}
 
-    for i in range (0, 50):
+    for i in range (0, max_countables_num):
         entry = entry_pattern(i)
         if entry in keys_list:
             values_dict[entry] = hdul[table_name].data[entry]
@@ -911,7 +1352,7 @@ def convert_to_default_byte_order(df):
 
 
 def GetRawHeaderData(hdul_raw):
-
+    '''Extracts data from the header of raw MUSE fits file'''
     Cn2_data_df, atm_data_df, asm_data_df = None, None, None
 
     def concatenate_non_empty_dfs(df_list):
@@ -959,10 +1400,15 @@ def GetRawHeaderData(hdul_raw):
             'AIRMASS',
             'ASM_RFLRMS',
             'SLODAR_TOTAL_CN2',
-            'IA_FWHMLIN', 'IA_FWHMLINOBS', 'IA_FWHM',
-            'SLODAR_FRACGL_300', 'SLODAR_FRACGL_500',
-            'ASM_WINDDIR_10', 'ASM_WINDDIR_30',
-            'ASM_WINDSPEED_10', 'ASM_WINDSPEED_30',
+            'IA_FWHMLIN',
+            'IA_FWHMLINOBS',
+            'IA_FWHM',
+            'SLODAR_FRACGL_300',
+            'SLODAR_FRACGL_500',
+            'ASM_WINDDIR_10',
+            'ASM_WINDDIR_30',
+            'ASM_WINDSPEED_10',
+            'ASM_WINDSPEED_30',
         ]
 
         asm_data_df = [
@@ -1070,8 +1516,9 @@ def FetchFromESOarchive(start_time, end_time, minutes_delta=1, verbose=False):
     slodar_df = GetFromURL(request_slodar)
     return asm_df, massdimm_df, dimm_df, slodar_df
 
-# Function to create the flat DataFrame
+
 def create_flat_dataframe(df):
+    """" Computes singular values for a specific MUSE NFM sample if there are several values per dataset entry. """
     flat_data = {}
 
     for col in df.columns:
@@ -1095,188 +1542,104 @@ def create_flat_dataframe(df):
     return pd.DataFrame([flat_data])
 
 
-def get_PSF_rotation(MUSE_images, derot_angle):
-    from scipy.ndimage import rotate
-    from tools.utils import cropper
-    from skimage.restoration import inpaint_biharmonic
-    from scipy.ndimage import gaussian_filter
-    from tools.utils import mask_circle
-    from photutils.profiles import RadialProfile
-    from tools.utils import safe_centroid
-    from scipy.interpolate import interp1d
-    from PIL import Image, ImageDraw
+def EstimateIRLOSphase(cube: np.ndarray) -> Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    """
+    Estimates the IRLOS phase using the external LIFT module that implements phase diversity.
 
-    PSF_0 = np.copy(MUSE_images['cube'])
-    PSF_0 = PSF_0 / PSF_0.sum(axis=(-2,-1))[:,None,None]
-    PSF_0 = PSF_0.mean(axis=0)[1:,1:]
+    Parameters
+    ----------
+    cube : np.ndarray
+        Input cube containing IRLOS data
 
-    PSF_1 = np.load(DATA_FOLDER / 'reduced_telemetry/MUSE/NFM_PSF_default.npy').mean(axis=0)
-    PSF_1 = PSF_1[cropper(PSF_1, PSF_0.shape[-1])]
-
-    # Get streaks mask
-    line_wid = 15
-    width, height = PSF_1.shape
-    image = Image.new('L', (width, height), 0)
-    draw = ImageDraw.Draw(image)
-    draw.line([(0, 20), (90, 90)], fill=1, width=line_wid)
-    draw.line([(width, 20), (width-90, 90)], fill=1, width=line_wid)
-    draw.line([(width, height-20), (width-90, height-90)], fill=1, width=line_wid)
-    draw.line([(0, height-20), (85, height-90)], fill=1, width=line_wid)
-    mask_streaks = np.array(image)
-
-    angle_init = derot_angle * 2 + 165 - 45 # The magic formula to get the initial angle
-    angle_init += 360 if angle_init <= 180 else -360
-
-    mask_rot  = (1-mask_circle(PSF_0.shape[0], 25)) * mask_circle(PSF_0.shape[0], 80)
-
-    def subtract_radial_avg(img):
-        xycen = safe_centroid(img)
-        edge_radii = np.arange(img.shape[-1]//2)
-        rp = RadialProfile(img, xycen, edge_radii)
-
-        size  = img.shape[0]
-        radii = np.arange(0, len(rp.profile))
-
-        x = np.linspace(-size//2, size//2, size)+1
-        y = np.linspace(-size//2, size//2, size)+1
-        X, Y = np.meshgrid(x, y)
-
-        R = np.sqrt(X**2 + Y**2)
-
-        interp_func = interp1d(radii, rp.profile, bounds_error=False, fill_value=0)
-        return interp_func(R)
-
-
-    PSF_0_rad = subtract_radial_avg(PSF_0)
-    PSF_1_rad = subtract_radial_avg(PSF_1)
-
-    PSF_0_diff = mask_rot*(PSF_0-PSF_0_rad)
-    PSF_0_diff = PSF_0_diff / PSF_0_diff.sum()
-
-    PSF_1_diff = mask_rot*(PSF_1-PSF_1_rad)
-    PSF_1_diff = PSF_1_diff / PSF_1_diff.sum() / 3
-
-
-    search_limits = 15
-
-    def angle_search(PSF_0, PSF_1, angle_0):
-
-        angles = np.linspace(-search_limits, search_limits, search_limits*2+1)
-
-        losses = []
-        # for angle in tqdm(angles):
-        for angle in angles:
-            rot_0 = gaussian_filter(np.copy(PSF_0), 2)
-            rot_1 = gaussian_filter(np.copy(PSF_1), 2)
-
-            mask_rot = rotate(mask_streaks, angle+angle_0, reshape=False)
-            rot_1_ = rotate(rot_1, angle+angle_0, reshape=False)
-
-            loss = np.abs(rot_1_-rot_0*mask_rot).sum()
-
-            # plt.imshow(np.abs(rot_1_-rot_0)*mask_rot)
-            # plt.title(f'Angle: {angle}')
-            # plt.show()
-
-            losses.append(loss.copy())
-
-        # plt.plot(angles, losses)
-        # plt.show()
-
-        optimal_angle = angles[np.argmin(losses)]
-
-        return 0.0 if np.abs(optimal_angle) == search_limits else optimal_angle
-
-    corrective_ang = angle_search(PSF_0_diff, PSF_1_diff, angle_init)
-    return angle_init, corrective_ang
-
-
-def get_IRLOS_phase(cube):
+    Returns
+    -------
+    Optional[Tuple[np.ndarray, np.ndarray, np.ndarray]]
+        If successful, returns (OPD_subap, OPD_aperture, PSF_estim)
+        If unsuccessful, returns None
+    """
     try:
-        from project_settings import LIFT_PATH
-        # Add dependencies to the path
-        for path in ['', 'DIP', 'LIFT', 'LIFT/modules', 'experimental']:
-            path_new = f'{LIFT_PATH}{path}/..'
-            if path_new not in sys.path:
-                sys.path.append(path_new)
+        # Add LIFT dependencies to the path
+        LIFT_PATH = Path(project_settings["LIFT_path"])
+        dependency_paths = [
+            '',
+            'DIP',
+            'LIFT',
+            'LIFT/modules',
+            'experimental'
+        ]
 
+        for path in dependency_paths:
+            full_path = f'{LIFT_PATH}/{path}/..'
+            if full_path not in sys.path:
+                sys.path.append(full_path)
+
+        # Import the LIFT estimator function
         from LIFT_full.experimental.IRLOS_2x2_function import estimate_2x2
-
-        return estimate_2x2(cube)
+        return estimate_2x2(cube) # Run the estimation results
 
     except Exception as e:
-        print(f'Cannot import LIFT module: {e}')
+        logging.error(f'Cannot import or use LIFT module: {e}')
         return None
 
 
 #%%
 def ProcessMUSEcube(
-        path_raw,
-        path_cube,
-        crop=False,
-        get_IRLOS_phase=False,
-        derotate=False,
-        impaint_bad_pixels=False,
-        extract_spectrum=False,
-        plot_spectrum=False,
-        fill_missing_values=False,
-        verbose=False
-    ):
+        path_raw: str | os.PathLike,
+        path_cube: str | os.PathLike,
+        crop: bool | tuple[slice, slice] = False,
+        estimate_IRLOS_phase: bool = False,
+        impaint_bad_pixels: bool = False,
+        extract_spectrum: bool = False,
+        wavelength_bins: int | np.ndarray | list | None = None,
+        plot_spectrum: bool = False,
+        fill_missing_values: bool = False,
+        verbose: bool = False
+    ) -> tuple[dict, str]:
 
     cube_name = os.path.basename(path_cube)
 
     hdul_raw  = fits.open(path_raw)
     hdul_cube = fits.open(path_cube)
 
-    start_time = pd.to_datetime(time_from_str(hdul_cube[0].header['DATE-OBS'])).tz_localize('UTC')
-    end_time   = pd.to_datetime(start_time + datetime.timedelta(seconds=hdul_cube[0].header['EXPTIME']))
+    exposure_start = pd.to_datetime(time_from_str(hdul_cube[0].header['DATE-OBS'])).tz_localize('UTC')
+    exposure_end   = pd.to_datetime(exposure_start + datetime.timedelta(seconds=hdul_cube[0].header['EXPTIME']))
 
-    if verbose: print(f'\n>>>>> Getting IRLOS data...')
-    IRLOS_cube, win = GetIRLOScube(hdul_raw)
-    IRLOS_data_df   = GetIRLOSdata(hdul_raw, hdul_cube, start_time, IRLOS_cube)
-    LGS_data_df     = GetLGSdata(hdul_cube, cube_name, start_time, fill_missing_values, verbose)
+    if verbose: print(f'>>>>> Getting IRLOS data...')
+    IRLOS_cube, win = GetIRLOScube(hdul_raw, verbose)
+    IRLOS_data_df   = GetIRLOSdata(hdul_raw,  hdul_cube, exposure_start, exposure_end, IRLOS_cube, verbose)
+    LGS_data_df     = GetLGSdata  (hdul_cube, exposure_start, exposure_end, fill_missing_values, verbose)
 
     if win is not None:
         IRLOS_data_df['window'] = win
 
-    if verbose: print(f'\n>>>>> Reading data from reduced MUSE spectral cube...')
-    MUSE_images, MUSE_data_df, spectral_info = GetImageSpectrumHeader(
+    if verbose: print(f'>>>>> Reading data from reduced MUSE spectral cube...')
+    MUSE_images, MUSE_data_df, spectral_info = GetSpectralCubeAndHeaderData(
         hdul_cube,
         show_plots = plot_spectrum,
         crop_cube  = crop,
         extract_spectrum = extract_spectrum,
         impaint = impaint_bad_pixels,
+        wvl_bins = wavelength_bins,
         verbose = verbose
     )
-    if verbose: print(f'\n>>>>> Reading data from raw MUSE file ...')
+    if verbose: print(f'>>>>> Reading data from raw MUSE file ...')
     Cn2_data_df, atm_data_df, asm_data_df   = GetRawHeaderData(hdul_raw)
-    if verbose: print(f'\n>>>>> Getting data from ESO archive...')
-    asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(start_time, end_time, minutes_delta=1)
+    if verbose: print(f'>>>>> Getting data from ESO archive...')
+    asm_df, massdimm_df, dimm_df, slodar_df = FetchFromESOarchive(exposure_start, exposure_end, minutes_delta=1)
 
     hdul_cube.close()
     hdul_raw.close()
 
-    # Try to detect the rotation of the PSF with diffracive features, work only for high-SNR oon-axis PSFs
-    derot_ang = MUSE_data_df['Derot. angle'].item()
-    derot_ang += 360 if derot_ang < -180 else -360
-
-    if derotate:
-        pupil_angle, angle_delta = get_PSF_rotation(MUSE_images, derot_ang)
-        MUSE_data_df['Pupil angle'] = pupil_angle + angle_delta
-    else:
-        MUSE_data_df['Pupil angle'] = derot_ang * 2 + 165 - 45
-
     # Estimate the IRLOS phasecube from 2x2 PSFs
     OPD_subap, OPD_aperture, PSF_estim = (None,)*3
-    if IRLOS_cube is not None:
-        if get_IRLOS_phase:
-            if verbose: print(f'\n>>>>> Reconstructing IRLOS phase via phase diversity...')
-            res = get_IRLOS_phase(IRLOS_cube)
-            if res is not None:
-                OPD_subap, OPD_aperture, PSF_estim = res
-                OPD_subap = OPD_subap.astype(np.float32)
-                OPD_aperture = OPD_aperture.astype(np.float32)
-                PSF_estim = PSF_estim.astype(np.float32)
+    if IRLOS_cube is not None and estimate_IRLOS_phase:
+        if verbose: print(f'>>>>> Estimating IRLOS phase via phase diversity...')
+        res = EstimateIRLOSphase(IRLOS_cube)
+        if res is not None:
+            OPD_subap, OPD_aperture, PSF_estim = res
+            OPD_subap = OPD_subap.astype(np.float32)
+            OPD_aperture = OPD_aperture.astype(np.float32)
+            PSF_estim = PSF_estim.astype(np.float32)
 
     IRLOS_phase_data = {
         'OPD per subap': OPD_subap,
@@ -1284,7 +1647,7 @@ def ProcessMUSEcube(
         'PSF estimated': PSF_estim
     }
 
-    if verbose: print(f'\n>>>>> Packing data...')
+    if verbose: print(f'>>>>> Packing data...')
 
     # Create a flat DataFrame with temporal dimension compressed
     all_df = pd.concat([
@@ -1294,7 +1657,7 @@ def ProcessMUSEcube(
     all_df.sort_index(inplace=True)
 
     flat_df = create_flat_dataframe(all_df)
-    flat_df.insert(0, 'time', start_time)
+    flat_df.insert(0, 'time', exposure_start)
     flat_df.insert(0, 'name', cube_name)
 
     MUSE_images['IRLOS cube'] = IRLOS_cube
@@ -1326,12 +1689,6 @@ def RenderDataSample(data_dict, file_name):
     white =  np.log10(1+np.abs(data_dict['images']['white']))
     white -= white.min()
     white /= white.max()
-
-    # from scipy.ndimage import rotate
-    # pupil_ang = data_dict['MUSE header data']['Pupil angle'].item() - 45
-    # if pupil_ang < -180: pupil_ang += 360
-    # if pupil_ang > 180:  pupil_ang -= 360
-    # white_rot = rotate(white, pupil_ang, reshape=False)
 
     if data_dict['images']['IRLOS cube'] is not None:
         IRLOS_img = np.log10(1+np.abs(data_dict['images']['IRLOS cube'].mean(axis=-1)))
@@ -1366,7 +1723,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     # Filter out NaN values
     cube_full = np.nan_to_num(cube_full, nan=0.0) * valid_mask[np.newaxis, :, :]
 
-    valid_mask = torch.tensor(valid_mask, device=device).float().unsqueeze(0)
+    valid_mask = torch.tensor(valid_mask, dtype=default_torch_type, device=device).unsqueeze(0)
 
     if os.path.exists(cache_path):
         if verbose: print('Loading existing cached data cube...')
@@ -1385,7 +1742,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
             path_raw  = raw_path,
             path_cube = cube_path,
             crop = False,
-            get_IRLOS_phase = False,
+            estimate_IRLOS_phase = False,
             derotate = False,
             impaint_bad_pixels = False,
             extract_spectrum = False,
@@ -1407,7 +1764,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     λ_full = np.linspace(λ_min, λ_max, np.round((λ_max-λ_min)/Δλ_full+1).astype('int'))
     assert len(λ_full) == cube_full.shape[0]
 
-    cube_binned, _, _, _ = LoadImages(data_cached, device=device, subtract_background=False, normalize=False, convert_images=True)
+    cube_binned = torch.tensor(data_cached['images']['cube'], dtype=default_torch_type, device=device)
     cube_binned = cube_binned.squeeze() * valid_mask
 
     # Correct the flux to match MUSE cube
@@ -1454,5 +1811,140 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
         "cube_sparse": cube_sparse, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
         "mask":        valid_mask   # this one contains the mask of the data cube
     }
-
     return spectral_cubes, spectral_info, data_cached, model_config
+
+
+def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True):
+    wvls_ = [(sample['spectral data']['wvls binned']*1e-9).tolist()]
+
+    # All wavelengths
+    if wvl_id is None:
+        wvls  = wvls_
+        PSF_0 = PSF_data
+
+    # Select one particular wavelength
+    else:
+        wvls = [wvls_[0][wvl_id]]
+        PSF_0 = PSF_data[:,wvl_id,...].unsqueeze(1)
+        # N_wvl = 1
+
+    # wvls = [wvls_[0][0], wvls_[0][-1]]
+    # N_wvl = 2
+    # PSF_0 = torch.stack( [PSF_0_[:,0,...], PSF_0_[:,-1,...]], axis=1 )
+  
+    config_manager = ConfigManager()
+    config_file    = ParameterParser(PROJECT_PATH / 'data/parameter_files/muse_ltao.ini').params
+    # merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample, *config_loader()) for sample in data_samples])
+
+    h_GL = 2000
+
+    try:
+        # For NFM it's save to assume gound layer to be below 2 km, for WFM it's lower than that
+        Cn2_weights = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
+        altitudes   = np.array([sample['All data'][f'ALT{i}'].item() for i in range(1, 9)])*100 # in meters
+
+        Cn2_weights[Cn2_weights > 1] = 0.0
+        Cn2_weights[Cn2_weights < 0] = 0.0
+
+        Cn2_weights_GL = Cn2_weights[altitudes < h_GL]
+        altitudes_GL   = altitudes  [altitudes < h_GL]
+
+        GL_frac  = Cn2_weights_GL.sum()  # Ground layer fraction   
+        Cn2_w_GL = np.interp(h_GL, altitudes, Cn2_weights)
+    except:
+        GL_frac = 0.9
+        
+
+    config_file['NumberSources'] = 1
+
+    config_file['telescope']['TelescopeDiameter'] = 8.0
+    config_file['telescope']['ZenithAngle'] = [90.0 - sample['MUSE header data']['Tel. altitude'].item()]
+    config_file['telescope']['Azimuth']     = [sample['MUSE header data']['Tel. azimuth'].item()]
+    
+    if 'PupilAngle' not in config_file['telescope']:
+        config_file['telescope']['PupilAngle'] = 0.0
+    else:
+        try:
+            config_file['telescope']['PupilAngle'] = sample['All data']['Pupil angle'].item()
+        except (KeyError, TypeError):
+            config_file['telescope']['PupilAngle'] = 0.0
+    
+    
+    if sample['Raw Cn2 data'] is not None:
+        config_file['atmosphere']['L0']  = [sample['All data']['L0Tot'].item()]
+    else:
+        config_file['atmosphere']['L0']  = [config_file['atmosphere']['L0']]
+                
+    config_file['atmosphere']['Seeing'] = [sample['MUSE header data']['Seeing (header)'].item()]
+    config_file['atmosphere']['Cn2Weights'] = [[GL_frac, 1-GL_frac]]
+    config_file['atmosphere']['Cn2Heights'] = [[0, h_GL]]
+
+    config_file['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item(),]*2]
+    config_file['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item(),]*2]
+    config_file['sources_science']['Wavelength'] = wvls
+
+    config_file['sources_LO']['Wavelength'] = (1215+1625)/2.0 * 1e-9
+
+    config_file['sensor_science']['PixelScale'] = sample['MUSE header data']['Pixel scale (science)'].item()
+    config_file['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
+
+    try:
+        LGS_ph = np.array([sample['All data'][f'LGS{i} photons, [photons/m^2/s]'].item() / 1240e3 for i in range(1,5)])
+        LGS_ph[LGS_ph < 1] = np.mean(LGS_ph)
+        LGS_ph = [LGS_ph.tolist()]
+    except:
+        LGS_ph = [[2000,]*4]
+        
+    config_file['sensor_HO']['NumberPhotons']  = LGS_ph
+    config_file['sensor_HO']['SizeLenslets']   = config_file['sensor_HO']['SizeLenslets'][0]
+    config_file['sensor_HO']['NumberLenslets'] = config_file['sensor_HO']['NumberLenslets'][0]
+    # config_file['sensor_HO']['NoiseVariance'] = 4.5
+
+    IRLOS_ph_per_subap_per_frame = sample['IRLOS data']['IRLOS photons (cube), [photons/s/m^2]'].item()
+    if IRLOS_ph_per_subap_per_frame is not None:
+        IRLOS_ph_per_subap_per_frame /= sample['IRLOS data']['frequency'].item() / 4
+
+    config_file['sensor_LO']['PixelScale']    = sample['IRLOS data']['plate scale, [mas/pix]'].item()
+    config_file['sensor_LO']['NumberPhotons'] = [IRLOS_ph_per_subap_per_frame]
+    config_file['sensor_LO']['SigmaRON']      = sample['IRLOS data']['RON, [e-]'].item()
+    config_file['sensor_LO']['Gain']          = [sample['IRLOS data']['gain'].item()]
+
+    config_file['RTC']['SensorFrameRate_LO'] = [sample['IRLOS data']['frequency'].item()]
+    config_file['RTC']['SensorFrameRate_HO'] = [config_file['RTC']['SensorFrameRate_HO']]
+
+    config_file['RTC']['LoopDelaySteps_HO']  = [config_file['RTC']['LoopDelaySteps_HO']]
+    config_file['RTC']['LoopGain_HO']        = [config_file['RTC']['LoopGain_HO']]
+
+    # config_file['DM']['DmPitchs'] = [config_file['DM']['DmPitchs'][0]*1.25]
+    config_file['DM']['DmPitchs'][0] = 0.22
+
+    config_file['sensor_HO']['ClockRate'] = np.mean([config_file['sensor_HO']['ClockRate']])
+    
+    if convert_config:
+        config_manager.Convert(config_file, framework='pytorch', device=device)
+
+    return config_file, PSF_0
+
+
+def RotatePSF(PSF_data, angle):
+    if isinstance(PSF_data, torch.Tensor):
+        PSF_data_ = PSF_data.cpu().numpy()
+        torch_flag = True
+    else:
+        PSF_data_ = PSF_data
+        torch_flag = False
+
+    PSF_data_rotated = np.zeros_like(PSF_data_[0,...])
+    
+    for i in range(PSF_data_.shape[1]):
+        PSF_data_rotated[i,...] = rotate(PSF_data_[0,i,...], angle , reshape=False)
+    
+    if torch_flag:
+        PSF_data_rotated = torch.tensor(PSF_data_rotated, dtype=default_torch_type).unsqueeze(0).to(PSF_data.device)
+    else:
+        PSF_data_rotated = PSF_data_rotated.astype(np.float32)[None,...]
+        
+    return PSF_data_rotated
+    
+
+# %%

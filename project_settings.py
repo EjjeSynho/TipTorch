@@ -1,12 +1,11 @@
 #%%
-from logging import warning
+# from logging import warning
 import os, sys
 import json
 import torch
 from pathlib import Path
 
-from traitlets import default
-from tools.utils import DownloadFromRemote
+from tools.network import DownloadFromRemote
 import warnings
 import platform
 # warnings.filterwarnings("ignore", category=UserWarning)
@@ -19,7 +18,7 @@ sys.path.insert(0, str(PROJECT_PATH / 'tools/') )
 sys.path.insert(0, str(PROJECT_PATH / 'managers/') )
 sys.path.insert(0, str(PROJECT_PATH / 'data_processing/') )
 
-# Downloading default project settings if they are not found locally
+# Download the default project settings if they are not found locally
 if not os.path.exists(path_to_config := Path(PROJECT_PATH) / Path("project_config.json")):
     DownloadFromRemote(
         share_url   = 'https://drive.google.com/file/d/1VJbqGtxISYzRlirHfe-dS4Urx3u7wYO2/view?usp=sharing',
@@ -28,17 +27,25 @@ if not os.path.exists(path_to_config := Path(PROJECT_PATH) / Path("project_confi
         verbose     = False
     )
 
+# Load project-wide folders settings
 with open(PROJECT_PATH / Path("project_config.json"), "r") as f:
     project_settings = json.load(f)
 
-# Load project-wide folders settings
-WEIGHTS_FOLDER = PROJECT_PATH / Path(project_settings["model_weights_folder"])
-DATA_FOLDER    = PROJECT_PATH / Path(project_settings["project_data_folder"])
+# Make sure paths are absolute when they're relative
+if project_settings["model_weights_folder"].startswith("./") or project_settings["model_weights_folder"].startswith("../"):
+    WEIGHTS_FOLDER = (PROJECT_PATH / Path(project_settings["model_weights_folder"])).resolve()
+else:
+    WEIGHTS_FOLDER = Path(project_settings["model_weights_folder"]).resolve()
+
+if project_settings["project_data_folder"].startswith("./") or project_settings["project_data_folder"].startswith("../"):
+    DATA_FOLDER = (PROJECT_PATH / Path(project_settings["project_data_folder"])).resolve()
+else:
+    DATA_FOLDER = Path(project_settings["project_data_folder"]).resolve()
 
 # Load instrument specific folders settings
-MUSE_DATA_FOLDER   = Path(project_settings["MUSE_data_folder"])
-SPHERE_DATA_FOLDER = Path(project_settings["SPHERE_data_folder"])
-LIFT_PATH          = Path(project_settings["LIFT_path"])
+# SPHERE_DATA_FOLDER = Path(project_settings["SPHERE_data_folder"])
+
+TELEMETRY_CACHE = DATA_FOLDER / 'reduced_telemetry/'
 
 default_torch_type = torch.float32
 

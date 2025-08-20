@@ -517,7 +517,6 @@ core_mask = torch.tensor(mask_circle(box_size, 3)[None,None,...]).to(device).flo
 #     plt.show()
 
 #%%
-from data_processing.MUSE_preproc_utils import GetRadialBackround
 from scipy.ndimage import gaussian_filter
 
 transformer_dict_astrometry = {

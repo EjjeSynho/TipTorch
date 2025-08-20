@@ -1,16 +1,22 @@
 #%%
+try:
+    ipy = get_ipython()        # NameError if not running under IPython
+    if ipy:
+        ipy.run_line_magic('reload_ext', 'autoreload')
+        ipy.run_line_magic('autoreload', '2')
+except NameError:
+    pass
+
 import sys
 # sys.path.insert(0, '.')
-# sys.path.insert(0, '..')
+sys.path.insert(0, '..')
 
 import pickle
 import os
-from os import path
+# from os import path
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-
-from project_settings import  MUSE_DATA_FOLDER
 
 import pandas as pd
 from astropy.coordinates import SkyCoord, AltAz
@@ -18,24 +24,103 @@ from astropy.io import fits
 import astropy.units as u
 from MUSE_data_utils import *
 
-MUSE_CUBES_FOLDER = MUSE_DATA_FOLDER + 'standart_stars/NFM_STD_cubes/'
-MUSE_RAW_FOLDER   = MUSE_DATA_FOLDER + 'standart_stars/NFM_STD_raw/'
+from project_settings import xp
+
+
+STD_FOLDER   = MUSE_DATA_FOLDER / 'standart_stars/'
+CUBES_FOLDER = STD_FOLDER / 'cubes/'
+RAW_FOLDER   = STD_FOLDER / 'raw/'
+CUBES_CACHE  = STD_FOLDER / 'cached_cubes/'
 
 #%%
-include_dirs_cubes = [
-    MUSE_CUBES_FOLDER,
-    MUSE_DATA_FOLDER + 'wide_field/cubes/',
-    MUSE_DATA_FOLDER + 'quasars/J0259_cubes/'
-]
+def LoadSTDStarCacheByID(id):
+    ''' Searches a specific STD star by its ID in the list of cached cubes. '''
+    with open(TELEMETRY_CACHE / 'MUSE/muse_df.pickle', 'rb') as handle:
+        muse_df = pickle.load(handle)
 
-include_dirs_raw = [
-    MUSE_RAW_FOLDER,
-    MUSE_DATA_FOLDER + 'wide_field/raw/',
-    MUSE_DATA_FOLDER + 'quasars/J0259_raw/'
-]
+    file = muse_df.loc[muse_df.index == id]['Filename'].values[0]
+    full_filename = CUBES_CACHE / f'{id}_{file}.pickle'
+
+    with open(full_filename, 'rb') as handle:
+        data_sample = pickle.load(handle)
+    
+    data_sample['All data']['Pupil angle'] = muse_df.loc[id]['Pupil angle']
+    return data_sample
+
+
+def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background=False, device=device):
+    def get_radial_backround(img):
+        ''' Computed STD star background as a minimum of radial profile '''
+        from tools.utils import safe_centroid
+        from photutils.profiles import RadialProfile
+        
+        xycen = safe_centroid(img)
+        edge_radii = np.arange(img.shape[-1]//2)
+        rp = RadialProfile(img, xycen, edge_radii)
+        
+        return rp.profile.min()
+    
+    
+    def load_sample(id):
+        sample = LoadSTDStarCacheByID(id)
+  
+        PSF_data = np.copy(sample['images']['cube']) 
+        PSF_STD  = np.copy(sample['images']['std'])
+        
+        if subtract_background:
+            backgrounds = np.array([ get_radial_backround(PSF_data[i,:,:]) for i in range(PSF_data.shape[0]) ])[:,None,None]
+            PSF_data -= backgrounds
+            
+        else:
+            backgrounds = np.zeros(PSF_data.shape[0])[:,None,None]
+
+        if normalize:
+            norms = PSF_data.sum(axis=(-1,-2), keepdims=True)
+            PSF_data /= norms
+            PSF_STD  /= norms
+        else:
+            norms = np.ones(PSF_data.shape[0])[:,None,None]
+    
+        config_file, PSF_0 = GetConfig(sample, PSF_0, convert_config=False)
+        return PSF_0, PSF_STD, norms, backgrounds, config_file, sample
+
+
+    PSF_0, configs, norms, bgs = [], [], [], []
+    
+    for id in ids:
+        PSF_0_, _, norm, bg, config_dict_, sample_ = load_sample(id)
+        configs.append(config_dict_)
+        if derotate_PSF:
+            PSF_0_rot = RotatePSF(PSF_0_, -sample_['All data']['Pupil angle'].item())
+            PSF_0.append(PSF_0_rot)
+        else:
+            PSF_0.append(PSF_0_)
+            
+        norms.append(norm)
+        bgs.append(bg)
+
+    PSF_0 = torch.tensor(np.vstack(PSF_0), dtype=default_torch_type, device=device)
+    norms = torch.tensor(norms, dtype=default_torch_type, device=device)
+    bgs   = torch.tensor(bgs, dtype=default_torch_type, device=device)
+
+    config_manager = ConfigManager()
+    merged_config  = config_manager.Merge(configs)
+
+    config_manager.Convert(merged_config, framework='pytorch', device=device)
+
+    merged_config['sources_science']['Wavelength'] = merged_config['sources_science']['Wavelength'][0]
+    merged_config['sources_HO']['Height']          = merged_config['sources_HO']['Height'].unsqueeze(-1)
+    merged_config['sources_HO']['Wavelength']      = merged_config['sources_HO']['Wavelength'].squeeze()
+    merged_config['NumberSources'] = len(ids)
+    
+    if derotate_PSF:
+        merged_config['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated
+
+    return PSF_0, norms, bgs, merged_config
+
 
 def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
-    '''Renames the MUSE cubes .fits files according to their exposure date and time'''
+    '''Renames MUSE reduced cubes .fits files according to their exposure date and time'''
     original_cubes_exposure, new_cubes_exposure = [], []
     original_filename, new_filename = [], []
 
@@ -48,7 +133,7 @@ def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
             new_cubes_exposure.append(hdul_cube[0].header['DATE-OBS'])
             new_filename.append(file)
 
-    print(f'Reding cubes in {folder_cubes_old}')
+    print(f'Reading cubes in {folder_cubes_old}')
     for file in tqdm(os.listdir(folder_cubes_old)):
         with fits.open(os.path.join(folder_cubes_old, file)) as hdul_cube:
             original_cubes_exposure.append(hdul_cube[0].header['DATE-OBS'])
@@ -70,7 +155,7 @@ def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
         os.makedirs(renamed_dir)
 
     for file in tqdm(os.listdir(folder_cubes_new)):
-        # Skip the 'renamed' directory itself
+        # Skip the 'renamed' directory
         if file == 'renamed':
             continue
 
@@ -90,14 +175,15 @@ def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
 
     return renamed_dir
 
-# _ = RenameMUSECubes(MUSE_CUBES_FOLDER, MUSE_DATA_FOLDER+'NFM_cubes_temp/')
+
+# _ = RenameMUSECubes(CUBES_FOLDER, STD_FOLDER / 'NFM_cubes_temp/')
 
 #%%
-if not os.path.exists( match_path:=(MUSE_DATA_FOLDER+'files_matches.csv') ):
+if not os.path.exists(match_path := STD_FOLDER / 'files_matches.csv') or not os.path.exists(STD_FOLDER / 'file_mismatches.csv'):
     try:
-        files_matches, file_mismatches = MatchRawWithReduced(include_dirs_raw, include_dirs_cubes, verbose=True)
-        files_matches.to_csv(MUSE_DATA_FOLDER+'files_matches.csv')
-        file_mismatches.to_csv(MUSE_DATA_FOLDER+'file_mismatches.csv')
+        files_matches, file_mismatches = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=True)
+        files_matches.to_csv(STD_FOLDER / 'files_matches.csv')
+        file_mismatches.to_csv(STD_FOLDER / 'file_mismatches.csv')
     except Exception as e:
         print(f'Error: {e}')
     else:
@@ -105,8 +191,9 @@ if not os.path.exists( match_path:=(MUSE_DATA_FOLDER+'files_matches.csv') ):
 else:
     files_matches = pd.read_csv(match_path)
     files_matches.set_index('date', inplace=True)
-    file_mismatches = pd.read_csv(MUSE_DATA_FOLDER+'file_mismatches.csv')
+    file_mismatches = pd.read_csv(STD_FOLDER / 'file_mismatches.csv')
     file_mismatches.set_index('date', inplace=True)
+    print(f'Read file matches file from {match_path}')
 
 #%%
 # import 
@@ -114,138 +201,27 @@ else:
 
 # # Move all files whoch are in file_mismatches raw column to a specified folder:
 # for file in tqdm(file_mismatches['raw'].values):
-#     shutil.move(MUSE_RAW_FOLDER+file, MUSE_DATA_FOLDER+'file_mismatches/')
+#     shutil.move(RAW_FOLDER+file, STD_FOLDER / 'file_mismatches/')
 
 #%%
-if not os.path.exists( exp_folder:=(MUSE_DATA_FOLDER+'exposure_times.csv') ):
+if not os.path.exists( exposures_file := STD_FOLDER / 'exposure_times.csv'):
     try:
-        df3 = GetExposureTimes(include_dirs_cubes, verbose=True)
-        df3.to_csv(exp_folder)
+        exposures_df = GetExposureTimesList(CUBES_FOLDER, verbose=True)
+        exposures_df.to_csv(exposures_file)
     except Exception as e:
         print(f'Error: {e}')
     else:
-        print(f'Exposure times table is saved at: {exp_folder}')
+        print(f'Exposure times table is saved at: {exposures_file}')
 
 else:
-    df3 = pd.read_csv(exp_folder)
-    df3.set_index('filename', inplace=True)
-
-'''
-# ------------------ Create/read the dataset with the samples observation type ---------------------------------------
-
-obs_types      = {}
-obs_types[file] = dirs_obs_types[include_dirs_cubes.index(folder_cubes)]
-dirs_obs_types = ['Calib. on-axis', 'Science, globular']
-
-if not os.path.exists( obs_type_folder:=(MUSE_RAW_FOLDER+'../obs_types.csv') ):
-    obs_types_df = pd.DataFrame(obs_types.items(), columns=['filename', 'obs_type'])
-    obs_types_df.set_index('filename', inplace=True)
-
-    try:
-        obs_types_df.to_csv(obs_type_folder)
-    except Exception as e:
-        print(f'Error: {e}')
-    else:
-        print(f'Observation types table is saved at: {obs_type_folder}')
-
-else:
-    obs_types_df = pd.read_csv(obs_type_folder)
-    obs_types_df.set_index('filename', inplace=True)
-'''
-
-
-
-#%%
-# Processing quasar data
-for name in ['2024-12-05T03_04_07.007', '2024-12-05T03_15_37.598', '2024-12-05T03_49_24.768']:
-    cube_name = f'J0259-0901_DATACUBE_FINAL_{name}.fits'
-
-    print(f'\n\n =================== Processing {cube_name} ===================')
-
-    raw_name = files_matches.loc[files_matches['cube'] == cube_name, 'raw'].values[0]
-
-    data_q, name_q = ProcessMUSEcube(
-        path_raw  = MUSE_DATA_FOLDER + 'quasars/J0259_raw/'   + raw_name,
-        path_cube = MUSE_DATA_FOLDER + 'quasars/J0259_cubes/' + cube_name,
-        crop=False,
-        get_IRLOS_phase=False,
-        derotate=False,
-        impaint_bad_pixels=False,
-        extract_spectrum=False,
-        plot_spectrum=False,
-        fill_missing_values=True,
-        verbose=True
-    )
-
-    path_new = MUSE_DATA_FOLDER + f'quasars/J0259_reduced/J0259_{name}.pickle'
-    try:
-        with open(path_new, 'wb') as handle:
-            pickle.dump(data_q, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-    except Exception as e:
-        print(f'Error: {e}')
-
-print(' ======================= Done! =======================')
-
-#%%
-
-print(f'\n\n =================== Processing combined exposure cube ===================')
-
-data_q, name_q = ProcessMUSEcube(
-    path_raw  = MUSE_DATA_FOLDER + 'quasars/J0259_raw/MUSE.2024-12-05T03_04_07.008.fits.fz',
-    path_cube = MUSE_DATA_FOLDER + 'quasars/J0259_cubes/J0259-0901_all.fits',
-    crop=False,
-    get_IRLOS_phase=False,
-    derotate=False,
-    impaint_bad_pixels=False,
-    extract_spectrum=False,
-    plot_spectrum=False,
-    fill_missing_values=True,
-    verbose=True
-)
-
-path_new = MUSE_DATA_FOLDER + f'quasars/J0259_reduced/J0259_all.pickle'
-try:
-    with open(path_new, 'wb') as handle:
-        pickle.dump(data_q, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-except Exception as e:
-    print(f'Error: {e}')
-
-print(' ======================= Done! =======================')
-
-#%%
-files = os.listdir(MUSE_DATA_FOLDER + 'quasars/J0259_reduced/')
-for file in files:
-    path = MUSE_DATA_FOLDER + 'quasars/J0259_reduced/' + file
-    with open(path, 'rb') as handle:
-        data_q = pickle.load(handle)
-
-    RenderDataSample(data_q, file)
-    plt.show()
-
-#%%
-
-data_q, name_q = ProcessMUSEcube(
-    path_raw  = MUSE_DATA_FOLDER + 'quasars/J0259_raw/MUSE.2024-12-05T03_15_37.598.fits.fz',
-    path_cube = MUSE_DATA_FOLDER + 'quasars/J0259_cubes/J0259-0901_DATACUBE_FINAL_2024-12-05T03_15_37.598.fits',
-    crop=False,
-    get_IRLOS_phase=False,
-    derotate=False,
-    impaint_bad_pixels=False,
-    extract_spectrum=False,
-    plot_spectrum=False,
-    fill_missing_values=True,
-    verbose=True
-)
-
-print(' ======================= Done! =======================')
+    exposures_df = pd.read_csv(exposures_file)
+    exposures_df.set_index('filename', inplace=True)
 
 
 #%%
 bad_ids = []
 # read list of files form .txt file:
-# with open(MUSE_RAW_FOLDER+'../bad_files.txt', 'r') as f:
+# with open(MUSE_RAW_FOLDER / '../bad_files.txt', 'r') as f:
 #     files_bad = f.read().splitlines()
 # for i in range(len(files_bad)):
 #     files_bad[i] = int(files_bad[i])
@@ -254,39 +230,61 @@ bad_ids = []
 # list_ids = [411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335]
 # cube_name = files_matches.iloc[file_id]['cube']
 
+# wvl_bins = None #np.array([478, 511, 544, 577, 606, 639, 672, 705, 738, 771, 804, 837, 870, 903, 935], dtype='float32')
+wvl_bins = np.array([
+    478.   , 492.125, 506.25 , 520.375, 534.625, 548.75 , 562.875,
+    577.   , 606.   , 620.25 , 634.625, 648.875, 663.25 , 677.5  ,
+    691.875, 706.125, 720.375, 734.75 , 749.   , 763.375, 777.625,
+    792.   , 806.25 , 820.625, 834.875, 849.125, 863.5  , 877.75 ,
+    892.125, 906.375, 920.75 , 935.
+], dtype='float32')
+
 
 for file_id in tqdm(range(0, len(files_matches))):
-# for file_id in tqdm(list_ids):
-    print(f'>>>>>>>>>>>>>> Processing file {file_id}...')
+    fname_new = files_matches.iloc[file_id]['cube'].replace('.fits','.pickle').replace(':','-')
+    fname_new = f'{file_id}_{fname_new}'
+
+    if fname_new in os.listdir(CUBES_CACHE):
+        print(f'File {fname_new} already exists. Skipping...')
+        continue
+
+    print(f'\n\n>>>>>>>>>>>>>> Processing file {file_id}...')
     try:
-        path_raw  = os.path.join(MUSE_RAW_FOLDER,   files_matches.iloc[file_id]['raw' ])
-        path_cube = os.path.join(MUSE_CUBES_FOLDER, files_matches.iloc[file_id]['cube'])
+        sample = ProcessMUSEcube(
+            path_raw  = os.path.join(RAW_FOLDER,   files_matches.iloc[file_id]['raw' ]),
+            path_cube = os.path.join(CUBES_FOLDER, files_matches.iloc[file_id]['cube']),
+            crop = True,
+            estimate_IRLOS_phase = False,
+            impaint_bad_pixels = False,
+            extract_spectrum = True,
+            wavelength_bins = wvl_bins,
+            plot_spectrum = False,
+            fill_missing_values = True,
+            verbose = True
+        )
 
-        data_store = ProcessMUSEcube(path_raw, path_cube, get_IRLOS_phase=True, derotate_PSF=True)
-
-        path_new = os.path.basename(path_cube).replace('.fits','.pickle').replace(':','-')
-        path_new = MUSE_RAW_FOLDER + '../DATA_reduced/' + str(file_id) + '_' + path_new
-
-        with open(path_new, 'wb') as handle:
-            pickle.dump(data_store, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        with open(CUBES_CACHE / fname_new, 'wb') as handle:
+            pickle.dump(sample, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     except Exception as e:
         print(f'Error with file {file_id}: {e}')
         bad_ids.append(file_id)
         continue
 
+print(f'Bad ids: {bad_ids}')
 
-#%% Render the dataset
-for file in tqdm(os.listdir(MUSE_RAW_FOLDER+'../DATA_reduced/')):
 
-    with open(MUSE_RAW_FOLDER+'../DATA_reduced/'+file, 'rb') as f:
-        data = pickle.load(f)
-
-    RenderDataSample(data)
-
-    plt.show()
-    plt.savefig(MUSE_RAW_FOLDER+'../MUSE_images/' + title + '.png')
-
+#%% Render the STD stars dataset
+for file in tqdm(os.listdir(CUBES_CACHE)):
+    try:
+        with open(CUBES_CACHE / file, 'rb') as f:
+            RenderDataSample(pickle.load(f))
+            
+        plt.show()
+        plt.savefig(STD_FOLDER / f'MUSE_images/{file.replace(".pickle",".png")}')
+        
+    except:
+        continue
 
 #%%
 # These two have the same target: CD-38 10980
@@ -440,24 +438,6 @@ extent = np.array([-data.shape[0]/2, data.shape[0]/2, -data.shape[1]/2, data.sha
 plt.imshow(data, extent=extent.tolist(), origin='lower')
 plt.colorbar()
 plt.show()
-
-#%% ============================================================================================
-# ---------------------- Reducing the full-frame data
-
-#TODO: remove obs.type
-fname_cube_multi = obs_types_df.loc[obs_types_df['obs_type'] == 'Science, globular']['obs_type'].index[0]
-fname_raw_multi  = files_matches['raw'].loc[files_matches['cube'] == fname_cube_multi].values[0]
-
-hdul_raw  = fits.open(os.path.join(MUSE_DATA_FOLDER+'wide_field/raw/',   fname_raw_multi ))
-hdul_cube = fits.open(os.path.join(MUSE_DATA_FOLDER+'wide_field/cubes/', fname_cube_multi))
-
-
-path_new = fname_cube_multi.split('.fits')[0] + '.pickle'
-path_new = path_new.replace(':','-')
-path_new = MUSE_DATA_FOLDER+'wide_field/reduced/' + path_new
-
-with open(path_new, 'wb') as handle:
-    pickle.dump(data_store, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 #%%

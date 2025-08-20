@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 
+import random
 import numpy as np
 import pandas as pd
 
@@ -37,8 +38,15 @@ raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.
 cube_path  = MUSE_DATA_FOLDER / "omega_cluster/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
-spectral_cubes, spectral_info, data_cached, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, TELEMETRY_CACHEd, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
+
+λ_full,   λ_sparse = spectral_info['λ_full'],  spectral_info['λ_sparse']
+Δλ_full, Δλ_binned = spectral_info['Δλ_full'], spectral_info['Δλ_binned']
+
+#TODO: fix binned and sparse consistency
+flux_λ_norm = torch.tensor(Δλ_full / Δλ_binned, device=device, dtype=torch.float32)
+cube_sparse *= flux_λ_norm[:, None, None]
 
 #%%
 # Read pre-processed HST data from DataFrame
@@ -83,167 +91,20 @@ sources_coords  = sources_coords*25 / rad2mas  # [pix] -> [rad]
 
 #%%
 # Yes, this inconsistency in sparse and and binned is intended for proper energy normalization
-λ_full,   λ_sparse = spectral_info['λ_full'],  spectral_info['λ_sparse']
-Δλ_full, Δλ_binned = spectral_info['Δλ_full'], spectral_info['Δλ_binned']
-
-# Correct for the difference in energy per λ bin
-flux_λ_norm = Δλ_full / Δλ_binned # TODO: make it an array per spectral slice since every spoectral bin has different span
-#TODO: fix binned and sparse consistency
-
 flux_core_radius = 2  # [pix]
 N_core_pixels = (flux_core_radius*2 + 1)**2  # [pix^2]
 
 # It tells the average flux in the PSF core for each source
-src_spectra_sparse = [GetSpectrum(cube_sparse, sources.iloc[i], radius=flux_core_radius) * flux_λ_norm for i in range(N_src)]
+src_spectra_sparse = [GetSpectrum(cube_sparse, sources.iloc[i], radius=flux_core_radius) for i in range(N_src)]
 src_spectra_full   = [GetSpectrum(cube_full,   sources.iloc[i], radius=flux_core_radius) for i in range(N_src)]
 
 # Compute HST spectra for each source
+HST_weights = np.array([1.0, 1.0, 0.93, 0.82, 1.0])[None, ...] * 2.35  # empirical multiplier
 src_spectra_HST = sources_df.copy().drop(columns=['x, [asec]', 'y, [asec]', 'flux (total, normalized)']).loc[sources.index]
 λ_HST = np.array([float(col[1:-1]) for col in src_spectra_HST.columns]) # [nm]
-src_spectra_HST = src_spectra_HST.to_numpy() * flux_λ_norm * 2.35 # empirical multiplier
+src_spectra_HST = src_spectra_HST.to_numpy() * HST_weights * flux_λ_norm.median().item()
 
 #%%
-import numpy as np
-import torch
-from torch import nn
-from torch.utils.data import Dataset, DataLoader, Subset
-
-# 1) Define your wavelength grids (in Å) and build an interpolation matrix
-wave_nfm = λ_sparse.cpu().numpy()
-wave_hst = λ_HST
-
-# Create a Dataset of (nfm_spectrum, hst_spectrum) pairs
-class SpecDataset(Dataset):
-    def __init__(self, nfm_list, hst_list):
-        assert len(nfm_list) == len(hst_list)
-        self.nfm = torch.vstack(nfm_list).float()  # (N,7)
-        self.hst = torch.as_tensor(hst_list, dtype=torch.float32)  # (N,5)
-
-    def __len__(self):
-        return self.nfm.size(0)
-
-    def __getitem__(self, idx):
-        return self.nfm[idx], self.hst[idx]
-
-
-dataset = SpecDataset(src_spectra_sparse, src_spectra_HST)
-
-total_flux = dataset.nfm.sum(dim=1).cpu().numpy()  # shape (N,)
-sorted_idx = np.argsort(total_flux)[::-1] # Sort indices by brightness descending
-
-n_train = int(0.15 * len(dataset))
-train_idx, val_idx = sorted_idx[:n_train], sorted_idx[n_train:]
-
-train_ds = Subset(dataset, train_idx)
-val_ds   = Subset(dataset, val_idx)
-
-train_loader = DataLoader(train_ds, batch_size=32, shuffle=True)
-val_loader   = DataLoader(val_ds,   batch_size=32, shuffle=False)
-
-#%%
-class CorrectionNet(nn.Module):
-    def __init__(self, in_size, out_size, hidden=16):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(in_size, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, hidden),
-            nn.ReLU(),
-            nn.Linear(hidden, out_size),
-            nn.Softplus()   # ensures coefficients ≥0
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
-
-def normalized_mse(pred, target):#, eps=1e-6):
-    # p = pred / (pred.sum(dim=1, keepdim=True) + eps)
-    # t = target / (target.sum(dim=1, keepdim=True) + eps)
-    
-    p = pred
-    t = target
-    
-    # return ((p - t)**2).mean()
-    return ((p - t).abs()).mean()
-
-
-# 5) Set up model, optimizer, device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-model  = CorrectionNet(in_size=dataset.hst.shape[1], out_size=dataset.nfm.shape[1], hidden=16).to(device)
-opt    = torch.optim.Adam(model.parameters(), lr=1e-3)
-
-
-#%%
-num_epochs = 2000
-for epoch in range(1, num_epochs+1):
-    # ——— Training ———
-    model.train()
-    train_loss = 0.0
-    for nfm_batch, hst_batch in train_loader:
-        nfm = nfm_batch.to(device)
-        hst = hst_batch.to(device)
-
-        opt.zero_grad()
-        pred_nfm = model(hst)
-        loss     = normalized_mse(pred_nfm, nfm)
-        loss.backward()
-        opt.step()
-
-        train_loss += loss.item() * nfm.size(0)
-
-    train_loss /= len(train_ds)
-
-    # ——— Validation ———
-    model.eval()
-    val_loss = 0.0
-    with torch.no_grad():
-        for nfm_batch, hst_batch in val_loader:
-            nfm = nfm_batch.to(device)
-            hst = hst_batch.to(device)
-
-            pred_nfm = model(hst)
-            loss     = normalized_mse(pred_nfm, nfm)
-            val_loss += loss.item() * nfm.size(0)
-
-    val_loss /= len(val_ds)
-
-    print(f"Epoch {epoch:4d}/{num_epochs}  "
-          f"Train Loss: {train_loss:.4e}  "
-          f"Val Loss: {val_loss:.4e}")
-
-#%%
-# Predict for all sources
-model.eval()
-with torch.no_grad():
-    nfm_corrected = model(dataset.hst.to(device)).cpu().numpy()
-
-    
-#%%
-from scipy.interpolate import interp1d
-'''
-# Interpolate MUSE spectra to HST wavelengths
-src_spectra_sparse_interp = []
-src_spectra_HST_temp = []
-
-# use 15 brightest sources to compute the spectral corrective factor for HST fluxes so that they best match NFM ones
-for i in range(15):
-    src_spectra_sparse_interp.append(
-        interp1d(λ_sparse.cpu().numpy(), src_spectra_sparse[i].cpu().numpy(), kind='linear', fill_value='extrapolate')(λ_HST)
-    )
-    src_spectra_HST_temp.append(src_spectra_HST[i])
-
-HST_correction = np.median(np.array(src_spectra_sparse_interp) / np.array(src_spectra_HST_temp), axis=0)
-# HST_correction = 2.5
-src_spectra_HST = (src_spectra_HST*HST_correction).tolist()
-# src_spectra_HST = (src_spectra_HST).tolist()
-
-del src_spectra_HST_temp, src_spectra_sparse_interp
-'''
-
-
-import random
-
 # Generate as many random colors as N_src
 colors = []
 for _ in range(N_src):
@@ -256,20 +117,17 @@ colors[:10] = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gra
 # Plot spectra for NFM and HST
 plt.figure(figsize=(6, 4))
 # for i_src in range(N_src):
-for i_src in range(40, 45):
+for i_src in range(130, 137):
     # Full MUSE spectrum (in true units)
-    # plt.plot(λ_full, src_spectra_full[i_src], linewidth=0.25, alpha=0.2, color=colors[i_src])
+    plt.plot(λ_full, src_spectra_full[i_src], linewidth=0.25, alpha=0.2, color=colors[i_src])
     
     # Sparse and renormalized NFM spectrum
-    # plt.scatter(λ_sparse.cpu().numpy(), src_spectra_sparse[i_src].cpu().numpy(), color=colors[i_src], marker='o', s=30, alpha=0.8)
-    plt.plot(λ_sparse.cpu().numpy(), src_spectra_sparse[i_src].cpu().numpy(), linestyle='--', linewidth=0.5, alpha=1, color=colors[i_src])
-    
-    plt.plot(λ_sparse.cpu().numpy(), nfm_corrected[i_src, ...], linestyle='-', linewidth=0.75, alpha=1, color=colors[i_src])
-    
+    plt.scatter(λ_sparse.cpu().numpy(), src_spectra_sparse[i_src].cpu().numpy(), color=colors[i_src], marker='o', s=30, alpha=0.8)
+    # plt.plot(λ_sparse.cpu().numpy(), src_spectra_sparse[i_src].cpu().numpy(), linestyle='--', linewidth=0.5, alpha=1, color=colors[i_src])
     
     # Renormalized and corrected HST spectrum
     # plt.scatter(λ_HST, src_spectra_HST[i_src], color=colors[i_src], marker='+', s=30, alpha=0.8)
-    # plt.plot(   λ_HST, src_spectra_HST[i_src], linewidth=0.25, alpha=1, color=colors[i_src])
+    plt.plot(   λ_HST, src_spectra_HST[i_src], linewidth=0.25, alpha=1, color=colors[i_src])
 
 
 plt.xlabel('Wavelength, [nm]')
@@ -315,7 +173,7 @@ PSD_include = {
     'Moffat':          predict_Moffat
 }
 
-model = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 # model_single.apodizer = model_single.make_tensor(1.0)
 
 model.to_float()

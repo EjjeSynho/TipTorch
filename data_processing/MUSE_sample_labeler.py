@@ -7,7 +7,7 @@ from tkinter import messagebox, ttk, font
 import os
 from PIL import Image, ImageTk
 
-from project_settings import MUSE_DATA_FOLDER
+from MUSE_data_utils import MUSE_DATA_FOLDER
 
 class ImageLabeller:
     def __init__(self, master, image_paths, labels_file):

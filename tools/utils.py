@@ -1,15 +1,16 @@
 #%%
+from attr import has
 import numpy as np
-import os
 import torch
-import gdown
 from torch import nn
-from scipy.ndimage import center_of_mass
+# from scipy.ndimage import center_of_mass
 from photutils.centroids import centroid_quadratic, centroid_com, centroid_com, centroid_quadratic
 from astropy.modeling import models, fitting
 import matplotlib.pyplot as plt
 import seaborn as sns
 import warnings
+
+from project_settings import xp, use_cupy
 
 try:
     from graphviz import Digraph
@@ -32,23 +33,24 @@ r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0     = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
 
 
-def DownloadFromRemote(share_url, output_path, overwrite=False, verbose=False):
-    """
-    Downloads a file from Google Drive using a shareable link.
+# def check_framework(x):
+#     """ Determine whether an array is NumPy or CuPy. """
+#     if hasattr(x, '__module__'):
+#         module_name = x.__module__.split('.')[0]
+#         if   module_name == 'numpy': return np
+#         elif module_name == 'cupy':  return xp
 
-    Parameters:
-        share_url (str): URL to the shared file on Google Drive
-        output_path (str): Path where the file should be saved
-        overwrite (bool): If True, overwrites the file if it already exists.
-                          If False, skips download if file exists. Default is False.
-    """
-    # Check if the file exists and handle based on overwrite flag
-    if os.path.exists(output_path) and not overwrite:
-        print(f"File already exists at {output_path}. Set overwrite=True to replace it.")
-        return
+#     # Default to NumPy if not using GPU, otherwise CuPy
+#     return np if not use_cupy else xp
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True) # Create file's directory if it doesn't exist
-    gdown.download(share_url, output_path, quiet=not verbose, fuzzy=True) # Download the file
+
+def check_framework(x):
+    """Return the array library (numpy or cupy) that matches the input array."""
+    if isinstance(x, np.ndarray):
+        return np
+    if use_cupy and hasattr(x, 'device'):
+        return xp
+    return np
 
 
 def to_little_endian(array):
@@ -183,6 +185,86 @@ def CroppedROI(im, point, win):
              slice(max(point[1]-win//2, 0), min(point[1]+win//2+win%2, im.shape[1])) )
 
 
+def center_of_mass(arr):
+    """
+    Calculate the center of mass of an array.
+
+    Works with NumPy or CuPy arrays. If `arr` is a CuPy array, 
+    computations run on the GPU.
+
+    Parameters
+    ----------
+    arr : ndarray (numpy or cupy)
+        Input data. Values act as "masses" (can be positive or negative).
+
+    Returns
+    -------
+    com : tuple of floats
+        Coordinates of the center of mass.
+    """
+    
+    _xp = check_framework(arr)
+    arr = _xp.asarray(arr)
+    m = _xp.sum(arr)
+    
+    grids = _xp.ogrid[tuple(slice(0, s) for s in arr.shape)]
+    grids = [g.astype(_xp.float64, copy=False) for g in grids]
+    coords = [_xp.sum(arr * g) / m for g in grids]
+
+    return tuple(coords)
+
+
+def GetROIaroundMax(image, win=200):
+    """
+    Get a square ROI centered on the brightest spot (refined by center-of-mass).
+
+    Works with NumPy or CuPy arrays.
+
+    Parameters
+    ----------
+    im : 2D ndarray (numpy or cupy)
+        Image data. Can contain NaN/Inf.
+    win : int, optional
+        Half-size ("radius") of the ROI to extract. The ROI side length
+        is up to (2*win + 1), clipped at image borders.
+
+    Returns
+    -------
+    roi : ndarray
+        Cropped image around the brightest spot (with inf treated as nan).
+    ids : tuple(slice, slice)
+        Slice objects used to index the ROI.
+    max_id : tuple(int, int)
+        (row, col) of the final center used for the ROI in the full image.
+    """
+
+    _xp = check_framework(image)
+
+    # Work on a safe copy; treat +/−inf as NaN for max/CoM logic
+    work = _xp.array(image, copy=True)
+    work = _xp.where(_xp.isinf(work), _xp.nan, work)
+
+    # 1) initial brightest pixel (ignoring NaNs)
+    max_flat = _xp.nanargmax(work)          # raises if all-NaN; same as numpy/cupy
+    
+    # max_id = _xp.unravel_index(max_flat, work.shape)
+    max_id = tuple(int(i) for i in _xp.unravel_index(max_flat, work.shape))
+
+    # 2) refine with center-of-mass in a small local window (radius 20)
+    local_ids = CroppedROI(work, max_id, 20)
+    local = work[local_ids]
+    CoG_rc = _xp.asarray(center_of_mass(local)).round().astype(_xp.int32)
+    max_id = (local_ids[0].start + int(CoG_rc[0]),
+              local_ids[1].start + int(CoG_rc[1]))
+
+    # 3) final ROI of size ~ (2*win+1) around refined center
+    ids = CroppedROI(work, max_id, int(win))
+    roi = work[ids]
+
+    return roi, ids, max_id
+
+
+'''
 def GetROIaroundMax(im, win=200):
     im[np.isinf(im)] = np.nan
     # determine the position of maximum intensity, so the image is centered around the brightest star
@@ -193,7 +275,7 @@ def GetROIaroundMax(im, win=200):
     max_id = (max_crop[0].start + CoG_id[0], max_crop[1].start + CoG_id[1])
     ids = CroppedROI(im, max_id, win)
     return im[ids], ids, max_id
-
+'''
 
 def GetJmag(N_ph):
     J_zero_point = 1.9e12

@@ -56,8 +56,10 @@ class Calibrator(nn.Module):
         # Handle conversion to tensor based on input type
         if isinstance(x, (pd.DataFrame, pd.Series)):
             NN_inp = torch.as_tensor(x.to_numpy(), device=self.device, dtype=self.dtype)
+
         elif isinstance(x, (list, np.ndarray)):
             NN_inp = torch.as_tensor(x, device=self.device, dtype=self.dtype)
+            
         elif isinstance(x, torch.Tensor):
             # Only convert if needed
             if x.device != self.device or x.dtype != self.dtype:
