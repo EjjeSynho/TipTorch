@@ -8,182 +8,33 @@ except NameError:
     pass
 
 import sys
-# sys.path.insert(0, '.')
 sys.path.insert(0, '..')
 
 import pickle
 import os
-# from os import path
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 import pandas as pd
-from astropy.coordinates import SkyCoord, AltAz
+import seaborn as sns
 from astropy.io import fits
 import astropy.units as u
-from MUSE_data_utils import *
+from MUSE_STD_dataset_utils import *
 
-from project_settings import xp
-
-
-STD_FOLDER   = MUSE_DATA_FOLDER / 'standart_stars/'
-CUBES_FOLDER = STD_FOLDER / 'cubes/'
-RAW_FOLDER   = STD_FOLDER / 'raw/'
-CUBES_CACHE  = STD_FOLDER / 'cached_cubes/'
+# from astropy.coordinates import SkyCoord, AltAz
 
 #%%
-def LoadSTDStarCacheByID(id):
-    ''' Searches a specific STD star by its ID in the list of cached cubes. '''
-    with open(TELEMETRY_CACHE / 'MUSE/muse_df.pickle', 'rb') as handle:
-        muse_df = pickle.load(handle)
-
-    file = muse_df.loc[muse_df.index == id]['Filename'].values[0]
-    full_filename = CUBES_CACHE / f'{id}_{file}.pickle'
-
-    with open(full_filename, 'rb') as handle:
-        data_sample = pickle.load(handle)
-    
-    data_sample['All data']['Pupil angle'] = muse_df.loc[id]['Pupil angle']
-    return data_sample
-
-
-def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background=False, device=device):
-    def get_radial_backround(img):
-        ''' Computed STD star background as a minimum of radial profile '''
-        from tools.utils import safe_centroid
-        from photutils.profiles import RadialProfile
-        
-        xycen = safe_centroid(img)
-        edge_radii = np.arange(img.shape[-1]//2)
-        rp = RadialProfile(img, xycen, edge_radii)
-        
-        return rp.profile.min()
-    
-    
-    def load_sample(id):
-        sample = LoadSTDStarCacheByID(id)
-  
-        PSF_data = np.copy(sample['images']['cube']) 
-        PSF_STD  = np.copy(sample['images']['std'])
-        
-        if subtract_background:
-            backgrounds = np.array([ get_radial_backround(PSF_data[i,:,:]) for i in range(PSF_data.shape[0]) ])[:,None,None]
-            PSF_data -= backgrounds
-            
-        else:
-            backgrounds = np.zeros(PSF_data.shape[0])[:,None,None]
-
-        if normalize:
-            norms = PSF_data.sum(axis=(-1,-2), keepdims=True)
-            PSF_data /= norms
-            PSF_STD  /= norms
-        else:
-            norms = np.ones(PSF_data.shape[0])[:,None,None]
-    
-        config_file, PSF_0 = GetConfig(sample, PSF_0, convert_config=False)
-        return PSF_0, PSF_STD, norms, backgrounds, config_file, sample
-
-
-    PSF_0, configs, norms, bgs = [], [], [], []
-    
-    for id in ids:
-        PSF_0_, _, norm, bg, config_dict_, sample_ = load_sample(id)
-        configs.append(config_dict_)
-        if derotate_PSF:
-            PSF_0_rot = RotatePSF(PSF_0_, -sample_['All data']['Pupil angle'].item())
-            PSF_0.append(PSF_0_rot)
-        else:
-            PSF_0.append(PSF_0_)
-            
-        norms.append(norm)
-        bgs.append(bg)
-
-    PSF_0 = torch.tensor(np.vstack(PSF_0), dtype=default_torch_type, device=device)
-    norms = torch.tensor(norms, dtype=default_torch_type, device=device)
-    bgs   = torch.tensor(bgs, dtype=default_torch_type, device=device)
-
-    config_manager = ConfigManager()
-    merged_config  = config_manager.Merge(configs)
-
-    config_manager.Convert(merged_config, framework='pytorch', device=device)
-
-    merged_config['sources_science']['Wavelength'] = merged_config['sources_science']['Wavelength'][0]
-    merged_config['sources_HO']['Height']          = merged_config['sources_HO']['Height'].unsqueeze(-1)
-    merged_config['sources_HO']['Wavelength']      = merged_config['sources_HO']['Wavelength'].squeeze()
-    merged_config['NumberSources'] = len(ids)
-    
-    if derotate_PSF:
-        merged_config['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated
-
-    return PSF_0, norms, bgs, merged_config
-
-
-def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
-    '''Renames MUSE reduced cubes .fits files according to their exposure date and time'''
-    original_cubes_exposure, new_cubes_exposure = [], []
-    original_filename, new_filename = [], []
-
-    print(f'Reding cubes in {folder_cubes_new}')
-    for file in tqdm(os.listdir(folder_cubes_new)):
-        if file == 'renamed':
-            continue
-        
-        with fits.open(os.path.join(folder_cubes_new, file)) as hdul_cube:
-            new_cubes_exposure.append(hdul_cube[0].header['DATE-OBS'])
-            new_filename.append(file)
-
-    print(f'Reading cubes in {folder_cubes_old}')
-    for file in tqdm(os.listdir(folder_cubes_old)):
-        with fits.open(os.path.join(folder_cubes_old, file)) as hdul_cube:
-            original_cubes_exposure.append(hdul_cube[0].header['DATE-OBS'])
-            original_filename.append(file)
-
-    intersection = list(set(original_cubes_exposure).intersection(set(new_cubes_exposure)))
-
-    # Remove files which intersect
-    if len(intersection) > 0:
-        for exposure in intersection:
-            file = new_filename[new_cubes_exposure.index(exposure)]
-            file_2_rm = os.path.normpath(os.path.join(folder_cubes_new, file))
-            print(f'Removed duplicate: {file_2_rm}')
-            os.remove(file_2_rm)
-
-    # Rename files according to the their exposure timestamps (just for convenience)
-    renamed_dir = os.path.join(folder_cubes_new, 'renamed')
-    if not os.path.exists(renamed_dir):
-        os.makedirs(renamed_dir)
-
-    for file in tqdm(os.listdir(folder_cubes_new)):
-        # Skip the 'renamed' directory
-        if file == 'renamed':
-            continue
-
-        with fits.open(os.path.join(folder_cubes_new, file)) as hdul_cube:
-            exposure = hdul_cube[0].header['DATE-OBS']
-
-        new_name = 'M.MUSE.' + exposure.replace(':', '-') + '.fits'
-        file_2_rm = os.path.normpath(os.path.join(folder_cubes_new, file))
-        file_2_mv = os.path.normpath(os.path.join(renamed_dir, new_name))
-
-        # Check if destination file already exists
-        if os.path.exists(file_2_mv):
-            print(f"Warning: Duplicate file found for {exposure}. Removing {file_2_rm}")
-            os.remove(file_2_rm)
-        else:
-            os.rename(file_2_rm, file_2_mv)
-
-    return renamed_dir
-
-
 # _ = RenameMUSECubes(CUBES_FOLDER, STD_FOLDER / 'NFM_cubes_temp/')
 
 #%%
-if not os.path.exists(match_path := STD_FOLDER / 'files_matches.csv') or not os.path.exists(STD_FOLDER / 'file_mismatches.csv'):
+if not os.path.exists(match_path := STD_FOLDER / 'files_matches.csv') or not os.path.exists(STD_FOLDER / 'files_mismatches.csv'):
     try:
-        files_matches, file_mismatches = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=True)
+        files_matches, files_mismatches = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=True)
+        files_matches = files_matches.sort_index()
+        files_mismatches = files_mismatches.sort_index()
         files_matches.to_csv(STD_FOLDER / 'files_matches.csv')
-        file_mismatches.to_csv(STD_FOLDER / 'file_mismatches.csv')
+        files_mismatches.to_csv(STD_FOLDER / 'files_mismatches.csv')
     except Exception as e:
         print(f'Error: {e}')
     else:
@@ -191,60 +42,44 @@ if not os.path.exists(match_path := STD_FOLDER / 'files_matches.csv') or not os.
 else:
     files_matches = pd.read_csv(match_path)
     files_matches.set_index('date', inplace=True)
-    file_mismatches = pd.read_csv(STD_FOLDER / 'file_mismatches.csv')
-    file_mismatches.set_index('date', inplace=True)
+    files_matches = files_matches.sort_index()
+    files_mismatches = pd.read_csv(STD_FOLDER / 'files_mismatches.csv')
+    files_mismatches.set_index('date', inplace=True)
+    files_mismatches = files_mismatches.sort_index()
     print(f'Read file matches file from {match_path}')
 
-#%%
-# import 
-# from tqdm import tqdm
-
+#%
 # # Move all files whoch are in file_mismatches raw column to a specified folder:
 # for file in tqdm(file_mismatches['raw'].values):
 #     shutil.move(RAW_FOLDER+file, STD_FOLDER / 'file_mismatches/')
 
-#%%
-if not os.path.exists( exposures_file := STD_FOLDER / 'exposure_times.csv'):
-    try:
-        exposures_df = GetExposureTimesList(CUBES_FOLDER, verbose=True)
-        exposures_df.to_csv(exposures_file)
-    except Exception as e:
-        print(f'Error: {e}')
-    else:
-        print(f'Exposure times table is saved at: {exposures_file}')
+#%
+# if not os.path.exists( exposures_file := STD_FOLDER / 'exposure_times.csv'):
+#     try:
+#         exposures_df = GetExposureTimesList(CUBES_FOLDER, verbose=True)
+#         exposures_df.to_csv(exposures_file)
+#     except Exception as e:
+#         print(f'Error: {e}')
+#     else:
+#         print(f'Exposure times table is saved at: {exposures_file}')
 
-else:
-    exposures_df = pd.read_csv(exposures_file)
-    exposures_df.set_index('filename', inplace=True)
+# else:
+#     exposures_df = pd.read_csv(exposures_file)
+#     exposures_df.set_index('filename', inplace=True)
 
 
-#%%
+#%% ================================ Cache MUSE NFM STD stars cubes ================================
 bad_ids = []
-# read list of files form .txt file:
-# with open(MUSE_RAW_FOLDER / '../bad_files.txt', 'r') as f:
-#     files_bad = f.read().splitlines()
-# for i in range(len(files_bad)):
-#     files_bad[i] = int(files_bad[i])
-# for file_id in tqdm(files_bad):
-# bad_IRLOS_ids = [68, 242, 316, 390]
-# list_ids = [411, 410, 409, 405, 146, 296, 276, 395, 254, 281, 343, 335]
-# cube_name = files_matches.iloc[file_id]['cube']
 
-# wvl_bins = None #np.array([478, 511, 544, 577, 606, 639, 672, 705, 738, 771, 804, 837, 870, 903, 935], dtype='float32')
-wvl_bins = np.array([
-    478.   , 492.125, 506.25 , 520.375, 534.625, 548.75 , 562.875,
-    577.   , 606.   , 620.25 , 634.625, 648.875, 663.25 , 677.5  ,
-    691.875, 706.125, 720.375, 734.75 , 749.   , 763.375, 777.625,
-    792.   , 806.25 , 820.625, 834.875, 849.125, 863.5  , 877.75 ,
-    892.125, 906.375, 920.75 , 935.
-], dtype='float32')
+rewrite = False
 
+ids_process = range(0, len(files_matches))
 
-for file_id in tqdm(range(0, len(files_matches))):
+for file_id in tqdm(ids_process):
     fname_new = files_matches.iloc[file_id]['cube'].replace('.fits','.pickle').replace(':','-')
     fname_new = f'{file_id}_{fname_new}'
 
-    if fname_new in os.listdir(CUBES_CACHE):
+    if fname_new in os.listdir(CUBES_CACHE) and not rewrite:
         print(f'File {fname_new} already exists. Skipping...')
         continue
 
@@ -262,7 +97,6 @@ for file_id in tqdm(range(0, len(files_matches))):
             fill_missing_values = True,
             verbose = True
         )
-
         with open(CUBES_CACHE / fname_new, 'wb') as handle:
             pickle.dump(sample, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
@@ -274,46 +108,212 @@ for file_id in tqdm(range(0, len(files_matches))):
 print(f'Bad ids: {bad_ids}')
 
 
-#%% Render the STD stars dataset
+#%% ================================ Render the STD stars dataset ================================
 for file in tqdm(os.listdir(CUBES_CACHE)):
+    if (fx:=file.replace(".pickle",".png")) in os.listdir(STD_FOLDER / f'MUSE_images/'):
+        print(f'File {fx} already exists. Skipping...')
+        continue
     try:
         with open(CUBES_CACHE / file, 'rb') as f:
-            RenderDataSample(pickle.load(f))
+            RenderDataSample(pickle.load(f)[0], file)
             
-        plt.show()
         plt.savefig(STD_FOLDER / f'MUSE_images/{file.replace(".pickle",".png")}')
+        plt.close()
         
-    except:
+    except Exception as e:
+        print(f'{e}')
         continue
 
+
+#%% ================================ Label PSFs ================================
+import subprocess
+import sys
+
+# Execute the data labeler script
+result = subprocess.run([sys.executable, 'MUSE_STD_stars_labeler.py'],
+                        capture_output=True,
+                        text=True,
+                        cwd='.')
+
+if result.returncode != 0:
+    print(f"Error executing data_labeler.py: {result.stderr}")
+else:
+    print(f"data_labeler.py executed successfully: {result.stdout}")
+
+
+#%% ================================ Assemble STD stars reduced telemetry dataset ================================
+
+# Compose dataset of MUSE NFM redued telemetry values based on the data associated with cahed data cubes
+if not os.path.exists(TELEMETRY_CACHE / 'MUSE/muse_df.pickle'):
+    # Load labels information
+    all_labels = []
+    labels_df  = { 'ID': [], 'Filename': [] }
+
+    if os.path.exists(labels_path := STD_FOLDER / 'labels.txt'):
+        with open(labels_path, 'r') as f:
+            for line in f:
+                filename, labels = line.strip().split(': ')
+
+                ID = filename.split('_')[0]
+                pure_filename = filename.replace(ID+'_', '').replace('.png', '')
+
+                labels_df['ID'].append(int(ID))
+                labels_df['Filename'].append(pure_filename)
+                all_labels.append(labels.split(', '))
+    else:
+        raise ValueError('Labels file does not exist!')
+
+    labels_list = list(set( [x for xs in all_labels for x in xs] ))
+    labels_list.sort()
+
+    for i in range(len(labels_list)):
+        labels_df[labels_list[i]] = []
+
+    for i in range(len(all_labels)):
+        for label in labels_list:
+            labels_df[label].append(label in all_labels[i])
+
+    labels_df = pd.DataFrame(labels_df)
+    labels_df.set_index('ID', inplace=True)
+    labels_df.sort_index(inplace=True)
+
+    # Read reduced telemetry data
+    muse_df = []
+    files = os.listdir(processed_path := STD_FOLDER / 'cached_cubes/')
+
+    for file in tqdm(files):
+        with open(processed_path / file, 'rb') as f:
+            data_sample, _ = pickle.load(f)
+            df_ = data_sample['All data']
+            df_['name'] = df_['name'].apply(lambda x: x.replace('.fits',''))
+            df_['ID'] = int(file.split('_')[0])
+            muse_df.append(df_)
+            
+    muse_df = pd.concat(muse_df)
+    muse_df.set_index('ID', inplace=True)
+    muse_df.sort_index(inplace=True)
+    muse_df = muse_df.join(labels_df)
+
+    with open(TELEMETRY_CACHE / 'MUSE/muse_df.pickle', 'wb') as handle:
+        pickle.dump(muse_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+else:
+    with open(TELEMETRY_CACHE / 'MUSE/muse_df.pickle', 'rb') as handle:
+        muse_df = pickle.load(handle)
+
+
 #%%
-# These two have the same target: CD-38 10980
-# file_id = 344
-# file_id = 405
+from sklearn.experimental import enable_iterative_imputer
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.impute import IterativeImputer
+from sklearn.preprocessing import StandardScaler
 
-# from astroquery.eso import Eso
-# eso = Eso()
-# eso.login(username='akuznets')
+from data_analysis_utils import plot_correlation_heatmap, calculate_VIF, analyze_NaN_distribution
+from data_analysis_utils import analyze_outliers, plot_data_filling, VIF_contributors, filter_by_correlation
 
-# result_table = eso.query_instrument('muse', column_fil ters={'target': 'NGC 6754'})
+from MUSE_data_utils import filter_values, prune_columns
+verbose = True
 
+# Exclude all mostly missing/highly-correlated/repeating values from the dataset
+muse_df_pruned = prune_columns(filter_values(muse_df.copy()))
 
-# stime = night + 'T19:00:00.00'
-# etime = (Time(night).to_datetime()+timedelta(days=1)).date().isoformat() + 'T14:00:00.00'
-# eso_query_dict = {'stime':stime,'etime':etime,'dp_cat':'SCIENCE','dp_type':'OBJECT,AO'}
+median_imputer = SimpleImputer(strategy='median')
+telemetry_scaler = StandardScaler()
 
-# print(eso_query_dict)
+nan_mask = muse_df_pruned.isna().values # get the mask of NaN values
+numeric_cols = muse_df_pruned.select_dtypes(include="number").columns
 
+muse_df_pruned_buf_   = muse_df_pruned.copy()
+muse_df_pruned_scaled = muse_df_pruned.copy()
 
-# plt.imshow(np.log(1+np.abs(hdul_cube['DATA'].data[0,...])), cmap='gray')
-# plt.axis('off')
-# plt.savefig('C:/Users/akuznets/Desktop/thesis_results/MUSE/colored_PSFs_example/unprocessed_PSF_example.pdf', dpi=400)
+# Temporarly fill NaNs with median to compute the scaling
+muse_df_pruned_buf_[numeric_cols] = median_imputer.fit_transform(muse_df_pruned[numeric_cols])
+
+# Standartize pruned dataset
+_ = telemetry_scaler.fit_transform(muse_df_pruned_buf_[numeric_cols])
+muse_df_pruned_scaled[numeric_cols] = telemetry_scaler.transform(muse_df_pruned[numeric_cols])
+
+del muse_df_pruned_buf_
 
 #%%
-data_offaxis = 'F:/ESO/Data/MUSE/wide_field/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits'
-hdul_cube = fits.open(data_offaxis)
+if verbose:
+    _ = plt.hist(muse_df_pruned_scaled[numeric_cols].values.flatten(), bins = 100)
+    plt.title('Distribution of standartized features')
+    plt.show()
+    
+    plot_data_filling(muse_df_pruned)
+    # for entry in muse_df_pruned.columns.values:
+    #     sns.displot(data=muse_df_pruned, x=entry, kde=True, bins=100)
+    #     plt.show()
+    print(f'Total number of remaining features in pruned telemetry dataset: {len(muse_df_pruned.columns)}')
 
 #%%
+# from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
+
+# Impute missing values
+iterative_imputer = IterativeImputer(max_iter=200, random_state=3, verbose=(2 if verbose else 0))
+
+# iterative_imputer = IterativeImputer(
+#     estimator = ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=16),
+#     # estimator = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=16),
+#     random_state = 42, 
+#     max_iter = 30,
+#     verbose = (2 if verbose else 0))
+
+imputed_data = iterative_imputer.fit_transform(muse_df_pruned_scaled[numeric_cols])
+muse_df_pruned_scaled_imputed = pd.DataFrame(imputed_data, index=muse_df_pruned_scaled.index, columns=numeric_cols)
+
+#%%
+imputing_ouliers = analyze_outliers(
+    muse_df_pruned_scaled_imputed,
+    outlier_threshold=3,
+    nan_mask=nan_mask,
+    verbose=verbose
+)
+# Impute outliers with median values
+median_imputer = SimpleImputer(strategy='median')
+muse_df_pruned_scaled_imputed[imputing_ouliers] = np.nan
+muse_df_pruned_scaled_imputed = median_imputer.fit_transform(muse_df_pruned_scaled_imputed)
+muse_df_pruned_scaled_imputed = pd.DataFrame(muse_df_pruned_scaled_imputed, index=muse_df_pruned_scaled.index, columns=numeric_cols)
+
+# Unscaling back to physical values ranges
+muse_df_pruned_imputed = pd.DataFrame(
+    telemetry_scaler.inverse_transform(muse_df_pruned_scaled_imputed[numeric_cols]),
+    index=muse_df_pruned.index,
+    columns=numeric_cols
+)
+
+if verbose:
+    muse_df_pruned_scaled_imputed.plot.hist(bins=100, alpha=0.5, figsize=(20, 15))
+    plt.legend(ncol=4, fontsize=8, loc='upper right')
+    plt.title('Distribution of normalized features per feature')
+    plt.show()
+    
+    corr = plot_correlation_heatmap(muse_df_pruned_scaled, verbose=verbose)
+    columns_to_drop = filter_by_correlation(corr, threshold=0.9, verbose=verbose)
+    
+    nan_percentages = analyze_NaN_distribution(muse_df_pruned)
+    
+    vif_results = calculate_VIF(muse_df_pruned_scaled)
+    print(vif_results)
+    # VIF_contributors(muse_df_pruned_scaled, 'NGS mag (from ph.)')
+    
+
+#%%
+# Pack all data into a single dictionary and store it
+muse_data_package = {
+    'data imputer': iterative_imputer,
+    'telemetry normalized imputed df': muse_df_pruned_scaled_imputed,
+    'telemetry imputed df': muse_df_pruned_imputed,
+    'scaler': telemetry_scaler,
+}
+
+with open(TELEMETRY_CACHE / 'MUSE/muse_STD_data_package.pickle', 'wb') as handle:
+    pickle.dump(muse_data_package, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+#%%
+'''
 def convert_to_dms(angle):
     is_negative = angle < 0
     angle = abs(angle)
@@ -331,7 +331,6 @@ def format_dms(degrees, minutes, seconds):
 alpha_hms = lambda alpha: f"{int(alpha // 10000):02}h{int((alpha % 10000) // 100):02}m{alpha % 100:06.3f}s"
 delta_dms = lambda delta: format_dms(*convert_to_dms(delta))
 
-#%%
 NGS_alpha = hdul_cube[0].header[h+'AOS NGS ALPHA'] # Alpha coordinate for the NGS, [hms]
 NGS_delta = hdul_cube[0].header[h+'AOS NGS DELTA'] # Delta coordinate for the NGS, [dms]
 
@@ -339,57 +338,29 @@ coord_NGS = SkyCoord(alpha_hms(NGS_alpha), delta_dms(NGS_delta), frame='icrs')
 
 ra_NGS, dec_NGS = (coord_NGS.ra.deg, coord_NGS.dec.deg)
 
-#%
 targ_alpha = hdul_cube[0].header[h+'TEL TARG ALPHA']
-# = 162333.83 / Alpha coordinate for the target
-# 162333.83
-
-# 162509.77717
 targ_delta = hdul_cube[0].header[h+'TEL TARG DELTA']
-# = -391346.1 / Delta coordinate for the target
-# -391346.1
-
-# -391700.69955
 
 coord_targ = SkyCoord(alpha_hms(targ_alpha), delta_dms(targ_delta), frame='fk4', equinox='J2000', obstime=start_time, location=UT4_location)
 coord_targ = SkyCoord(alpha_hms(targ_alpha), delta_dms(targ_delta), frame='gcrs', obstime=start_time, location=UT4_location)
 
 # coord_targ_dummy = SkyCoord(alpha_hms(targ_alpha), '-40d13m46.100s', frame='icrs')
-
-
 # print( coord_targ.separation(coord_targ_dummy).degree )
 
-#%%
 # ra_targ  = hdul_cube[0].header['RA']
 # dec_targ = hdul_cube[0].header['DEC']
 
-'''
-RA  = 245.892843 / [deg]  16:23:34.2 RA  (J2000) pointing
-DEC =  -39.23000 / [deg] -39:13:48.0 DEC (J2000) pointing
-'''
-# coord_targ = SkyCoord(ra=ra_targ*u.deg, dec=dec_targ*u.deg, frame='icrs')
-
-# #%
 tel_alt = hdul_cube[0].header[h+'TEL ALT']
 tel_az  = hdul_cube[0].header[h+'TEL AZ']
 
 altaz = AltAz(alt=tel_alt*u.deg, az=tel_az*u.deg, location=UT4_location, obstime=start_time)
 
-# coord_VLT = SkyCoord(altaz, frame='altaz', obstime=start_time)
 coord_VLT = SkyCoord(altaz, frame='altaz', obstime=start_time)
 
-#%
-
 tel_delta = hdul_cube[0].header[h+'INS ADC1 DEC']
-# = -391700.69955 / [deg] Telescope declination
 tel_alpha = hdul_cube[0].header[h+'INS ADC1 RA']
-# = 162509.77717 / [deg] Telescope right ascension
 coord_tel = SkyCoord(alpha_hms(tel_alpha), delta_dms(tel_delta), frame='icrs')
 
-# coord_VLT = coord_tel
-
-
-#%
 # Extract RA and Dec in degrees
 ra_VLT  = coord_VLT.icrs.ra.deg
 dec_VLT = coord_VLT.icrs.dec.deg
@@ -397,48 +368,7 @@ dec_VLT = coord_VLT.icrs.dec.deg
 print( coord_VLT.separation(coord_targ).degree )
 print( coord_VLT.separation(coord_NGS).degree )
 print( coord_targ.separation(coord_NGS).degree )
-
-
-
-#%%
-df = raw_df
-# df = all_df
-fig, ax = plt.subplots(figsize=(20, 7))
-
-# Loop through the DataFrame to plot non-NaN values
-for col in df.columns:
-    non_nan_indices = df.index[~df[col].isna()]
-    ax.scatter([col] * len(non_nan_indices), non_nan_indices, label=col)
-
-ax.fill_between(df.columns, start_time, end_time, color='green', alpha=0.15, label='Observation Period')
-
-# Set labels and title
-ax.set_xlabel('Columns')
-ax.set_ylabel('Timestamps')
-ax.set_title('Presence of Values in DataFrame')
-plt.xticks(rotation=90, ha='right')
-
-ax.set_xlim(-0.5, len(df.columns)-0.5)
-
-plt.grid(True)
-plt.show()
-
-
-#%%
-%matplotlib qt
-
-import matplotlib.pyplot as plt
-import numpy as np
-
-data = np.log(data['cube'].mean(axis=0))
-# Get the extent of the data
-extent = np.array([-data.shape[0]/2, data.shape[0]/2, -data.shape[1]/2, data.shape[1]/2]) * data['telemetry']['pixel scale']
-
-# Display the data with the extent centered at zero
-plt.imshow(data, extent=extent.tolist(), origin='lower')
-plt.colorbar()
-plt.show()
-
+'''
 
 #%%
 # wmfsgw
@@ -607,73 +537,8 @@ plt.show()
 #TEL POS THETA: [deg] actual telescope position in THETA E/W. This position is logged at intervals of typically 1 minute.
 #TEL PRESET NAME: Name of the target star. This action is logged when presetting to a new target star (asmws).
 
-#%%
-parang = hdul_cube[0].header[h+'TEL PARANG END' ]*0.5 + hdul_cube[0].header[h+'TEL PARANG START']*0.5
-ALT    = hdul_cube[0].header[h+'TEL ALT']
-
-try:
-    if h+'INS DROT START' in hdul_cube[0].header:
-        derot_ang = hdul_cube[0].header[h+'INS DROT START']*0.5 + hdul_cube[0].header[h+'INS DROT END']*0.5
-    else:
-        derot_ang = hdul_cube[0].header[h+'INS DROT END']
-except:
-    derot_ang = -2*(parang + ALT)
-
-print(f'Parallactic angle: {parang}, altitude: {ALT}, derotator: {derot_ang}')
-
-
-coumns = ['ID', 'Par', 'Alt', 'Derot', 'Image']
-
-datas = [
-    [411,  61.269,  74.639,  -67.835,  27.5],
-    [405, -64.6311, 63.126,    0.687, 154.5],
-    [146, -33.0085, 72.976, -20.3815, 122.0],
-    [296, -60.226,  74.602,   -7.276, 152.0],
-    [382, 149.9915, 67.234, -108.553, -58.0],
-    [395, -63.0235, 73.528, -5.33955, 153.0],
-    [254, -46.5385,  81.99, -17.784,  135.0],
-    [281, -42.8125,  65.352, -11.2668, 133.0]
-]
-
-ang_df = pd.DataFrame(datas, columns=coumns)
-ang_df.set_index('ID', inplace=True)
-# ang_df.sort_index(inplace=True)
-# -par + 45
-
-testos = ang_df['Image'] - (ang_df['Derot']*2 + 161)
-testos = ang_df['Image'] - (161-ang_df['Par']-ang_df['Alt'])
-print(testos)
-
-V1 = np.array(ang_df['Par'])
-V2 = np.array(ang_df['Alt'])
-one = np.ones_like(V1)
-
-V3 = np.array(ang_df['Derot'])
-V4 = np.array(ang_df['Image'])
-
-ranger = np.arange(-80, 160, 1)
-
-plt.scatter(V4, V3)
-plt.plot(ranger, (ranger-162)/2, 'r')
-plt.xlabel('Image')
-plt.ylabel('Derotator')
-
-# A = np.vstack([V3, one]).T
-A = np.vstack([V1, V2]).T
-
-# Solve the least squares problem
-result = np.linalg.lstsq(A, V3, rcond=None)
-
-# Extract the solution (a, b) from the result
-B = result[0]
-
-# result = np.linalg.lstsq(A, V3, rcond=None)
-print(A@B-V3)
-
 
 #%% ------------------- Sausage predictor --------------------
-
-#%%
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression

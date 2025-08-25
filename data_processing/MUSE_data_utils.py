@@ -25,7 +25,6 @@ from astropy.io import fits
 from scipy.ndimage import binary_dilation
 from pathlib import Path
 
-
 from tools.utils import GetROIaroundMax, GetJmag, check_framework
 from tools.network import DownloadFromRemote
 from tools.plotting import wavelength_to_rgb
@@ -440,72 +439,23 @@ def FetchLGSfluxFromDatalab(timestamp_start, timestamp_end):
         return pd.DataFrame()
 
 
-#%
-# verbose = True
-
-# IRLOS_df = check_cached_data(
-#     cache_path = TELEMETRY_CACHE / 'MUSE/IRLOS_regimes_df.csv',
-#     start_time = exposure_start,
-#     end_time   = exposure_end,
-#     fetch_function = FetchIRLOSlogsFromDatalab if datalab_available else None,
-#     parse_function = ParseIRLOSlogs,
-#     time_buffer_after  = pd.Timedelta(seconds=10),
-#     time_buffer_before = pd.Timedelta(minutes=120), # Search 2 hours before the exposure to see if IRLOS config was changed before OB
-#     verbose=verbose
-# )
-
-# LGS_df = check_cached_data(
-#     cache_path = TELEMETRY_CACHE / 'MUSE/LGS_flux_df.csv',
-#     start_time = exposure_start,
-#     end_time   = exposure_end,
-#     fetch_function = FetchLGSfluxFromDatalab if datalab_available else None,
-#     time_buffer_after  = pd.Timedelta(minutes=1),
-#     time_buffer_before = pd.Timedelta(minutes=1),
-#     verbose=verbose
-# )
-
-# LGS_slopes_df = check_cached_data(
-#     cache_path = TELEMETRY_CACHE / 'MUSE/LGS_slopes_df.csv',
-#     start_time = exposure_start,
-#     end_time   = exposure_end,
-#     fetch_function = FetchLGSfluxFromDatalab if datalab_available else None,
-#     time_buffer_after  = pd.Timedelta(minutes=1),
-#     time_buffer_before = pd.Timedelta(minutes=1),
-#     verbose=verbose
-# )
-
-
-# Get closest IRLOS configuration to exposure start time (in the past)
-# if IRLOS_df.empty:
-#     IRLOS_record = None
-# else:
-#     IRLOS_df_before_exposure = IRLOS_df[IRLOS_df.index <= exposure_start]
-
-#     if IRLOS_df_before_exposure.empty:
-#         print("Warning: No IRLOS configuration found before the exposure start time")
-#         IRLOS_record = None
-#     else:
-#         closest_timestamp = IRLOS_df_before_exposure.index[np.argmin(np.abs(IRLOS_df_before_exposure.index - exposure_start))]
-#         IRLOS_record = pd.DataFrame(IRLOS_df.loc[closest_timestamp]).T
-
-
-def get_background(img, sigmas=1):
-    bkg = Background2D(img, (5,)*2, filter_size=(3,), bkg_estimator=MedianBackground())
-
-    background = bkg.background
-    background_rms = bkg.background_rms
-
-    threshold = sigmas * background_rms
-    mask = img > (background + threshold)
-
-    return background, background_rms, mask
-
-
 # Get 2x2 images from the IRLOS cube
 def GetIRLOScube(hdul_raw, verbose=False):
+    def _get_background_(img, sigma=1):
+        bkg = Background2D(img, (5,)*2, filter_size=(3,), bkg_estimator=MedianBackground())
+
+        background = bkg.background
+        background_rms = bkg.background_rms
+
+        threshold = sigma * background_rms
+        mask = img > (background + threshold)
+        
+        return background, background_rms, mask
+    
     if 'SPARTA_TT_CUBE' in hdul_raw:
         if verbose: print('Found IRLOS cube in the FITS file...')
         IRLOS_cube = hdul_raw['SPARTA_TT_CUBE'].data.transpose(1,2,0)
+        
         win_size = IRLOS_cube.shape[0] // 2
 
         # Removing the frame of zeros around the cube
@@ -519,11 +469,22 @@ def GetIRLOScube(hdul_raw, verbose=False):
             np.hstack([IRLOS_cube[quadrant_3], IRLOS_cube[quadrant_4]]),
         ])
 
-        IRLOS_cube = IRLOS_cube_ - 200 # Minus constant ADU shift
+        background, background_rms, mask = _get_background_(IRLOS_cube_.mean(axis=-1), 1.5)
 
-        background, background_rms, mask = get_background(IRLOS_cube.mean(axis=-1), 1)
-        IRLOS_cube *= mask[..., None] # Remove noisy background pixels
-        return IRLOS_cube, win_size # [ADU], [pix]
+        mask_edges = np.ones_like(IRLOS_cube_[...,0])
+        mask_edges[mask_edges.shape[0]//2,:] = 0
+        mask_edges[:,mask_edges.shape[0]//2] = 0
+        mask_edges[mask_edges.shape[0]//2+1,:] = 0
+        mask_edges[:,mask_edges.shape[0]//2+1] = 0
+        mask_edges[0,:]  = 0
+        mask_edges[:,0]  = 0
+        mask_edges[-1,:] = 0
+        mask_edges[:,-1] = 0
+
+        IRLOS_cube_ -= background[..., None]
+        IRLOS_cube_ *= mask[..., None] * mask_edges[..., None] # Remove noisy background pixels
+
+        return IRLOS_cube_, win_size # [ADU], [pix]
 
     else:
         if verbose: print('No IRLOS cubes found')
@@ -1684,30 +1645,6 @@ def ProcessMUSEcube(
     return data_store, cube_name
 
 
-def RenderDataSample(data_dict, file_name):
-
-    white =  np.log10(1+np.abs(data_dict['images']['white']))
-    white -= white.min()
-    white /= white.max()
-
-    if data_dict['images']['IRLOS cube'] is not None:
-        IRLOS_img = np.log10(1+np.abs(data_dict['images']['IRLOS cube'].mean(axis=-1)))
-        IRLOS_img = data_dict['images']['IRLOS cube'].mean(axis=-1)
-    else:
-        IRLOS_img = np.zeros_like(white)
-
-    title = file_name.replace('.pickle', '')
-    fig, ax = plt.subplots(1,2, figsize=(14, 7.5))
-
-    ax[0].set_title(title)
-    ax[1].set_title('IRLOS (2x2)')
-    ax[0].imshow(white, cmap='gray')
-    ax[1].imshow(IRLOS_img, cmap='hot')
-    ax[0].set_axis_off()
-    ax[1].set_axis_off()
-    plt.tight_layout()
-
-
 def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=False):
     """
     This function prepares the data to be understandable by the PSF model. It bins the NFM cube and
@@ -1945,6 +1882,461 @@ def RotatePSF(PSF_data, angle):
         PSF_data_rotated = PSF_data_rotated.astype(np.float32)[None,...]
         
     return PSF_data_rotated
+
+
+# %%
+def filter_values(df: pd.DataFrame) -> pd.DataFrame:
+     
+    df.loc[df['SLODAR_FRACGL_300'] < 1e-12, 'SLODAR_FRACGL_300'] = np.nan
+    df.loc[df['SLODAR_FRACGL_500'] < 1e-12, 'SLODAR_FRACGL_500'] = np.nan
+    df.loc[df['SLODAR_TOTAL_CN2']  < 1e-12, 'SLODAR_TOTAL_CN2'] = np.nan
+    df.loc[df['IA_FWHM'] > 5, 'IA_FWHM'] = np.nan
+    df.loc[df['ASM_RFLRMS'] > 0.25, 'ASM_RFLRMS'] = np.nan
+    df.loc[df['Strehl (header)'] < 0.01, 'Strehl (header)'] = np.nan
+    df.loc[df['LGS3 flux, [ADU/frame]'] < 1e-12, 'LGS3 flux, [ADU/frame]'] = np.nan
+    df.loc[df['LGS3 photons, [photons/m^2/s]'] < 1e-12, 'LGS3 photons, [photons/m^2/s]'] = np.nan
+    df.loc[df['IRLOS photons, [photons/s/m^2]'] < 1e-12, 'IRLOS photons, [photons/s/m^2]'] = np.nan
+
+    for i in range(1, 9):
+        entry = f'ALT{i}'
+        df.loc[df[entry] > 100, entry] = np.nan
+        df.loc[df[entry] < 1e-16, entry] = np.nan
+        
+
+        entry = f'L0_ALT{i}'
+        df.loc[df[entry] > 100, entry] = np.nan
+        df.loc[df[entry] < 0, entry] = np.nan
+
+        entry = f'CN2_FRAC_ALT{i}'
+        df.loc[df[entry] >= 1, entry] = np.nan
+        # df.loc[df[entry] < 1e-10, entry] = np.nan
+        df.loc[df[entry] < 0, entry] = np.nan
+
+        entry = f'CN2_ALT{i}'
+        # df.loc[df[entry] > 1e-11, entry] = np.nan
+        df.loc[df[entry] > 1e-10, entry] = np.nan
+        df.loc[df[entry] < 1e-16, entry] = np.nan
+
+
+    for i in range(0, 7):
+        entry = f'MASS_TURB{i}'
+        df.loc[df[entry] < 1e-16, entry] = np.nan
+
+    for i in range(1, 5):   
+        entry = f'LGS{i}_STREHL'
+        df.loc[df[entry] < 0.01, entry] = np.nan
+        
+        entry = f'LGS{i}_L0'
+        df.loc[df[entry] > 500, entry] = np.nan
+        
+        df.loc[df[entry:=f'AOS.LGS{i}.SLOPERMSX'] < 1e-9, entry] = np.nan
+        df.loc[df[entry:=f'AOS.LGS{i}.SLOPERMSY'] < 1e-9, entry] = np.nan
+        df.loc[df[entry:=f'LGS{i}_TURVAR_TOT'] < 1e-9, entry] = np.nan
+        df.loc[df[entry:=f'LGS{i}_TUR_GND'] < 1e-9, entry] = np.nan
     
+    df = df.replace([np.inf, -np.inf], np.nan)
+
+    # numeric_cols = df.select_dtypes(include=['float64', 'int64']).columns
+
+    # # Handle each numeric column
+    # for col in numeric_cols:
+    #     # Skip columns that are mostly NaN
+    #     if df[col].isna().sum() > 0.8 * len(df):
+    #         continue
+
+    #     # Calculate mean and std, ignoring NaN values
+    #     mean_val = df[col].mean(skipna=True)
+    #     std_val = df[col].std(skipna=True)
+
+    #     # Skip if std is zero or NaN
+    #     if std_val == 0 or pd.isna(std_val):
+    #         continue
+
+    #     # Identify outliers (5-sigma threshold)
+    #     upper_bound = mean_val + 3 * std_val
+    #     lower_bound = mean_val - 3 * std_val
+
+    #     # Replace outliers with NaN
+    #     df.loc[(df[col] > upper_bound) | (df[col] < lower_bound), col] = np.nan
+
+    return df
+
+# Dataset cleaning
+def prune_columns(df):
+    
+    df_ = df.copy()
+    
+    df_['LGS_R0']         = df_[[f'LGS{i}_R0'         for i in range(1,5)]].median(axis=1, skipna=True)
+    df_['LGS_SEEING']     = df_[[f'LGS{i}_SEEING'     for i in range(1,5)]].median(axis=1, skipna=True)
+    df_['LGS_STREHL']     = df_[[f'LGS{i}_SEEING'     for i in range(1,5)]].median(axis=1, skipna=True)
+    df_['LGS_TURVAR_RES'] = df_[[f'LGS{i}_TURVAR_RES' for i in range(1,5)]].median(axis=1, skipna=True)
+    df_['LGS_TURVAR_TOT'] = df_[[f'LGS{i}_TURVAR_TOT' for i in range(1,5)]].median(axis=1, skipna=True)
+    df_['LGS_TUR_ALT']    = df_[[f'LGS{i}_TUR_ALT'    for i in range(1,5)]].median(axis=1, skipna=True)
+    df_['LGS_TUR_GND']    = df_[[f'LGS{i}_TUR_GND'    for i in range(1,5)]].median(axis=1, skipna=True)
+    df_['LGS_FWHM_GAIN']  = df_[[f'LGS{i}_FWHM_GAIN'  for i in range(1,5)]].median(axis=1, skipna=True)
+    
+    df_['LGS photons, [photons/m^2/s]'] = \
+        df_[[f'LGS{i} photons, [photons/m^2/s]' for i in range(1,5)]].median(axis=1, skipna=True)
+    
+    # df['LGS_R0']         = df[['LGS1_R0', 'LGS2_R0', 'LGS3_R0', 'LGS4_R0']].mean(axis=1, skipna=True)
+    # df['LGS_SEEING']     = df[['LGS1_SEEING', 'LGS2_SEEING', 'LGS3_SEEING', 'LGS4_SEEING']].mean(axis=1, skipna=True)
+    # df['LGS_STREHL']     = df[['LGS1_SEEING', 'LGS2_SEEING', 'LGS3_SEEING', 'LGS4_SEEING']].mean(axis=1, skipna=True)
+    # df['LGS_TURVAR_RES'] = df[['LGS1_TURVAR_RES', 'LGS2_TURVAR_RES', 'LGS3_TURVAR_RES', 'LGS4_TURVAR_RES']].mean(axis=1, skipna=True)
+    # df['LGS_TURVAR_TOT'] = df[['LGS1_TURVAR_TOT', 'LGS2_TURVAR_TOT', 'LGS3_TURVAR_TOT', 'LGS4_TURVAR_TOT']].mean(axis=1, skipna=True)
+    # df['LGS_TUR_ALT']    = df[['LGS1_TUR_ALT', 'LGS2_TUR_ALT', 'LGS3_TUR_ALT', 'LGS4_TUR_ALT']].mean(axis=1, skipna=True)
+    # df['LGS_TUR_GND']    = df[['LGS1_TUR_GND', 'LGS2_TUR_GND', 'LGS3_TUR_GND', 'LGS4_TUR_GND']].mean(axis=1, skipna=True)
+    # df['LGS_FWHM_GAIN']  = df[['LGS1_FWHM_GAIN', 'LGS2_FWHM_GAIN', 'LGS3_FWHM_GAIN', 'LGS4_FWHM_GAIN']].mean(axis=1, skipna=True)
+    
+    for i in range(1, 5):
+        df_[f'AOS.LGS{i}.SLOPERMS'] = (df_[f'AOS.LGS{i}.SLOPERMSX']**2 + df_[f'AOS.LGS{i}.SLOPERMSY']**2)**0.5
+        df_[f'LGS{i}_SLOPERMS']     = (df_[f'LGS{i}_SLOPERMSX']**2 + df_[f'LGS{i}_SLOPERMSY']**2)**0.5
+
+    df_['AOS.LGS.SLOPERMS'] = df_[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].median(axis=1, skipna=True)
+    df_['LGS_SLOPERMS']     = df_[[f'LGS{i}_SLOPERMS' for i in range(1, 5)]].median(axis=1, skipna=True)
+    
+    # df['MASS_TURB']        = df[[f'MASS_TURB{i}' for i in range(0, 7)]].sum(axis=1, skipna=True)
+    turb_df = df_[[f'MASS_TURB{i}' for i in range(0,7)]].copy()
+    turb_df['ground_layer'] = turb_df['MASS_TURB0']
+    turb_df['upper_layers'] = turb_df[[f'MASS_TURB{i}' for i in range(1,7)]].sum(axis=1, skipna=True)
+    turb_df['MASS_TURB total'] = turb_df['ground_layer'] + turb_df['upper_layers']
+    turb_df['MASS_TURB ratio'] = turb_df['ground_layer'] / turb_df['MASS_TURB total']
+    df_['MASS_TURB total'] = turb_df['MASS_TURB total'].copy()
+    df_.loc[df_['MASS_TURB total'] < 1e-16, 'MASS_TURB total'] = np.nan
+    df_['MASS_TURB ratio'] = turb_df['MASS_TURB ratio'].copy()
+    
+    df_['Pupil angle'] = df_['Pupil angle'].map(lambda x: x % 360)
+    df_[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].median(axis=1)
+
+
+    def compute_ground_layer_fraction(df: pd.DataFrame, h_GL: float = 2000) -> pd.DataFrame:
+        """
+        Compute Cn2 fraction below a given altitude (ground layer).
+
+        Parameters
+        ----------
+        df : pandas.DataFrame
+            Input dataframe with CN2_FRAC_ALT{i} and ALT{i} columns (i = 1..8).
+        h_GL : float, optional
+            Ground layer altitude threshold in meters. Default = 2000.
+
+        Returns
+        -------
+        df : pandas.DataFrame
+            Copy of input dataframe with a new column: 'Cn2 fraction below {h_GL}m'.
+        """
+        GL_fracs = []
+
+        for j in range(len(df)):
+            Cn2_weights = np.array([df.iloc[j][f'CN2_FRAC_ALT{i}'] for i in range(1, 9)])
+
+            if not np.isnan(Cn2_weights).all():
+                altitudes = np.array([df.iloc[j][f'ALT{i}'] for i in range(1, 9)]) * 100 # Convert altitudes to meters
+                Cn2_weights_GL = Cn2_weights[altitudes < h_GL] # Select values below threshold
+                GL_frac = np.nansum(Cn2_weights_GL)
+                
+                if GL_frac > 1.0+1e-10 or GL_frac < 0.0:  # Sanity check
+                    GL_frac = np.nan
+
+                GL_fracs.append(GL_frac)
+            else:
+                GL_fracs.append(np.nan)
+
+        df = df.copy()
+        df[f'Cn2 fraction below {h_GL}m'] = GL_fracs
+        return df
+
+    # Compute Cn² fractions for 2 and 10 kms
+    df_ = compute_ground_layer_fraction(df_, h_GL=2000)
+    # df_ = compute_ground_layer_fraction(df_, h_GL=10000)
+
+    entries_to_drop = [
+        # These features are just collapsed to a median one instead of FETURE1, FEATURE2...
+        *[f'LGS{i}_R0' for i in range(1, 5)],
+        *[f'LGS{i}_L0' for i in range(1, 5)],
+        *[f'LGS{i}_SEEING' for i in range(1, 5)],
+        *[f'LGS{i}_STREHL' for i in range(1, 5)],
+        *[f'LGS{i} works'  for i in range(1, 5)],
+        *[f'LGS{i} flux, [ADU/frame]' for i in range(1, 5)],
+        *[f'LGS{i} photons, [photons/m^2/s]' for i in range(1, 5)],
+        *[f'AOS.LGS{i}.SLOPERMSX' for i in range(1, 5)],
+        *[f'AOS.LGS{i}.SLOPERMSY' for i in range(1, 5)],
+        *[f'AOS.LGS{i}.SLOPERMS'  for i in range(1, 5)],
+        *[f'LGS{i}_SLOPERMSX'  for i in range(1, 5)],
+        *[f'LGS{i}_SLOPERMSY'  for i in range(1, 5)],
+        *[f'LGS{i}_SLOPERMS'   for i in range(1, 5)],
+        *[f'LGS{i}_TURVAR_RES' for i in range(1, 5)],
+        *[f'LGS{i}_TURVAR_TOT' for i in range(1, 5)],
+        *[f'LGS{i}_TUR_ALT'    for i in range(1, 5)],
+        *[f'LGS{i}_TUR_GND'    for i in range(1, 5)],
+        *[f'LGS{i}_FWHM_GAIN'  for i in range(1, 5)],
+        
+        *[f'CN2_FRAC_ALT{i}' for i in range(1, 9)],
+        *[f'CN2_ALT{i}' for i in range(1, 9)],
+        *[f'ALT{i}' for i in range(1, 9)],
+        *[f'L0_ALT{i}' for i in range(1, 9)],
+        *[f'SLODAR_CNSQ{i}' for i in range(2, 9)],
+        *[f'MASS_TURB{i}' for i in range(0, 7)],
+        
+        # These features miss most of the values
+        'SLODAR_TOTAL_CN2',
+        'SLODAR_FRACGL_300',
+        'SLODAR_FRACGL_500',
+        'ADUs (from 2x2)',
+        'NGS mag',
+        'NGS mag (from 2x2)',
+        'Cn2 above UTs [10**(-15)m**(1/3)]',
+        'Cn2 fraction below 300m',
+        'Cn2 fraction below 500m',
+        'Surface layer profile [10**(-15)m**(1/3)]',
+        'Air Temperature at 30m [C]',
+        'Seeing ["]',
+        'scale',
+        'AIRMASS',
+        'seeingTot',
+        'L0Tot',
+        'r0Tot',
+        'ADUs (header)',
+        'NGS mag (header)',
+        'Strehl (header)',
+        'IRLOS photons (cube), [photons/s/m^2]',
+        'IRLOS photons, [photons/s/m^2]',
+        'Pixel scale (science)',
+        
+        # These features has strong correlaions with other ones
+        'DIMM_SEEING',
+        'Wind Speed at 30m [m/s]',
+        'R0',
+        'LGS_R0',
+        'DIMM Seeing ["]',
+        'MASS_TURB ratio',
+        'ASM_WINDDIR_10',
+        'ASM_WINDDIR_30',
+        'ASM_WINDSPEED_10',
+        'ASM_WINDSPEED_30',
+        'ASM_RFLRMS',
+        'Wind Direction at 30m (0/360) [deg]',
+        'MASS-DIMM Cn2 fraction at ground',
+        'AOS.LGS.SLOPERMS',
+        'MASS-DIMM Seeing ["]',
+        'MASS-DIMM Tau0 [s]',
+        'Airmass',
+        'IA_FWHM',
+        'IA_FWHMLIN',
+        'LGS_SEEING',
+        'LGS_TURVAR_TOT',
+        'LGS_TUR_GND',
+        'plate scale, [mas/pix]',
+        'conversion, [e-/ADU]',
+        'RON, [e-]',
+        'RA (science)',
+        'DEC (science)',
+
+        # These features are non-numeric
+        'Filename',
+        'Science target',
+        'name',
+        'Bad quality',
+        'Corrupted',
+        'Good quality',
+        'Has streaks',
+        'Low AO errs',
+        'Medium quality',
+        'Non-point',
+        'time'
+        
+    ]
+
+    # Remove columns with specific names
+    entries_to_drop_in_df = [entry for entry in entries_to_drop if entry in df_.columns]
+    df_.drop(columns=entries_to_drop_in_df, inplace=True)
+    
+    return df_
+
+
+def create_normalizing_transforms(df):
+    from data_processing.normalizers import Invert, Gauss, Logify, YeoJohnson, Uniform, CreateTransformSequence, TransformSequence
+
+    entry_data = [
+        ('name', []),
+        ('time', []),
+        ('Filename',     []),
+        ('Bad quality',  []),
+        ('Corrupted',    []),
+        ('Good quality', []),
+        ('Has streaks',  []),
+        ('Low AO errs',  []),
+        ('Non-point',    []),
+        ('Science target', []),
+        ('Medium quality', []),
+
+        ('MASS_TURB',        [Logify, Gauss]),
+        ('LGS_FWHM_GAIN',    [YeoJohnson, Gauss]),
+        ('AOS.LGS.SLOPERMS', [YeoJohnson, Gauss]),
+        ('LGS_SLOPERMS',     [YeoJohnson, Gauss]),
+        ('LGS_R0',           [YeoJohnson, Gauss]),
+        ('LGS_SEEING',       [YeoJohnson, Gauss]),
+        ('LGS_STREHL',       [YeoJohnson, Gauss]),
+        ('LGS_TURVAR_RES',   [YeoJohnson, Gauss]),
+        ('LGS_TURVAR_TOT',   [YeoJohnson, Gauss]),
+        ('LGS_TUR_ALT',      [YeoJohnson, Gauss]),
+        ('DIMM Seeing ["]',  [YeoJohnson, Gauss]),
+        ('MASS-DIMM Seeing ["]', [YeoJohnson, Gauss]),
+        ('MASS-DIMM Tau0 [s]',   [YeoJohnson, Gauss]),
+        ('MASS-DIMM Turb Velocity [m/s]', [YeoJohnson, Gauss]),
+        ('Wind Speed at 30m [m/s]',       [YeoJohnson, Gauss]),
+        ('Free Atmosphere Seeing ["]',    [YeoJohnson, Gauss]),
+        ('MASS Tau0 [s]',       [YeoJohnson, Gauss]),
+        ('ASM_WINDSPEED_10',    [YeoJohnson, Gauss]),
+        ('ASM_WINDSPEED_30',    [YeoJohnson, Gauss]),
+        ('Seeing (header)',     [YeoJohnson, Gauss]),
+        ('Tau0 (header)',       [YeoJohnson, Gauss]),
+        ('Wind dir (header)',   [Uniform]),
+        ('Pupil angle',         [YeoJohnson, Gauss]),
+        ('R0',                  [YeoJohnson, Gauss]),
+        ('DIMM_SEEING',         [YeoJohnson, Gauss]),
+        ('IA_FWHMLIN',          [YeoJohnson, Gauss]),
+        ('IA_FWHMLINOBS',       [YeoJohnson, Gauss]),
+        ('Wind speed (header)', [YeoJohnson, Gauss]),
+
+        ('LGS_TUR_GND', [Invert, YeoJohnson, Gauss]),
+        ('MASS-DIMM Cn2 fraction at ground', [Invert, YeoJohnson, Gauss]),
+        ('Temperature (header)', [Invert, YeoJohnson, Gauss]),
+        ('Relative Flux RMS',    [Logify, Gauss]),
+        ('ASM_RFLRMS',  [Logify, Gauss]),
+        ('Airmass',     [YeoJohnson, Uniform]),
+        ('IRLOS photons, [photons/s/m^2]',        [Logify, Gauss]),
+        # ('IRLOS photons (cube), [photons/s/m^2]', [Logify, Gauss]),
+
+        ('Cn2 fraction below 2000m', [YeoJohnson, Uniform]),
+        ('MASS_FRACGL',              [YeoJohnson, Gauss]),
+
+        ('IA_FWHM', [Gauss]),
+
+        ('ASM_WINDDIR_10', [Uniform]),
+        ('ASM_WINDDIR_30', [Uniform]),
+        ('Wind Direction at 30m (0/360) [deg]', [Uniform]),
+        ('LGS1 photons, [photons/m^2/s]', [Uniform]),
+        ('LGS2 photons, [photons/m^2/s]', [Uniform]),
+        ('LGS3 photons, [photons/m^2/s]', [Uniform]),
+        ('LGS4 photons, [photons/m^2/s]', [Uniform]),
+        ('NGS mag (from ph.)', [Uniform]),
+        ('RA (science)',  [Uniform]),
+        ('DEC (science)', [Uniform]),
+        ('Exp. time',     [Gauss]),
+        ('Tel. altitude', [Uniform]),
+        ('Tel. azimuth',  [Uniform]),
+        ('Par. angle',    [Uniform]),
+        ('Derot. angle',  [Uniform]),
+        ('NGS RA',        [Uniform]),
+        ('NGS DEC',       [Uniform]),
+        # ('Pixel scale (science)', [Uniform]),
+        ('window',    [Uniform]),
+        ('frequency', [Uniform]),
+        ('gain',      [Uniform]),
+        ('plate scale, [mas/pix]', [Uniform]),
+        ('conversion, [e-/ADU]',   [Uniform]),
+        ('RON, [e-]', [Uniform])
+    ]
+
+    # Find transforms parameters for each entry
+    df_transforms = {}
+    for entry, transforms_list in entry_data:
+        if entry in df.columns.values and len(transforms_list) > 0:
+            print(f' -- Processing \"{entry}\"')
+            df_transforms[entry] = CreateTransformSequence(entry, df, transforms_list)
+            
+    return df_transforms
+
+
+def normalize_df(df, df_transforms, backward=False):
+    df_normalized = {}
+
+    for entry in df.columns.values:
+        if entry in df_transforms:
+            series = df[entry].replace([np.inf, -np.inf], np.nan)
+            if backward:
+                transformed_values = df_transforms[entry].backward(series.dropna().values)
+            else:
+                transformed_values = df_transforms[entry].forward(series.dropna().values)
+                    
+            full_length_values = np.full_like(series, np.nan, dtype=np.float64)
+            full_length_values[~series.isna()] = transformed_values 
+            df_normalized[entry] = full_length_values   
+
+    df_normalized = pd.DataFrame(df_normalized)
+    df_normalized['ID'] = df.index
+    df_normalized.set_index('ID', inplace=True)
+    
+    return df_normalized
+
+
+# Data imputation
+def impute_df(df):
+    from sklearn.experimental import enable_iterative_imputer
+    from sklearn.impute import IterativeImputer
+    from sklearn.linear_model import BayesianRidge
+    from sklearn.ensemble import RandomForestRegressor,ExtraTreesRegressor
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.neural_network import MLPRegressor
+
+    # Clone dataframe
+    df_imputed = df.copy()
+
+    # Delete non-numeric string columns
+    # df_imputed = df_imputed.select_dtypes(exclude=['object'])
+    # df_imputed = df_imputed.select_dtypes(exclude=['bool'])
+
+    droppies_for_imputter = [
+        # 'RA (science)',
+        # 'DEC (science)',
+        # 'Tel. altitude',
+        # 'Tel. azimuth',
+        # 'NGS RA',
+        # 'NGS DEC',
+        # 'NGS mag (from ph.)' # delete to restore later
+    ]
+
+    # Change scaling
+    # for i in range(1, 5):
+    #     df_imputed[f'LGS{i} photons, [photons/m^2/s]'] /= 1e9
+        
+    # df_imputed['MASS_TURB'] *= 1e13
+    # df_imputed['IRLOS photons, [photons/s/m^2]'] /= 1e4
+    # df_imputed['IRLOS photons (cube), [photons/s/m^2]'] /= 1e4
+
+    if len(droppies_for_imputter) > 0:
+        df_imputed.drop(columns=droppies_for_imputter, inplace=True)
+
+    df_imputed.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+    # scaler_imputer = StandardScaler()
+    # df_imputed_data = scaler_imputer.fit_transform(df_imputed)
+    # df_imputed = pd.DataFrame(df_imputed_data, columns=df_imputed.columns)
+
+    # plot_data_filling(df_imputed)
+
+    #%
+    # imputer = IterativeImputer(estimator=BayesianRidge(), random_state=0, max_iter=200, verbose=2)
+    # imputer = IterativeImputer(estimator=RandomForestRegressor(n_estimators=100, n_jobs=16), max_iter=15, random_state=0, verbose=2)
+
+    imputer = IterativeImputer(
+        estimator = ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=16),
+        random_state = 42, 
+        max_iter = 7,
+        verbose = 2)
+
+    imputed_data = imputer.fit_transform(df_imputed)
+    df_imputed = pd.DataFrame(imputed_data, columns=df_imputed.columns)
+
+    #%
+    df_out = df.copy()
+
+    # Copy missing values back to the original DataFrame
+    for col in df_imputed.columns:
+        df_out[col] = df_imputed[col]
+
+    # df_out['NGS mag (from ph.)'] = GetJmag(df_out['IRLOS photons, [photons/s/m^2]'])
+    return imputer, df_out
+
 
 # %%

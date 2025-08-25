@@ -1,3 +1,4 @@
+
 #%%
 import sys
 sys.path.insert(0, '..')
@@ -9,6 +10,9 @@ from PIL import Image, ImageTk
 
 from MUSE_data_utils import MUSE_DATA_FOLDER
 
+STD_FOLDER = MUSE_DATA_FOLDER / 'standart_stars/'
+
+#%%
 class ImageLabeller:
     def __init__(self, master, image_paths, labels_file):
         self.master = master
@@ -17,7 +21,7 @@ class ImageLabeller:
         self.current_image_index = 0
 
         # Read list of classes from a file
-        with open(os.path.join(MUSE_DATA_FOLDER, 'PSF_classes.txt'), 'r') as f:
+        with open(os.path.join(STD_FOLDER, 'PSF_classes.txt'), 'r') as f:
             self.classes = [line.strip() for line in f]
         
         self.selections = {}
@@ -199,12 +203,82 @@ if __name__ == "__main__":
     default_font = font.nametofont("TkDefaultFont")
     default_font.configure(family="Helvetica", size=13)
 
-    image_folder = os.path.join(MUSE_DATA_FOLDER, 'MUSE_images')
-    image_paths = [os.path.join(image_folder, f) for f in os.listdir(image_folder) if f.endswith(('.png'))]
+    image_folder = STD_FOLDER / 'MUSE_images'
+    image_paths = [image_folder / f for f in os.listdir(image_folder) if f.endswith(('.png'))]
     # Sort by image IDs
     image_paths.sort(key=lambda x: int(os.path.basename(x).split('_')[0]))
 
-    labels_file = os.path.join(MUSE_DATA_FOLDER, 'labels.txt')
+    labels_file = os.path.join(STD_FOLDER, 'labels.txt')
     app = ImageLabeller(root, image_paths, labels_file)
     root.mainloop()
 
+
+#%%
+"""
+from pathlib import Path
+import pandas as pd
+
+# Input: text file contents as provided by the user
+# Read text lines from file
+text_file_path = STD_FOLDER / 'labels.txt'
+with open(text_file_path, 'r') as f:
+    text_lines = [line.strip() for line in f.readlines()]
+
+# Input: folder filenames as provided by the user
+folder_files = os.listdir(STD_FOLDER / "MUSE_images")
+
+def split_index_and_tail(filename_with_index: str):
+    if '_' in filename_with_index:
+        idx, tail = filename_with_index.split('_', 1)
+        return idx, tail
+    return None, filename_with_index
+
+# Build a lookup from tail -> index for the folder files
+tail_to_index = {}
+for f in folder_files:
+    idx, tail = split_index_and_tail(f)
+    tail_to_index[tail] = idx
+
+# Process text lines
+results = []
+updated_lines = []
+for line in text_lines:
+    # split at ': ' to separate filename and labels
+    if ': ' in line:
+        name_part, labels = line.split(': ', 1)
+    else:
+        name_part, labels = line, ""
+
+    old_idx, tail = split_index_and_tail(name_part)
+    new_idx = tail_to_index.get(tail)  # match on tail
+
+    if new_idx is not None:
+        # Replace leading index with the matched one
+        new_name = f"{new_idx}_{tail}"
+        updated_line = f"{new_name}: {labels}" if labels else new_name
+        changed = (new_idx != old_idx)
+        matched = True
+    else:
+        # No match found; keep as-is
+        new_name = name_part
+        updated_line = line
+        changed = False
+        matched = False
+
+    results.append({
+        "original_name": name_part,
+        "labels": labels,
+        "matched_folder_file": matched,
+        "new_name": new_name,
+        "index_changed": changed,
+    })
+    updated_lines.append(updated_line)
+
+# Save updated text file
+out_path = STD_FOLDER / "updated_labels.txt"
+out_path.write_text("\n".join(updated_lines), encoding="utf-8")
+
+# Show a concise dataframe summary
+df = pd.DataFrame(results, columns=["original_name","new_name","matched_folder_file","index_changed","labels"])
+df.head()
+"""

@@ -55,8 +55,8 @@ with open(MUSE_DATA_FOLDER+'muse_df_norm_imputed.pickle', 'rb') as handle:
 with open(MUSE_RAW_FOLDER+'../muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
 
-muse_df_pruned  = prune_columns(muse_df.copy())
-muse_df_reduced = reduce_columns(muse_df_pruned.copy())
+muse_df_pruned  = filter_values(muse_df.copy())
+muse_df_reduced = prune_columns(muse_df_pruned.copy())
 
 selected_entries_input = muse_df_norm.columns.values.tolist()
 
@@ -70,8 +70,8 @@ df = data_sample['All data']
 df['ID'] = 0
 df.loc[0, 'Pupil angle'] = 0.0
 
-df_pruned  = prune_columns(df.copy())
-df_reduced = reduce_columns(df_pruned.copy())
+df_pruned  = filter_values(df.copy())
+df_reduced = prune_columns(df_pruned.copy())
 
 df_norm = normalize_df(df_reduced, df_transforms)
 df_norm = df_norm.fillna(0)

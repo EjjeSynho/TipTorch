@@ -38,7 +38,7 @@ raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.
 cube_path  = MUSE_DATA_FOLDER / "omega_cluster/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
-spectral_cubes, spectral_info, TELEMETRY_CACHEd, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, TELEMETRY_CACHE, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
 
 λ_full,   λ_sparse = spectral_info['λ_full'],  spectral_info['λ_sparse']
@@ -148,8 +148,8 @@ df = data_sample['All data']
 df['ID'] = 0
 df.loc[0, 'Pupil angle'] = 0.0
 
-df_pruned  = prune_columns(df.copy())
-df_reduced = reduce_columns(df_pruned.copy())
+df_pruned  = filter_values(df.copy())
+df_reduced = prune_columns(df_pruned.copy())
 df_transforms = CreateTransformSequenceFromFile('../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle')
 df_norm = normalize_df(df_reduced, df_transforms)
 df_norm = df_norm.fillna(0)
