@@ -23,20 +23,22 @@ wvl_bins = np.array([
 
 def LoadSTDStarCacheByID(id):
     ''' Searches a specific STD star by its ID in the list of cached cubes. '''
-    with open(TELEMETRY_CACHE / 'MUSE/muse_df.pickle', 'rb') as handle:
+    with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
         muse_df = pickle.load(handle)
 
     file = muse_df.loc[muse_df.index == id]['Filename'].values[0]
     full_filename = CUBES_CACHE / f'{id}_{file}.pickle'
 
     with open(full_filename, 'rb') as handle:
-        data_sample = pickle.load(handle)
+        data_sample, _ = pickle.load(handle)
     
     data_sample['All data']['Pupil angle'] = muse_df.loc[id]['Pupil angle']
     return data_sample
 
 
-def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background=False, device=device):
+def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background=False, wvl_ids=None, ensure_odd_pixels=False, device=device):
+    """ Loads data associated with provided list of STD star by their ID """
+    
     def get_radial_backround(img):
         ''' Computed STD star background as a minimum of radial profile '''
         from tools.utils import safe_centroid
@@ -48,12 +50,17 @@ def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background
         
         return rp.profile.min()
     
-    
     def load_sample(id):
+        ''' Loads individual sample '''
         sample = LoadSTDStarCacheByID(id)
   
         PSF_data = np.copy(sample['images']['cube']) 
         PSF_STD  = np.copy(sample['images']['std'])
+        
+        if ensure_odd_pixels:
+            if PSF_data.shape[-1] % 2 == 0:
+                PSF_data = PSF_data[:,:-1,:-1]
+                PSF_STD  = PSF_STD[:,:-1,:-1]
         
         if subtract_background:
             backgrounds = np.array([ get_radial_backround(PSF_data[i,:,:]) for i in range(PSF_data.shape[0]) ])[:,None,None]
@@ -63,48 +70,66 @@ def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background
             backgrounds = np.zeros(PSF_data.shape[0])[:,None,None]
 
         if normalize:
-            norms = PSF_data.sum(axis=(-1,-2), keepdims=True)
+            norms     = PSF_data.sum(axis=(-1,-2), keepdims=True)
             PSF_data /= norms
             PSF_STD  /= norms
         else:
             norms = np.ones(PSF_data.shape[0])[:,None,None]
     
-        config_file, PSF_0 = GetConfig(sample, PSF_0, convert_config=False)
-        return PSF_0, PSF_STD, norms, backgrounds, config_file, sample
+        config_file = GetConfig(sample, PSF_data, wvl_ids, convert_config=False)
+        
+        # Select a subset of wavelengths bins
+        if wvl_ids is not None:
+            PSF_data = PSF_data[wvl_ids,...]
+            PSF_STD = PSF_STD [wvl_ids,...]
+            norms = norms[wvl_ids,...]
+            backgrounds = backgrounds[wvl_ids,...]
+        
+        return PSF_data, PSF_STD, norms, backgrounds, config_file, sample
 
 
-    PSF_0, configs, norms, bgs = [], [], [], []
+    PSFs, configs, norms, bgs = [], [], [], []
     
     for id in ids:
-        PSF_0_, _, norm, bg, config_dict_, sample_ = load_sample(id)
-        configs.append(config_dict_)
+        PSF_, _, norm, bg, config_dict_, sample_ = load_sample(id)
+        
         if derotate_PSF:
-            PSF_0_rot = RotatePSF(PSF_0_, -sample_['All data']['Pupil angle'].item())
-            PSF_0.append(PSF_0_rot)
+            PSF_0_rot = RotatePSF(PSF_,  -sample_['All data']['Pupil angle'].item())
+            # PSF_std   = RotatePSF(PSF_std, -sample_['All data']['Pupil angle'].item())
+            PSFs.append(PSF_0_rot)
         else:
-            PSF_0.append(PSF_0_)
+            PSFs.append(PSF_)
             
+        configs.append(config_dict_)
         norms.append(norm)
         bgs.append(bg)
 
-    PSF_0 = torch.tensor(np.vstack(PSF_0), dtype=default_torch_type, device=device)
-    norms = torch.tensor(norms, dtype=default_torch_type, device=device)
-    bgs   = torch.tensor(bgs, dtype=default_torch_type, device=device)
+    PSFs  = torch.tensor(np.stack(PSFs),  dtype=default_torch_type, device=device)
+    norms = torch.tensor(np.array(norms), dtype=default_torch_type, device=device)
+    bgs   = torch.tensor(np.array(bgs),   dtype=default_torch_type, device=device)
 
     config_manager = ConfigManager()
     merged_config  = config_manager.Merge(configs)
 
     config_manager.Convert(merged_config, framework='pytorch', device=device)
 
+    # All stacked sources must have the same wavelengths bins
     merged_config['sources_science']['Wavelength'] = merged_config['sources_science']['Wavelength'][0]
     merged_config['sources_HO']['Height']          = merged_config['sources_HO']['Height'].unsqueeze(-1)
     merged_config['sources_HO']['Wavelength']      = merged_config['sources_HO']['Wavelength'].squeeze()
+    merged_config['sensor_science']['FieldOfView'] = merged_config['sensor_science']['FieldOfView'].item()
     merged_config['NumberSources'] = len(ids)
+    merged_config['atmosphere']['Cn2Weights']      = merged_config['atmosphere']['Cn2Weights'].view(len(ids), -1)
+    merged_config['atmosphere']['Cn2Heights']      = merged_config['atmosphere']['Cn2Heights'].view(len(ids), -1)
+    merged_config['atmosphere']['WindSpeed']       = merged_config['atmosphere']['WindSpeed'].view(len(ids), -1)
+    merged_config['atmosphere']['WindDirection']   = merged_config['atmosphere']['WindDirection'].view(len(ids), -1)
+    merged_config['atmosphere']['Seeing']          = merged_config['atmosphere']['Seeing'].view(len(ids)) 
+    merged_config['sensor_science']['FieldOfView'] = int(merged_config['sensor_science']['FieldOfView'])
     
     if derotate_PSF:
         merged_config['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated
 
-    return PSF_0, norms, bgs, merged_config
+    return PSFs, norms, bgs, merged_config
 
 
 def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
@@ -187,3 +212,73 @@ def RenderDataSample(data_dict, file_name):
     ax[0].set_axis_off()
     ax[1].set_axis_off()
     plt.tight_layout()
+
+
+def update_label_IDs():
+    """ Matches the IDs in the labels file with the current samples indexing """
+    from pathlib import Path
+    import pandas as pd
+
+    # Input: text file contents as provided by the user
+    # Read text lines from file
+    text_file_path = STD_FOLDER / 'labels.txt'
+    with open(text_file_path, 'r') as f:
+        text_lines = [line.strip() for line in f.readlines()]
+
+    # Input: folder filenames as provided by the user
+    folder_files = os.listdir(STD_FOLDER / "MUSE_images")
+
+    def split_index_and_tail(filename_with_index: str):
+        if '_' in filename_with_index:
+            idx, tail = filename_with_index.split('_', 1)
+            return idx, tail
+        return None, filename_with_index
+
+    # Build a lookup from tail -> index for the folder files
+    tail_to_index = {}
+    for f in folder_files:
+        idx, tail = split_index_and_tail(f)
+        tail_to_index[tail] = idx
+
+    # Process text lines
+    results = []
+    updated_lines = []
+    for line in text_lines:
+        # split at ': ' to separate filename and labels
+        if ': ' in line:
+            name_part, labels = line.split(': ', 1)
+        else:
+            name_part, labels = line, ""
+
+        old_idx, tail = split_index_and_tail(name_part)
+        new_idx = tail_to_index.get(tail)  # match on tail
+
+        if new_idx is not None:
+            # Replace leading index with the matched one
+            new_name = f"{new_idx}_{tail}"
+            updated_line = f"{new_name}: {labels}" if labels else new_name
+            changed = (new_idx != old_idx)
+            matched = True
+        else:
+            # No match found; keep as-is
+            new_name = name_part
+            updated_line = line
+            changed = False
+            matched = False
+
+        results.append({
+            "original_name": name_part,
+            "labels": labels,
+            "matched_folder_file": matched,
+            "new_name": new_name,
+            "index_changed": changed,
+        })
+        updated_lines.append(updated_line)
+
+    # Save updated text file
+    out_path = STD_FOLDER / "updated_labels.txt"
+    out_path.write_text("\n".join(updated_lines), encoding="utf-8")
+
+    # Show a concise dataframe summary
+    df = pd.DataFrame(results, columns=["original_name","new_name","matched_folder_file","index_changed","labels"])
+    df.head()

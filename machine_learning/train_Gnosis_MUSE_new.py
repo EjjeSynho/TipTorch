@@ -18,7 +18,7 @@ from copy import copy, deepcopy
 from tqdm import tqdm
 from tools.plotting import plot_radial_profiles, draw_PSF_stack
 from tools.utils import cropper, PupilVLT
-from tools.static_phase import SausageFeature
+from tools.static_phase import MUSEPhaseBump
 from managers.config_manager import ConfigManager
 from data_processing.project_settings import MUSE_DATASET_FOLDER, MUSE_DATA_FOLDER
 from data_processing.normalizers import CreateTransformSequenceFromFile
@@ -109,7 +109,7 @@ tiptorch = TipTorch(init_config, pupil, PSD_include, 'sum', device, oversampling
 tiptorch.to_float()
 
 if predict_sausage:
-    sausage_absorber = SausageFeature(tiptorch)
+    sausage_absorber = MUSEPhaseBump(tiptorch)
     sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
     tiptorch.s_pow = torch.zeros([tiptorch.N_src, 1], device=tiptorch.device).float()
 

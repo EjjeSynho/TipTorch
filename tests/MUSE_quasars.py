@@ -26,7 +26,6 @@ from pathlib import Path
 from tools.utils import mask_circle
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
 from data_processing.normalizers import CreateTransformSequenceFromFile
-from data_processing.MUSE_onsky_df import *
 
 
 #%

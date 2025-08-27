@@ -69,7 +69,7 @@ class ConfigManager():
                 ['telescope', 'PathStaticOff'],
                 ['telescope', 'PathStaticOn'],
                 ['telescope', 'PathStaticPos'],
-                ['telescope', 'PupilAngle'],
+                # ['telescope', 'PupilAngle'],
                 ['telescope', 'Resolution'],
                 ['telescope', 'TelescopeDiameter']
             ]

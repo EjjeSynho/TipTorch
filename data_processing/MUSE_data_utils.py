@@ -2,8 +2,7 @@
 import sys, os
 
 from project_settings import device, xp, use_cupy, default_torch_type
-from project_settings import WEIGHTS_FOLDER, PROJECT_PATH, TELEMETRY_CACHE # Import pathes
-
+from project_settings import WEIGHTS_FOLDER, PROJECT_PATH, TELEMETRY_CACHE, DATA_FOLDER
 import pickle
 import re
 import os
@@ -1665,7 +1664,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     if os.path.exists(cache_path):
         if verbose: print('Loading existing cached data cube...')
         with open(cache_path, 'rb') as f:
-            data_cached = pickle.load(f)
+            data_cached, _ = pickle.load(f)
     else:
         if verbose: print('Generating new cached data cube...')
 
@@ -1751,29 +1750,20 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     return spectral_cubes, spectral_info, data_cached, model_config
 
 
-def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True):
-    wvls_ = [(sample['spectral data']['wvls binned']*1e-9).tolist()]
+def GetConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_config=True):
+    if PSF_data is None:
+        PSF_data = sample['images']['cube']
+        
+    FoV_science = int(PSF_data.shape[-1])
+    # N_wvl_PSF   = int(PSF_data.shape[0] if PSF_data.ndim == 3 else PSF_data.shape[1])
 
-    # All wavelengths
-    if wvl_id is None:
-        wvls  = wvls_
-        PSF_0 = PSF_data
-
-    # Select one particular wavelength
-    else:
-        wvls = [wvls_[0][wvl_id]]
-        PSF_0 = PSF_data[:,wvl_id,...].unsqueeze(1)
-        # N_wvl = 1
-
-    # wvls = [wvls_[0][0], wvls_[0][-1]]
-    # N_wvl = 2
-    # PSF_0 = torch.stack( [PSF_0_[:,0,...], PSF_0_[:,-1,...]], axis=1 )
-  
+    wvls_ = (sample['spectral data']['wvls binned']*1e-9).tolist()
+    wvls  = wvls_ if wvl_ids is None else np.array([wvls_[i] for i in wvl_ids])
+        
     config_manager = ConfigManager()
-    config_file    = ParameterParser(PROJECT_PATH / 'data/parameter_files/muse_ltao.ini').params
-    # merged_config  = config_manager.Merge([config_manager.Modify(config_file, sample, *config_loader()) for sample in data_samples])
+    config_file    = ParameterParser(DATA_FOLDER / 'parameter_files/muse_ltao.ini').params
 
-    h_GL = 2000
+    h_GL = 2000 # Assumed separation altitude betwee ground and high-altitude layers
 
     try:
         # For NFM it's save to assume gound layer to be below 2 km, for WFM it's lower than that
@@ -1788,9 +1778,9 @@ def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True)
 
         GL_frac  = Cn2_weights_GL.sum()  # Ground layer fraction   
         Cn2_w_GL = np.interp(h_GL, altitudes, Cn2_weights)
+        
     except:
         GL_frac = 0.9
-        
 
     config_file['NumberSources'] = 1
 
@@ -1818,12 +1808,12 @@ def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True)
 
     config_file['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item(),]*2]
     config_file['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item(),]*2]
-    config_file['sources_science']['Wavelength'] = wvls
+    config_file['sources_science']['Wavelength'] = [wvls]
 
-    config_file['sources_LO']['Wavelength'] = (1215+1625)/2.0 * 1e-9
+    config_file['sources_LO']['Wavelength'] = (1215+1625)/2.0 * 1e-9 # Mean  approx. wavelengths between J and H
 
     config_file['sensor_science']['PixelScale'] = sample['MUSE header data']['Pixel scale (science)'].item()
-    config_file['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
+    config_file['sensor_science']['FieldOfView'] = FoV_science
 
     try:
         LGS_ph = np.array([sample['All data'][f'LGS{i} photons, [photons/m^2/s]'].item() / 1240e3 for i in range(1,5)])
@@ -1860,7 +1850,7 @@ def GetConfig(sample, PSF_data, wvl_id=None, device=device, convert_config=True)
     if convert_config:
         config_manager.Convert(config_file, framework='pytorch', device=device)
 
-    return config_file, PSF_0
+    return config_file
 
 
 def RotatePSF(PSF_data, angle):
@@ -1871,15 +1861,13 @@ def RotatePSF(PSF_data, angle):
         PSF_data_ = PSF_data
         torch_flag = False
 
-    PSF_data_rotated = np.zeros_like(PSF_data_[0,...])
+    PSF_data_rotated = np.zeros_like(PSF_data_)
     
-    for i in range(PSF_data_.shape[1]):
-        PSF_data_rotated[i,...] = rotate(PSF_data_[0,i,...], angle , reshape=False)
+    for i in range(PSF_data_.shape[0]):
+        PSF_data_rotated[i,...] = rotate(PSF_data_[i,...], angle, reshape=False)
     
     if torch_flag:
         PSF_data_rotated = torch.tensor(PSF_data_rotated, dtype=default_torch_type).unsqueeze(0).to(PSF_data.device)
-    else:
-        PSF_data_rotated = PSF_data_rotated.astype(np.float32)[None,...]
         
     return PSF_data_rotated
 

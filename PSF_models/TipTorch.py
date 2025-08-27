@@ -48,7 +48,7 @@ class TipTorch(torch.nn.Module):
         self.wvl = self.config['sources_science']['Wavelength']
         # self.wvl = self.wvl if self.wvl.ndim == 2 else self.wvl.unsqueeze(0).T
         self.wvl = min_2d(self.wvl)
-        self.N_wvl = self.wvl.shape[-1]
+        self.N_wvl = self.wvl.shape[-1] # must be [1 x N_wvl]
         self.wvl_atm = self.config['atmosphere']['Wavelength']
 
         # Science sources positions relative to the center of FOV, input in [arc]
@@ -82,8 +82,10 @@ class TipTorch(torch.nn.Module):
         # Atmospheric parameters
         self.wind_speed  = self.config['atmosphere']['WindSpeed']
         self.wind_dir    = self.config['atmosphere']['WindDirection']
-        self.Cn2_weights = min_2d(self.config['atmosphere']['Cn2Weights'])
-        self.Cn2_heights = min_2d(self.config['atmosphere']['Cn2Heights']) * self.airmass # [m]
+        # self.Cn2_weights = min_2d(self.config['atmosphere']['Cn2Weights'])
+        # self.Cn2_heights = min_2d(self.config['atmosphere']['Cn2Heights']) * self.airmass # [m]        
+        self.Cn2_weights = self.config['atmosphere']['Cn2Weights']
+        self.Cn2_heights = self.config['atmosphere']['Cn2Heights'] * self.airmass # [m]
         
         self.stretch  = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
         self.h  = self.Cn2_heights * self.stretch

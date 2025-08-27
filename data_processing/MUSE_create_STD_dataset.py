@@ -144,7 +144,7 @@ else:
 #%% ================================ Assemble STD stars reduced telemetry dataset ================================
 
 # Compose dataset of MUSE NFM redued telemetry values based on the data associated with cahed data cubes
-if not os.path.exists(TELEMETRY_CACHE / 'MUSE/muse_df.pickle'):
+if not os.path.exists(STD_FOLDER / 'muse_df.pickle'):
     # Load labels information
     all_labels = []
     labels_df  = { 'ID': [], 'Filename': [] }
@@ -194,11 +194,11 @@ if not os.path.exists(TELEMETRY_CACHE / 'MUSE/muse_df.pickle'):
     muse_df.sort_index(inplace=True)
     muse_df = muse_df.join(labels_df)
 
-    with open(TELEMETRY_CACHE / 'MUSE/muse_df.pickle', 'wb') as handle:
+    with open(STD_FOLDER / 'muse_df.pickle', 'wb') as handle:
         pickle.dump(muse_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 else:
-    with open(TELEMETRY_CACHE / 'MUSE/muse_df.pickle', 'rb') as handle:
+    with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
         muse_df = pickle.load(handle)
 
 
@@ -303,14 +303,20 @@ if verbose:
 #%%
 # Pack all data into a single dictionary and store it
 muse_data_package = {
-    'data imputer': iterative_imputer,
     'telemetry normalized imputed df': muse_df_pruned_scaled_imputed,
-    'telemetry imputed df': muse_df_pruned_imputed,
-    'scaler': telemetry_scaler,
+    'telemetry imputed df': muse_df_pruned_imputed
 }
 
-with open(TELEMETRY_CACHE / 'MUSE/muse_STD_data_package.pickle', 'wb') as handle:
+with open(STD_FOLDER / 'muse_STD_data_package.pickle', 'wb') as handle:
     pickle.dump(muse_data_package, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+# Save imputer and scaler as separate pickle files
+with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'wb') as handle:
+    pickle.dump(iterative_imputer, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'wb') as handle:
+    pickle.dump(telemetry_scaler, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
 
 #%%
 '''

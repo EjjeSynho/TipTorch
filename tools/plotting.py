@@ -3,7 +3,7 @@ import torch
 import matplotlib.pyplot as plt
 from photutils.profiles import RadialProfile
 from matplotlib import cm
-from utils import safe_centroid
+from .utils import safe_centroid
 
 
 def wavelength_to_rgb(wavelength, gamma=0.8, show_invisible=False):

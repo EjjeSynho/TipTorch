@@ -5,6 +5,7 @@ import numpy as np
 import torch
 from scipy.io import loadmat
 from utils import mask_circle, rad2mas, pdims
+from project_settings import default_torch_type, DATA_FOLDER
 
 decompose_WF = lambda WF, basis, pupil: WF[:, pupil > 0] @ basis[:, pupil > 0].T / pupil.sum()
 project_WF   = lambda WF, basis, pupil: torch.einsum('mn,nwh->mwh', decompose_WF(WF, basis, pupil), basis)
@@ -278,12 +279,12 @@ class ZernikeBasis(PhaseMap):
         if ignore_pupil:
             pupil_mask = mask_circle(N=model.pupil.shape[-1], r=model.pupil.shape[-1] // 2)
         else:
-            pupil_mask = model.pupil[0].cpu().numpy()
+            pupil_mask = model.pupil.squeeze().cpu().numpy()
 
         Z = ZernikeModes(pupil_mask, N_modes)
-        Z.computeZernike()
+        Z.computeZernike(angle=self.model.pupil_angle)
         # store as (N_modes, H, W)
-        modes = torch.as_tensor(Z.modesFullRes, device=model.device, dtype=model.pupil.dtype)
+        modes = torch.as_tensor(Z.modesFullRes, device=model.device, dtype=default_torch_type)
         self.zernike_basis = modes.permute(2, 0, 1)
         self.N_modes = N_modes
 
@@ -293,32 +294,106 @@ class ZernikeBasis(PhaseMap):
         return torch.einsum('om,mhw->ohw', coefs, self.zernike_basis) * 1e-9
 
 
-class SausageFeature(PhaseMap):
-    def __init__(self, model):
-        # always apply pupil (ignore_pupil=False)
-        super().__init__(model, ignore_pupil=False)
-        
+class MUSEPhaseBump(PhaseMap):
+    def __init__(self, model, ignore_pupil=False):
+        super().__init__(model, ignore_pupil=ignore_pupil)
+
         # load calibration map and rescale to meters
-        mat = loadmat("../data/calibrations/Muse_slopes/DelatRS2Phase.mat")["aa"]
-        
+        mat = loadmat(DATA_FOLDER / "calibrations/VLT_CALIBRATION/MUSE_slopes/DelatRS2Phase.mat")["aa"]
+
         OPD = torch.tensor(mat).float().to(model.device)
         OPD *= 35 * 2 / 1.6 / 1e6  # [m]
         
         # up-sample to pupil resolution
-        self.OPD_map = F.interpolate(
+        OPD_upsampled = F.interpolate(
             OPD[None, None, ...],
             size=model.pupil.shape[-2:],
             mode="bilinear",
             align_corners=False,
-        ).squeeze(0)
+        ).squeeze()
+        
+        # rotate during initialization
+        angle = model.pupil_angle - 45.0
+        self.OPD_map = TF.rotate(OPD_upsampled.unsqueeze(0), angle, interpolation=TF.InterpolationMode.BILINEAR).squeeze(0)
 
     def compute_OPD(self, coef):
         # coef: (N_src, N_wvl)
-        # rotate and broadcast
-        angle = self.model.pupil_angle - 45.0
         # make full batch of maps
-        batch_map = self.OPD_map.unsqueeze(0).unsqueeze(0).repeat(coef.shape + (1, 1))
-        batch_map = TF.rotate(batch_map, angle, interpolation=TF.InterpolationMode.BILINEAR)
+        batch_map = self.OPD_map.expand(self.model.N_src, self.model.N_wvl, -1, -1)
         # OPD = map * coef
         return batch_map * coef.view(self.model.N_src, self.model.N_wvl, 1, 1)
+    
 
+class ArbitraryBasis(PhaseMap):
+    def __init__(self, model, basis, ignore_pupil=True):
+        """
+        Initialize with an arbitrary basis.
+        
+        Args:
+            model: The model object
+            basis: Tensor of shape (N_modes, H, W) containing the basis functions
+            ignore_pupil: Whether to ignore pupil mask
+        """
+        super().__init__(model, ignore_pupil)
+        
+        # Store the basis, ensuring it's on the correct device and dtype
+        self.basis = basis.to(model.device).float()
+        self.N_modes = basis.shape[0]
+        
+    def orthogonalize_modes(self):
+        """
+        Orthogonalize the basis modes using Gram-Schmidt process.
+        Only operates on pixels within the pupil if not ignoring pupil.
+        """
+        if not self.ignore_pupil:
+            pupil_mask = self.model.pupil.squeeze() > 0
+            # Extract pixels within pupil for each mode
+            basis_masked = self.basis[:, pupil_mask]
+            
+            # Gram-Schmidt orthogonalization
+            orthogonal_basis = torch.zeros_like(basis_masked)
+            for i in range(self.N_modes):
+                # Start with current mode
+                v = basis_masked[i].clone()
+                
+                # Subtract projections onto previous orthogonal modes
+                for j in range(i):
+                    proj = torch.dot(v, orthogonal_basis[j]) / torch.dot(orthogonal_basis[j], orthogonal_basis[j])
+                    v -= proj * orthogonal_basis[j]
+                
+                # Normalize
+                orthogonal_basis[i] = v / torch.norm(v)
+            
+            # Reconstruct full basis
+            self.basis[:, pupil_mask] = orthogonal_basis
+            self.basis[:, ~pupil_mask] = 0
+        else:
+            # Flatten spatial dimensions for full array orthogonalization
+            basis_flat = self.basis.view(self.N_modes, -1)
+            
+            # Gram-Schmidt orthogonalization
+            for i in range(self.N_modes):
+                v = basis_flat[i].clone()
+                
+                for j in range(i):
+                    proj = torch.dot(v, basis_flat[j]) / torch.dot(basis_flat[j], basis_flat[j])
+                    v -= proj * basis_flat[j]
+                
+                basis_flat[i] = v / torch.norm(v)
+            
+            # Reshape back
+            self.basis = basis_flat.view(self.N_modes, *self.basis.shape[1:])
+
+    def compute_OPD(self, coefs):
+        """
+        Compute OPD from coefficients and basis.
+        
+        Args:
+            coefs: Tensor of shape (N_src, N_wvl, N_modes)
+            
+        Returns:
+            OPD tensor of shape (N_src, N_wvl, H, W) in meters
+        """
+        # coefs: (N_src, N_wvl, N_modes)
+        # basis: (N_modes, H, W)
+        return torch.einsum('om,mhw->ohw', coefs, self.basis) * 1e-9
