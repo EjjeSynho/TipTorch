@@ -17,7 +17,7 @@ from data_processing.normalizers import Uniform
 from managers.input_manager import InputsManager
 from machine_learning.calibrator import Calibrator, Gnosis
 from data_processing.normalizers import CreateTransformSequenceFromFile
-from data_processing.project_settings import MUSE_DATA_FOLDER, MUSE_DATASET_FOLDER
+from data_processing.project_settings import MUSE_DATA_FOLDER, DATASET_FOLDER
 from data_processing.MUSE_onsky_df import *
 from tools.utils import rad2mas
 
@@ -167,8 +167,8 @@ train_ids, val_ids = [], []
 batches_train, batches_val = [], []
 
 
-train_files = [ MUSE_DATASET_FOLDER+'train/'+file      for file in os.listdir(MUSE_DATASET_FOLDER+'train')      if '.pkl' in file ]
-val_files   = [ MUSE_DATASET_FOLDER+'validation/'+file for file in os.listdir(MUSE_DATASET_FOLDER+'validation') if '.pkl' in file ]
+train_files = [ DATASET_FOLDER+'train/'+file      for file in os.listdir(DATASET_FOLDER+'train')      if '.pkl' in file ]
+val_files   = [ DATASET_FOLDER+'validation/'+file for file in os.listdir(DATASET_FOLDER+'validation') if '.pkl' in file ]
 
 print('Loading train batches...')
 for file in tqdm(train_files):

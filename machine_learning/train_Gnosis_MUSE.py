@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from tools.plotting import plot_radial_profiles, cropper, draw_PSF_stack
 from managers.config_manager import ConfigManager
-from project_settings import MUSE_DATASET_FOLDER, MUSE_DATA_FOLDER, device
+from project_settings import DATASET_FOLDER, MUSE_DATA_FOLDER, device
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from copy import copy, deepcopy
 from managers.input_manager import InputsTransformer
@@ -40,7 +40,7 @@ predict_Moffat = True
 # predict_Moffat = False
 
 #%%
-with open(MUSE_DATASET_FOLDER + 'batch_test.pkl', 'rb') as handle:
+with open(DATASET_FOLDER + 'batch_test.pkl', 'rb') as handle:
     batch_init = pickle.load(handle)
 
 init_config = batch_init['configs']
@@ -256,8 +256,8 @@ batch_size = len(batch_init['IDs'])
 batches_train, batches_val = [], []
 train_ids, val_ids = [], []
 
-train_files = [ MUSE_DATASET_FOLDER+'train/'+file      for file in os.listdir(MUSE_DATASET_FOLDER+'train')      if '.pkl' in file ]
-val_files   = [ MUSE_DATASET_FOLDER+'validation/'+file for file in os.listdir(MUSE_DATASET_FOLDER+'validation') if '.pkl' in file ]
+train_files = [ DATASET_FOLDER+'train/'+file      for file in os.listdir(DATASET_FOLDER+'train')      if '.pkl' in file ]
+val_files   = [ DATASET_FOLDER+'validation/'+file for file in os.listdir(DATASET_FOLDER+'validation') if '.pkl' in file ]
 
 batches_train, batches_val = [], []
 

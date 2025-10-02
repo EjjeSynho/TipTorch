@@ -1,9 +1,8 @@
-from project_settings import PROJECT_PATH
+from project_settings import PROJECT_PATH, default_torch_type
 
 import os.path as ospath
 import warnings
 from configparser import ConfigParser
-from sys import path
 import numpy as np
 import os
 

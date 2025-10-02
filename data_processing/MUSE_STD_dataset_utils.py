@@ -1,24 +1,10 @@
 from MUSE_data_utils import *
 
-STD_FOLDER   = MUSE_DATA_FOLDER / 'standart_stars/'
-CUBES_FOLDER = STD_FOLDER / 'cubes/'
-RAW_FOLDER   = STD_FOLDER / 'raw/'
-CUBES_CACHE  = STD_FOLDER / 'cached_cubes/'
-
-# Wavelength bins used to bin MUSE NFM multispectral cubes
-wvl_bins = np.array([
-    478.   , 492.125, 506.25 , 520.375, 534.625, 548.75 , 562.875, 
-    577.   , 606.   , 620.25 , 634.625, 648.875, 663.25 , 677.5  ,
-    691.875, 706.125, 720.375, 734.75 , 749.   , 763.375, 777.625,
-    792.   , 806.25 , 820.625, 834.875, 849.125, 863.5  , 877.75 ,
-    892.125, 906.375, 920.75 , 935.
-], dtype='float32')
-
-# wvl_bins = np.array([
-    # 478, 511, 544, 577, 606,
-    # 639, 672, 705, 738, 771,
-    # 804, 837, 870, 903, 935
-# ], dtype='float32')
+STD_FOLDER     = MUSE_DATA_FOLDER / 'standart_stars/'
+CUBES_FOLDER   = STD_FOLDER / 'cubes/'
+RAW_FOLDER     = STD_FOLDER / 'raw/'
+CUBES_CACHE    = STD_FOLDER / 'cached_cubes/'
+DATASET_FOLDER = STD_FOLDER / 'dataset/'
 
 
 def LoadSTDStarCacheByID(id):
@@ -36,7 +22,16 @@ def LoadSTDStarCacheByID(id):
     return data_sample
 
 
-def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background=False, wvl_ids=None, ensure_odd_pixels=False, device=device):
+def LoadSTDStarData(
+    ids,
+    derotate_PSF = False,
+    normalize = True,
+    subtract_background = False,
+    wvl_ids = None,
+    ensure_odd_pixels = False,
+    device = device
+):
+    
     """ Loads data associated with provided list of STD star by their ID """
     
     def get_radial_backround(img):
@@ -56,7 +51,8 @@ def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background
   
         PSF_data = np.copy(sample['images']['cube']) 
         PSF_STD  = np.copy(sample['images']['std'])
-        
+
+        # Make sure that the image is centered in one pixel, so PSF peak has a chance to be in a single pixel
         if ensure_odd_pixels:
             if PSF_data.shape[-1] % 2 == 0:
                 PSF_data = PSF_data[:,:-1,:-1]
@@ -76,7 +72,7 @@ def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background
         else:
             norms = np.ones(PSF_data.shape[0])[:,None,None]
     
-        config_file = GetConfig(sample, PSF_data, wvl_ids, convert_config=False)
+        config_file = InitNFMConfig(sample, PSF_data, wvl_ids, convert_config=False)
         
         # Select a subset of wavelengths bins
         if wvl_ids is not None:
@@ -90,12 +86,15 @@ def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background
 
     PSFs, configs, norms, bgs = [], [], [], []
     
+    if not isinstance(ids, list):
+        ids = [ids]
+    
     for id in ids:
         PSF_, _, norm, bg, config_dict_, sample_ = load_sample(id)
         
         if derotate_PSF:
             PSF_0_rot = RotatePSF(PSF_,  -sample_['All data']['Pupil angle'].item())
-            # PSF_std   = RotatePSF(PSF_std, -sample_['All data']['Pupil angle'].item())
+            # PSF_std  = RotatePSF(PSF_std, -sample_['All data']['Pupil angle'].item())
             PSFs.append(PSF_0_rot)
         else:
             PSFs.append(PSF_)
@@ -108,6 +107,7 @@ def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background
     norms = torch.tensor(np.array(norms), dtype=default_torch_type, device=device)
     bgs   = torch.tensor(np.array(bgs),   dtype=default_torch_type, device=device)
 
+    '''
     config_manager = ConfigManager()
     merged_config  = config_manager.Merge(configs)
 
@@ -123,9 +123,16 @@ def LoadSTDStarData(ids, derotate_PSF=False, normalize=True, subtract_background
     merged_config['atmosphere']['Cn2Heights']      = merged_config['atmosphere']['Cn2Heights'].view(len(ids), -1)
     merged_config['atmosphere']['WindSpeed']       = merged_config['atmosphere']['WindSpeed'].view(len(ids), -1)
     merged_config['atmosphere']['WindDirection']   = merged_config['atmosphere']['WindDirection'].view(len(ids), -1)
-    merged_config['atmosphere']['Seeing']          = merged_config['atmosphere']['Seeing'].view(len(ids)) 
+    merged_config['atmosphere']['Seeing']          = merged_config['atmosphere']['Seeing'].view(len(ids))
+    # merged_config['DM']['OptimizationWeight']      = merged_config['DM']['OptimizationWeight'][0]
     merged_config['sensor_science']['FieldOfView'] = int(merged_config['sensor_science']['FieldOfView'])
-    
+    '''
+
+    # if len(ids) > 1:
+    merged_config = MultipleTargetsInDifferentObservations(configs, device=device)
+    # else:
+    #     merged_config = configs[0]
+
     if derotate_PSF:
         merged_config['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated
 

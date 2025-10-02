@@ -1,7 +1,7 @@
 import sys
 sys.path.insert(0, '..')
 
-from managers.parameter_parser import ParameterParser
+from managers.parameter_parser import ParameterParser, default_torch_type
 
 import math
 import torch
@@ -231,33 +231,37 @@ class ConfigManager():
         return split_configs
 
 
-    def Convert(self, config, framework='pytorch', device=None):
+    def Convert(self, config, framework='pytorch', device=torch.device('cpu'), dtype=default_torch_type):
         """Converts all values in a config file to a specified framework"""
+        
         if framework.lower() == 'pytorch' or framework.lower() == 'torch':
-            
-            if device is None:
-                device = torch.device('cpu')
-            
             def convert_value(x):
                 if isinstance(x, torch.Tensor):
-                    return x.float().to(device) if x.device != device else x.float()
+                    return x.to(device=device, dtype=dtype)
                 
                 elif isinstance(x, list) and all(isinstance(i, torch.Tensor) for i in x):
-                    return torch.stack(x).float().to(device)
-                
-                elif isinstance(x, str):
-                    pass
-                
+                    return torch.stack([t.to(device=device, dtype=dtype) for t in x])
+
+                elif isinstance(x, list) and all(isinstance(i, np.ndarray) for i in x):
+                    return torch.stack([torch.from_numpy(i) for i in x]).to(device, dtype=dtype)
+
                 else:
-                    return torch.as_tensor(x, dtype=torch.float32, device=device)
-                            
-            
+                    return torch.as_tensor(x, dtype=dtype, device=device)
+
         elif framework.lower() == 'numpy':
-            convert_value = lambda x: np.array(x.cpu()) if isinstance(x, torch.Tensor) else np.array(x)
-        
+            def convert_value(x): 
+                if isinstance(x, torch.Tensor):
+                    return np.array(x.cpu())
+                else:
+                    return np.array(x)
+
         elif framework.lower() == 'cupy':
-            convert_value = lambda x: cp.array(x.cpu()) if isinstance(x, torch.Tensor) else cp.array(x)
-        
+            def convert_value(x):
+                if isinstance(x, torch.Tensor):
+                    return cp.array(x.cpu())
+                else:
+                    return cp.array(x)
+
         elif framework.lower() == 'list':
             def convert_value(x):
                 if isinstance(x, torch.Tensor):
@@ -271,158 +275,24 @@ class ConfigManager():
         else:
             raise NotImplementedError(f'Unsupported framework "{framework}"!')
 
-        zero_d = lambda x: x if type(x) == float else convert_value(x)
+        # Handle scalar types
+        def process_value(x):
+            if isinstance(x, (str, type(None))) or not self.is_valid(x):
+                return x
+            elif isinstance(x, (int, float, complex)) and not hasattr(x, '__len__'):
+                return x  # Keep scalar values as-is
+            else:
+                return convert_value(x)
         
         for entry in config:
             value = config[entry]
             if isinstance(value, dict):
                 self.Convert(value, framework, device)  
-            elif isinstance(value, str) or not self.is_valid(value):
-                pass
             else:
-                value = zero_d(value)
-                
-            config[entry] = value
+                config[entry] = process_value(value)  # Assign the converted value back
 
-
+    
 '''
-    def Convert(self, config, framework='pytorch', device=None, convert_to_float=True):
-        """Converts all values in a config file to a specified framework"""
-        if framework.lower() == 'pytorch' or framework.lower() == 'torch':
-            if device is None: device = torch.device('cpu')
-
-            if getattr(torch.backends.mps, "is_available", lambda: False)():
-                convert_to_float = True  # MPS only supports float32
-
-            # Define a helper function to convert values to arraays of the correct type and framework
-            def convert_value(x):
-                if isinstance(x, torch.Tensor):
-                    if convert_to_float:
-                        return x.to(device=device, dtype=torch.float32)
-                    else:
-                        return x.to(device=device)
-                    
-                elif isinstance(x, list) and all(isinstance(i, torch.Tensor) for i in x):
-                    if convert_to_float:
-                        return torch.stack(x).to(device=device, dtype=torch.float32)
-                    else:
-                        return torch.stack(x).to(device=device)
-                    
-                elif isinstance(x, str):
-                    return x
-                
-                else:
-                    if convert_to_float:
-                        return torch.as_tensor(x, device=device, dtype=torch.float32)
-                    else:
-                        return torch.as_tensor(x, device=device)
-
-        elif framework.lower() == 'numpy':
-            def convert_value(x):
-                if isinstance(x, torch.Tensor):
-                    arr = x.cpu().numpy()
-                    return arr.astype(np.float32) if convert_to_float else arr
-                else:
-                    arr = np.array(x)
-                    return arr.astype(np.float32) if convert_to_float else arr
-
-        elif framework.lower() == 'cupy':
-            def convert_value(x):
-                if isinstance(x, torch.Tensor):
-                    arr = cp.array(x.cpu().numpy())
-                    return arr.astype(cp.float32) if convert_to_float else arr
-                else:
-                    arr = cp.array(x)
-                    return arr.astype(cp.float32) if convert_to_float else arr
-
-        elif framework.lower() == 'list':
-            def convert_value(x):
-                if   isinstance(x, torch.Tensor): return x.cpu().tolist()
-                elif isinstance(x, np.ndarray):   return x.tolist()
-                elif isinstance(x, cp.ndarray):   return cp.asnumpy(x).tolist()+
-                else: return x
-        else:
-            raise NotImplementedError(f'Unsupported framework "{framework}"!')
-
-        zero_d = lambda x: x if isinstance(x, float) else convert_value(x)
-
-        for entry in config:
-            value = config[entry]
-            if isinstance(value, dict):
-                self.Convert(value, framework, device, convert_to_float) # use recursion to convert nested dictionaries
-                
-            elif isinstance(value, str) or not self.is_valid(value):
-                pass
-            
-            else:
-                config[entry] = zero_d(value)
-'''
-
-
-def GetSPHEREonsky():
-    '''
-    This function composes the SPHERE config understandable by the TipTorch model. It converts the data from an external source
-    (modifier) and puts iit into the config. NOTE: to be refactored for clarity!
-    '''
-    
-    conversion_table = [
-        (['atmosphere','Seeing'],          ['seeing','SPARTA']        ),
-        (['atmosphere','WindSpeed'],       ['Wind speed','header']    ),
-        (['atmosphere','WindDirection'],   ['Wind direction','header']),
-        (['sensor_science','Zenith'],      ['telescope','altitude']   ),
-        (['telescope','ZenithAngle'],      ['telescope','altitude']   ), #TODO: difference between zenith and zenithAngle?
-        (['sensor_science','Azimuth'],     ['telescope','azimuth']    ),
-        (['sensor_science','SigmaRON'],    ['Detector','ron']         ),
-        (['sensor_science','Gain'],        ['Detector','gain']        ),
-        (['sources_HO', 'Wavelength'],     ['WFS', 'wavelength']      ),
-        (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis']          ),
-        (['sensor_HO','Jitter X'],         ['WFS','TT jitter X']      ),
-        (['sensor_HO','Jitter Y'],         ['WFS','TT jitter Y']      ),
-        (['RTC','SensorFrameRate_HO'],     ['WFS','rate']             ),
-        (['sensor_science','PixelScale'],  ['Detector', 'psInMas']    ),
-        (['sensor_science','SigmaRON'],    ['Detector', 'ron']        ),
-        (['sources_science','Wavelength'], ['spectra']                )
-    ]
-    
-    def processor_func(config, modifier):
-        config['sources_science']['Zenith'] = 90.0 - modifier['telescope']['altitude']
-        config['telescope']['ZenithAngle']  = 90.0 - modifier['telescope']['altitude']
-        
-        def frame_delay(loop_freq):
-            if not isinstance(loop_freq, torch.Tensor):
-                loop_freq_ = torch.tensor(loop_freq)
-            return torch.clamp(loop_freq_/1e3 * 2.3, min=1.0)
-        
-        config['RTC']['LoopDelaySteps_HO'] = frame_delay(config['RTC']['SensorFrameRate_HO'])
-
-        return config
-    
-    return conversion_table, processor_func
-
-
-def GetSPHEREsynth():
-    conversion_table = [
-        (['atmosphere','Cn2Weights'],      ['Cn2','profile']     ),
-        (['atmosphere','Cn2Heights'],      ['Cn2','heights']      ),
-        (['atmosphere','Seeing'],          ['seeing']             ),
-        (['atmosphere','WindSpeed'],       ['Wind speed']         ),
-        (['atmosphere','WindDirection'],   ['Wind direction']     ),
-        (['telescope','Zenith'],           ['telescope','zenith'] ),
-        (['telescope','ZenithAngle'],      ['telescope','zenith'] ),
-        (['sensor_science','SigmaRON'],    ['Detector','ron']     ),
-        (['sensor_science','Gain'],        ['Detector','gain']    ),
-        (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis']      ),
-        (['sources_HO','Wavelength'],      ['WFS','wavelength']   ),
-        (['RTC','SensorFrameRate_HO'],     ['RTC','loop rate']    ),
-        (['RTC','LoopGain_HO'],            ['RTC','loop gain']    ),
-        (['RTC','LoopDelaySteps_HO'],      ['RTC','frames delay'] ),
-        (['sensor_science','PixelScale'],  ['Detector', 'psInMas']),
-        (['sensor_science','SigmaRON'],    ['Detector','ron']     ),
-        (['sources_science','Wavelength'], ['spectra']            ),
-    ]
-    return conversion_table, None
-
-    
 def ConfigFromFile(ini_file_path, device):
     config_manager = ConfigManager()
     config = ParameterParser(ini_file_path).params
@@ -447,7 +317,7 @@ def ConfigFromFile(ini_file_path, device):
     config['sensor_HO']['ClockRate']    = config['sensor_HO']['ClockRate'][0]
 
     return config
-
+'''
 
 def are_equal(a, b, tolerance):
     """Check if two values are equal within the given tolerance, handling tensors and nested structures."""
@@ -530,8 +400,9 @@ def CompareConfigs(dict1, dict2, tolerance=1e-6, path=""):
     return differences
 
 
-def MultipleTargetsInOneObservation(config_file, N_srcs):
+def MultipleTargetsInOneObservation(config_file, N_srcs, device=None):
     '''
+    Restructures config file in such a way that multiple sources are observed in one observation.
     Initializing the config file this way allows to avoid computing tomographic reconstructor
     multiple times for the same atmospheric conditions. This involves initializing the proper dimensions
     for the input arrays. Given the right dimensionality, the PSF model will automatically understand what to do.
@@ -540,43 +411,121 @@ def MultipleTargetsInOneObservation(config_file, N_srcs):
     config_manager = ConfigManager()
     config  = config_manager.Merge([config_file,]*N_srcs)
 
-    if hasattr(config_file['atmosphere']['Cn2Weights'], 'device'):
-        config_manager.Convert(config, framework='pytorch', device=config_file['atmosphere']['Cn2Weights'].device)
+    # Determine framework based on device parameter or existing data
+    if device is not None:
+        config_manager.Convert(config, framework='pytorch', device=device)
     else:
         config_manager.Convert(config, framework='numpy')
     
     config['NumberSources'] = N_srcs
-    
-    config['sources_science']['Wavelength'] = config['sources_science']['Wavelength'][0]
-    config['sources_HO']['Height']          = config['sources_HO']['Height'].unsqueeze(-1)
-    config['sources_HO']['Wavelength']      = config['sources_HO']['Wavelength'].squeeze()
-    config['sensor_science']['FieldOfView'] = config['sensor_science']['FieldOfView'].int().item()
-    config['atmosphere']['Cn2Weights']      = config['atmosphere']['Cn2Weights'].squeeze()
-    config['atmosphere']['Cn2Heights']      = config['atmosphere']['Cn2Heights'].squeeze()
-    config['sensor_HO']['NumberPhotons']    = config['sensor_HO']['NumberPhotons'].squeeze()
-    
-    config['telescope']['ZenithAngle']    = config['telescope']['ZenithAngle'][0,...]
 
-    config['atmosphere']['L0']            = config['atmosphere']['L0'][0]
-    config['atmosphere']['Seeing']        = config['atmosphere']['Seeing'][0]
-    config['atmosphere']['Cn2Weights']    = config['atmosphere']['Cn2Weights'][0,...].unsqueeze(0)
-    config['atmosphere']['Cn2Heights']    = config['atmosphere']['Cn2Heights'][0,...].unsqueeze(0)
-    config['atmosphere']['WindSpeed']     = config['atmosphere']['WindSpeed'][0,...].unsqueeze(0)
-    config['atmosphere']['WindDirection'] = config['atmosphere']['WindDirection'][0,...].unsqueeze(0)
+    if device is not None:
+        # PyTorch operations
+        config['sources_science']['Wavelength'] = config['sources_science']['Wavelength'][0]
+        config['sources_HO']['Height']          = config['sources_HO']['Height'].unsqueeze(-1)
+        config['sources_HO']['Wavelength']      = config['sources_HO']['Wavelength'].squeeze()
+        config['sensor_science']['FieldOfView'] = config['sensor_science']['FieldOfView'].int().item()
+        config['atmosphere']['Cn2Weights']      = config['atmosphere']['Cn2Weights'].squeeze()
+        config['atmosphere']['Cn2Heights']      = config['atmosphere']['Cn2Heights'].squeeze()
+        config['sensor_HO']['NumberPhotons']    = config['sensor_HO']['NumberPhotons'].squeeze()
+        
+        config['telescope']['ZenithAngle']    = config['telescope']['ZenithAngle'][0,...]
 
-    config['sources_HO']['Height']        = config['sources_HO']['Height'][0,...].unsqueeze(0)
-    config['sources_HO']['Zenith']        = config['sources_HO']['Zenith'][0,...]
-    config['sources_HO']['Azimuth']       = config['sources_HO']['Azimuth'][0,...]
+        config['atmosphere']['L0']            = config['atmosphere']['L0'][0]
+        config['atmosphere']['Seeing']        = config['atmosphere']['Seeing'][0]
+        config['atmosphere']['Cn2Weights']    = config['atmosphere']['Cn2Weights'][0,...].unsqueeze(0)
+        config['atmosphere']['Cn2Heights']    = config['atmosphere']['Cn2Heights'][0,...].unsqueeze(0)
+        config['atmosphere']['WindSpeed']     = config['atmosphere']['WindSpeed'][0,...].unsqueeze(0)
+        config['atmosphere']['WindDirection'] = config['atmosphere']['WindDirection'][0,...].unsqueeze(0)
 
-    config['RTC']['SensorFrameRate_HO']   = config['RTC']['SensorFrameRate_HO'][0]
-    config['RTC']['LoopDelaySteps_HO']    = config['RTC']['LoopDelaySteps_HO'][0]
-    config['RTC']['LoopGain_HO']          = config['RTC']['LoopGain_HO'][0]
+        config['sources_HO']['Height']        = config['sources_HO']['Height'][0,...].unsqueeze(0)
+        config['sources_HO']['Zenith']        = config['sources_HO']['Zenith'][0,...]
+        config['sources_HO']['Azimuth']       = config['sources_HO']['Azimuth'][0,...]
 
-    config['DM']['OptimizationZenith' ]   = config['DM']['OptimizationZenith'][0]
-    config['DM']['OptimizationAzimuth']   = config['DM']['OptimizationAzimuth'][0]
-    config['DM']['OptimizationWeight']    = config['DM']['OptimizationWeight'][0]
-    
-    config['sensor_HO']['NumberPhotons']  = config['sensor_HO']['NumberPhotons'][0,...].unsqueeze(0)
-    config['sensor_HO']['ClockRate']      = config['sensor_HO']['ClockRate'][0]
+        config['RTC']['SensorFrameRate_HO']   = config['RTC']['SensorFrameRate_HO'][0]
+        config['RTC']['LoopDelaySteps_HO']    = config['RTC']['LoopDelaySteps_HO'][0]
+        config['RTC']['LoopGain_HO']          = config['RTC']['LoopGain_HO'][0]
+
+        config['DM']['OptimizationZenith' ]   = config['DM']['OptimizationZenith'][0]
+        config['DM']['OptimizationAzimuth']   = config['DM']['OptimizationAzimuth'][0]
+        config['DM']['OptimizationWeight']    = config['DM']['OptimizationWeight'][0]
+        
+        config['sensor_HO']['NumberPhotons']  = config['sensor_HO']['NumberPhotons'][0,...].unsqueeze(0)
+        config['sensor_HO']['ClockRate']      = config['sensor_HO']['ClockRate'][0]
+        
+    else:
+        # NumPy operations
+        config['sources_science']['Wavelength'] = config['sources_science']['Wavelength'][0]
+        config['sources_HO']['Height']          = np.expand_dims(config['sources_HO']['Height'], axis=-1)
+        config['sources_HO']['Wavelength']      = config['sources_HO']['Wavelength'].squeeze()
+        config['sensor_science']['FieldOfView'] = int(config['sensor_science']['FieldOfView'])
+        config['atmosphere']['Cn2Weights']      = config['atmosphere']['Cn2Weights'].squeeze()
+        config['atmosphere']['Cn2Heights']      = config['atmosphere']['Cn2Heights'].squeeze()
+        config['sensor_HO']['NumberPhotons']    = config['sensor_HO']['NumberPhotons'].squeeze()
+        
+        config['telescope']['ZenithAngle']    = config['telescope']['ZenithAngle'][0,...]
+        
+        config['atmosphere']['L0']            = config['atmosphere']['L0'][0]
+        config['atmosphere']['Seeing']        = config['atmosphere']['Seeing'][0]
+        config['atmosphere']['Cn2Weights']    = np.expand_dims(config['atmosphere']['Cn2Weights'][0,...], axis=0)
+        config['atmosphere']['Cn2Heights']    = np.expand_dims(config['atmosphere']['Cn2Heights'][0,...], axis=0)
+        config['atmosphere']['WindSpeed']     = np.expand_dims(config['atmosphere']['WindSpeed'][0,...], axis=0)
+        config['atmosphere']['WindDirection'] = np.expand_dims(config['atmosphere']['WindDirection'][0,...], axis=0)
+
+        config['sources_HO']['Height']        = np.expand_dims(config['sources_HO']['Height'][0,...], axis=0)
+        config['sources_HO']['Zenith']        = config['sources_HO']['Zenith'][0,...]
+        config['sources_HO']['Azimuth']       = config['sources_HO']['Azimuth'][0,...]
+
+        config['RTC']['SensorFrameRate_HO']   = config['RTC']['SensorFrameRate_HO'][0]
+        config['RTC']['LoopDelaySteps_HO']    = config['RTC']['LoopDelaySteps_HO'][0]
+        config['RTC']['LoopGain_HO']          = config['RTC']['LoopGain_HO'][0]
+
+        config['DM']['OptimizationZenith' ]   = config['DM']['OptimizationZenith'][0]
+        config['DM']['OptimizationAzimuth']   = config['DM']['OptimizationAzimuth'][0]
+        config['DM']['OptimizationWeight']    = config['DM']['OptimizationWeight'][0]
+        
+        config['sensor_HO']['NumberPhotons']  = np.expand_dims(config['sensor_HO']['NumberPhotons'][0,...], axis=0)
+        config['sensor_HO']['ClockRate']      = config['sensor_HO']['ClockRate'][0]
     
     return config
+
+
+def MultipleTargetsInDifferentObservations(configs, device=None):
+    '''
+    Merges multiple config files into one config file for multiple targets observed in different observations.
+    Useful when training calibrator NN on multiple targets.
+    '''
+    config_manager = ConfigManager()
+    merged_config  = config_manager.Merge(configs)
+
+    N_src = len(configs)
+    
+    if device is None:
+        config_manager.Convert(merged_config, framework='numpy')
+        
+        # All stacked sources must have the same wavelengths bins
+        merged_config['sources_HO']['Height']        = np.expand_dims(merged_config['sources_HO']['Height'], axis=-1)
+        merged_config['atmosphere']['Cn2Weights']    = merged_config['atmosphere']['Cn2Weights'].reshape(N_src, -1)
+        merged_config['atmosphere']['Cn2Heights']    = merged_config['atmosphere']['Cn2Heights'].reshape(N_src, -1)
+        merged_config['atmosphere']['WindSpeed']     = merged_config['atmosphere']['WindSpeed'].reshape(N_src, -1)
+        merged_config['atmosphere']['WindDirection'] = merged_config['atmosphere']['WindDirection'].reshape(N_src, -1)
+        merged_config['atmosphere']['Seeing']        = merged_config['atmosphere']['Seeing'].reshape(N_src)
+        merged_config['sensor_HO']['NumberPhotons']  = merged_config['sensor_HO']['NumberPhotons'].reshape(N_src, -1)
+    else:
+        config_manager.Convert(merged_config, framework='pytorch', device=device)
+        
+        merged_config['sources_HO']['Height']        = merged_config['sources_HO']['Height'].unsqueeze(-1)
+        merged_config['atmosphere']['Cn2Weights']    = merged_config['atmosphere']['Cn2Weights'].view(N_src, -1)
+        merged_config['atmosphere']['Cn2Heights']    = merged_config['atmosphere']['Cn2Heights'].view(N_src, -1)
+        merged_config['atmosphere']['WindSpeed']     = merged_config['atmosphere']['WindSpeed'].view(N_src, -1)
+        merged_config['atmosphere']['WindDirection'] = merged_config['atmosphere']['WindDirection'].view(N_src, -1)
+        merged_config['atmosphere']['Seeing']        = merged_config['atmosphere']['Seeing'].view(N_src)
+        merged_config['sensor_HO']['NumberPhotons']  = merged_config['sensor_HO']['NumberPhotons'].view(N_src, -1)
+
+    merged_config['NumberSources'] = N_src
+    # All stacked sources must have the same wavelengths bins
+    merged_config['sources_science']['Wavelength'] = merged_config['sources_science']['Wavelength'].view(N_src, -1)[0,...].unsqueeze(0)
+    merged_config['sources_HO']['Wavelength']      = merged_config['sources_HO']['Wavelength'].squeeze()
+    merged_config['sensor_science']['FieldOfView'] = int(merged_config['sensor_science']['FieldOfView'])
+
+    return merged_config

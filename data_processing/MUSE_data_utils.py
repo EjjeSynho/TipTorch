@@ -28,7 +28,7 @@ from tools.utils import GetROIaroundMax, GetJmag, check_framework
 from tools.network import DownloadFromRemote
 from tools.plotting import wavelength_to_rgb
 from managers.parameter_parser import ParameterParser
-from managers.config_manager import ConfigManager
+from managers.config_manager import ConfigManager, MultipleTargetsInDifferentObservations
 from scipy.ndimage import rotate
 import logging
 
@@ -54,6 +54,22 @@ except Exception as e:
     datalab_available = False
 
 
+# Wavelength bins used to bin MUSE NFM multispectral cubes
+wvl_bins = np.array([
+    478.   , 492.125, 506.25 , 520.375, 534.625, 548.75 , 562.875, 
+    577.   , 606.   , 620.25 , 634.625, 648.875, 663.25 , 677.5  ,
+    691.875, 706.125, 720.375, 734.75 , 749.   , 763.375, 777.625,
+    792.   , 806.25 , 820.625, 834.875, 849.125, 863.5  , 877.75 ,
+    892.125, 906.375, 920.75 , 935.
+], dtype='float32')
+
+wvl_bins_old = np.array([
+    478, 511, 544, 577, 606,
+    639, 672, 705, 738, 771,
+    804, 837, 870, 903, 935
+], dtype='float32')
+
+
 #%%
 find_closest_λ   = lambda λ, λs: check_framework(λs).argmin(check_framework(λs).abs(λs-λ)).astype('int')
 pupil_angle_func = lambda par_ang: (45.0 - par_ang) % 360 # where par_ang is the parallactic angle
@@ -61,7 +77,7 @@ pupil_angle_func = lambda par_ang: (45.0 - par_ang) % 360 # where par_ang is the
 with open(PROJECT_PATH / Path("project_config.json"), "r") as f:
     project_settings = json.load(f)
 
-MUSE_DATA_FOLDER   = Path(project_settings["MUSE_data_folder"])
+MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
 default_IRLOS_config = '20x20_SmallScale_500Hz_HighGain'
 
@@ -720,8 +736,8 @@ def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
         return data[:, y, x]
     
     y_min = max(0, y - radius)
-    y_max = min(data.shape[1], y + radius + 1)
     x_min = max(0, x - radius)
+    y_max = min(data.shape[1], y + radius + 1)
     x_max = min(data.shape[2], x + radius + 1)
 
     # Handle different array types
@@ -1030,8 +1046,8 @@ def GetSpectralCubeAndHeaderData(
     data_binned = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
     std_binned  = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
     # Central λs at each spectral bin
-    wavelengths  = xp.zeros(len(λ_bins_smart)-1)
-    flux         = xp.zeros(len(λ_bins_smart)-1)
+    wavelengths = xp.zeros(len(λ_bins_smart)-1)
+    flux        = xp.zeros(len(λ_bins_smart)-1)
 
     bad_layers     = [] # list of corrupted spectral slices (excluding the Na-filter)
     bins_to_ignore = [] # list of corrupted spectral slices (including Na-filter)
@@ -1041,8 +1057,8 @@ def GetSpectralCubeAndHeaderData(
         print(f'Processing spectral bins on {"GPU" if use_cupy else "CPU"}...')
 
     for bin in progress_bar( range(len(bins_smart)-1) ):
-        chunk = cube_data[ bins_smart[bin]:bins_smart[bin+1], ROI[0], ROI[1] ]
-        wvl_chunck = λs[bins_smart[bin]:bins_smart[bin+1]]
+        chunk       = cube_data[ bins_smart[bin]:bins_smart[bin+1], ROI[0], ROI[1] ]
+        wvl_chunck  = λs[bins_smart[bin]:bins_smart[bin+1]]
         flux_chunck = spectrum[bins_smart[bin]:bins_smart[bin+1]]
 
         # Check if it is a sodium filter range
@@ -1096,7 +1112,7 @@ def GetSpectralCubeAndHeaderData(
 
     # Generate spectral plot (if applies)
     fig_handler = None
-    if show_plots and crop_cube and extract_spectrum:
+    if show_plots and extract_spectrum:
         if verbose: print("Generating spectral plot...")
         # Initialize arrays using np.zeros_like to match λs shape
         Rs, Gs, Bs = np.zeros_like(λs), np.zeros_like(λs), np.zeros_like(λs)
@@ -1104,30 +1120,34 @@ def GetSpectralCubeAndHeaderData(
         for i, λ in enumerate(λs):
             Rs[i], Gs[i], Bs[i] = wavelength_to_rgb(λ, show_invisible=True)
 
+        # Mask out the bad wavelength ranges
+        spectrum_valid = valid_λs * spectrum.copy()
+
         # Scale the RGB arrays by valid_λs and spectrum
-        Rs = Rs * valid_λs * spectrum / np.median(spectrum)
-        Gs = Gs * valid_λs * spectrum / np.median(spectrum)
-        Bs = Bs * valid_λs * spectrum / np.median(spectrum)
+        Rs = Rs * spectrum_valid / np.median(spectrum_valid)
+        Gs = Gs * spectrum_valid / np.median(spectrum_valid)
+        Bs = Bs * spectrum_valid / np.median(spectrum_valid)
 
         # Create a color array by stacking and transposing appropriately
-        colors = np.dstack([np.vstack([Rs, Gs, Bs])]*600).transpose(2,1,0)
+        colors = np.dstack([np.vstack([Rs, Gs, Bs])]*2).transpose(2,1,0)
 
         # Plotting using matplotlib
         fig_handler = plt.figure(dpi=200)
-        plt.imshow(colors, extent=[λs.min(), λs.max(), 0, 120])
-        plt.ylim(0, 120)
-        plt.vlines(λ_bins_smart, 0, 120, color='white')  # draw bins borders
-        plt.plot(λs, spectrum/spectrum.max()*120, linewidth=2.0, color='white')
-        plt.plot(λs, spectrum/spectrum.max()*120, linewidth=0.5, color='blue')
+        plt.imshow(colors, extent=[λs.min(), λs.max(), 0, spectrum_valid.max()])
+        plt.ylim(0, spectrum_valid.max())
+        plt.vlines(λ_bins_smart, 0, spectrum_valid.max(), color='white')  # draw bins borders
+        plt.plot(λs, spectrum_valid, linewidth=2.0, color='white')
+        plt.plot(λs, spectrum_valid, linewidth=0.5, color='blue')
         plt.xlabel(r"$\lambda$, [nm]")
         plt.ylabel(r"$\left[ 10^{-20} \frac{erg}{s \cdot cm^2 \cdot \AA} \right]$")
         ax = plt.gca()
+        ax.set_aspect(np.ptp(λs)/np.max(spectrum_valid)/2.5) # 1:2.5 aspect ratio
 
 
     data_binned = np.delete(data_binned, bins_to_ignore, axis=0)
     std_binned  = np.delete(std_binned,  bins_to_ignore, axis=0)
-    wavelengths = np.delete(wavelengths,  bins_to_ignore)
-    flux        = np.delete(flux,         bins_to_ignore)
+    wavelengths = np.delete(wavelengths, bins_to_ignore)
+    flux        = np.delete(flux,        bins_to_ignore)
 
     if verbose:
         print(str(len(bad_layers))+'/'+str(cube_data.shape[0]), '('+str(xp.round(len(bad_layers)/cube_data.shape[0],2))+'%)', 'slices are corrupted')
@@ -1707,7 +1727,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     cube_binned = cube_binned * (cube_full.sum(axis=0).max() /  cube_binned.sum(axis=0).max())
 
     # Extract config file and update it
-    model_config, cube_binned = GetConfig(data_cached, cube_binned, device=device, convert_config=True)
+    model_config, cube_binned = InitNFMConfig(data_cached, cube_binned, device=device, convert_config=True)
     cube_binned = cube_binned.squeeze()
 
     model_config['NumberSources'] = 1
@@ -1750,7 +1770,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     return spectral_cubes, spectral_info, data_cached, model_config
 
 
-def GetConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_config=True):
+def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_config=True):
     if PSF_data is None:
         PSF_data = sample['images']['cube']
         
@@ -1808,9 +1828,9 @@ def GetConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_config
 
     config_file['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item(),]*2]
     config_file['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item(),]*2]
-    config_file['sources_science']['Wavelength'] = [wvls]
+    config_file['sources_science']['Wavelength'] = wvls
 
-    config_file['sources_LO']['Wavelength'] = (1215+1625)/2.0 * 1e-9 # Mean  approx. wavelengths between J and H
+    config_file['sources_LO']['Wavelength'] = (1215 + 1625)/2.0 * 1e-9 # Mean  approx. wavelengths between J and H
 
     config_file['sensor_science']['PixelScale'] = sample['MUSE header data']['Pixel scale (science)'].item()
     config_file['sensor_science']['FieldOfView'] = FoV_science

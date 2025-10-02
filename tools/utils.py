@@ -783,3 +783,111 @@ class CombinedLoss:
         mae_loss = (diff * self.mae_weight).abs().mean()
         return (mse_loss + mae_loss)
     
+    
+class RadialProfileLossSimple(nn.Module):
+    """
+    Differentiable radial-profile loss for PSFs of shape (N, N_wvl, H, W).
+    Assumes PSFs are already normalized and centered.
+
+    Args:
+      n_bins: number of radial bins
+      r_max: max radius in pixels (default: half of min(H,W) minus 1)
+      sigma_scale: Gaussian bin width factor (sigma = sigma_scale * bin_width)
+      loss: 'mse' or 'fvu'
+      bin_weight: 'uniform' | 'counts' | 'r'   (optional emphasis on wings/area)
+      log_profile: if True, profile over log(PSF+eps) to emphasize wings
+      eps: numerical stability
+    """
+    def __init__(
+        self,
+        n_bins: int = 64,
+        r_max: float | None = None,
+        sigma_scale: float = 0.5,
+        loss: str = "fvu",
+        bin_weight: str = "r",
+        log_profile: bool = False,
+        eps: float = 1e-8,
+    ):
+        super().__init__()
+        assert loss in ("mse", "fvu")
+        assert bin_weight in ("uniform", "counts", "r")
+        self.n_bins = n_bins
+        self.r_max = r_max
+        self.sigma_scale = sigma_scale
+        self.loss = loss
+        self.bin_weight = bin_weight
+        self.log_profile = log_profile
+        self.eps = eps
+
+        # small cache for precomputed weights
+        self._cache = {}  # key = (H,W,device,dtype,n_bins,r_max,sigma_scale)
+
+    def _precompute(self, H, W, device, dtype):
+        r_max = self.r_max if self.r_max is not None else float(min(H, W) / 2.0 - 1.0)
+        key = (H, W, device, dtype, self.n_bins, r_max, self.sigma_scale)
+        if key in self._cache:
+            return self._cache[key]
+
+        yy, xx = torch.meshgrid(
+            torch.arange(H, device=device, dtype=dtype),
+            torch.arange(W, device=device, dtype=dtype),
+            indexing="ij",
+        )
+        cx, cy = (W - 1) / 2.0, (H - 1) / 2.0
+        r = torch.sqrt((xx - cx) ** 2 + (yy - cy) ** 2)  # (H,W)
+
+        edges = torch.linspace(0.0, r_max, self.n_bins + 1, device=device, dtype=dtype)
+        centers = 0.5 * (edges[:-1] + edges[1:])         # (B,)
+        bin_width = r_max / self.n_bins
+        sigma = self.sigma_scale * bin_width + self.eps
+
+        # soft (Gaussian) bin weights: W(h,w,b)
+        W = torch.exp(-0.5 * ((r.unsqueeze(-1) - centers) / sigma) ** 2)  # (H,W,B)
+
+        self._cache[key] = (W, centers, r_max)
+        return W, centers, r_max
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor):
+        assert pred.shape == target.shape and pred.ndim == 4
+        N, WVL, H, W = pred.shape
+        device, dtype = pred.device, pred.dtype
+
+        # precompute soft radial weights
+        W_hwB, centers, _ = self._precompute(H, W, device, dtype)  # (H,W,B),(B,)
+        # expand to broadcast over batch/wavelengths
+        W_full = W_hwB.view(1, 1, H, W, self.n_bins)               # (1,1,H,W,B)
+
+        # choose image domain (linear or log)
+        X = torch.log(pred + self.eps) if self.log_profile else pred
+        Y = torch.log(target + self.eps) if self.log_profile else target
+
+        # radial profiles via weighted average over pixels
+        num_pred = (X.unsqueeze(-1) * W_full).sum(dim=(-3, -2))    # (N,WVL,B)
+        num_targ = (Y.unsqueeze(-1) * W_full).sum(dim=(-3, -2))    # (N,WVL,B)
+        den = W_full.sum(dim=(-3, -2)).clamp_min(self.eps)         # (1,1,B) -> broadcasts
+        prof_pred = num_pred / den
+        prof_targ = num_targ / den
+
+        # per-bin weights
+        if self.bin_weight == "uniform":
+            w = torch.ones_like(prof_pred)
+        elif self.bin_weight == "counts":
+            w = den.expand_as(prof_pred)                           # proportional to pixel counts
+        else:  # 'r' — emphasize wings
+            w = centers.view(1, 1, -1).expand_as(prof_pred)
+
+        # normalize weights per-sample to mean 1 over bins
+        w = w / w.mean(dim=-1, keepdim=True).clamp_min(self.eps)
+
+        if self.loss == "mse":
+            diff = prof_pred - prof_targ
+            loss = (w * diff.pow(2)).mean()
+        else:  # 'fvu' across bins, then average over batch & wavelength
+            y = prof_targ
+            ybar = y.mean(dim=-1, keepdim=True)
+            sse = (w * (prof_pred - y).pow(2)).sum(dim=-1)                 # (N,WVL)
+            ssy = (w * (y - ybar).pow(2)).sum(dim=-1).clamp_min(self.eps)  # (N,WVL)
+            fvu = sse / ssy
+            loss = fvu.mean()
+
+        return loss

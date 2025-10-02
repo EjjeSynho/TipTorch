@@ -415,7 +415,7 @@ def plot_radial_profiles_relative(PSF_0,
 
     if return_profiles:
         return p_err
-    
+
 
 def draw_PSF_stack(
     PSF_in, PSF_out,
@@ -489,6 +489,86 @@ def draw_PSF_stack(
             # ax.set_title('Source %d' % src)
             ax.axis('off')
             plt.show()
+
+
+def plot_chromatic_PSF_slice(PSF, wavelengths, norms=None, window_size=50, slices=['vertical', 'horizontal', 'diagonal_1', 'diagonal_2'], figsize=(12, 5)):
+    """
+    Plot PSF cross-sections and optionally normalization values across wavelengths.
+    
+    Parameters:
+    -----------
+    PSF : torch.Tensor
+        PSF data with shape (batch, wavelength, height, width)
+    wavelengths : torch.Tensor
+        Wavelength values
+    norms : torch.Tensor, optional
+        Normalization values for each wavelength. If None, only PSF plot is shown.
+    window_size : int
+        Size of the window to extract from center (default: 50)
+    slices : list of str
+        List of slice directions to extract from the PSF (default: ['vertical', 'horizontal', 'diagonal_1', 'diagonal_2'])
+    figsize : tuple
+        Figure size (default: (12, 5))
+    """
+    if norms is not None:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    else:
+        fig, ax1 = plt.subplots(1, 1, figsize=(figsize[0]//2, figsize[1]))
+    
+    N_wvl = PSF.shape[1]
+    center_y, center_x = PSF.shape[-2] // 2, PSF.shape[-1] // 2
+    half_window = window_size // 2
+    
+    # Calculate slice bounds
+    y_start = max(0, center_y - half_window)
+    y_end = min(PSF.shape[-2], center_y + half_window)
+    x_start = max(0, center_x - half_window)
+    x_end = min(PSF.shape[-1], center_x + half_window)
+    
+    wvl_colors = [wavelength_to_rgb(l, gamma=1.0) for l in np.linspace(440, 750, N_wvl)]
+
+    for i in range(N_wvl):
+        # Extract cross-sections through center and average them
+        h_slice = PSF[0, i, center_y, x_start:x_end].cpu().numpy()
+        v_slice = PSF[0, i, y_start:y_end, center_x].cpu().numpy()
+            
+        min_len = min(len(h_slice), len(v_slice))
+        
+        # Extract diagonal slices more efficiently
+        psf_slice = PSF[0, i, y_start:y_end, x_start:x_end].cpu().numpy()
+        d_slice = np.diag(psf_slice)[:min_len]
+        d_slice_orth = np.diag(np.fliplr(psf_slice))[:min_len]
+        
+        # Make slices the same length and average
+        # Create a dictionary to store all slices
+        slice_dict = {
+            'horizontal': h_slice[:min_len],
+            'vertical':   v_slice[:min_len], 
+            'diagonal_1': d_slice[:min_len],
+            'diagonal_2': d_slice_orth[:min_len]
+        }
+        
+        # Select only the requested slices and average them
+        selected_slices = [slice_dict[s] for s in slices if s in slice_dict]
+        slice_ = np.mean(selected_slices, axis=0)
+        
+        ax1.plot(slice_, color=wvl_colors[i], alpha=0.5, label=f"{wavelengths[i].item()*1e9:.0f} nm")
+
+    ax1.set_yscale('symlog', linthresh=5e-4)
+    ax1.grid(True, which='both', alpha=0.3)
+    ax1.set_xlim([0, len(slice_)-1])
+    ax1.set_xlabel('')
+    ax1.tick_params(axis='x', labelbottom=False)
+    ax1.legend(ncol=1, fontsize='small', loc='upper right')
+
+    if norms is not None:
+        ax2.plot(wavelengths.squeeze().cpu().numpy()*1e9, norms.squeeze().cpu().numpy())
+        ax2.set_xlabel('Wavelength (nm)')
+        ax2.set_ylabel('Normalization')
+        ax2.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    plt.show()
 
 
 def hist_thresholded(
@@ -597,3 +677,35 @@ def hist_thresholded(
     plt.legend()
     plt.tight_layout()
     # plt.show()
+
+
+def plot_PSD_profiles(PSF_model):
+    plt.figure(figsize=(6,4))
+    for entry in PSF_model.PSD_include:
+        PSD = PSF_model.PSDs[entry]
+
+        if len(PSD.shape) > 1:            
+            PSD_norm = (PSF_model.dk*PSF_model.wvl_atm*1e9/2/torch.pi)**2
+            PSD = PSF_model.half_PSD_to_full(PSD * PSD_norm) # [nm^2]
+
+            img = PSD[0,0,...].cpu().numpy().real
+            xycen = (img.shape[-1]//2, img.shape[-2]//2)  # (x, y) position tuple
+            edge_radii = np.arange(img.shape[-1]//2)
+            rp = RadialProfile(img, xycen, edge_radii)
+
+            spatial_freq = rp.radius * PSF_model.dk.cpu().numpy()
+            plt.plot(spatial_freq, rp.profile, label=entry, linewidth=1)
+
+    img = PSF_model.PSD[0,0,...].cpu().numpy().real
+    xycen = (img.shape[-1]//2, img.shape[-2]//2)  # (x, y) position tuple
+    edge_radii = np.arange(img.shape[-1]//2)
+    rp = RadialProfile(img, xycen, edge_radii)
+    spatial_freq = rp.radius * PSF_model.dk.cpu().numpy()
+    plt.plot(spatial_freq, rp.profile, color='k', linewidth=1, linestyle='--', label='Total PSD')
+
+    plt.ylabel(rf'PSD [nm$^2$/(1/m)$^2$]')
+    plt.yscale('symlog', linthresh=1e-4)
+    plt.xscale('log')
+    plt.grid(True, which='both', alpha=0.3)
+    plt.legend()
+    plt.xlabel('Spatial frequency (1/m)')

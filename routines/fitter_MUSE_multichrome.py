@@ -11,7 +11,7 @@ import torch
 import numpy as np
 from tools.utils import SR, FitGauss2D, SausageFeature
 from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from data_processing.MUSE_data_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
+from data_processing.MUSE_data_utils import InitNFMConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_settings import MUSE_DATA_FOLDER, MUSE_FITTING_FOLDER, device
 from managers.config_manager import ConfigManager
 from torchmin import minimize
@@ -143,7 +143,7 @@ def load_and_fit_sample(id):
     
     sample = LoadMUSEsampleByID(id)
     PSF_0, _, norms, bgs = LoadImages(sample, device)
-    config_file, PSF_0 = GetConfig(sample, PSF_0, None, device)
+    config_file, PSF_0 = InitNFMConfig(sample, PSF_0, None, device)
     N_wvl = PSF_0.shape[1]
 
     if derotate_PSF:

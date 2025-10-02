@@ -4,6 +4,8 @@
 
 import os
 import sys
+
+from tests.MUSE_Torch2Top import PSF
 sys.path.insert(0, '..')
 
 from pathlib import Path
@@ -20,17 +22,19 @@ from tools.plotting import plot_radial_profiles, draw_PSF_stack
 from tools.utils import cropper, PupilVLT
 from tools.static_phase import MUSEPhaseBump
 from managers.config_manager import ConfigManager
-from data_processing.project_settings import MUSE_DATASET_FOLDER, MUSE_DATA_FOLDER
+from data_processing.MUSE_data_utils import MUSE_DATA_FOLDER
+from data_processing.MUSE_STD_dataset_utils import DATASET_FOLDER
+
 from data_processing.normalizers import CreateTransformSequenceFromFile
 from managers.input_manager import InputsTransformer
 from PSF_models.TipTorch import TipTorch
 
-from project_settings import device
+from project_settings import device, DATA_FOLDER
 
-df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
-df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/muse_df_fitted_transforms.pickle')
+df_transforms_onsky  = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_norm_transforms.pickle')
+df_transforms_fitted = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_fitted_transforms.pickle')
 
-with open(MUSE_DATA_FOLDER+'muse_df_norm_imputed.pickle', 'rb') as handle:
+with open(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_norm_imputed.pickle', 'rb') as handle:
     muse_df_norm = pickle.load(handle)
 
 config_manager = ConfigManager()
@@ -39,7 +43,7 @@ predict_Moffat  = True # False
 predict_sausage = True
 
 #%%
-with open(MUSE_DATASET_FOLDER + 'batch_test.pkl', 'rb') as handle:
+with open(DATASET_FOLDER + 'batch_test.pkl', 'rb') as handle:
     batch_init = pickle.load(handle)
 
 wavelength  = batch_init['Wvls']
@@ -224,8 +228,8 @@ def func(x_, config, fixed_inputs):
 batches_train, batches_val = [], []
 train_ids, val_ids = [], []
 
-train_files = [ MUSE_DATASET_FOLDER+'train/'+file      for file in os.listdir(MUSE_DATASET_FOLDER+'train')      if '.pkl' in file ]
-val_files   = [ MUSE_DATASET_FOLDER+'validation/'+file for file in os.listdir(MUSE_DATASET_FOLDER+'validation') if '.pkl' in file ]
+train_files = [ DATASET_FOLDER+'train/'+file      for file in os.listdir(DATASET_FOLDER+'train')      if '.pkl' in file ]
+val_files   = [ DATASET_FOLDER+'validation/'+file for file in os.listdir(DATASET_FOLDER+'validation') if '.pkl' in file ]
 
 batches_train, batches_val = [], []
 
@@ -763,19 +767,19 @@ for id in tqdm(good_ids):
 #%%
 
 # Read the results
-with open('../data/temp/PSFs_val_data_polychrome.pickle', 'rb') as handle:
+with open('../data/temp/temp_PSFs_MUSE/PSFs_val_data_polychrome.pickle', 'rb') as handle:
     PSFs_0_val_poly_data = pickle.load(handle)
-    
-    
-with open('../data/temp/PSFs_val_calibrated_polychrome.pickle', 'rb') as handle:
+
+
+with open('../data/temp/temp_PSFs_MUSE/PSFs_val_calibrated_polychrome.pickle', 'rb') as handle:
     PSFs_1_val_poly_calib = pickle.load(handle)
 
 
-with open('../data/temp/PSFs_val_tuned_polychrome.pickle', 'rb') as handle:
+with open('../data/temp/temp_PSFs_MUSE/PSFs_val_tuned_polychrome.pickle', 'rb') as handle:
     PSFs_2_val_poly_tuned = pickle.load(handle)
 
 
-with open('../data/temp/PSFs_val_direct_polychrome_raw.pickle', 'rb') as handle:
+with open('../data/temp/temp_PSFs_MUSE/PSFs_val_direct_polychrome_raw.pickle', 'rb') as handle:
     PSFs_2_val_poly_direct = pickle.load(handle)
     
 # with open('../data/temp/PSFs_val_fitted_polychrome.pickle', 'wb') as handle:
@@ -852,16 +856,16 @@ print(f'Median relative FWHM error (direct): {np.median(relative_err_direct):.1f
 print(f'Median absolute FWHM error (direct): {np.median(absolute_err_direct):.1f} [mas]')
 
 #%%
-from tools.utils import hist_thresholded
+from tools.plotting import hist_thresholded
 
 hist_thresholded(
-    datasets=[absolute_err_calib, absolute_err_tuned],
+    datasets=[absolute_err_calib, absolute_err_tuned, absolute_err_direct],
     threshold=np.round( np.percentile(absolute_err_calib, 90)),
     bins=10,
     title="Absolute FWHM error",
     xlabel=r"$\Delta\:$FWHM, [mas]",
     ylabel="Percentage, [%]",
-    labels=['Caibrated', 'Tuned'],
+    labels=['Caibrated', 'Tuned', 'Direct'],
     colors=None,
     alpha=0.6
 )
@@ -869,49 +873,78 @@ hist_thresholded(
 
 
 hist_thresholded(
-    datasets=[relative_err_calib, relative_err_tuned],
+    datasets=[relative_err_calib, relative_err_tuned, relative_err_direct],
     threshold=np.round( np.percentile(relative_err_calib, 90)),
     bins=10,
     title="Relative FWHM error",
     xlabel=r"$\Delta\:$FWHM $\, / \,$ FWHM$_{\: data}$, [%]",
     ylabel="Percentage, [%]",
-    labels=['Caibrated', 'Tuned'],
+    labels=['Caibrated', 'Tuned', 'Direct'],
     colors=None,
     alpha=0.6
 )
 # plt.savefig(save_dir / 'FWHM_relative_MUSE.pdf', dpi=300)
 
 #%%
-# PSFs_0_val_poly_data, 
-# PSFs_1_val_poly_calib,
-# PSFs_2_val_poly_tuned,
-# PSFs_2_val_poly_direct
-
-var_data  = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
-var_delta = np.var((PSFs_1_val_poly_calib - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
-
-FVU = var_delta / var_data
-
-print(np.median(FVU))
-
-# plt.hist(FVU, bins=100)
-
-#%%
-var_data  = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
-var_delta = np.var((PSFs_2_val_poly_tuned - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
-
-FVU = var_delta / var_data
-
-print(np.median(FVU))
+hist_thresholded(
+    datasets=[relative_err_calib],
+    threshold=np.round( np.percentile(relative_err_calib, 90)),
+    bins=10,
+    title="Relative FWHM error",
+    xlabel=r"$\Delta\:$FWHM $\, / \,$ FWHM$_{\: data}$, [%]",
+    ylabel="Percentage, [%]",
+    labels=['Caibrated'],
+    colors=None,
+    alpha=0.6
+)
+plt.savefig(save_dir / 'FWHM_relative_calib_MUSE.pdf', dpi=300)
 
 #%%
+ΔSR_tuned  = (PSFs_2_val_poly_tuned  - PSFs_0_val_poly_data).max(axis=(-2,-1))
+ΔSR_calib  = (PSFs_1_val_poly_calib  - PSFs_0_val_poly_data).max(axis=(-2,-1))
+ΔSR_direct = (PSFs_2_val_poly_direct - PSFs_0_val_poly_data).max(axis=(-2,-1))
 
-var_data  = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
-var_delta = np.var((PSFs_2_val_poly_direct - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+ΔSR_tuned  /= PSFs_0_val_poly_data.max(axis=(-2,-1))
+ΔSR_calib  /= PSFs_0_val_poly_data.max(axis=(-2,-1))
+ΔSR_direct /= PSFs_0_val_poly_data.max(axis=(-2,-1))
 
-FVU = var_delta / var_data
+ΔSR_calib_median  = np.median(np.mean(ΔSR_calib,  axis=1))
+ΔSR_direct_median = np.median(np.mean(ΔSR_direct, axis=1))
+ΔSR_tuned_median  = np.median(np.mean(ΔSR_tuned,  axis=1))
 
-print(np.median(FVU))
+print(f'Median ΔSR (calib):  {ΔSR_calib_median*100:.1f}%')
+print(f'Median ΔSR (tuned):  {ΔSR_tuned_median*100:.1f}%')
+print(f'Median ΔSR (direct): {ΔSR_direct_median*100:.1f}%')
+
+#%%
+hist_thresholded(
+    datasets=[np.mean(ΔSR_calib*100,  axis=1)],
+    threshold=np.round( np.percentile(np.mean(ΔSR_calib*100,  axis=1), 90)),
+    bins=10,
+    title="SR error",
+    xlabel=fr"$\Delta$ SR, [%]",
+    ylabel="Percentage, [%]",
+    labels=['Caibrated'],
+    colors=None,
+    alpha=0.6
+)
+
+# save_dir = Path(os.path.dirname(os.getcwd())) / 'data' / 'temp' / 'plots'
+# plt.savefig(save_dir / 'SR_calib_MUSE.pdf', dpi=300)
+
+#%%
+var_data         = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
+var_delta_calib  = np.var((PSFs_1_val_poly_calib  - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+var_delta_tuned  = np.var((PSFs_2_val_poly_tuned  - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+var_delta_direct = np.var((PSFs_2_val_poly_direct - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+
+FVU_calib  = var_delta_calib  / var_data
+FVU_tuned  = var_delta_tuned  / var_data
+FVU_direct = var_delta_direct / var_data
+
+print(f'FVU of calibrated: {np.median(FVU_calib)*100:.1f}%')
+print(f'FVU of tuned: {np.median(FVU_tuned)*100:.1f}%')
+print(f'FVU of direct: {np.median(FVU_direct)*100:.1f}%')
 
 
 #%%

@@ -115,7 +115,7 @@ raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
 #%
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
 # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
-spectral_cubes, spectral_info, TELEMETRY_CACHEd, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, data_cache, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 # Extract full and binned spectral cubes. Sparse cube selects a set of 7 binned wavelengths ranges
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
 
@@ -271,7 +271,7 @@ def GetReducedTelemetryInputs(cached_data):
     return df_norm[selected_entries_input].loc[0]
 
 
-telemetry_inputs = GetReducedTelemetryInputs(TELEMETRY_CACHEd)
+telemetry_inputs = GetReducedTelemetryInputs(data_cache)
 
 
 calibrator = Calibrator(

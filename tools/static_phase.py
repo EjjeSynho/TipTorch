@@ -197,7 +197,7 @@ class ZernikeModes:
 
 class PhaseMap:
     """
-    Base class for any OPD→complex-field mapping.
+    Base class for any OPD -> complex-field mapping.
     Subclasses must implement compute_OPD(x) to return
     an OPD tensor in meters of shape (N_src, N_wvl, H, W).
     """
@@ -281,8 +281,10 @@ class ZernikeBasis(PhaseMap):
         else:
             pupil_mask = model.pupil.squeeze().cpu().numpy()
 
+        pupil_angle_ = model.pupil_angle.item() if isinstance(model.pupil_angle, torch.Tensor) else model.pupil_angle
+
         Z = ZernikeModes(pupil_mask, N_modes)
-        Z.computeZernike(angle=self.model.pupil_angle)
+        Z.computeZernike(angle=pupil_angle_)
         # store as (N_modes, H, W)
         modes = torch.as_tensor(Z.modesFullRes, device=model.device, dtype=default_torch_type)
         self.zernike_basis = modes.permute(2, 0, 1)
@@ -313,7 +315,7 @@ class MUSEPhaseBump(PhaseMap):
         ).squeeze()
         
         # rotate during initialization
-        angle = model.pupil_angle - 45.0
+        angle = -model.pupil_angle.item() - 45.0 if isinstance(model.pupil_angle, torch.Tensor) else -model.pupil_angle - 45.0
         self.OPD_map = TF.rotate(OPD_upsampled.unsqueeze(0), angle, interpolation=TF.InterpolationMode.BILINEAR).squeeze(0)
 
     def compute_OPD(self, coef):
@@ -389,11 +391,15 @@ class ArbitraryBasis(PhaseMap):
         Compute OPD from coefficients and basis.
         
         Args:
-            coefs: Tensor of shape (N_src, N_wvl, N_modes)
+            coefs: Tensor of shape (N_src, N_wvl, N_modes) or (Nsrc, N_modes) or (N_modes,)
             
         Returns:
-            OPD tensor of shape (N_src, N_wvl, H, W) in meters
+            OPD tensor of shape (N_src, N_wvl, H, W) or (N_src, H, W) in meters
         """
-        # coefs: (N_src, N_wvl, N_modes)
-        # basis: (N_modes, H, W)
-        return torch.einsum('om,mhw->ohw', coefs, self.basis) * 1e-9
+
+        # return torch.einsum('om,mhw->ohw', coefs, self.basis) * 1e-9
+
+        if   coefs.ndim == 1: return torch.einsum('m,mhw->hw',     coefs, self.basis).unsqueeze(0) * 1e-9 # single source, achromatic
+        elif coefs.ndim == 2: return torch.einsum('om,mhw->ohw',   coefs, self.basis) * 1e-9 # multiple sources, achromatic
+        elif coefs.ndim == 3: return torch.einsum('bmn,nhw->bmhw', coefs, self.basis) * 1e-9 # multiple sources, chromatic
+        else: raise ValueError("Coefficients tensor must be 1D, 2D, or 3D.")

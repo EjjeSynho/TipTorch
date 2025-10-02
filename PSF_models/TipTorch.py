@@ -44,11 +44,9 @@ class TipTorch(torch.nn.Module):
         self.N_src = self.config['NumberSources'] # Make sure it is type(int) already in the config file
         
         self.pupil_angle = self.config['telescope']['PupilAngle'] if 'PupilAngle' in self.config['telescope'] else 0.0
-         
-        self.wvl = self.config['sources_science']['Wavelength']
-        # self.wvl = self.wvl if self.wvl.ndim == 2 else self.wvl.unsqueeze(0).T
-        self.wvl = min_2d(self.wvl)
-        self.N_wvl = self.wvl.shape[-1] # must be [1 x N_wvl]
+
+        self.wvl = self.config['sources_science']['Wavelength'].view(1, -1) # must be [1 x N_wvl]
+        self.N_wvl = self.wvl.shape[-1]
         self.wvl_atm = self.config['atmosphere']['Wavelength']
 
         # Science sources positions relative to the center of FOV, input in [arc]
@@ -109,7 +107,7 @@ class TipTorch(torch.nn.Module):
 
         self.DM_opt_dir_x  = torch.tan(self.DM_opt_angle) * torch.cos(self.DM_opt_azimuth) # [N_src_tomo x N_optdir]
         self.DM_opt_dir_y  = torch.tan(self.DM_opt_angle) * torch.sin(self.DM_opt_azimuth) # [N_src_tomo x N_optdir]
-        self.DM_opt_weight = self.config['DM']['OptimizationWeight'].flatten() # [N_src_tomo, N_optdir]
+        self.DM_opt_weight = self.config['DM']['OptimizationWeight'].view(self.N_src_tomo, -1) # [N_src_tomo, N_optdir]
         self.N_optdir = self.DM_opt_weight.shape[-1]
 
         # HO WFS(s) parameters
@@ -536,7 +534,7 @@ class TipTorch(torch.nn.Module):
         
         kx = pdims(self.kx_AO, 1) # [1 x nOtf_AO x nOtf_AO x 1]
         ky = pdims(self.ky_AO, 1) # [1 x nOtf_AO x nOtf_AO x 1]
-        h_DM = self.h_DM.view(self.N_src_tomo, 1, 1, self.N_DM) # [N_src_tomo x 1 x 1 x N_DM]
+        h_DM = self.h_DM.view(1, 1, 1, self.N_DM) # [N_src_tomo x 1 x 1 x N_DM]
         
         beta_x = self.src_dirs_x.view(self.N_src, 1, 1, 1)
         beta_y = self.src_dirs_y.view(self.N_src, 1, 1, 1)
@@ -550,7 +548,7 @@ class TipTorch(torch.nn.Module):
     def OptimalDMProjector(self):
         h_dm = self.h_DM.view(1, 1, 1, self.N_DM)
         h    = self.h.view(self.N_src_tomo, 1, 1, 1, self.nL)
-        opt_w = self.DM_opt_weight.view(self.N_src_tomo, 1, 1, self.N_optdir, 1, 1) 
+        opt_w = self.DM_opt_weight.view(self.N_src_tomo, 1, 1, self.N_optdir, 1, 1)
 
         theta_x = self.DM_opt_dir_x.view(self.N_src_tomo, 1, 1, self.N_optdir)
         theta_y = self.DM_opt_dir_y.view(self.N_src_tomo, 1, 1, self.N_optdir)
@@ -758,9 +756,9 @@ class TipTorch(torch.nn.Module):
         
         # Adds  atmospheric layers dimension
         km, kn = self.km.unsqueeze(-1), self.kn.unsqueeze(-1)
-
+        # TODO: do we really need an additional Cn2_weights multiplication here since it's already in h1 term?
         avr = (Cn2_weights * tf * torch.sinc(km*vx*T) * torch.sinc(kn*vy*T) * \
-            torch.exp( 2j*torch.pi*td*(km*vx + kn*vy) )).sum(dim=-1) # sum along atmolayers axis
+            torch.exp( 2j*torch.pi*td*(km*vx + kn*vy) )).sum(dim=-1) # sum along atmospheric layers
 
         # Sum along aliasing samples axis      
         aliasing_PSD = torch.sum( W_mn*(Q*avr).abs()**2, dim=0 ) * self.mask_corrected_AO    
@@ -814,17 +812,17 @@ class TipTorch(torch.nn.Module):
         r0_WFS  = self.r0_new(self.r0.view(self.N_src_tomo), WFS_wvl, self.wvl_atm).abs()
         WFS_nPix = self.WFS_FOV / self.WFS_n_sub
         WFS_pixelScale = self.WFS_psInMas * self.mas2arc # [arcsec]
-       
+        
         # Read-out noise calculation
         nD = torch.maximum( self.rad2arc*WFS_wvl/self.WFS_d_sub/WFS_pixelScale, self.one_gpu) #spot FWHM in pixels and without turbulence
         # Photon-noise calculation
-        nT = torch.maximum( torch.hypot(self.WFS_spot_FWHM.max()*self.mas2arc, self.rad2arc*WFS_wvl/r0_WFS) / WFS_pixelScale, self.one_gpu )
+        nT = torch.maximum( torch.hypot(self.WFS_spot_FWHM.max()*self.mas2arc, self.rad2arc*WFS_wvl/r0_WFS) / WFS_pixelScale, self.one_gpu)
 
-        varRON  =  self.var_RON_const  * (self.WFS_RON / WFS_Nph).pow(2) * (WFS_nPix.pow(2)/nD).pow(2).unsqueeze(-1)
-        varShot =  self.var_Shot_const / (2*WFS_Nph)  * (nT/nD).pow(2).unsqueeze(-1)
+        varRON  =  self.var_RON_const  * (self.WFS_RON / WFS_Nph)**2 * (WFS_nPix**2/nD).unsqueeze(-1)**2
+        varShot =  self.var_Shot_const / (2*WFS_Nph) * (nT/nD).unsqueeze(-1)**2
         
         # Noise variance calculation
-        varNoise = self.WFS_excessive_factor * (varRON + varShot) * (self.wvl_atm / WFS_wvl).pow(2).unsqueeze(-1) # Also rescale to the atmospgeric wavelength
+        varNoise = self.WFS_excessive_factor * (varRON + varShot) * (self.wvl_atm / WFS_wvl).unsqueeze(-1)**2 # Also rescale to the atmospheric wavelength
 
         return varNoise
 
@@ -1090,16 +1088,13 @@ class TipTorch(torch.nn.Module):
         Jy  = pdims(min_2d(self.Jy ), 2)
         Jxy = pdims(min_2d(self.Jxy), 2)
                 
-        # F   = pdims(self.F,   2)
-        # Jx  = pdims(self.Jx,  3) if self.Jx.ndim  == 1 else pdims(self.Jx,  2)
-        # Jy  = pdims(self.Jy,  3) if self.Jy.ndim  == 1 else pdims(self.Jy,  2)
-        # Jxy = pdims(self.Jxy, 3) if self.Jxy.ndim == 1 else pdims(self.Jxy, 2)
-
         # Removing the DC component
         PSD[..., self.nOtf_y//2, self.nOtf_x] = 0.0
         
         # Computing OTF from PSD, real is to remove the imaginary part that appears due to numerical errors
-        cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(PSD.abs(), dim=(-2,-1)), dim=-2).abs())
+        # cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(PSD.abs(), dim=(-2,-1)), dim=-2).abs())
+        cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(torch.fft.ifftshift(PSD.abs(), dim=(-2,-1)), dim=(-2,-1)), dim=-2).real)
+        # cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(PSD.abs(), dim=(-2,-1)), dim=-2).abs())
 
         # Computing the Structure Function from the covariance
         SF = 2*(cov.abs().amax(dim=(-2,-1), keepdim=True) - cov).real
@@ -1113,6 +1108,7 @@ class TipTorch(torch.nn.Module):
         
         # Resulting combined OTF
         self.OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
+        # self.OTF = OTF_static
         self.OTF_norm = pdims(self.OTF.abs()[..., self.nOtf//2, self.nOtf//2], 2)
         self.OTF = self.OTF / self.OTF_norm
         

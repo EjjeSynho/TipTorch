@@ -27,7 +27,7 @@ from data_processing.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 
-from data_processing.MUSE_onsky_df import *
+from data_processing.MUSE_data_utils import *
 from managers.multisrc_manager import select_sources
 
 predict_Moffat = True
@@ -429,7 +429,7 @@ PlotSourcesProfiles(cube_sparse, model_sparse, sources, radius=16, title='Predic
 
 #%%
 # merged_config = MultipleTargetsInOneObservation(config_file, N_batch := 16)
-merged_config = MultipleTargetsInOneObservation(config_file, N_src)
+merged_config = MultipleTargetsInOneObservation(config_file, N_src, device)
 
 # for key, value in sources_inputs.items():
 #     print(f'{key}: {value.shape}')

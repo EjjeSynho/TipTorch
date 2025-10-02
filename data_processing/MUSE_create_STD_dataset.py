@@ -93,6 +93,7 @@ for file_id in tqdm(ids_process):
             impaint_bad_pixels = False,
             extract_spectrum = True,
             wavelength_bins = wvl_bins,
+            # wavelength_bins = wvl_bins_old,
             plot_spectrum = False,
             fill_missing_values = True,
             verbose = True

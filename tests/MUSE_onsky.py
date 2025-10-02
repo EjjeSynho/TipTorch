@@ -5,49 +5,62 @@
 import sys
 sys.path.insert(0, '..')
 
-import pickle
+# import pickle
+# from torch import nn
+# import torch.optim as optim
+# from tqdm import tqdm
 import torch
-from torch import nn
-import torch.optim as optim
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
-from tools.plotting import plot_radial_profiles, draw_PSF_stack
-from tools.utils import mask_circle
-from data_processing.MUSE_STD_dataset_utils import LoadSTDStarData
 import matplotlib as mpl
 
-from project_settings import device
-from torchmin import minimize
-from data_processing.normalizers import Uniform, Atanh#, InputsCompressor, InputsManager
-from managers.input_manager import InputsManager
-from tqdm import tqdm
-from tools.utils import PupilVLT, GradientLoss
 from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
+from torchmin import minimize
+from managers.input_manager import InputsManager
+
+from tools.plotting import plot_radial_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
+from tools.utils import PupilVLT, GradientLoss, RadialProfileLossSimple
+# from tools.utils import mask_circle
+from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarData
+from data_processing.normalizers import Uniform, Uniform0_1, Atanh, Uniform0_1
+from project_settings import device
 
 derotate_PSF    = True
-Moffat_absorber = True
+Moffat_absorber = False
 fit_LO          = True
-LO_pixels_modes = 75
+chrom_defocus   = False
+spline_fit      = False
+LO_N_params     = 75
+Z_mode_max      = 10
+N_spline_ctrl   = 5
+
+chrom_defocus = chrom_defocus and fit_LO
 
 #%%
 # with open(MUSE_DATA_FOLDER+'/muse_df.pickle', 'rb') as handle:
 #     muse_df = pickle.load(handle)
 
 # wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 5), a_min=0, a_max=N_wvl_max-1)
+# wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 3), a_min=0, a_max=N_wvl_max-1)
+wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
 
-wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 3), a_min=0, a_max=N_wvl_max-1)
-
+#%
 PSF_0, norms, bgs, model_config = LoadSTDStarData(
-    # ids = [394],
-    # ids = [296],
-    # ids = [324],
-    # ids = [230],
-    # ids = [230],
-    # ids = [231],
-    ids = [470],
-    # ids = [462],
-    # ids = [465],
+    # ids = 394,
+    # ids = 296,
+    # ids = 324,
+    # ids = 230,
+    # ids = 231,
+    ids = 470,
+    # ids = 462,
+    # ids = 465,
+    # ids = 359,
+    # ids = 184,
+    # ids = 121,
+    # ids = 206,
+    # ids = 451, # good one
+    # ids = 174,
     derotate_PSF = derotate_PSF,
     normalize = True,
     subtract_background = True,
@@ -77,10 +90,15 @@ for i in range(N_wvl):
     plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
     # plt.show()
 
+#%
+# plot_chromatic_PSF_slice(PSF_0, wavelengths, norms, window_size=40)
+# plot_chromatic_PSF_slice(PSF_0, wavelengths, window_size=100, slices=['horizontal'])
 
 #%% Initialize the model
 from PSF_models.TipTorch import TipTorch
 from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis, MUSEPhaseBump
+
+model_config['DM']['DmPitchs'] = torch.tensor([0.245], dtype=torch.float32, device=device)  # [m]
 
 pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=pupil_angle), device=device )
 PSD_include = {
@@ -93,21 +111,26 @@ PSD_include = {
     'Moffat':          Moffat_absorber
 }
 PSF_model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
-PSF_model.apodizer = PSF_model.make_tensor(1.0)
+# PSF_model.apodizer = PSF_model.make_tensor(1.0)
+testo = PSF_model()
 
+#%%
 # LO_basis = PixelmapBasis(PSF_model, ignore_pupil=False)
-Z_basis = ZernikeBasis(PSF_model, N_modes=LO_pixels_modes, ignore_pupil=False)
+Z_basis = ZernikeBasis(PSF_model, N_modes=LO_N_params, ignore_pupil=False)
 sausage_basis = MUSEPhaseBump(PSF_model, ignore_pupil=False)
 
 #%%
 # LO NCPAs + phase bump optimized jointly
 composite_basis = torch.concat([
+    # (sausage_basis.OPD_map*PSF_model.pupil).unsqueeze(0).flip(-2)*5e6,
     sausage_basis.OPD_map.unsqueeze(0).flip(-2)*5e6,
-    Z_basis.zernike_basis[2:10,...]
+    Z_basis.zernike_basis[2:Z_mode_max,...]
 ], dim=0)
 
+defocus_mode_id = 1 # the index of defocus mode
+
 LO_basis = ArbitraryBasis(PSF_model, composite_basis, ignore_pupil=False)
-LO_pixels_modes = LO_basis.N_modes
+LO_N_params = LO_basis.N_modes
 
 # for i in range(LO_basis.N_modes):
 #     plt.imshow(LO_basis.basis[i,...].cpu().numpy())
@@ -135,25 +158,48 @@ norm_theta       = Uniform(a=-np.pi/2, b=np.pi/2)
 norm_wind_speed  = Uniform(a=0, b=10)
 norm_sausage_pow = Uniform(a=0, b=1)
 norm_LO          = Uniform(a=-100, b=100)
-norm_wvl         = Uniform(a=wavelengths.min().item(), b=wavelengths.max().item())
 # df_transforms_GL_frac = Atanh()
+# TODO: must be scaling of spline values, too
+norm_wvl         = Uniform0_1(a=wavelengths.min().item(), b=wavelengths.max().item())
+wvl_norm = norm_wvl(wavelengths).clone().unsqueeze(0)
+x_ctrl = torch.linspace(0, 1, N_spline_ctrl, device=device)
+
+# polychromatic_params = ['F', 'dx', 'dy', 'Jx', 'Jy']
+polychromatic_params = ['F', 'dx', 'dy'] + ['chrom_defocus'] if chrom_defocus else ['J']
 
 # Add base parameters
+if spline_fit:
+    inputs_manager.add('F_ctrl',  torch.tensor([[1.0,]*N_spline_ctrl]),  norm_F)
+    inputs_manager.add('dx_ctrl', torch.tensor([[0.0,]*N_spline_ctrl]),  norm_dxy)
+    inputs_manager.add('dy_ctrl', torch.tensor([[0.0,]*N_spline_ctrl]),  norm_dxy)
+    inputs_manager.add('bg_ctrl', torch.tensor([[0.0,]*N_spline_ctrl]),  norm_bg)
+else:
+    inputs_manager.add('F',  torch.tensor([[1.0,]*N_wvl]),  norm_F)
+    inputs_manager.add('dx', torch.tensor([[0.0,]*N_wvl]),  norm_dxy)
+    inputs_manager.add('dy', torch.tensor([[0.0,]*N_wvl]),  norm_dxy)
+    inputs_manager.add('bg', torch.tensor([[0.0,]*N_wvl]),  norm_bg)
+
+    if chrom_defocus:
+        inputs_manager.add('J', torch.tensor([[25.0]]), norm_J)
+    else:
+        if spline_fit:
+            inputs_manager.add('J_ctrl', torch.tensor([[25.0,]*N_spline_ctrl]), norm_J)
+            # inputs_manager.add('Jx_ctrl', torch.tensor([[10.0,]*N_spline_ctrl]), norm_dxy)
+            # inputs_manager.add('Jy_ctrl', torch.tensor([[10.0,]*N_spline_ctrl]), norm_dxy)
+        else:
+            inputs_manager.add('J', torch.tensor([[25.0]*N_wvl]), norm_J)
+            # inputs_manager.add('Jx', torch.tensor([[25.0]*N_wvl]),  norm_J)
+            # inputs_manager.add('Jy', torch.tensor([[25.0]*N_wvl]),  norm_J)
+            
 inputs_manager.add('r0',  torch.tensor([PSF_model.r0.item()]), norm_r0)
-inputs_manager.add('F',   torch.tensor([[1.0,]*N_wvl]),  norm_F)
-inputs_manager.add('dx',  torch.tensor([[0.0,]*N_wvl]),  norm_dxy)
-inputs_manager.add('dy',  torch.tensor([[0.0,]*N_wvl]),  norm_dxy)
-inputs_manager.add('bg',  torch.tensor([[0.0,]*N_wvl]),  norm_bg)
-inputs_manager.add('dn',  torch.tensor([0.25]),          norm_dn)
-inputs_manager.add('Jx',  torch.tensor([[2.5,]*N_wvl]),  norm_J)
-inputs_manager.add('Jy',  torch.tensor([[2.5,]*N_wvl]),  norm_J)
-inputs_manager.add('Jxy', torch.tensor([[0.0]]),         norm_Jxy)
+inputs_manager.add('Jxy', torch.tensor([[0.0]]), norm_Jxy, optimizable=False)
+inputs_manager.add('dn',  torch.tensor([0.25]),  norm_dn)
 # inputs_manager.add('wind_speed', PSF_model.wind_speed.detach().clone(),  norm_wind_speed)
 # inputs_manager.add('GL_frac', torch.tensor([GL_frac]), df_transforms_GL_frac)
 
 # Add Moffat parameters if needed
 if Moffat_absorber:
-    inputs_manager.add('amp',   torch.tensor([0.0]), norm_amp)
+    inputs_manager.add('amp',   torch.tensor([1.0]), norm_amp)
     inputs_manager.add('b',     torch.tensor([0.0]), norm_b)
     inputs_manager.add('alpha', torch.tensor([4.5]), norm_alpha)
     inputs_manager.add('beta',  torch.tensor([2.5]), norm_beta)
@@ -162,77 +208,105 @@ if Moffat_absorber:
 
 if fit_LO:
     if isinstance(LO_basis, PixelmapBasis):
-        inputs_manager.add('LO_coefs', torch.zeros([1, LO_pixels_modes**2]), norm_LO)
+        inputs_manager.add('LO_coefs', torch.zeros([1, LO_N_params**2]), norm_LO)
+        phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_N_params, LO_N_params))
+        
     elif isinstance(LO_basis, ZernikeBasis) or isinstance(LO_basis, ArbitraryBasis):
-        inputs_manager.add('LO_coefs', torch.zeros([1, LO_pixels_modes]), norm_LO)
+        inputs_manager.add('LO_coefs', torch.zeros([1, LO_N_params]), norm_LO)
+        
+        if chrom_defocus:
+            inputs_manager.add('chrom_defocus',  torch.tensor([[0.0,]*N_wvl]),  norm_LO, optimizable=chrom_defocus)
+            
+            def phase_func():
+                coefs_chromatic = inputs_manager["LO_coefs"].view(1, LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1)
+                coefs_chromatic[:, :, defocus_mode_id] += inputs_manager["chrom_defocus"].view(1, N_wvl) # add chromatic defocus
+                return LO_basis(coefs_chromatic)
+        else:
+            phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_N_params))
     else:
         raise ValueError('Wrong LO type specified.')
+else:
+    phase_func = None
 
 inputs_manager.to(device)
 inputs_manager.to_float()
 
 _ = inputs_manager.stack()
 
-
-        # # Ensure control points are sorted (soft constraint)
-        # t_sorted = torch.sort(self.t_control)[0]
-        
-        # # Create spline with current control points
-        # coeffs = natural_cubic_spline_coeffs(t_sorted, self.y_control)
-        # spline = NaturalCubicSpline(coeffs)
-        
-        # # Evaluate at desired points
-        # y_pred = spline.evaluate(x_eval).squeeze(-1)
-
 #%%
 def func(x_, include_list=None):
     x_torch = inputs_manager.unstack(x_)
-    
-    if fit_LO:
-        if isinstance(LO_basis, PixelmapBasis):
-            phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_pixels_modes, LO_pixels_modes))
-        elif isinstance(LO_basis, ZernikeBasis) or isinstance(LO_basis, ArbitraryBasis):
-            phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_pixels_modes))
-        else:
-            raise ValueError('Wrong LO type specified.')
-    else:
-        phase_func = None
 
-    if include_list is not None:
-        return PSF_model({ key: x_torch[key] for key in include_list }, None, phase_generator=phase_func)
-    else:
-        return PSF_model(x_torch, None, phase_generator=phase_func)
+    # Clone J entry to Jx and Jy
+    x_torch['Jx'] = x_torch['J']
+    x_torch['Jy'] = x_torch['J']
+
+    x_ = { key: x_torch[key] for key in include_list } if include_list is not None else x_torch
+
+    if spline_fit:
+        for entry in polychromatic_params:
+            spline = NaturalCubicSpline(natural_cubic_spline_coeffs(x_ctrl, x_torch[entry+'_ctrl'].T))
+            x_torch[entry] = spline.evaluate(wvl_norm).squeeze(-1)
+    
+    return PSF_model(x_torch, None, phase_generator=phase_func)
 
 
 wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
 wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
-mask = torch.tensor(mask_circle(PSF_0.shape[-1], 5)).view(1, 1, *PSF_0.shape[-2:]).to(device)
-mask_inv = 1.0 - mask
+# mask = torch.tensor(mask_circle(PSF_0.shape[-1], 5)).view(1, 1, *PSF_0.shape[-2:]).to(device)
+# mask_inv = 1.0 - mask
 
 grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
+loss_radial_fn = RadialProfileLossSimple(
+    n_bins=64,
+    loss="fvu",      # or "mse"
+    bin_weight="r",  # "uniform" or "counts" also available
+    log_profile=False
+)
+
 def loss_fn1(x_):
-    diff1 = (func(x_)-PSF_0) * wvl_weights
-    mse_loss = (diff1 * 4000).pow(2).mean()
-    mae_loss = (diff1 * 32000).abs().mean()
-    if fit_LO:  
+    PSF_1 = func(x_)
+    diff = (PSF_1-PSF_0) * wvl_weights
+    mse_loss = (diff * 4000).pow(2).mean()
+    mae_loss = (diff * 32000).abs().mean()
+    if fit_LO:
         if isinstance(LO_basis, PixelmapBasis):
-            LO_loss = grad_loss_fn(inputs_manager['LO_coefs'].view(1, 1, LO_pixels_modes, LO_pixels_modes)) * 5e-5
+            LO_loss = grad_loss_fn(inputs_manager['LO_coefs'].view(1, 1, LO_N_params, LO_N_params)) * 5e-5
         elif isinstance(LO_basis, ZernikeBasis) or isinstance(LO_basis, ArbitraryBasis):
             LO_loss = inputs_manager['LO_coefs'].abs().sum()**2 * 1e-7
+            # Constraint to enforce first element of LO_coefs to be positiv
             first_coef_penalty = torch.clamp(-inputs_manager['LO_coefs'][0, 0], min=0).pow(2) * 5e-5
             LO_loss += first_coef_penalty
-            # phi = LO_basis.compute_OPD(inputs_manager["LO_coefs"].view(1, LO_pixels_modes)).squeeze()
-            # phi_rot = torch.flip(phi, dims=(-2,-1)) # 180° rotation around array center
-            # phi_even = 0.5 * (phi + phi_rot)
-            # eta = 5e5
-            # LO_loss += eta * (phi_even).pow(2).sum() / phi.pow(2).sum().clamp_min(1e-12)          
         else:
             raise ValueError('Wrong LO type specified.')
     else:
         LO_loss = 0.0
+
     return mse_loss + mae_loss + LO_loss
+
+
+def loss_radial(x_):
+    PSF_1 = func(x_)
+    diff = (PSF_1-PSF_0) * wvl_weights
+    mse_loss = (diff * 4000).pow(2).mean()
+    mae_loss = (diff * 32000).abs().mean()
+    if fit_LO:
+        if isinstance(LO_basis, PixelmapBasis):
+            LO_loss = grad_loss_fn(inputs_manager['LO_coefs'].view(1, 1, LO_N_params, LO_N_params)) * 5e-5
+        elif isinstance(LO_basis, ZernikeBasis) or isinstance(LO_basis, ArbitraryBasis):
+            LO_loss = inputs_manager['LO_coefs'].abs().sum()**2 * 1e-7
+            # Constraint to enforce first element of LO_coefs to be positiv
+            first_coef_penalty = torch.clamp(-inputs_manager['LO_coefs'][0, 0], min=0).pow(2) * 5e-5
+            LO_loss += first_coef_penalty
+        else:
+            raise ValueError('Wrong LO type specified.')
+    else:
+        LO_loss = 0.0
+
+    loss_rad = loss_radial_fn(PSF_1, PSF_0) * 5000
+    return mse_loss + mae_loss + LO_loss + loss_rad
 
 
 def loss_fn2(x_):
@@ -241,17 +315,12 @@ def loss_fn2(x_):
     mae_loss = diff1.abs().sum()  / PSF_0.shape[-2] / PSF_0.shape[-1] * 2500
     if fit_LO:  
         if isinstance(LO_basis, PixelmapBasis):
-            LO_loss = grad_loss_fn(inputs_manager['LO_coefs'].view(1, 1, LO_pixels_modes, LO_pixels_modes)) * 5e-5
+            LO_loss = grad_loss_fn(inputs_manager['LO_coefs'].view(1, 1, LO_N_params, LO_N_params)) * 5e-5
         elif isinstance(LO_basis, ZernikeBasis) or isinstance(LO_basis, ArbitraryBasis):
             LO_loss = inputs_manager['LO_coefs'].abs().sum()**2 * 1e-7
             # Constraint to enforce first element of LO_coefs to be positive
             first_coef_penalty = torch.clamp(-inputs_manager['LO_coefs'][0, 0], min=0).pow(2) * 5e-5
             LO_loss += first_coef_penalty
-            # phi = LO_basis.compute_OPD(inputs_manager["LO_coefs"].view(1, LO_pixels_modes)).squeeze()
-            # phi_rot = torch.flip(phi, dims=(-2,-1)) # 180° rotation around array center
-            # phi_even = 0.5 * (phi + phi_rot)
-            # eta = 5e5
-            # LO_loss += eta * (phi_even).pow(2).sum() / phi.pow(2).sum().clamp_min(1e-12)          
         else:
             raise ValueError('Wrong LO type specified.')
     else:
@@ -259,18 +328,6 @@ def loss_fn2(x_):
     
     return mse_loss + mae_loss + LO_loss
 
-
-def loss_fn3(x_):
-    diff1 = (func(x_ )-PSF_0) * wvl_weights
-    mse_loss = (diff1 * 1500).pow(2).sum()
-    mae_loss = (diff1 * 2500).abs().sum()
-    return (mse_loss + mae_loss) / PSF_0.shape[-2] / PSF_0.shape[-1]
-
-
-def loss_fn4(x_):
-    diff1 = (func(x_ )-PSF_0) * wvl_weights
-    sqrt_loss = (diff1 * 1500).abs().sqrt().sum()
-    return sqrt_loss / PSF_0.shape[-2] / PSF_0.shape[-1]
 
 #%%
 def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True):
@@ -286,39 +343,31 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True)
     result = minimize(loss_fn, inputs_manager.stack(), max_iter=max_iter, tol=1e-4, method='l-bfgs', disp= 2 if verbose else 0)
     if fit_LO:  
         if isinstance(LO_basis, PixelmapBasis):
-            OPD_map = inputs_manager['LO_coefs'].view(1, LO_pixels_modes, LO_pixels_modes).squeeze().detach().cpu().numpy()
+            OPD_map = inputs_manager['LO_coefs'].view(1, LO_N_params, LO_N_params).squeeze().detach().cpu().numpy()
         elif isinstance(LO_basis, ZernikeBasis) or isinstance(LO_basis, ArbitraryBasis):
-            OPD_map = LO_basis.compute_OPD(inputs_manager["LO_coefs"].view(1, LO_pixels_modes)).squeeze().detach().cpu().numpy()
+            OPD_map = LO_basis.compute_OPD(inputs_manager["LO_coefs"].view(1, LO_N_params)).squeeze().detach().cpu().numpy()
     else:
         OPD_map = None
 
     return result.x, func(result.x), OPD_map
 
-
                 #   ['wind_speed'] + \
-include_general = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy'] + \
-                  (['amp', 'alpha', 'beta'] if Moffat_absorber else []) + \
-                  (['LO_coefs'] if fit_LO else [])
-                  
-exclude_general = ['ratio', 'theta', 'b'] if Moffat_absorber else []
+include_general = ['r0', 'dn'] + \
+                  (['amp', 'alpha', 'beta', 'b'] if Moffat_absorber else []) + \
+                  (['LO_coefs'] if fit_LO else []) + (['chrom_defocus'] if chrom_defocus else []) + \
+                  ([x+'_ctrl' for x in polychromatic_params] if spline_fit else polychromatic_params)
 
-include_LO = ['LO_coefs']
-
-exclude_LO = ['r0', 'F', 'dx', 'dy', 'bg', 'dn', 'Jx', 'Jy', 'Jxy'] + \
-             ['ratio', 'theta', 'b', 'amp', 'alpha', 'beta'] if Moffat_absorber else []
-
+exclude_general = ['ratio', 'theta'] if Moffat_absorber else []
+include_LO = (['LO_coefs'] if fit_LO else []) + (['chrom_defocus'] if chrom_defocus else [])
+exclude_LO = list(set(include_general + exclude_general) - set(include_LO))
 
 #%%
-x0, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 200)
+x0, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 150)
 
 if fit_LO:
-    x1, PSF_1, OPD_map = minimize_params(loss_fn2, include_LO, exclude_LO, 100)
-    x2, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 100)
-
-if fit_LO:
-    plt.imshow(OPD_map*1e9)
-    plt.colorbar()
-    plt.show()
+    x1, PSF_1, OPD_map = minimize_params(loss_fn2, include_LO, exclude_LO, 50)
+    x2, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 50)
+# x3, PSF_1, OPD_map = minimize_params(loss_radial, include_general, exclude_general, 100)
 
 #%%
 from tools.plotting import plot_radial_profiles
@@ -341,309 +390,115 @@ PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
-    plot_radial_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=40,  y_min=3e-2, linthresh=1e-2, ax=ax[i] )
+    plot_radial_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd), 'Data', 'TipTorch', cutoff=40,  y_min=3e-2, linthresh=1e-2, ax=ax[i] )
+plt.show()
+
+if fit_LO:
+    plt.imshow(OPD_map*1e9)
+    plt.colorbar()
+    plt.show()
+    
+# %%
+from tools.plotting import plot_PSD_profiles
+
+plot_PSD_profiles(PSF_model)
+
+#%%
+if spline_fit:
+    x_torch = inputs_manager.unstack(x2)
+    spline = NaturalCubicSpline(natural_cubic_spline_coeffs(x_ctrl, x_torch['F_ctrl'].T))
+    AA = spline.evaluate(torch.linspace(0, 1, 100).to(device)).squeeze(-1)
+    plt.plot(np.linspace(wavelengths.min().item()*1e9, wavelengths.max().item()*1e9, 100), AA.detach().cpu().numpy())
+
+plt.plot(wavelengths.squeeze(0).cpu().numpy()*1e9, PSF_model.F.squeeze().detach().cpu().numpy())
 plt.show()
 
 #%%
+from tools.plotting import plot_chromatic_PSF_slice
 
-
-a = inputs_manager['dy'].squeeze().cpu().numpy()
-
-plt.plot(wavelengths.squeeze(0).cpu().numpy()*1e9, a)
-
+plot_chromatic_PSF_slice((PSF_0-PSF_1).abs(), wavelengths, window_size=40)
+# plot_chromatic_PSF_slice(PSF_0-PSF_1, wavelengths, window_size=40)
 
 #%%
-def bspline_basis(lams, knots, degree=3):
-    """
-    Return design matrix Phi of shape [B, N] for B-splines of given degree.
-    knots: 1D tensor of non-decreasing knot positions with padding at ends.
-    """
-    # co-locate dtype/device
-    lams  = torch.as_tensor(lams)
-    knots = torch.as_tensor(knots, dtype=lams.dtype, device=lams.device)
-    lams  = lams.to(knots.device).to(knots.dtype)[..., None]  # [B, 1]
+# PSF_diff = (PSF_0 - PSF_1)[0,:,...].mean(0).squeeze()
+PSF_diff = (PSF_0 - PSF_1)[0,-5:,...].mean(0).squeeze()#.abs()
 
-    m = knots.numel()                  # number of knots
-    # ---- degree 0: one basis per interval [t_i, t_{i+1}) => m-1 functions
-    K0 = m - 1
-    B0 = []
-    for i in range(K0):
-        left, right = knots[i], knots[i+1]
-        B0.append(((lams >= left) & (lams < right)).to(lams.dtype))
-    B = torch.cat(B0, dim=-1)          # [B, m-1]
+center_y, center_x = PSF_diff.shape[-2] // 2, PSF_diff.shape[-1] // 2
+half_window = 50 // 2
 
-    # optional: include right boundary so sum of bases = 1 at last knot
-    at_right = (lams.squeeze(-1) == knots[-1])
-    if at_right.any():
-        B[at_right, :] = 0
-        B[at_right, -1] = 1.0
+# Calculate slice bounds
+y_start = max(0, center_y - half_window)
+y_end = min(PSF_diff.shape[-2], center_y + half_window)
+x_start = max(0, center_x - half_window)
+x_end = min(PSF_diff.shape[-1], center_x + half_window)
+    
+h_slice = PSF_diff[center_y, x_start:x_end].cpu().numpy()
+v_slice = PSF_diff[y_start:y_end, center_x].cpu().numpy()
+# Calculate diagonal slice (top-left to bottom-right)
+min_len = min(len(h_slice), len(v_slice))
 
-    # ---- Cox–de Boor recursion
-    for p in range(1, degree + 1):
-        K_new = m - p - 1              # shrinks by one each step
-        B_next = torch.zeros(B.shape[0], K_new, dtype=B.dtype, device=B.device)
-        for i in range(K_new):
-            den1 = (knots[i+p]   - knots[i]).item()
-            den2 = (knots[i+p+1] - knots[i+1]).item()
+d_slice = []
+for i in range(min_len):
+    y_idx = y_start + i
+    x_idx = x_start + i
+    if y_idx < PSF_diff.shape[-2] and x_idx < PSF_diff.shape[-1]:
+        d_slice.append(PSF_diff[y_idx, x_idx].cpu().numpy())
+d_slice = np.array(d_slice)
 
-            w1 = 0.0 if den1 == 0.0 else (lams - knots[i]) / den1      # [B,1]
-            w2 = 0.0 if den2 == 0.0 else (knots[i+p+1] - lams) / den2  # [B,1]
-
-            # keep column dims to avoid [B,B] broadcasting
-            B_next[:, i:i+1] = w1 * B[:, i:i+1] + w2 * B[:, i+1:i+2]
-        B = B_next
-
-    return B  # [B, m-degree-1]
-
-# --- Example usage ---
-degree = 3
-knots = torch.tensor([0, 0, 0, 0, 0.2, 0.4, 0.6, 0.8, 1, 1, 1, 1], dtype=torch.float32)
-wavelengths = torch.linspace(0, 1, 100)
-
-basis_matrix = bspline_basis(wavelengths, knots, degree)
-coefficients = torch.randn(basis_matrix.shape[-1])
-
-spline_values = basis_matrix @ coefficients
-
-plt.figure(figsize=(10, 6))
-plt.plot(wavelengths.numpy(), spline_values.numpy(), linewidth=2, label='B-spline')
-plt.xlabel('Wavelength')
-plt.ylabel('Spline Value')
-plt.title('B-spline Interpolation')
-plt.grid(True, alpha=0.3)
-plt.legend()
-plt.show()
+# Make slices the same length and average
+# slice_ = 0.5 * (h_slice[:min_len] + v_slice[:min_len])
+# slice_ = v_slice[:min_len]
+slice_ = d_slice[:min_len]
+plt.plot(slice_)
 
 # %%
-length, channels = 7, 3
-t = torch.linspace(0, 1, length)
-x = torch.rand(length, channels)
-coeffs = natural_cubic_spline_coeffs(t, x)
-spline = NaturalCubicSpline(coeffs)
-point = torch.tensor(0.4)
-out = spline.evaluate(point)
+from photutils.profiles import RadialProfile
 
-#%%
-x_range = torch.linspace(0, 1, 100)
-y_range = spline.evaluate(x_range)
+xycen = (PSF_diff.shape[-1]//2, PSF_diff.shape[-2]//2)  # (x, y) position tuple
+edge_radii = np.arange(PSF_diff.shape[-1]//2)
+rp = RadialProfile(PSF_diff.cpu().numpy().squeeze(), xycen, edge_radii)
 
-plt.figure(figsize=(10, 6))
-for i in range(channels):
-    plt.plot(x_range.numpy(), y_range[:, i].numpy(), linewidth=2, label=f'Channel {i+1}')
-    plt.scatter(t.numpy(), x[:, i].numpy(), s=50, alpha=0.7)
-plt.xlabel('t')
-plt.ylabel('Value')
-plt.title('Natural Cubic Spline Interpolation')
-plt.grid(True, alpha=0.3)
-plt.legend()
+plt.plot(rp.profile)
+plt.xlim(0, 25)
+
+
+# %%
+# TODO: curently improperly normalized
+# Compute error budget over PSDs with proper integration
+error_budget = {}
+dk = PSF_model.dk
+dk_squared = dk**2  # Area element in frequency space
+
+for entry in PSF_model.PSD_include:
+    PSD = PSF_model.PSDs[entry]
+
+    if len(PSD.shape) > 1:            
+        PSD_norm = (PSF_model.dk*PSF_model.wvl_atm*1e9/2/torch.pi)**2
+        PSD = PSF_model.half_PSD_to_full(PSD * PSD_norm).real # [nm^2]
+        
+        # Proper integration: multiply by dk^2 for area element
+        error_budget[entry] = (PSD * dk_squared).sum().item()
+        
+        print(f"{entry:15s}: {np.sqrt(error_budget[entry]):.2f} nm RMS")
+        
+total_PSD = PSF_model.PSD.real
+error_budget['Total PSD'] = (total_PSD * dk_squared).sum().item()
+print(f"{'Total PSD':15s}: {np.sqrt(error_budget['Total PSD']):.2f} nm RMS")
+
+
+# %%
+# for i in range(N_wvl):
+im = PSF_0[0,-1,...].cpu().numpy()
+vmin = np.percentile(im[im > 0], 10) if np.any(im > 0) else 1
+vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
+
+plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
 plt.show()
 
-#%%
-class NonLinearSplineFitter(nn.Module):
-    """
-    Non-linear optimization based spline fitting using learnable control points.
-    """
-    def __init__(self, x_data, y_data, n_control_points=10):
-        super().__init__()
-        self.x_data = x_data
-        self.y_data = y_data
-        self.n_control_points = n_control_points
-        
-        # Initialize control point positions uniformly along x range
-        x_min, x_max = x_data.min(), x_data.max()
-        t_init = torch.linspace(x_min, x_max, n_control_points)
-        
-        # Initialize control point values by interpolating from data
-        y_init = torch.zeros(n_control_points)
-        for i, t_val in enumerate(t_init):
-            # Find closest data point
-            closest_idx = torch.argmin(torch.abs(x_data - t_val))
-            y_init[i] = y_data[closest_idx]
-        
-        # Learnable parameters
-        self.t_control = nn.Parameter(t_init)
-        self.y_control = nn.Parameter(y_init.unsqueeze(-1))  # Add channel dimension
-        
-        # Keep endpoints fixed to avoid extrapolation issues
-        self.register_buffer('t_fixed_mask', torch.tensor([True] + [False]*(n_control_points-2) + [True]))
-    
-    def forward(self, x_eval=None):
-        """
-        Evaluate spline at given points or at data points.
-        """
-        if x_eval is None:
-            x_eval = self.x_data
-            
-        # Ensure control points are sorted (soft constraint)
-        t_sorted = torch.sort(self.t_control)[0]
-        
-        # Create spline with current control points
-        coeffs = natural_cubic_spline_coeffs(t_sorted, self.y_control)
-        spline = NaturalCubicSpline(coeffs)
-        
-        # Evaluate at desired points
-        y_pred = spline.evaluate(x_eval).squeeze(-1)
-        return y_pred
-    
-    def get_spline_object(self):
-        """Return the current spline object for evaluation."""
-        t_sorted = torch.sort(self.t_control)[0]
-        coeffs = natural_cubic_spline_coeffs(t_sorted, self.y_control)
-        return NaturalCubicSpline(coeffs)
+im = PSF_1[0,-1,...].cpu().numpy()
+vmin = np.percentile(im[im > 0], 10) if np.any(im > 0) else 1
+vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
 
-def fit_nonlinear_spline(x_data, y_data, n_control_points=10, lr=0.01, epochs=1000, 
-                        regularization=1e-4, fix_endpoints=True, plot=True, verbose=True):
-    """
-    Fits a spline using non-linear optimization of control points.
-    
-    Args:
-        x_data: torch.Tensor of x coordinates
-        y_data: torch.Tensor of y coordinates
-        n_control_points: number of control points to optimize
-        lr: learning rate for optimizer
-        epochs: number of optimization epochs
-        regularization: L2 regularization strength for smoothness
-        fix_endpoints: whether to fix first and last control points
-        plot: whether to plot the results
-        verbose: whether to print progress
-    
-    Returns:
-        model: trained NonLinearSplineFitter
-        spline: final spline object
-        losses: list of loss values during training
-    """
-    # Ensure data is sorted by x
-    sorted_indices = torch.argsort(x_data)
-    x_sorted = x_data[sorted_indices]
-    y_sorted = y_data[sorted_indices]
-    
-    # Create model
-    model = NonLinearSplineFitter(x_sorted, y_sorted, n_control_points)
-    
-    # Optimizer
-    optimizer = optim.Adam(model.parameters(), lr=lr)
-    
-    # Loss function with regularization
-    def loss_fn():
-        y_pred = model()
-        # Data fitting loss
-        mse_loss = torch.mean((y_pred - y_sorted)**2)
-        # Smoothness regularization (penalize large second differences)
-        t_sorted = torch.sort(model.t_control)[0]
-        y_ctrl = model.y_control.squeeze()
-        if len(y_ctrl) > 2:
-            second_diff = y_ctrl[2:] - 2*y_ctrl[1:-1] + y_ctrl[:-2]
-            smooth_loss = regularization * torch.mean(second_diff**2)
-        else:
-            smooth_loss = 0.0
-        
-        # Monotonicity constraint for t_control (soft)
-        t_diff = model.t_control[1:] - model.t_control[:-1]
-        monotonic_loss = torch.sum(torch.clamp(-t_diff, min=0)**2) * 10.0
-        
-        return mse_loss + smooth_loss + monotonic_loss
-    
-    # Training loop
-    losses = []
-    for epoch in range(epochs):
-        optimizer.zero_grad()
-        loss = loss_fn()
-        loss.backward()
-        
-        # Optional: fix endpoints
-        if fix_endpoints:
-            with torch.no_grad():
-                model.t_control.grad[0] = 0
-                model.t_control.grad[-1] = 0
-        
-        optimizer.step()
-        
-        losses.append(loss.item())
-        
-        if verbose and (epoch + 1) % (epochs // 10) == 0:
-            print(f"Epoch {epoch+1}/{epochs}, Loss: {loss.item():.6f}")
-    
-    # Get final spline
-    with torch.no_grad():
-        spline = model.get_spline_object()
-        
-        if plot:
-            # Evaluation points for smooth curve
-            t_eval = torch.linspace(x_sorted[0], x_sorted[-1], 200)
-            y_eval = model(t_eval)
-            
-            plt.figure(figsize=(15, 10))
-            
-            # Main plot
-            plt.subplot(2, 2, 1)
-            plt.plot(x_data.numpy(), y_data.numpy(), 'o', alpha=0.5, label='Original data', markersize=3)
-            t_ctrl_sorted = torch.sort(model.t_control)[0]
-            y_ctrl_sorted = model.y_control.squeeze()[torch.argsort(model.t_control)]
-            
-            plt.plot(t_ctrl_sorted.detach().numpy(), y_ctrl_sorted.detach().numpy(), 's', 
-                    markersize=8, label=f'Optimized control points ({n_control_points})')
-            
-            plt.plot(t_eval.numpy(), y_eval.detach().numpy(), '-', linewidth=2, label='Fitted spline')
-            plt.xlabel('x')
-            plt.ylabel('y')
-            plt.title('Non-linear Spline Fitting')
-            plt.legend()
-            plt.grid(True, alpha=0.3)
-            
-            # Loss curve
-            plt.subplot(2, 2, 2)
-            plt.plot(losses)
-            plt.xlabel('Epoch')
-            plt.ylabel('Loss')
-            plt.title('Training Loss')
-            plt.yscale('log')
-            plt.grid(True, alpha=0.3)
-            
-            # Residuals
-            plt.subplot(2, 2, 3)
-            y_pred_data = model()
-            residuals = (y_pred_data - y_sorted).detach().numpy()
-            plt.plot(x_sorted.numpy(), residuals, 'o', alpha=0.6, markersize=2)
-            plt.axhline(y=0, color='r', linestyle='--')
-            plt.xlabel('x')
-            plt.ylabel('Residual')
-            plt.title('Fitting Residuals')
-            plt.grid(True, alpha=0.3)
-            
-            # Control points evolution (if we tracked them)
-            plt.subplot(2, 2, 4)
-            plt.plot(t_ctrl_sorted.detach().numpy(), y_ctrl_sorted.detach().numpy(), 'o-')
-            plt.xlabel('Control Point Position')
-            plt.ylabel('Control Point Value')
-            plt.title('Optimized Control Points')
-            plt.grid(True, alpha=0.3)
-            
-            plt.tight_layout()
-            plt.show()
-    
-    return model, spline, losses
-
-# Example usage with the same data
-torch.manual_seed(42)
-n_points = 1000
-x_random = torch.linspace(0, 2*np.pi, n_points)
-y_random = torch.sin(x_random) + 0.3*torch.randn(n_points) + 0.1*torch.sin(5*x_random)
-
-# Fit spline with different numbers of control points using non-linear optimization
-model, spline, losses = fit_nonlinear_spline(
-    x_random, y_random, 
-    n_control_points=50,
-    lr=0.01,
-    epochs=500,
-    regularization=1e-4,
-    verbose=False
-)
-
-# Calculate final fitting error
-with torch.no_grad():
-    y_pred = model()
-    mse = torch.mean((y_pred - y_random)**2)
-    print(f"Final MSE: {mse:.6f}")
-    print(f"Final loss: {losses[-1]:.6f}")
-
+plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
+plt.show()
 # %%
