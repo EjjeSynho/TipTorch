@@ -18,7 +18,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from copy import copy, deepcopy
 from tqdm import tqdm
-from tools.plotting import plot_radial_profiles, draw_PSF_stack
+from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 from tools.utils import cropper, PupilVLT
 from tools.static_phase import MUSEPhaseBump
 from managers.config_manager import ConfigManager
@@ -603,18 +603,18 @@ cutoff = 40
 if draw_white:
     # White profiles
     if draw_calibrated:
-        plot_radial_profiles(PSFs_0_val_white, PSFs_1_val_white, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
+        plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_1_val_white, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
         if save_profiles:
             plt.savefig(save_dir / 'PSFs_calibrated.pdf', dpi=300)
 
     if draw_direct:
-        plot_radial_profiles(PSFs_0_val_white, PSFs_2_val_white, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
+        plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_2_val_white, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
         if save_profiles:
             postfix = '_tuned' if direct_tuned else '_raw'
             plt.savefig(save_dir / f'PSFs_direct_{postfix}.pdf', dpi=300)
 
     if draw_fitted:
-        plot_radial_profiles(PSFs_0_val_white, PSFs_3_val_white, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
+        plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_3_val_white, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
         if save_profiles:
             plt.savefig(save_dir / 'PSFs_fitted.pdf', dpi=300)
 
@@ -622,18 +622,18 @@ else:
     # Polychromatic profiles
     for i, wvl in tqdm(enumerate(wavelength_selected[ids_wavelength_selected].tolist())):
         if draw_calibrated:
-            plot_radial_profiles(PSFs_0_val_poly[:,i,...], PSFs_1_val_poly[:,i,...], 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
+            plot_radial_PSF_profiles(PSFs_0_val_poly[:,i,...], PSFs_1_val_poly[:,i,...], 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
             if save_profiles:
                 plt.savefig(save_dir / f'PSFs_calibrated_{wvl}.pdf', dpi=300)
                 
         if draw_direct:
-            plot_radial_profiles(PSFs_0_val_poly[:,i,...], PSFs_2_val_poly[:,i,...], 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
+            plot_radial_PSF_profiles(PSFs_0_val_poly[:,i,...], PSFs_2_val_poly[:,i,...], 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
             if save_profiles:
                 postfix = '_tuned' if direct_tuned else '_raw'
                 plt.savefig(save_dir / f'PSFs_direct_{postfix}_{wvl}.pdf', dpi=300)
         
         if draw_fitted:
-            plot_radial_profiles(PSFs_0_val_poly[:,i,...], PSFs_3_val_poly[:,i,...], 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
+            plot_radial_PSF_profiles(PSFs_0_val_poly[:,i,...], PSFs_3_val_poly[:,i,...], 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
             if save_profiles:
                 plt.savefig(save_dir / f'PSFs_fitted_{wvl}.pdf', dpi=300)
 

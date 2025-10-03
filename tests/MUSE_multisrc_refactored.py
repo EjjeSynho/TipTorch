@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from torchmin import minimize
 
-from tools.plotting import plot_radial_profiles
+from tools.plotting import plot_radial_PSF_profiles
 from tools.utils import mask_circle, rad2mas
 from managers.config_manager import MultipleTargetsInOneObservation
 from data_processing.normalizers import CreateTransformSequenceFromFile
@@ -396,7 +396,7 @@ display_mask = mask_circle(PSF_size, 18)[None,...]
 PSFs_0_white = np.mean(PSFs_data_norm.cpu().cpu().numpy(), axis=1) * display_mask
 PSFs_1_white = np.mean(PSFs_fitted.cpu().cpu().numpy(), axis=1)
 
-plot_radial_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
+plot_radial_PSF_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='PSFs predicted over the field', cutoff=16, y_min=5e-1)
 
 #%% ---------------------------
 model_sparse = add_ROIs(

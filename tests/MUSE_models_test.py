@@ -9,7 +9,7 @@ import pickle
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from tools.plotting import plot_radial_profiles, plot_radial_profiles_relative, draw_PSF_stack, mask_circle, PupilVLT
+from tools.plotting import plot_radial_PSF_profiles, plot_radial_PSF_profiles_relative, draw_PSF_stack, mask_circle, PupilVLT
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_settings import MUSE_DATA_FOLDER, device
 from torchmin import minimize
@@ -605,7 +605,7 @@ else:
 '''
 
 #%%
-from tools.plotting import plot_radial_profiles
+from tools.plotting import plot_radial_PSF_profiles
 
 center = np.array([PSF_0.shape[-2]//2, PSF_0.shape[-1]//2])
 
@@ -618,13 +618,13 @@ if len(toy.wvl[0]) > 1:
 
     fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
     for i, lmbd in enumerate(wvl_select):
-        plot_radial_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+        plot_radial_PSF_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
     plt.show()
 
 else:
     draw_PSF_stack( PSF_0.cpu().numpy()[:,0,...], PSF_1.cpu().numpy()[:,0,...], average=True, crop=120 )
     
-    plot_radial_profiles( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
+    plot_radial_PSF_profiles( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
     plt.show()
     
 #%%
@@ -638,13 +638,13 @@ if len(toy.wvl[0]) > 1:
 
     fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
     for i, lmbd in enumerate(wvl_select):
-        plot_radial_profiles_relative( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+        plot_radial_PSF_profiles_relative( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
     plt.show()
 
 else:
     draw_PSF_stack( PSF_0.cpu().numpy()[:,0,...], PSF_1.cpu().numpy()[:,0,...], average=True, crop=120 )
     
-    plot_radial_profiles_relative( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
+    plot_radial_PSF_profiles_relative( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=60, title='Left PSF')
     plt.show()
 
     
@@ -715,12 +715,12 @@ PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
-    plot_radial_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1_, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+    plot_radial_PSF_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1_, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
 plt.show()
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
-    plot_radial_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+    plot_radial_PSF_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
 plt.show()
 
 #%% ======================================================================================================
@@ -797,7 +797,7 @@ for i in range(N_wvl_):
 for i in range(N_wvl_):
     A = PSF_0.cpu().numpy()[0, i, ...]
     B = PSF_1.cpu().numpy()[0, i, ...]
-    plot_radial_profiles( A, B,  'Data', 'TipTorch', title=f'{(wvls_[0][i]*1e9):.2f} [nm]')
+    plot_radial_PSF_profiles( A, B,  'Data', 'TipTorch', title=f'{(wvls_[0][i]*1e9):.2f} [nm]')
     plt.savefig(f'C:/Users/akuznets/Desktop/MUSE_fits_new/profiles_{(wvls_[0][i]*1e9):.0f}.png')
 '''
 
@@ -950,13 +950,13 @@ if len(toy.wvl[0]) > 1:
     
     fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
     for i, lmbd in enumerate(wvl_select):
-        plot_radial_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=40,  ax=ax[i] )
+        plot_radial_PSF_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=40,  ax=ax[i] )
     plt.show()
 
 else:
     draw_PSF_stack( PSF_0.cpu().numpy()[:,0,...], PSF_1.cpu().numpy()[:,0,...], average=True, crop=120 )
     
-    plot_radial_profiles( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=20, title='Left PSF')
+    plot_radial_PSF_profiles( PSF_0[0,0,...].cpu().numpy(),  PSF_1[0,0,...].cpu().numpy(),  'Data', 'TipTorch', centers=center, cutoff=20, title='Left PSF')
     plt.show()
 
 #%% ==================================================================================
@@ -969,7 +969,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
-from tools.plotting import plot_radial_profiles, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping, mask_circle
+from tools.plotting import plot_radial_PSF_profiles, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping, mask_circle
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds, process_mask
 from managers.config_manager import GetSPHEREonsky
 from project_settings import SPHERE_DATA_FOLDER, device
@@ -1114,8 +1114,8 @@ PSF_1_new = TipTorch(x)
 #%
 # with torch.no_grad():
 fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-plot_radial_profiles( (PSF_1_old*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1_new*PSF_mask)[:,0,...].cpu().numpy(), 'Old', 'New', title='Left PSF',  ax=ax[0] )
-plot_radial_profiles( (PSF_1_old*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1_new*PSF_mask)[:,1,...].cpu().numpy(), 'Old', 'New', title='Right PSF', ax=ax[1] )
+plot_radial_PSF_profiles( (PSF_1_old*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1_new*PSF_mask)[:,0,...].cpu().numpy(), 'Old', 'New', title='Left PSF',  ax=ax[0] )
+plot_radial_PSF_profiles( (PSF_1_old*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1_new*PSF_mask)[:,1,...].cpu().numpy(), 'Old', 'New', title='Right PSF', ax=ax[1] )
 plt.show()
 
 draw_PSF_stack(PSF_1_old*PSF_mask, PSF_1_new*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
@@ -1138,7 +1138,7 @@ PSD_old = tiptorch_old.kx
 PSD_new = TipTorch.kx
 PSD_new = TipTorch.half_PSD_to_full(PSD_new)
 
-plot_radial_profiles( PSD_old.cpu().numpy(), PSD_new.cpu().numpy(), 'Old', 'New', title='Left PSF')
+plot_radial_PSF_profiles( PSD_old.cpu().numpy(), PSD_new.cpu().numpy(), 'Old', 'New', title='Left PSF')
 plt.show()
 
 #%%

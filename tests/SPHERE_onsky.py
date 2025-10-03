@@ -9,7 +9,7 @@ import pickle
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from tools.plotting import plot_radial_profiles, SR, draw_PSF_stack, rad2mas, mask_circle, GradientLoss, OptimizableLO, ZernikeLO
+from tools.plotting import plot_radial_PSF_profiles, SR, draw_PSF_stack, rad2mas, mask_circle, GradientLoss, OptimizableLO, ZernikeLO
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds, process_mask
 from managers.config_manager import GetSPHEREonsky
 from project_settings import SPHERE_DATA_FOLDER, device
@@ -304,8 +304,8 @@ plt.show()
 
 #%%
 fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-plot_radial_profiles( (PSF_0*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-plot_radial_profiles( (PSF_0*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+plot_radial_PSF_profiles( (PSF_0*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+plot_radial_PSF_profiles( (PSF_0*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
 plt.show()
 
 draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
@@ -374,8 +374,8 @@ plt.show()
 
 #%%
 fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-plot_radial_profiles( (PSF_0*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-plot_radial_profiles( (PSF_0*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+plot_radial_PSF_profiles( (PSF_0*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+plot_radial_PSF_profiles( (PSF_0*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
 plt.show()
 
 draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
@@ -397,8 +397,8 @@ PSF_1 = func_LO(x2)
 
 #%%
 fig, ax = plt.subplots(1, 2, figsize=(10, 3))
-plot_radial_profiles( (PSF_0*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
-plot_radial_profiles( (PSF_0*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
+plot_radial_PSF_profiles( (PSF_0*PSF_mask)[:,0,...].cpu().numpy(), (PSF_1*PSF_mask)[:,0,...].cpu().numpy(), 'Data', 'TipTorch', title='Left PSF',  ax=ax[0] )
+plot_radial_PSF_profiles( (PSF_0*PSF_mask)[:,1,...].cpu().numpy(), (PSF_1*PSF_mask)[:,1,...].cpu().numpy(), 'Data', 'TipTorch', title='Right PSF', ax=ax[1] )
 plt.show()
 
 draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=80)#, scale=None)
@@ -508,7 +508,7 @@ print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 draw_PSF_stack(PSF_0, PSF_1, average=True)
 
 destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
-plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+plot_radial_PSF_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
 
 #%%
 with torch.no_grad():

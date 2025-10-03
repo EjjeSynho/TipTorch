@@ -10,7 +10,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
-from tools.plotting import plot_radial_profiles, SR, draw_PSF_stack, rad2mas, cropper
+from tools.plotting import plot_radial_PSF_profiles, SR, draw_PSF_stack, rad2mas, cropper
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from managers.config_manager import GetSPHEREonsky
@@ -204,7 +204,7 @@ decomposed_variables = transformer.unstack(x0)
 
 with torch.no_grad():
     PSF_1_joint = func(x0)
-    plot_radial_profiles(
+    plot_radial_PSF_profiles(
         PSF_0[:,0,...].cpu().numpy(),
         PSF_1_joint[:,0,...].cpu().numpy(),
         'Data', 'TipToy', title='IRDIS PSF', dpi=200
@@ -282,7 +282,7 @@ print('\nStrehl ratio: ', SR(PSF_1, PSF_DL))
 draw_PSF_stack(PSF_0, PSF_1, average=True)
 
 destack = lambda PSF_stack: [ x for x in torch.split(PSF_stack[:,0,...].cpu(), 1, dim=0) ]
-plot_radial_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
+plot_radial_PSF_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title='IRDIS PSF', dpi=200)
 
 #%%
 with torch.no_grad():

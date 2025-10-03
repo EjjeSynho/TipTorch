@@ -235,7 +235,7 @@ def calc_profile(data, xycen=None):
     return rp.profile
 
     
-def plot_radial_profiles(PSF_0,
+def plot_radial_PSF_profiles(PSF_0,
                          PSF_1,
                          label_0 = 'PSFs #1',
                          label_1 = 'PSFs #2',
@@ -326,7 +326,7 @@ def plot_radial_profiles(PSF_0,
         return p_0, p_1, p_err
     
 
-def plot_radial_profiles_relative(PSF_0,
+def plot_radial_PSF_profiles_relative(PSF_0,
                                   PSF_1,
                                 #   label_0 = 'PSFs #1',
                                 #   label_1 = 'PSFs #2',
@@ -679,7 +679,7 @@ def hist_thresholded(
     # plt.show()
 
 
-def plot_PSD_profiles(PSF_model):
+def plot_radial_PSD_profiles(PSF_model):
     plt.figure(figsize=(6,4))
     for entry in PSF_model.PSD_include:
         PSD = PSF_model.PSDs[entry]

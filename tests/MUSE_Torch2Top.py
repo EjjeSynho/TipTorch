@@ -10,7 +10,7 @@ import torch
 from torch import nn
 import numpy as np
 import matplotlib.pyplot as plt
-from tools.plotting import plot_radial_profiles, plot_radial_profiles_relative, SR, draw_PSF_stack, rad2mas, mask_circle
+from tools.plotting import plot_radial_PSF_profiles, plot_radial_PSF_profiles_relative, SR, draw_PSF_stack, rad2mas, mask_circle
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_settings import MUSE_DATA_FOLDER, device
 from torchmin import minimize
@@ -197,7 +197,7 @@ draw_PSF_stack( PSF_onsky.cpu().numpy()[0, wvl_select, ...], PSF_pred.cpu().nump
 PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
-    plot_radial_profiles( PSF_disp(PSF_onsky, lmbd),  PSF_disp(PSF_pred, lmbd),  'Data', 'TipTorch', cutoff=30,  y_min=3e-1, linthresh=1e-2, ax=ax[i] )
+    plot_radial_PSF_profiles( PSF_disp(PSF_onsky, lmbd),  PSF_disp(PSF_pred, lmbd),  'Data', 'TipTorch', cutoff=30,  y_min=3e-1, linthresh=1e-2, ax=ax[i] )
 plt.show()
 
 #%%

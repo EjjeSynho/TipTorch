@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from tools.plotting import plot_radial_profiles, LWE_basis, cropper, draw_PSF_stack
+from tools.plotting import plot_radial_PSF_profiles, LWE_basis, cropper, draw_PSF_stack
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from managers.config_manager import GetSPHEREonsky, ConfigManager
@@ -136,14 +136,14 @@ PSFs_fitted = torch.cat(PSFs_fitted, dim=0)[:,0,...].numpy()
 
 index_ = batch_data['IDs'].index(2818)
 
-# plot_radial_profiles(PSFs_data[index_,...], PSFs_fitted[index_,...], 'Data', 'TipTorch', title='Fitted')
+# plot_radial_PSF_profiles(PSFs_data[index_,...], PSFs_fitted[index_,...], 'Data', 'TipTorch', title='Fitted')
 # plt.show()
 
 print(batch_data['IDs'][2])
-plot_radial_profiles(PSFs_data[2,...], PSFs_fitted[2,...], 'Data', 'TipTorch', title='Fitted')
+plot_radial_PSF_profiles(PSFs_data[2,...], PSFs_fitted[2,...], 'Data', 'TipTorch', title='Fitted')
 plt.show()
 
-# plot_radial_profiles(PSFs_data, PSFs_fitted, 'Data', 'TipTorch', title='Fitted')
+# plot_radial_PSF_profiles(PSFs_data, PSFs_fitted, 'Data', 'TipTorch', title='Fitted')
 # plt.show()
 
 #%%
@@ -167,7 +167,7 @@ _ = toy_one()
 PSF_test = toy_one(new_dict, None, lambda: basis(new_dict['basis_coefs'].float())).cpu().numpy()[0,0,...]#[index_,0,...]
 
 #%
-plot_radial_profiles(PSFs_data[index_,...], PSF_test, 'Data', 'TipTorch', title='Fitted')
+plot_radial_PSF_profiles(PSFs_data[index_,...], PSF_test, 'Data', 'TipTorch', title='Fitted')
 plt.show()
 
 
@@ -181,5 +181,5 @@ B = PSFs_fitted[index_,...]
 # plt.show()
 
 # draw_PSF_stack(A, B, average=True, crop=40, min_val=1e-6, max_val=1e-1)
-plot_radial_profiles(A, B, 'Data', 'TipTorch', title='Fitted')
+plot_radial_PSF_profiles(A, B, 'Data', 'TipTorch', title='Fitted')
 plt.show()

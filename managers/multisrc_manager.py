@@ -11,7 +11,7 @@ from photutils.detection import find_peaks
 from photutils.aperture import RectangularAperture
 from matplotlib.colors import LogNorm
 from traitlets import Instance
-from tools.plotting import plot_radial_profiles
+from tools.plotting import plot_radial_PSF_profiles
 
 
 """
@@ -336,7 +336,7 @@ def PlotSourcesProfiles(data, model, sources, radius, title=''):
     else:
         PSFs_1_white = np.mean(np.stack(ROIs_1), axis=1)
     
-    plot_radial_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'Model', title=title, cutoff=radius, y_min=5e-2)
+    plot_radial_PSF_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'Model', title=title, cutoff=radius, y_min=5e-2)
     plt.show()
 
 

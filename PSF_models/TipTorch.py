@@ -86,8 +86,8 @@ class TipTorch(torch.nn.Module):
         self.Cn2_heights = self.config['atmosphere']['Cn2Heights'] * self.airmass # [m]
         
         self.stretch  = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
-        self.h  = self.Cn2_heights * self.stretch
-        self.nL = self.Cn2_heights.shape[-1]
+        self.h   = self.Cn2_heights * self.stretch
+        self.N_L = self.Cn2_heights.shape[-1]
 
         # N_src_tomo is very important! It must = 1 if all simulated targets share the same atmospheric conditions.
         # Doing so can dramatically reduce the computational cost. Otherwise, for multiple targets in multiple conditions,
@@ -248,7 +248,7 @@ class TipTorch(torch.nn.Module):
         self.dk    = 1.0 / self.D / self.sampling.min() # PSD spatial frequency step
                 
         # Initialize PSD spatial frequencies
-        # TODO: multi-object pupil rotation angle
+        # This assumes thaat pupil rotation is the same for all simulated objects
         if self.pupil_angle != 0.0:
             kx, ky = self._gen_grid(self.nOtf)
             rot_ang = torch.deg2rad(self.pupil_angle)
@@ -420,7 +420,7 @@ class TipTorch(torch.nn.Module):
                 # Tomographic src to DM projector for on-axis is just an identity matrix
                 self.P_beta_DM = torch.ones([self.N_src, self.nOtf_AO_y, self.nOtf_AO_x, 1, self.N_DM], dtype=torch.complex64, device=self.device) * pdims(self.mask_corrected_AO, 2)
                 # TODO: comment
-                self.P_opt = torch.ones([self.N_src_tomo, self.nOtf_AO_y, self.nOtf_AO_x, 1, self.nL], dtype=torch.complex64, device=self.device)
+                self.P_opt = torch.ones([self.N_src_tomo, self.nOtf_AO_y, self.nOtf_AO_x, 1, self.N_L], dtype=torch.complex64, device=self.device)
             else:
                 self.OptimalDMProjector()
     
@@ -547,7 +547,7 @@ class TipTorch(torch.nn.Module):
     # TODO: allow to input the atmospheric params externaly to account user-assumed atmospheric layers instead of simulated ones
     def OptimalDMProjector(self):
         h_dm = self.h_DM.view(1, 1, 1, self.N_DM)
-        h    = self.h.view(self.N_src_tomo, 1, 1, 1, self.nL)
+        h    = self.h.view(self.N_src_tomo, 1, 1, 1, self.N_L)
         opt_w = self.DM_opt_weight.view(self.N_src_tomo, 1, 1, self.N_optdir, 1, 1)
 
         theta_x = self.DM_opt_dir_x.view(self.N_src_tomo, 1, 1, self.N_optdir)
@@ -607,7 +607,7 @@ class TipTorch(torch.nn.Module):
 
     def Controller(self):
         #nTh = 1
-        idim = lambda x: x.view(self.N_src_tomo, 1, 1, self.nL)
+        idim = lambda x: x.view(self.N_src_tomo, 1, 1, self.N_L)
         
         vy = idim(self.vy)
         vx = idim(self.vx)
@@ -699,7 +699,7 @@ class TipTorch(torch.nn.Module):
         else:
             kx = pdims(self.kx_AO, 1)
             ky = pdims(self.ky_AO, 1)
-            h  = self.h.view(self.N_src_tomo, 1, 1, self.nL)
+            h  = self.h.view(self.N_src_tomo, 1, 1, self.N_L)
             
             beta_x = self.src_dirs_x.view(self.N_src, 1, 1, 1)
             beta_y = self.src_dirs_y.view(self.N_src, 1, 1, 1)
@@ -750,9 +750,9 @@ class TipTorch(torch.nn.Module):
         tf = self.h1.unsqueeze(0).unsqueeze(-1) # [N_combs x N_src x nOtf_AO x n_Otf_AO x nL]
 
         # Add aliasing dimension and more
-        vx = self.vx.view(1, self.N_src_tomo, 1, 1, self.nL)
-        vy = self.vy.view(1, self.N_src_tomo, 1, 1, self.nL)
-        Cn2_weights = self.Cn2_weights.view(1, self.N_src_tomo, 1, 1, self.nL)
+        vx = self.vx.view(1, self.N_src_tomo, 1, 1, self.N_L)
+        vy = self.vy.view(1, self.N_src_tomo, 1, 1, self.N_L)
+        Cn2_weights = self.Cn2_weights.view(1, self.N_src_tomo, 1, 1, self.N_L)
         
         # Adds  atmospheric layers dimension
         km, kn = self.km.unsqueeze(-1), self.kn.unsqueeze(-1)
@@ -783,8 +783,8 @@ class TipTorch(torch.nn.Module):
 
     def DifferentialRefractionPSD(self):
         # TODO: account for the pupil angle
-        h = self.h.view(self.N_src_tomo, 1, 1, 1, self.nL)
-        w = self.Cn2_weights.view(self.N_src_tomo, 1, 1, 1, self.nL)
+        h = self.h.view(self.N_src_tomo, 1, 1, 1, self.N_L)
+        w = self.Cn2_weights.view(self.N_src_tomo, 1, 1, 1, self.N_L)
         k = self.k_AO.view(1, 1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
         # [N_src x 1 x nOtf_AO_y x nOtf_AO_x]
         cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - pdims(self.src_azimuth, 2)).unsqueeze(1)
@@ -861,7 +861,7 @@ class TipTorch(torch.nn.Module):
         then it's possible to compute one tomographic reconstructor for all simulated sources.
         For example, this is the case when all objects are within one FoV and belong to one observation
         '''
-        h = self.h.view(self.N_src_tomo, 1, 1, 1, self.nL)
+        h = self.h.view(self.N_src_tomo, 1, 1, 1, self.N_L)
         
         kx = pdims(self.kx_AO, 2)
         ky = pdims(self.ky_AO, 2)
@@ -883,7 +883,7 @@ class TipTorch(torch.nn.Module):
         # As previosuly mentioned, if the same tomo reconstructor is used for all targets, then WFS_noise_variance also must be the same for all targets
         self.C_b = fix_dims( WFS_noise_variance[:self.N_src_tomo], self.N_GS )
         kernel = self.VonKarmanSpectrum(self.r0.abs().to(dtype=MP.dtype), self.L0.abs(), self.k2_AO) * self.piston_filter
-        self.C_phi = pdims(kernel, 2) * fix_dims(self.Cn2_weights, self.nL)
+        self.C_phi = pdims(kernel, 2) * fix_dims(self.Cn2_weights, self.N_L)
 
         # Inversion happens relative to the last two dimensions of the these tensors
         if inv_method == 'standart':
@@ -972,8 +972,8 @@ class TipTorch(torch.nn.Module):
             self.vx = self.wind_speed * torch.cos( torch.deg2rad(self.wind_dir) )
             self.vy = self.wind_speed * torch.sin( torch.deg2rad(self.wind_dir) )
 
-            self.freq_t = self.vx.view(self.N_src_tomo, 1, 1, self.nL) * pdims(self.kx_AO, 1) + \
-                          self.vy.view(self.N_src_tomo, 1, 1, self.nL) * pdims(self.ky_AO, 1) # [N_src x nOtf_AO x nOtf_AO x nL]
+            self.freq_t = self.vx.view(self.N_src_tomo, 1, 1, self.N_L) * pdims(self.kx_AO, 1) + \
+                          self.vy.view(self.N_src_tomo, 1, 1, self.N_L) * pdims(self.ky_AO, 1) # [N_src x nOtf_AO x nOtf_AO x nL]
 
             self.Controller()
             self.ReconstructionFilter(WFS_noise_var)

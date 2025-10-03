@@ -168,7 +168,7 @@ class ZernikeModes:
             X, Y = Y, X
         
         if angle is not None and angle != 0.0:
-            X, Y = self.__rotate_coordinates(angle, X, Y)
+            X, Y = self.__rotate_coordinates(-angle, X, Y)
         
         R = np.sqrt(X**2 + Y**2)
         R /= R.max()
@@ -313,8 +313,8 @@ class MUSEPhaseBump(PhaseMap):
             mode="bilinear",
             align_corners=False,
         ).squeeze()
-        
-        # rotate during initialization
+
+        # Rotate by 45 degrees to compensate for the derotator shift
         angle = -model.pupil_angle.item() - 45.0 if isinstance(model.pupil_angle, torch.Tensor) else -model.pupil_angle - 45.0
         self.OPD_map = TF.rotate(OPD_upsampled.unsqueeze(0), angle, interpolation=TF.InterpolationMode.BILINEAR).squeeze(0)
 

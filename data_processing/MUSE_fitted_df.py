@@ -168,7 +168,7 @@ with open(MUSE_DATA_FOLDER + 'MUSE_fitted_df.pkl', 'wb') as handle:
     )
 
 #%%
-from tools.plotting import plot_radial_profiles
+from tools.plotting import plot_radial_PSF_profiles
 
 # rand_array = np.random.randint(0, len(ids), 100)
 
@@ -180,14 +180,14 @@ PSF_disp = lambda x, w: (x[:,w,...])
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
-    plot_radial_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=40,  ax=ax[i] )
+    plot_radial_PSF_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=40,  ax=ax[i] )
 plt.show()
 
 # %%
 fig = plt.figure(figsize=(10, 6))
 plt.title('Polychromatic PSF')
 PSF_avg = lambda x: np.mean(x, axis=1)
-plot_radial_profiles( PSF_avg(PSF_0), PSF_avg(PSF_1), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
+plot_radial_PSF_profiles( PSF_avg(PSF_0), PSF_avg(PSF_1), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
 plt.show()
 
 
@@ -247,7 +247,7 @@ setattr(model, 's_pow', torch.tensor([singular_df.loc[id,'sausage_pow']], device
 PSF_1 = model(inputs_tiptorch, None, lambda: sausage_absorber(model.s_pow.flatten()))
 
 #%%
-from tools.plotting import plot_radial_profiles, draw_PSF_stack
+from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 
 center = np.array([PSF_0.shape[-2]//2, PSF_0.shape[-1]//2])
 
@@ -260,12 +260,12 @@ PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
-    plot_radial_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+    plot_radial_PSF_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
 plt.show()
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
-    plot_radial_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1_fitted, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
+    plot_radial_PSF_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1_fitted, lmbd),  'Data', 'TipTorch', cutoff=30,  ax=ax[i] )
 plt.show()
 
 
