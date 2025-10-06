@@ -156,8 +156,8 @@ class TipTorch(torch.nn.Module):
         self.Jxy = torch.ones (self.N_src, device=self.device)*0.1
         
         if self.PSD_include['Moffat']:
-            self.amp   = torch.ones (self.N_src, device=self.device)*4.0  # Phase PSD Moffat amplitude [rad²]
-            self.b     = torch.ones (self.N_src, device=self.device)*0.01 # Phase PSD background [rad² m²]
+            self.amp   = torch.ones (self.N_src, device=self.device)*0.01 # Phase PSD Moffat amplitude [rad²]
+            self.b     = torch.zeros (self.N_src, device=self.device)     # Phase PSD background [rad² m²]
             self.alpha = torch.ones (self.N_src, device=self.device)*0.1  # Phase PSD Moffat alpha [1/m]
             self.beta  = torch.ones (self.N_src, device=self.device)*2    # Phase PSD Moffat beta power law
             self.ratio = torch.ones (self.N_src, device=self.device)      # Phase PSD Moffat ellipticity
@@ -590,6 +590,7 @@ class TipTorch(torch.nn.Module):
         return hInt, rtfInt, atfInt, ntfInt
 
     # TODO: also for LO WFS?
+    # TODO: accelerate this function
     def NoiseGain(self, nF=1000):
         Ts = 1.0 / self.HOloop_rate  # sampling time
         delay    = self.HOloop_delay # latency between the measurement and the correction
@@ -724,10 +725,8 @@ class TipTorch(torch.nn.Module):
             PW_t = torch.conj(torch.permute(PW, (0,1,2,4,3)))
             noisePSD = (PW @ self.C_b @ PW_t).squeeze(-1).squeeze(-1)
             
-            if WFS_noise_var.shape[1] > 1:
-                varNoise = WFS_noise_var.mean(dim=1) # averaging the varience over all LGSs
-            else:
-                varNoise = WFS_noise_var
+            # Averaging over all GSs if there are several of them assumed to have the same noise variance
+            varNoise = WFS_noise_var.mean(dim=1) if WFS_noise_var.shape[1] > 1 else WFS_noise_var
             
             noisePSD = noisePSD * self.noise_gain * pdims(varNoise,2) * self.mask_corrected_AO * self.piston_filter
             
@@ -908,7 +907,7 @@ class TipTorch(torch.nn.Module):
          
         self.W = self.P_opt @ self.W_tomo
         
-        # Note, that size of HOloop_rate == N_src_tomo (wait, why?)
+        # NOTE that size of HOloop_rate == N_src_tomo (wait, why?)
         samp_time = 1.0 / self.HOloop_rate
         www = 2j * torch.pi * pdims(self.k_AO, 1) * torch.sinc((samp_time * self.WFS_det_clock_rate).view(self.N_src_tomo,1,1,1) * self.freq_t)
         self.MP_alpha_L = www.unsqueeze(-2) * P * (torch.sinc(self.WFS_d_sub*kx) * torch.sinc(self.WFS_d_sub*ky))

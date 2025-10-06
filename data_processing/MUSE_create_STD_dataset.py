@@ -8,6 +8,7 @@ except NameError:
     pass
 
 import sys
+
 sys.path.insert(0, '..')
 
 import pickle
@@ -18,7 +19,6 @@ from tqdm import tqdm
 
 import pandas as pd
 import seaborn as sns
-from astropy.io import fits
 import astropy.units as u
 from MUSE_STD_dataset_utils import *
 
@@ -203,7 +203,7 @@ else:
         muse_df = pickle.load(handle)
 
 
-#%%
+#%% ================================= MUSE NFM STD stars dataset cleaning, imputation and scaling ==================================
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
@@ -308,7 +308,7 @@ muse_data_package = {
     'telemetry imputed df': muse_df_pruned_imputed
 }
 
-with open(STD_FOLDER / 'muse_STD_data_package.pickle', 'wb') as handle:
+with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'wb') as handle:
     pickle.dump(muse_data_package, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 # Save imputer and scaler as separate pickle files
@@ -317,6 +317,61 @@ with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'wb') as handl
 
 with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'wb') as handle:
     pickle.dump(telemetry_scaler, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+
+#%%
+# ================================ Write MUSE-NFW STD stars dataset cache ================================
+with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
+    muse_df = pickle.load(handle)
+
+with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
+    muse_data_package = pickle.load(handle)
+
+DATASET_CACHE = STD_FOLDER / 'dataset_cache'
+PSF_cubes, configs, telemetry_records, bad_ids = [], [], [], []
+
+good_samples = muse_df[muse_df['Corrupted'] == False]
+
+for id in tqdm(good_samples.index):
+    try:
+        PSF_data, _, _, model_config = LoadSTDStarData(
+            ids = id,
+            derotate_PSF = True,
+            normalize = True,
+            subtract_background = True,
+            ensure_odd_pixels = True,
+            device = torch.device('cpu')
+        )
+        telemetry_record = muse_data_package['telemetry normalized imputed df'].loc[id].to_numpy()
+        PSF_cubes.append(np.moveaxis(PSF_data.squeeze(0).numpy(), 0, -1)) # 1 x N_wvl x H x W  -->  H x W x N_wvl
+        configs.append(model_config)
+        telemetry_records.append(telemetry_record)
+
+    except Exception as e:
+        print(f'Error with id {id}: {e}')
+        bad_ids.append(id)
+        continue
+
+if len(bad_ids) > 0:
+    print('Bad ids:')
+    for bad_id in bad_ids:
+        print(bad_id)
+
+PSF_cubes = np.stack(PSF_cubes, axis=0) # N_samples x H x W x N_wvl
+telemetry_records = np.stack(telemetry_records, axis=0) # N_samples x N_features
+
+# Store dataset caches
+np.save(DATASET_CACHE / 'muse_STD_stars_telemetry.npy', telemetry_records)
+np.save(DATASET_CACHE / 'muse_STD_stars_PSFs.npy', PSF_cubes)
+torch.save(configs, DATASET_CACHE / 'muse_STD_stars_configs.pt')
+
+#%%
+from managers.config_manager import MultipleTargetsInDifferentObservations
+
+configs_list = torch.load(DATASET_CACHE / 'muse_STD_stars_configs.pt')
+
+batch_config = MultipleTargetsInDifferentObservations(configs_list, device=device)
+batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits') # Force right directory to the VLT UT4 pupil
 
 
 #%%
@@ -712,6 +767,3 @@ shap_values = explainer.shap_values(X_test_df)
 # SHAP dependence plot
 shap.dependence_plot(most_important_feature, shap_values[1], X_test_df)
 
-#%%
-# Check columns with all NaN values
-nan_cols = dfs.columns[dfs.isna().all()]

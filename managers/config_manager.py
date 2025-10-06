@@ -237,10 +237,10 @@ class ConfigManager():
         if framework.lower() == 'pytorch' or framework.lower() == 'torch':
             def convert_value(x):
                 if isinstance(x, torch.Tensor):
-                    return x.to(device=device, dtype=dtype)
+                    return x.to(device=device, dtype=dtype, non_blocking=True)
                 
                 elif isinstance(x, list) and all(isinstance(i, torch.Tensor) for i in x):
-                    return torch.stack([t.to(device=device, dtype=dtype) for t in x])
+                    return torch.stack([t.to(device=device, dtype=dtype, non_blocking=True) for t in x])
 
                 elif isinstance(x, list) and all(isinstance(i, np.ndarray) for i in x):
                     return torch.stack([torch.from_numpy(i) for i in x]).to(device, dtype=dtype)

@@ -5,7 +5,6 @@
 import sys
 sys.path.insert(0, '..')
 
-from sympy import N
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
@@ -24,7 +23,7 @@ from data_processing.normalizers import Uniform, Uniform0_1, Atanh, Uniform0_1
 from project_settings import device
 
 derotate_PSF    = True
-Moffat_absorber = True
+Moffat_absorber = False
 fit_LO          = True
 fit_wind_speed  = True
 chrom_defocus   = False and fit_LO
@@ -51,27 +50,56 @@ N_spline_ctrl   = 5
 # wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 3), a_min=0, a_max=N_wvl_max-1)
 wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
 
-#%
+# ids = 96 # strongest wind
+# ids = 394 # strong wind
+# ids = 278 # strong wind
+# ids = 176 # strong wind
+# ids = 296 # sausage
+# ids = 324
+# ids = 230 # PSF with chromatic displacement
+# ids = 231
+# ids = 344 # intense phase bump
+# ids = [344, 179, 451] # intense phase bump
+# ids = 423 # relatively good one
+
+# ids = 404 # intense streaks
+# ids = 462
+# ids = 465 # slight sausage
+# ids = 359
+# ids = 121
+# ids = 184 # weak wind patterns
+# ids = 338 # blurry
+# ids = 470 # blurry
+# ids = 346 # blurry
+# ids = 206 # blurry, good for red debugging
+# ids = 179 # blurry
+# ids = 174
+
+# ids = 428 # good one, no DM mismathc yet
+# ids = 434 # good one, no DM mismathc yet
+
+# ids = 446 # does not converge with L-BFGS
+
+# ids = 440 # good one, but DM correction mismatch
+# ids = 449 # good one, but DM correction mismatch
+# ids = 451 # good one, but DM correction mismatch
+# ids = 453 # good one, but DM correction mismatch
+
+# ids = 455 # good one
+
+# ids = 457 # surprisingly poor blue fitting
+# ids = 477 # surprisingly poor blue fitting
+ids = 467 # surprisingly poor blue fitting
+# ids = 458 # surprisingly poor blue fitting
+ids = 468 # surprisingly poor blue fitting
+
+# ids = 482 # good one
+# ids = 494 # good one
+# ids = 462 # good one
+# ids = 475 # good one
+
 PSF_0, norms, bgs, model_config = LoadSTDStarData(
-    ids = 96, # strongest wind
-    # ids = 394, # strong wind
-    # ids = 278, # strong wind
-    # ids = 176, # strong wind
-    # ids = 296,
-    # ids = 324,
-    # ids = 230, # PSF with chromatic displacement
-    # ids = 231,
-    # ids = 470,
-    # ids = 344, # intense phase bump
-    # ids = 404, # intense streaks
-    # ids = 462,
-    # ids = 465, # slight sausage
-    # ids = 359,
-    # ids = 184, # weak wind patterns
-    # ids = 121,
-    # ids = 206,
-    # ids = 451, # good one
-    # ids = 174,
+    ids = ids,
     derotate_PSF = derotate_PSF,
     normalize = True,
     subtract_background = True,
@@ -80,26 +108,36 @@ PSF_0, norms, bgs, model_config = LoadSTDStarData(
     device = device
 )
 
+# PSF_0[:,-1,...] /= 0.97
+# PSF_0[:,-2,...] /= 0.985
+# PSF_0[:,-1,...] /= 0.99
+# PSF_0[:,-2,...] /= 0.999
+
 if derotate_PSF:
     pupil_angle = 0.0
 else:
     pupil_angle = model_config['telescope']['PupilAngle'].cpu().numpy().item()
 
 N_wvl = PSF_0.shape[1]
+N_src = PSF_0.shape[0]
+
 wavelengths = model_config['sources_science']['Wavelength'].squeeze()
-# GL_frac = np.minimum(config['atmosphere']['Cn2Weights'][0,0].item(), 0.98)
 
 #%
 cmap = mpl.colormaps.get_cmap('gray')  # viridis is the default colormap for imshow
 cmap.set_bad(color='black')
 
-for i in range(N_wvl):
-    im = PSF_0[0,i,...].cpu().numpy()
-    vmin = np.percentile(im[im > 0], 10) if np.any(im > 0) else 1
-    vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
+for j in range(N_src):
+    for i in range(N_wvl):
+        im = PSF_0[j,i,...].cpu().numpy()
+        vmin = np.percentile(im[im > 0], 10) if np.any(im > 0) else 1
+        vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
 
-    # plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
-    # plt.show()
+        plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
+        plt.axis('off')
+        plt.show()
+        
+    plt.show()
 
 #%
 # plot_chromatic_PSF_slice(PSF_0, wavelengths, norms, window_size=40)
@@ -123,19 +161,7 @@ PSD_include = {
 }
 PSF_model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
 # PSF_model.apodizer = PSF_model.make_tensor(1.0)
-testo = PSF_model()
-
-#%%
-
-# WIND DIR TEST HERE
-
-im = testo[0,-1,...].cpu().numpy()
-vmin = np.percentile(im[im > 0], 10) if np.any(im > 0) else 1
-vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
-
-plt.imshow(im, norm=LogNorm(vmin=vmin, vmax=vmax))
-plt.show()
-
+PSF_1 = PSF_model()
 
 #%%
 # LO_basis = PixelmapBasis(PSF_model, ignore_pupil=False)
@@ -182,76 +208,82 @@ norm_wind_speed  = Uniform(a=0, b=10)
 norm_wind_dir    = Uniform(a=0, b=360)
 norm_sausage_pow = Uniform(a=0, b=1)
 norm_LO          = Uniform(a=-100, b=100)
-# df_transforms_GL_frac = Atanh()
+# norm_GL_h        = Uniform(a=0.0, b=2000.0)
+# norm_GL_frac     = Atanh()
+
+
 # TODO: must be scaling of spline values, too
-norm_wvl         = Uniform0_1(a=wavelengths.min().item(), b=wavelengths.max().item())
+norm_wvl = Uniform0_1(a=wavelengths.min().item(), b=wavelengths.max().item())
 wvl_norm = norm_wvl(wavelengths).clone().unsqueeze(0)
 x_ctrl = torch.linspace(0, 1, N_spline_ctrl, device=device)
 
 # polychromatic_params = ['F', 'dx', 'dy', 'Jx', 'Jy']
-polychromatic_params = ['F', 'dx', 'dy'] + ['chrom_defocus'] if chrom_defocus else ['J']
+polychromatic_params = ['F', 'dx', 'dy'] + (['chrom_defocus'] if chrom_defocus else ['J'])
 
 # Add base parameters
 if spline_fit:
-    inputs_manager.add('F_ctrl',  torch.tensor([[1.0,]*N_spline_ctrl]),  norm_F)
-    inputs_manager.add('dx_ctrl', torch.tensor([[0.0,]*N_spline_ctrl]),  norm_dxy)
-    inputs_manager.add('dy_ctrl', torch.tensor([[0.0,]*N_spline_ctrl]),  norm_dxy)
-    inputs_manager.add('bg_ctrl', torch.tensor([[0.0,]*N_spline_ctrl]),  norm_bg)
+    inputs_manager.add('F_ctrl',  torch.tensor([[1.0,]*N_spline_ctrl]*N_src),  norm_F)
+    inputs_manager.add('dx_ctrl', torch.tensor([[0.0,]*N_spline_ctrl]*N_src),  norm_dxy)
+    inputs_manager.add('dy_ctrl', torch.tensor([[0.0,]*N_spline_ctrl]*N_src),  norm_dxy)
+    inputs_manager.add('bg_ctrl', torch.tensor([[0.0,]*N_spline_ctrl]*N_src),  norm_bg)
 else:
-    inputs_manager.add('F',  torch.tensor([[1.0,]*N_wvl]),  norm_F)
-    inputs_manager.add('dx', torch.tensor([[0.0,]*N_wvl]),  norm_dxy)
-    inputs_manager.add('dy', torch.tensor([[0.0,]*N_wvl]),  norm_dxy)
-    inputs_manager.add('bg', torch.tensor([[0.0,]*N_wvl]),  norm_bg)
+    inputs_manager.add('F',  torch.tensor([[1.0,]*N_wvl]*N_src),  norm_F)
+    inputs_manager.add('dx', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_dxy)
+    inputs_manager.add('dy', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_dxy)
+    inputs_manager.add('bg', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_bg)
 
-    if chrom_defocus:
-        inputs_manager.add('J', torch.tensor([[25.0]]), norm_J)
+if chrom_defocus:
+    inputs_manager.add('J', torch.tensor([[25.0]]*N_src), norm_J)
+else:
+    if spline_fit:
+        inputs_manager.add('J_ctrl', torch.tensor([[25.0,]*N_spline_ctrl]*N_src), norm_J)
+        # inputs_manager.add('Jx_ctrl', torch.tensor([[10.0,]*N_spline_ctrl]*N_src), norm_dxy)
+        # inputs_manager.add('Jy_ctrl', torch.tensor([[10.0,]*N_spline_ctrl]*N_src), norm_dxy)
     else:
-        if spline_fit:
-            inputs_manager.add('J_ctrl', torch.tensor([[25.0,]*N_spline_ctrl]), norm_J)
-            # inputs_manager.add('Jx_ctrl', torch.tensor([[10.0,]*N_spline_ctrl]), norm_dxy)
-            # inputs_manager.add('Jy_ctrl', torch.tensor([[10.0,]*N_spline_ctrl]), norm_dxy)
-        else:
-            inputs_manager.add('J', torch.tensor([[25.0]*N_wvl]), norm_J)
-            # inputs_manager.add('Jx', torch.tensor([[25.0]*N_wvl]),  norm_J)
-            # inputs_manager.add('Jy', torch.tensor([[25.0]*N_wvl]),  norm_J)
-            
-inputs_manager.add('r0',  torch.tensor([PSF_model.r0.item()]), norm_r0)
+        inputs_manager.add('J', torch.tensor([[25.0]*N_wvl]*N_src), norm_J)
+        # inputs_manager.add('Jx', torch.tensor([[25.0]*N_wvl]*N_src),  norm_J)
+        # inputs_manager.add('Jy', torch.tensor([[25.0]*N_wvl]*N_src),  norm_J)
+        
+inputs_manager.add('r0', PSF_model.r0.clone(), norm_r0)
 if fit_wind_speed:
-    # inputs_manager.add('wind_dir_single',   PSF_model.wind_dir[0,-1].clone().unsqueeze(0),   norm_wind_dir)
-    inputs_manager.add('wind_speed_single', PSF_model.wind_speed[0,-1].clone().unsqueeze(0), norm_wind_speed)
+    # inputs_manager.add('wind_dir_single',   PSF_model.wind_dir[0,0].clone().unsqueeze(-1),   norm_wind_dir)
+    inputs_manager.add('wind_speed_single', PSF_model.wind_speed[:,0].clone().unsqueeze(-1), norm_wind_speed)
 
-inputs_manager.add('Jxy', torch.tensor([[0.0]]), norm_Jxy, optimizable=False)
-inputs_manager.add('dn',  torch.tensor([0.25]),  norm_dn)
+inputs_manager.add('Jxy', torch.tensor([[0.0]]*N_src), norm_Jxy, optimizable=False)
+inputs_manager.add('dn',  torch.tensor([0.25]*N_src),  norm_dn)
 
-# inputs_manager.add('wind_speed', PSF_model.wind_speed.detach().clone(),  norm_wind_speed)
-# inputs_manager.add('GL_frac', torch.tensor([GL_frac]), df_transforms_GL_frac)
+# GL_frac = np.maximum(PSF_model.Cn2_weights[0,-1].detach().cpu().numpy().item(), 0.9)
+# GL_h    = PSF_model.h[0,-1].detach().cpu().numpy().item()
+
+# inputs_manager.add('GL_frac', torch.tensor([GL_frac]), norm_GL_frac)
+# inputs_manager.add('GL_h',    torch.tensor([GL_h]), norm_GL_h)
 
 # Add Moffat parameters if needed
 if Moffat_absorber:
-    inputs_manager.add('amp',   torch.tensor([1.0]), norm_amp)
-    inputs_manager.add('b',     torch.tensor([0.0]), norm_b)
-    inputs_manager.add('alpha', torch.tensor([4.5]), norm_alpha)
-    inputs_manager.add('beta',  torch.tensor([2.5]), norm_beta)
-    inputs_manager.add('ratio', torch.tensor([1.0]), norm_ratio)
-    inputs_manager.add('theta', torch.tensor([0.0]), norm_theta)
+    inputs_manager.add('amp',   torch.tensor([1e-4]*N_src), norm_amp)
+    inputs_manager.add('b',     torch.tensor([0.0]*N_src), norm_b)
+    inputs_manager.add('alpha', torch.tensor([4.5]*N_src), norm_alpha)
+    inputs_manager.add('beta',  torch.tensor([2.5]*N_src), norm_beta)
+    inputs_manager.add('ratio', torch.tensor([1.0]*N_src), norm_ratio)
+    inputs_manager.add('theta', torch.tensor([0.0]*N_src), norm_theta)
 
 if fit_LO:
     if isinstance(LO_basis, PixelmapBasis):
-        inputs_manager.add('LO_coefs', torch.zeros([1, LO_N_params**2]), norm_LO)
+        inputs_manager.add('LO_coefs', torch.zeros([N_src, LO_N_params**2]), norm_LO)
         phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_N_params, LO_N_params))
         
     elif isinstance(LO_basis, ZernikeBasis) or isinstance(LO_basis, ArbitraryBasis):
-        inputs_manager.add('LO_coefs', torch.zeros([1, LO_N_params]), norm_LO)
-        
+        inputs_manager.add('LO_coefs', torch.zeros([N_src, LO_N_params]), norm_LO)
+
         if chrom_defocus:
-            inputs_manager.add('chrom_defocus',  torch.tensor([[0.0,]*N_wvl]),  norm_LO, optimizable=chrom_defocus)
-            
+            inputs_manager.add('chrom_defocus',  torch.tensor([[0.0,]*N_wvl]*N_src),  norm_LO, optimizable=chrom_defocus)
+
             def phase_func():
-                coefs_chromatic = inputs_manager["LO_coefs"].view(1, LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1)
-                coefs_chromatic[:, :, defocus_mode_id] += inputs_manager["chrom_defocus"].view(1, N_wvl) # add chromatic defocus
+                coefs_chromatic = inputs_manager["LO_coefs"].view(N_src, LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1)
+                coefs_chromatic[:, :, defocus_mode_id] += inputs_manager["chrom_defocus"].view(N_src, N_wvl) # add chromatic defocus
                 return LO_basis(coefs_chromatic)
         else:
-            phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(1, LO_N_params))
+            phase_func = lambda: LO_basis(inputs_manager["LO_coefs"].view(N_src, LO_N_params))
     else:
         raise ValueError('Wrong LO type specified.')
 else:
@@ -260,37 +292,45 @@ else:
 inputs_manager.to(device)
 inputs_manager.to_float()
 
+# print(inputs_manager)
+
 _ = inputs_manager.stack()
 
 #%%
 def func(x_, include_list=None):
     x_torch = inputs_manager.unstack(x_)
 
-    # Clone J entry to Jx and Jy
-    x_torch['Jx'] = x_torch['J']
-    x_torch['Jy'] = x_torch['J']
-    
-    if fit_wind_speed:
-        # x_torch['wind_dir']   = x_torch['wind_dir_single'].repeat(1, PSF_model.N_L)
-        x_torch['wind_speed'] = x_torch['wind_speed_single'].repeat(1, PSF_model.N_L)
-
-    x_ = { key: x_torch[key] for key in include_list } if include_list is not None else x_torch
-
     if spline_fit:
         for entry in polychromatic_params:
             spline = NaturalCubicSpline(natural_cubic_spline_coeffs(x_ctrl, x_torch[entry+'_ctrl'].T))
             x_torch[entry] = spline.evaluate(wvl_norm).squeeze(-1)
     
+    # Clone J entry to Jx and Jy
+    x_torch['Jx'] = x_torch['J']
+    x_torch['Jy'] = x_torch['J']
+    
+    if fit_wind_speed:
+        # x_torch['wind_dir']   = x_torch['wind_dir_single'].unsqueeze(-1).repeat(1, PSF_model.N_L)
+        x_torch['wind_speed'] = x_torch['wind_speed_single'].unsqueeze(-1).repeat(1, PSF_model.N_L)
+
+    # x_torch['Cn2_weights'] = torch.hstack([x_torch['GL_frac'], 1.0 - x_torch['GL_frac']]).unsqueeze(0)
+    # x_torch['h']           = torch.hstack([torch.tensor([0.0], device=device), x_torch['GL_h'].abs()]).unsqueeze(0)
+
+    x_ = { key: x_torch[key] for key in include_list } if include_list is not None else x_torch
+
     return PSF_model(x_torch, None, phase_generator=phase_func)
 
+x_ = inputs_manager.stack()
+PSF_1 = func(x_)
 
+#%%
 wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
 wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
+wvl_weights = wvl_weights * 0 + 1
+
 # mask = torch.tensor(mask_circle(PSF_0.shape[-1], 5)).view(1, 1, *PSF_0.shape[-2:]).to(device)
 # mask_inv = 1.0 - mask
-
-grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
 # loss_radial_fn = RadialProfileLossSimple(
 #     n_bins=64,
@@ -299,7 +339,6 @@ grad_loss_fn = GradientLoss(p=1, reduction='mean')
 #     log_profile=False
 # )
 
-#%%
 loss_Huber = torch.nn.HuberLoss(reduction='mean', delta=0.05)
 loss_MAE   = torch.nn.L1Loss(reduction='mean')
 loss_MSE   = torch.nn.MSELoss(reduction='mean')
@@ -313,6 +352,7 @@ def loss_fn(x_, w_MSE, w_MAE):
     LO_loss = loss_LO_fn() if fit_LO else 0.0
 
     return MSE_loss + MAE_loss + LO_loss
+
 
 def loss_LO_fn():
     if isinstance(LO_basis, PixelmapBasis):
@@ -335,9 +375,10 @@ def loss_fn_Huber(x_):
 
 loss_fn1 = lambda x_: loss_fn(x_, w_MSE=800.0, w_MAE=1.6)
 loss_fn2 = lambda x_: loss_fn(x_, w_MSE=1.0, w_MAE=2.0)
+grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
 
-#%%
+#%
 # def loss_radial(x_):
 #     PSF_1 = func(x_)
 #     diff = (PSF_1-PSF_0) * wvl_weights
@@ -365,20 +406,37 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True)
     if len(include_list) > 0:
         inputs_manager.set_optimizable(include_list, True)
     else:
-        print('include_list is empty')
+        raise ValueError('include_list is empty')
         
     inputs_manager.set_optimizable(exclude_list, False)
 
-    print(inputs_manager)
+    # print(inputs_manager)
 
-    result = minimize(loss_fn, inputs_manager.stack(), max_iter=max_iter, tol=1e-4, method='l-bfgs', disp= 2 if verbose else 0)
-    if fit_LO:  
+    x_backup = inputs_manager.stack().clone()
+
+    result = minimize(loss_fn, inputs_manager.stack(), max_iter=max_iter, tol=1e-4, method='l-bfgs', disp=2 if verbose else 0)
+    if result['nit'] < max_iter * 0.3:
+        if verbose:
+            print("Warning: minimization stopped too early. Perhaps, convergence wasn't reached? Trying BFGS...")
+        inputs_manager.unstack(x_backup, include_all=True, update=True)
+        result = minimize(loss_fn, inputs_manager.stack(), max_iter=max_iter, tol=1e-5, method='bfgs', disp=2 if verbose else 0)
+    
+    if result['fun'] > 1:
+        if verbose:
+            print("Warning: final loss is high. Perhaps, convergence wasn't reached? Trying BFGS...")
+        inputs_manager.unstack(x_backup, include_all=True, update=True)
+        result = minimize(loss_fn, inputs_manager.stack(), max_iter=max_iter, tol=1e-5, method='bfgs', disp=2 if verbose else 0)
+
+    if fit_LO:
         if isinstance(LO_basis, PixelmapBasis):
-            OPD_map = inputs_manager['LO_coefs'].view(1, LO_N_params, LO_N_params).squeeze().detach().cpu().numpy()
+            OPD_map = inputs_manager['LO_coefs'].view(N_src, LO_N_params, LO_N_params).detach().cpu().numpy()
         elif isinstance(LO_basis, ZernikeBasis) or isinstance(LO_basis, ArbitraryBasis):
-            OPD_map = LO_basis.compute_OPD(inputs_manager["LO_coefs"].view(1, LO_N_params)).squeeze().detach().cpu().numpy()
+            OPD_map = LO_basis.compute_OPD(inputs_manager["LO_coefs"].view(N_src, LO_N_params)).detach().cpu().numpy()
     else:
         OPD_map = None
+        
+    if verbose:
+        print('-'*50)
 
     return result.x, func(result.x), OPD_map
 
@@ -392,44 +450,79 @@ exclude_general = ['ratio', 'theta'] if Moffat_absorber else []
 include_LO = (['LO_coefs'] if fit_LO else []) + (['chrom_defocus'] if chrom_defocus else [])
 exclude_LO = list(set(include_general + exclude_general) - set(include_LO))
 
+# inc_minus_Moffat = list(set(include_general) - set(['amp', 'alpha', 'beta', 'b']))
+# inc_only_Moffat = ['amp', 'alpha', 'beta', 'b']
+
 #%%
 x0, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 150)
+# x0, PSF_1, OPD_map = minimize_params(loss_fn_Huber, include_general, exclude_general, 150)
 
 # if fit_LO:
-#     x1, PSF_1, OPD_map = minimize_params(loss_fn2, include_LO, exclude_LO, 50)
-#     x2, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 50)
+    # x1, PSF_1, OPD_map = minimize_params(loss_fn2, include_LO, exclude_LO, 50)
+    # x2, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 50)
 
-# x0, PSF_1, OPD_map = minimize_params(loss_fn_Huber, include_general, exclude_general, 150)
+#%
+# import pickle
+
+# with open(f'PSF_fitted_{ids}.pickle', 'wb') as handle:
+#     pickle.dump({
+#         'PSF_1': PSF_1.detach().cpu().numpy(),
+#         'x0': OPD_map,
+#         'IDS': ids,
+#     }, handle)
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles
 
-wvl_select = np.s_[0, N_wvl//2, -1]
+id_src = 0
 
 vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
 vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
+wvl_select = np.s_[0, N_wvl//2, -1]
 
 draw_PSF_stack(
-    PSF_0.cpu().numpy()[0, wvl_select, ...],
-    PSF_1.cpu().numpy()[0, wvl_select, ...],
+    PSF_0.cpu().numpy()[id_src, wvl_select, ...],
+    PSF_1.cpu().numpy()[id_src, wvl_select, ...],
     average=True,
     min_val=vmin,
     max_val=vmax,
     crop=100
 )
 
-PSF_disp = lambda x, w: (x[0,w,...]).cpu().numpy()
+PSF_disp = lambda x, w: (x[id_src,w,...]).cpu().numpy()
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
-    plot_radial_PSF_profiles( PSF_disp(PSF_0, lmbd),  PSF_disp(PSF_1, lmbd), 'Data', 'TipTorch', cutoff=40,  y_min=3e-2, linthresh=1e-2, ax=ax[i] )
+    plot_radial_PSF_profiles(
+        PSF_disp(PSF_0, lmbd),
+        PSF_disp(PSF_1, lmbd),
+        'Data',
+        'TipTorch',
+        cutoff=40,
+        y_min=3e-2,
+        linthresh=1e-2,
+        return_profiles=True,
+        ax=ax[i]        
+    )
 plt.show()
 
 if fit_LO:
-    plt.imshow(OPD_map*1e9)
+    plt.imshow(OPD_map[id_src,...]*1e9)
     plt.colorbar()
     plt.show()
-    
+
+#%%
+from data_processing.MUSE_STD_dataset_utils import GetROIaroundMax, GetSpectrum
+
+diff_im = (PSF_1-PSF_0).abs()[0,...].squeeze().cpu().numpy()
+
+_, _, max_id = GetROIaroundMax(diff_im.mean(0).squeeze(), 10) # TODO: this function is redundant
+spectrum_diff = GetSpectrum(diff_im, max_id, radius=2)
+_, _, max_id = GetROIaroundMax(PSF_0[0,...].squeeze().cpu().numpy().mean(0), 10) # TODO: this function is redundant
+spectrum_data = GetSpectrum(PSF_0[0,...].squeeze().cpu().numpy(), max_id, radius=5)
+
+plt.plot(wavelengths.squeeze().cpu().numpy()*1e9, spectrum_diff / spectrum_data * 100)
+
 # %%
 from tools.plotting import plot_radial_PSD_profiles
 
@@ -445,13 +538,47 @@ if spline_fit:
 plt.plot(wavelengths.squeeze(0).cpu().numpy()*1e9, PSF_model.F.squeeze().detach().cpu().numpy())
 plt.show()
 
-
 #%%
 from tools.plotting import plot_chromatic_PSF_slice
 
-# plot_chromatic_PSF_slice((PSF_0-PSF_1).abs(), wavelengths, window_size=40)
-plot_chromatic_PSF_slice((PSF_1).abs(), wavelengths, window_size=40)
+# plot_chromatic_PSF_slice(PSF_1.abs(), wavelengths, window_size=40)
+plot_chromatic_PSF_slice(PSF_0.abs(), wavelengths, window_size=40, scale='linear')
 # plot_chromatic_PSF_slice(PSF_0-PSF_1, wavelengths, window_size=40)
+
+
+#%%
+
+for j in range(N_src):
+    for i in range(N_wvl):
+        im = (PSF_1-PSF_0).abs()[j,i,...].cpu().numpy()
+        vmin = np.percentile(im[im > 0], 10) if np.any(im > 0) else 1
+        vmax = np.percentile(im[im > 0], 99.9975) if np.any(im > 0) else im.max()
+
+        plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
+        plt.axis('off')
+        plt.show()
+        
+    plt.show()
+
+
+
+#%%
+F_copy = PSF_model.F.detach().clone()
+
+#%%
+inputs_manager['F'] = torch.tensor([[1.0]*N_wvl], device=device)
+
+x_tmp = inputs_manager.stack()
+
+PSF_1_flat = func(x_tmp)
+
+plot_chromatic_PSF_slice((PSF_1_flat).abs(), wavelengths, window_size=40, scale='linear')
+
+#%%
+plot_chromatic_PSF_slice((PSF_1).abs(), wavelengths, window_size=40, scale='linear')
+
+#%%
+plot_chromatic_PSF_slice((PSF_1-PSF_0)/PSF_0, wavelengths, window_size=40, scale='linear', slices=['horizontal','vertical'])
 
 #%%
 # PSF_diff = (PSF_0 - PSF_1)[0,:,...].mean(0).squeeze()

@@ -317,7 +317,8 @@ def plot_radial_PSF_profiles(PSF_0,
         ax.set_title(title)
         ax.legend()
         ax.set_xlim(0, x_max)
-        ax.text(x_max-16, max_err+2.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
+        # ax.text(x_max-16, max_err+2.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
+        ax.text(6, max_err+0.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
         ax.set_xlabel('Pixels from on-axis, [pix]')
         ax.set_ylabel('Normalized intensity, [%]')
         ax.grid()
@@ -426,7 +427,7 @@ def draw_PSF_stack(
     
     from matplotlib.colors import LogNorm
     
-    if PSF_in.ndim == 2:  PSF_in  = PSF_in [None, None, ...]
+    if PSF_in.ndim  == 2:  PSF_in = PSF_in [None, None, ...]
     if PSF_out.ndim == 2: PSF_out = PSF_out[None, None, ...]
     
     if PSF_in.ndim  == 3:  PSF_in = PSF_in [None, ...]
@@ -491,7 +492,15 @@ def draw_PSF_stack(
             plt.show()
 
 
-def plot_chromatic_PSF_slice(PSF, wavelengths, norms=None, window_size=50, slices=['vertical', 'horizontal', 'diagonal_1', 'diagonal_2'], figsize=(12, 5)):
+def plot_chromatic_PSF_slice(
+    PSF,
+    wavelengths,
+    norms = None,
+    window_size = 50,
+    scale = 'log',
+    slices = ['vertical', 'horizontal', 'diagonal_1', 'diagonal_2'],
+    figsize = (12, 5)
+):
     """
     Plot PSF cross-sections and optionally normalization values across wavelengths.
     
@@ -554,7 +563,11 @@ def plot_chromatic_PSF_slice(PSF, wavelengths, norms=None, window_size=50, slice
         
         ax1.plot(slice_, color=wvl_colors[i], alpha=0.5, label=f"{wavelengths[i].item()*1e9:.0f} nm")
 
-    ax1.set_yscale('symlog', linthresh=5e-4)
+    if scale == 'log':
+        ax1.set_yscale('symlog', linthresh=5e-4)
+    elif scale == 'linear':
+        ax1.set_yscale('linear')
+
     ax1.grid(True, which='both', alpha=0.3)
     ax1.set_xlim([0, len(slice_)-1])
     ax1.set_xlabel('')
