@@ -86,7 +86,7 @@ with open(SPHERE_DATA_FOLDER + 'fitted_df.pickle', 'wb') as handle:
     pickle.dump(fitted_df_filtered, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 #%%
-from data_processing.normalizers import CreateTransformSequenceFromFile
+from tools.normalizers import CreateTransformSequenceFromFile
 
 df_transforms = CreateTransformSequenceFromFile('../data/temp/fitted_df_norm_transforms.pickle')
 

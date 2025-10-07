@@ -692,7 +692,7 @@ def hist_thresholded(
     # plt.show()
 
 
-def plot_radial_PSD_profiles(PSF_model):
+def plot_radial_PSD_profiles(PSF_model, xscale='symlog', yscale='symlog'):
     plt.figure(figsize=(6,4))
     for entry in PSF_model.PSD_include:
         PSD = PSF_model.PSDs[entry]
@@ -717,8 +717,17 @@ def plot_radial_PSD_profiles(PSF_model):
     plt.plot(spatial_freq, rp.profile, color='k', linewidth=1, linestyle='--', label='Total PSD')
 
     plt.ylabel(rf'PSD [nm$^2$/(1/m)$^2$]')
-    plt.yscale('symlog', linthresh=1e-4)
-    plt.xscale('log')
+    
+    if yscale == 'symlog' or yscale == 'log':
+        plt.yscale('symlog', linthresh=1e-4)
+    elif yscale == 'linear':
+        plt.yscale('linear')
+
+    if xscale == 'symlog' or xscale == 'log':
+        plt.xscale('symlog', linthresh=5e-2)
+    elif xscale == 'linear':
+        plt.xscale('linear')
+
     plt.grid(True, which='both', alpha=0.3)
     plt.legend()
     plt.xlabel('Spatial frequency (1/m)')

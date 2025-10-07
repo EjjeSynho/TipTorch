@@ -156,7 +156,7 @@ plt.imshow(C)
 plt.axis('off')
 
 #%% PSF fitting (no early-stopping)
-from data_processing.normalizers import Uniform
+from tools.normalizers import Uniform
 from tools.utils import OptimizableLO, ZernikeLO
 from managers.input_manager import InputsManager
 

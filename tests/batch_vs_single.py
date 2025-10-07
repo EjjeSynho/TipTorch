@@ -19,7 +19,7 @@ from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
 from managers.config_manager import GetSPHEREonsky, ConfigManager
 from project_settings import SPHERE_DATASET_FOLDER, SPHERE_DATA_FOLDER, device
-from data_processing.normalizers import CreateTransformSequenceFromFile
+from tools.normalizers import CreateTransformSequenceFromFile
 from managers.input_manager import InputsTransformer
 from copy import copy, deepcopy
 

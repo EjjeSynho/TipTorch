@@ -17,7 +17,7 @@ from tqdm import tqdm
 from tools.plotting import plot_radial_PSF_profiles, cropper, draw_PSF_stack
 from managers.config_manager import ConfigManager
 from project_settings import DATASET_FOLDER, MUSE_DATA_FOLDER, device
-from data_processing.normalizers import CreateTransformSequenceFromFile
+from tools.normalizers import CreateTransformSequenceFromFile
 from copy import copy, deepcopy
 from managers.input_manager import InputsTransformer
 

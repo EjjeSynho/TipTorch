@@ -166,7 +166,7 @@ def create_fold_data_loaders(cv_split, batch_size=16, num_workers=0):
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True if torch.cuda.is_available() else False,
+        # pin_memory=True if torch.cuda.is_available() else False,
         collate_fn=lambda batch: collate_batch(batch, device=device),
         drop_last=True
     )
@@ -176,7 +176,7 @@ def create_fold_data_loaders(cv_split, batch_size=16, num_workers=0):
         batch_size=batch_size,
         shuffle=False,
         num_workers=num_workers,
-        pin_memory=True if torch.cuda.is_available() else False,
+        # pin_memory=True if torch.cuda.is_available() else False,
         collate_fn=lambda batch: collate_batch(batch, device=device),
         drop_last=False
     )
@@ -189,7 +189,7 @@ test_loader = DataLoader(
     batch_size=16,
     shuffle=False,
     num_workers=0,
-    pin_memory=True if torch.cuda.is_available() else False,
+    # pin_memory=True if torch.cuda.is_available() else False,
     collate_fn=lambda batch: collate_batch(batch, device=device),
     drop_last=False
 )

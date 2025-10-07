@@ -28,7 +28,7 @@ import numpy as np
 from tqdm import tqdm
 from tools.utils import seeing, corr_plot
 from astropy.io import fits
-from data_processing.normalizers import CreateTransformSequenceFromFile
+from tools.normalizers import CreateTransformSequenceFromFile
 from sklearn.inspection import permutation_importance
 from matplotlib.colors import LogNorm
 from project_settings import WEIGHTS_FOLDER

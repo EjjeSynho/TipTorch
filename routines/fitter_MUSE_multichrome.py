@@ -16,7 +16,7 @@ from project_settings import MUSE_DATA_FOLDER, MUSE_FITTING_FOLDER, device
 from managers.config_manager import ConfigManager
 from torchmin import minimize
 
-from data_processing.normalizers import TransformSequence, Uniform
+from tools.normalizers import TransformSequence, Uniform
 from managers.input_manager import InputsTransformer
 from tqdm import tqdm
 

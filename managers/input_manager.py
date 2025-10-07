@@ -6,7 +6,7 @@ from collections import OrderedDict
 import torch
 import pickle
 import numpy as np
-from data_processing.normalizers import TransformSequence, DataTransform, Identity, LoadTransforms
+from tools.normalizers import TransformSequence, DataTransform, Identity, LoadTransforms
 
 """
 This module contains classes to manage the input data for the TipTorch PSF model. 

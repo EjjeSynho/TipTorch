@@ -25,7 +25,7 @@ from managers.config_manager import ConfigManager
 from data_processing.MUSE_data_utils import MUSE_DATA_FOLDER
 from data_processing.MUSE_STD_dataset_utils import DATASET_FOLDER
 
-from data_processing.normalizers import CreateTransformSequenceFromFile
+from tools.normalizers import CreateTransformSequenceFromFile
 from managers.input_manager import InputsTransformer
 from PSF_models.TipTorch import TipTorch
 

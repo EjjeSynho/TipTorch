@@ -23,7 +23,7 @@ from torchmin import minimize
 from tools.plotting import plot_radial_PSF_profiles
 from tools.utils import mask_circle, rad2mas
 from managers.config_manager import MultipleTargetsInOneObservation
-from data_processing.normalizers import CreateTransformSequenceFromFile
+from tools.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 
@@ -183,7 +183,7 @@ model.on_axis = False
 # PSF_1 = model()
 
 #%%
-from data_processing.normalizers import Uniform, Atanh
+from tools.normalizers import Uniform, Atanh
 from managers.input_manager import InputsManager, InputsManagersUnion
 
 

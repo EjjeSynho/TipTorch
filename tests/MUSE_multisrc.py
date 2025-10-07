@@ -27,7 +27,7 @@ from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
 from managers.parameter_parser import ParameterParser
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, mask_circle
 from managers.config_manager import ConfigManager
-from data_processing.normalizers import CreateTransformSequenceFromFile, InputsTransformer
+from tools.normalizers import CreateTransformSequenceFromFile, InputsTransformer
 from tqdm import tqdm
 from project_settings import MUSE_DATA_FOLDER, device
 from astropy.io import fits

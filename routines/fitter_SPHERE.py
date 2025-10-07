@@ -14,7 +14,7 @@ from tools.static_phase import SR, pdims, BuildPTTBasis, decompose_WF, project_W
 from tools.utils import cropper, FitGauss2D
 from PSF_models.TipTorch import TipTorch
 from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
-from data_processing.normalizers import TransformSequence, Uniform,
+from tools.normalizers import TransformSequence, Uniform,
 from managers.input_manager import InputsTransformer
 from managers.config_manager import GetSPHEREonsky, ConfigManager
 from data_processing.project_settings import SPHERE_DATA_FOLDER, SPHERE_FITTING_FOLDER

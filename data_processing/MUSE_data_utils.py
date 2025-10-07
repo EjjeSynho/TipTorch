@@ -2162,7 +2162,7 @@ def prune_columns(df):
 
 
 def create_normalizing_transforms(df):
-    from data_processing.normalizers import Invert, Gauss, Logify, YeoJohnson, Uniform, CreateTransformSequence, TransformSequence
+    from tools.normalizers import Invert, Gauss, Logify, YeoJohnson, Uniform, CreateTransformSequence, TransformSequence
 
     entry_data = [
         ('name', []),

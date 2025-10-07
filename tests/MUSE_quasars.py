@@ -25,7 +25,7 @@ from pathlib import Path
 
 from tools.utils import mask_circle
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
-from data_processing.normalizers import CreateTransformSequenceFromFile
+from tools.normalizers import CreateTransformSequenceFromFile
 
 
 #%
@@ -199,7 +199,7 @@ model.to(device)
 _ = model()
 
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
-from data_processing.normalizers import Uniform
+from tools.normalizers import Uniform
 from managers.input_manager import InputsManager, InputsManagersUnion
 
 df_transforms_fitted = CreateTransformSequenceFromFile(PROJECT_PATH / 'data/reduced_telemetry/MUSE/muse_df_fitted_transforms.pickle')

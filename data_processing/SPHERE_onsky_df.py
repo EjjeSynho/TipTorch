@@ -107,7 +107,7 @@ for entry in psf_df_filtered.columns.values:
 # psf_df_processed = psf_df_processed.dropna(axis=1)
 
 #%%
-from data_processing.normalizers import Gauss, Logify, YeoJohnson, Uniform, CreateTransformSequence
+from tools.normalizers import Gauss, Logify, YeoJohnson, Uniform, CreateTransformSequence
 
 entry_data = [\
     ['Tau0 (header)',              0.0,   0.025,  [YeoJohnson, Gauss]],

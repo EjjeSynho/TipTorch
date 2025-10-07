@@ -119,7 +119,7 @@ draw_PSF_stack(PSF_0*PSF_mask, PSF_1, average=True, crop=80, scale='log')
 
 #%% PSF fitting (no early-stopping)
 from tools.utils import LWE_basis
-from data_processing.normalizers import TransformSequence, Uniform, InputsTransformer
+from tools.normalizers import TransformSequence, Uniform, InputsTransformer
 
 basis = LWE_basis(toy)
 

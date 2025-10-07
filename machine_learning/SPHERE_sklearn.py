@@ -11,7 +11,7 @@ import torch.nn as nn
 import torch.optim as optim
 import pickle
 from sklearn.datasets import load_wine
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_splitö
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
@@ -28,7 +28,7 @@ import numpy as np
 from tqdm import tqdm
 from tools.utils import seeing, corr_plot
 from astropy.io import fits
-from data_processing.normalizers import CreateTransformSequenceFromFile
+from tools.normalizers import CreateTransformSequenceFromFile
 from sklearn.inspection import permutation_importance
 from matplotlib.colors import LogNorm
 
