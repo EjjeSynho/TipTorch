@@ -19,13 +19,16 @@ from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chroma
 from tools.utils import PupilVLT, GradientLoss, RadialProfileLossSimple
 # from tools.utils import mask_circle
 from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarData
-from tools.normalizers import Uniform, Uniform0_1, Atanh, Uniform0_1
+from tools.normalizers import Uniform, Uniform0_1, Atanh
 from project_settings import device
+
+from managers.config_manager import MultipleTargetsInDifferentObservations
 
 derotate_PSF    = True
 Moffat_absorber = False
 fit_LO          = True
 fit_wind_speed  = True
+fit_outer_scale = True
 chrom_defocus   = False and fit_LO
 spline_fit      = False
 LO_N_params     = 75
@@ -43,7 +46,7 @@ N_spline_ctrl   = 5
 
 # 6, 96, 151, 152, 188, 354 # strong wind ones
 
-#%
+#%%
 # with open(MUSE_DATA_FOLDER+'/muse_df.pickle', 'rb') as handle:
 #     muse_df = pickle.load(handle)
 
@@ -88,7 +91,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 
 # ids = 455 # good one
 
-ids = 457 # surprisingly poor blue fitting
+# ids = 457 # surprisingly poor blue fitting
 # ids = 477 # surprisingly poor blue fitting
 # ids = 467 # surprisingly poor blue fitting
 # ids = 458 # surprisingly poor blue fitting
@@ -97,9 +100,10 @@ ids = 457 # surprisingly poor blue fitting
 # ids = 494 # good one
 # ids = 462 # good one
 # ids = 475 # good one
-# ids = 468 # good one
+ids = 468 # good one
 
-PSF_0, norms, bgs, model_config = LoadSTDStarData(
+
+PSF_0, norms, bgs, configs = LoadSTDStarData(
     ids = ids,
     derotate_PSF = derotate_PSF,
     normalize = True,
@@ -109,12 +113,13 @@ PSF_0, norms, bgs, model_config = LoadSTDStarData(
     device = device
 )
 
-pupil_angle = 0.0 if derotate_PSF else model_config['telescope']['PupilAngle'].cpu().numpy().item()
+model_config = MultipleTargetsInDifferentObservations(configs, device=device)
+
+pupil_angle = model_config['telescope']['PupilAngle'].cpu().numpy().item()
+wavelengths = model_config['sources_science']['Wavelength'].squeeze()
 
 N_wvl = PSF_0.shape[1]
 N_src = PSF_0.shape[0]
-
-wavelengths = model_config['sources_science']['Wavelength'].squeeze()
 
 #%
 cmap = mpl.colormaps.get_cmap('gray')  # viridis is the default colormap for imshow
@@ -237,10 +242,12 @@ else:
         # inputs_manager.add('Jy', torch.tensor([[25.0]*N_wvl]*N_src),  norm_J)
         
 inputs_manager.add('r0', PSF_model.r0.clone(), norm_r0)
-inputs_manager.add('L0', PSF_model.L0.clone(), norm_L0)
+
+if fit_outer_scale:
+    inputs_manager.add('L0', PSF_model.L0.clone(), norm_L0)
 
 if fit_wind_speed:
-    # inputs_manager.add('wind_dir_single',   PSF_model.wind_dir[0,0].clone().unsqueeze(-1),   norm_wind_dir)
+    # inputs_manager.add('wind_dir_single',   PSF_model.wind_dir[:,0].clone().unsqueeze(-1),   norm_wind_dir)
     inputs_manager.add('wind_speed_single', PSF_model.wind_speed[:,0].clone().unsqueeze(-1), norm_wind_speed)
 
 inputs_manager.add('Jxy', torch.tensor([[0.0]]*N_src), norm_Jxy, optimizable=False)
@@ -436,12 +443,14 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True)
     return result.x, func(result.x), OPD_map
 
                 #   ['wind_speed'] + \
-include_general = ['r0', 'dn', 'L0'] + \
+include_general = ['r0', 'dn'] + \
                   (['amp', 'alpha', 'beta', 'b'] if Moffat_absorber else []) + \
                   (['LO_coefs'] if fit_LO else []) + (['chrom_defocus'] if chrom_defocus else []) + \
-                  ([x+'_ctrl' for x in polychromatic_params] if spline_fit else polychromatic_params)
+                  ([x+'_ctrl' for x in polychromatic_params] if spline_fit else polychromatic_params) + \
+                  (['L0'] if fit_wind_speed else [])
 
 exclude_general = ['ratio', 'theta'] if Moffat_absorber else []
+
 include_LO = (['LO_coefs'] if fit_LO else []) + (['chrom_defocus'] if chrom_defocus else [])
 exclude_LO = list(set(include_general + exclude_general) - set(include_LO))
 
@@ -455,30 +464,6 @@ x0, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general,
 # if fit_LO:
     # x1, PSF_1, OPD_map = minimize_params(loss_fn2, include_LO, exclude_LO, 50)
     # x2, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 50)
-
-#%
-# import pickle
-
-# with open(f'PSF_fitted_{ids}.pickle', 'wb') as handle:
-#     pickle.dump({
-#         'PSF_1': PSF_1.detach().cpu().numpy(),
-#         'x0': OPD_map,
-#         'IDS': ids,
-#     }, handle)
-
-#%%
-
-# PSF_model.L0 = torch.tensor([13.5049], device=device)
-# PSF_model.L0 = torch.tensor([13.5049/100000000], device=device)
-
-# inputs_manager['L0'] = torch.tensor([13.7681], device=device)
-# inputs_manager['L0'] = torch.tensor([13.7681/5], device=device)
-
-# x_ = inputs_manager.stack()
-
-# PSF_1 = func(x_)
-
-
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles

@@ -71,9 +71,12 @@ def LoadSTDStarData(
             PSF_STD  /= norms
         else:
             norms = np.ones(PSF_data.shape[0])[:,None,None]
-    
-        config_file = InitNFMConfig(sample, PSF_data, wvl_ids, convert_config=False)
-        
+
+        config_dict = InitNFMConfig(sample, PSF_data, wvl_ids, convert_config=False)
+
+        if derotate_PSF:
+            config_dict['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated
+
         # Select a subset of wavelengths bins
         if wvl_ids is not None:
             PSF_data = PSF_data[wvl_ids,...]
@@ -81,7 +84,7 @@ def LoadSTDStarData(
             norms = norms[wvl_ids,...]
             backgrounds = backgrounds[wvl_ids,...]
         
-        return PSF_data, PSF_STD, norms, backgrounds, config_file, sample
+        return PSF_data, PSF_STD, norms, backgrounds, config_dict, sample
 
 
     PSFs, configs, norms, bgs = [], [], [], []
@@ -107,36 +110,12 @@ def LoadSTDStarData(
     norms = torch.tensor(np.array(norms), dtype=default_torch_type, device=device)
     bgs   = torch.tensor(np.array(bgs),   dtype=default_torch_type, device=device)
 
-    '''
-    config_manager = ConfigManager()
-    merged_config  = config_manager.Merge(configs)
+    # merged_config = MultipleTargetsInDifferentObservations(configs, device=device)
 
-    config_manager.Convert(merged_config, framework='pytorch', device=device)
+    # if derotate_PSF:
+        # merged_config['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated
 
-    # All stacked sources must have the same wavelengths bins
-    merged_config['sources_science']['Wavelength'] = merged_config['sources_science']['Wavelength'][0]
-    merged_config['sources_HO']['Height']          = merged_config['sources_HO']['Height'].unsqueeze(-1)
-    merged_config['sources_HO']['Wavelength']      = merged_config['sources_HO']['Wavelength'].squeeze()
-    merged_config['sensor_science']['FieldOfView'] = merged_config['sensor_science']['FieldOfView'].item()
-    merged_config['NumberSources'] = len(ids)
-    merged_config['atmosphere']['Cn2Weights']      = merged_config['atmosphere']['Cn2Weights'].view(len(ids), -1)
-    merged_config['atmosphere']['Cn2Heights']      = merged_config['atmosphere']['Cn2Heights'].view(len(ids), -1)
-    merged_config['atmosphere']['WindSpeed']       = merged_config['atmosphere']['WindSpeed'].view(len(ids), -1)
-    merged_config['atmosphere']['WindDirection']   = merged_config['atmosphere']['WindDirection'].view(len(ids), -1)
-    merged_config['atmosphere']['Seeing']          = merged_config['atmosphere']['Seeing'].view(len(ids))
-    # merged_config['DM']['OptimizationWeight']      = merged_config['DM']['OptimizationWeight'][0]
-    merged_config['sensor_science']['FieldOfView'] = int(merged_config['sensor_science']['FieldOfView'])
-    '''
-
-    # if len(ids) > 1:
-    merged_config = MultipleTargetsInDifferentObservations(configs, device=device)
-    # else:
-    #     merged_config = configs[0]
-
-    if derotate_PSF:
-        merged_config['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated
-
-    return PSFs, norms, bgs, merged_config
+    return PSFs, norms, bgs, configs #merged_config
 
 
 def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
