@@ -6,6 +6,7 @@ _pycache_/
 data/temp
 data/reduced_telemetry
 data/misc
+data/logs
 data/weights
 data/configs
 data/*.npy
