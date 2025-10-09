@@ -7,8 +7,6 @@ import gc
 import logging
 from datetime import datetime
 
-from tests.MUSE_quasars import PSFs_pred
-
 sys.path.insert(0, '..')
 
 import numpy as np

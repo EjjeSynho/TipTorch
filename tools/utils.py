@@ -634,8 +634,6 @@ def FWHM_fitter(PSF_stack, function='Moffat', verbose=False):
     return FWHMs
 
 
-
-
 def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pixel_pad=True):
     secondary_diameter = 1.12
     pupil_diameter = 8.0
@@ -768,6 +766,23 @@ class GradientLoss(nn.Module):
         
         return loss
 
+
+def check_types(obj, prefix=''):
+    '''
+    Recursively checks and prints the types of elements in a nested dictionary or tensor structure.
+    '''
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            full_key = f'{prefix}{key}' if not prefix else f'{prefix}.{key}'
+            if isinstance(value, torch.Tensor):
+                print(f'{full_key}: torch.Tensor (shape: {value.shape}, device: {value.device})')
+            elif isinstance(value, dict):
+                print(f'{full_key}: dict')
+                check_types(value, full_key)
+            else:
+                print(f'{full_key}: {type(value).__name__}')
+    else:
+        print(f'{prefix}: {type(obj).__name__}')
 
 class CombinedLoss:
     def __init__(self, data, func, wvl_weights, mae_weight=2500, mse_weight=1120):
