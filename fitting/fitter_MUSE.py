@@ -3,7 +3,24 @@
 # %autoreload 2
 
 import sys
-sys.path.insert(0, '..')
+import os
+from pathlib import Path
+
+from traitlets import default
+
+# Ensure the project root is in the Python path
+if __name__ == '__main__':
+    # When running as a script
+    project_root = Path(__file__).parent.parent.resolve()
+else:
+    # When running interactively (cell by cell)
+    project_root = Path(os.getcwd()).resolve()
+    # Try to find the project root by looking for project_config.json
+    while not (project_root / 'project_config.json').exists() and project_root != project_root.parent:
+        project_root = project_root.parent
+
+sys.path.insert(0, str(project_root))
+sys.path.insert(0, str(project_root / 'data_processing'))
 
 import gc
 import pickle
@@ -18,7 +35,7 @@ from managers.config_manager import ConfigManager
 from tools.utils import SR, GradientLoss, FWHM_fitter
 from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
-from project_settings import *
+from project_settings import device
 import warnings
 
 
@@ -26,7 +43,9 @@ MUSE_FITTING_FOLDER = STD_FOLDER / 'fitted/'
 
 warnings.filterwarnings("ignore")
 
-default_device = device
+# default_device = device
+default_device = torch.device('cuda:0')
+
 start_id, end_id = -1, -1
 
 if len(sys.argv) > 1:
@@ -91,6 +110,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 
 #%%
 def load_and_fit_sample(id):
+    # id = 344
 
     # Load data
     PSF_0, norms, bgs, configs = LoadSTDStarData(
@@ -202,12 +222,12 @@ def load_and_fit_sample(id):
     fit_outerscale = True
 
     include_general = ['r0', 'dn'] + \
-                     (['amp', 'alpha', 'beta', 'b'] if PSF_model.Moffat_absorber else []) + \
-                     (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
-                     (['chrom_defocus'] if PSF_model.chrom_defocus else []) + \
-                     ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
-                     (['L0'] if fit_outerscale else []) + \
-                     (['wind_speed_single'] if fit_wind_speed else [])
+                        (['amp', 'alpha', 'beta', 'b'] if PSF_model.Moffat_absorber else []) + \
+                        (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
+                        (['chrom_defocus'] if PSF_model.chrom_defocus else []) + \
+                        ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
+                        (['L0'] if fit_outerscale else []) + \
+                        (['wind_speed_single'] if fit_wind_speed else [])
 
     exclude_general = ['ratio', 'theta'] if PSF_model.Moffat_absorber else []
 
@@ -216,6 +236,8 @@ def load_and_fit_sample(id):
 
     # Perform fitting
     x0, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 150, verbose=False)
+
+    loss_val = loss_fn1(x0).item()
 
     fitted_values = to_store(PSF_model.inputs_manager.unstack(x0, include_all=True, update=True))
 
@@ -243,7 +265,7 @@ def load_and_fit_sample(id):
         'Data norms':  to_store(norms),
         'Data bgs':    to_store(bgs),
         'Model norms': to_store(PSF_model.model.norm_scale) if hasattr(PSF_model.model, 'norm_scale') else None,
-        'loss':        loss_fn1(x0).item(),
+        'loss':        loss_val,
         'wavelengths': to_store(wavelengths),
         'is_Moffat':   PSF_model.Moffat_absorber,
         'is_LO_NCPAs': PSF_model.LO_NCPAs,

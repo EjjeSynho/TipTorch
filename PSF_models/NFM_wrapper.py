@@ -15,9 +15,9 @@ from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis, MUSE
 from tools.utils import PupilVLT
 from managers.config_manager import MultipleTargetsInDifferentObservations
 from managers.input_manager  import InputsManager
-from project_settings import device
 from tools.normalizers import Uniform, Uniform0_1
 from warnings import warn
+from project_settings import device
 import gc
 
 
@@ -54,7 +54,7 @@ class PSFModelNFM:
             self.N_spline_ctrl = 5
             # TODO: must be scaling of spline values, too
             self.norm_wvl = Uniform0_1(a=self.wavelengths.min().item(), b=self.wavelengths.max().item())
-            self.x_ctrl = torch.linspace(0, 1, self.N_spline_ctrl, device=device)
+            self.x_ctrl = torch.linspace(0, 1, self.N_spline_ctrl, device=self.device)
 
         self.init_model_inputs()
         
@@ -132,11 +132,11 @@ class PSFModelNFM:
     def init_configs(self, config):
         if len(config) > 1: # Multiple sources
             if self.multiple_obs:
-                model_config = MultipleTargetsInDifferentObservations(config, device=device)
+                model_config = MultipleTargetsInDifferentObservations(config, device=self.device)
             else:
                 raise NotImplementedError("Multiple sources in one observation case is not implemented yet.")
         else:
-            model_config = MultipleTargetsInDifferentObservations(config, device=device)
+            model_config = MultipleTargetsInDifferentObservations(config, device=self.device)
 
 
         return model_config
@@ -153,7 +153,7 @@ class PSFModelNFM:
             pupil_angle = pupil_angle[0]
             config['telescope']['PupilAngle'] = pupil_angle
        
-        pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=pupil_angle.cpu().numpy().item()), device=device )
+        pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=pupil_angle.cpu().numpy().item()), device=self.device )
         PSD_include = {
             'fitting':         True,
             'WFS noise':       True,
@@ -163,7 +163,7 @@ class PSFModelNFM:
             'diff. refract':   True,
             'Moffat':          self.Moffat_absorber
         }
-        self.model = TipTorch(config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+        self.model = TipTorch(config, 'LTAO', pupil, PSD_include, 'sum', self.device, oversampling=1)
         # _ = self.model()
 
 
@@ -219,10 +219,10 @@ class PSFModelNFM:
             self.inputs_manager.add('dy_ctrl', torch.tensor([[0.0,]*self.N_spline_ctrl]*N_src),  norm_dxy)
             self.inputs_manager.add('bg_ctrl', torch.tensor([[0.0,]*self.N_spline_ctrl]*N_src),  norm_bg)
             
-            # self.inputs_manager.add('F_x_ctrl',  torch.linspace(0, 1, 5, device=device).unsqueeze(0))
-            # self.inputs_manager.add('dx_x_ctrl', torch.linspace(0, 1, 5, device=device).unsqueeze(0))
-            # self.inputs_manager.add('dy_x_ctrl', torch.linspace(0, 1, 5, device=device).unsqueeze(0))
-            # self.inputs_manager.add('bg_x_ctrl', torch.linspace(0, 1, 5, device=device).unsqueeze(0))
+            # self.inputs_manager.add('F_x_ctrl',  torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
+            # self.inputs_manager.add('dx_x_ctrl', torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
+            # self.inputs_manager.add('dy_x_ctrl', torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
+            # self.inputs_manager.add('bg_x_ctrl', torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
                     
         else:
             self.inputs_manager.add('F',  torch.tensor([[1.0,]*N_wvl]*N_src),  norm_F)
@@ -235,7 +235,7 @@ class PSFModelNFM:
         else:
             if self.use_splines:
                 self.inputs_manager.add('J_ctrl', torch.tensor([[25.0,]*self.N_spline_ctrl]*N_src), norm_J)
-                # self.inputs_manager.add('J_x_ctrl', torch.linspace(0, 1, 5, device=device).unsqueeze(0))
+                # self.inputs_manager.add('J_x_ctrl', torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
                 
                 # self.inputs_manager.add('Jx_ctrl', torch.tensor([[10.0,]*self.N_spline_ctrl]*N_src), norm_dxy)
                 # self.inputs_manager.add('Jy_ctrl', torch.tensor([[10.0,]*self.N_spline_ctrl]*N_src), norm_dxy)
@@ -245,20 +245,13 @@ class PSFModelNFM:
                 # self.inputs_manager.add('Jy', torch.tensor([[25.0]*N_wvl]*N_src),  norm_J)
                 
         self.inputs_manager.add('r0', self.model.r0.clone(), norm_r0)
-
-        # if fit_outer_scale:
         self.inputs_manager.add('L0', self.model.L0.clone(), norm_L0)
-
-        # if fit_wind_speed:
-            # self.inputs_manager.add('wind_dir_single',   model.wind_dir[:,0].clone().unsqueeze(-1),   norm_wind_dir)
         self.inputs_manager.add('wind_speed_single', self.model.wind_speed[:,0].clone().unsqueeze(-1), norm_wind_speed)
-
         self.inputs_manager.add('Jxy', torch.tensor([[0.0]]*N_src), norm_Jxy, optimizable=False)
         self.inputs_manager.add('dn',  torch.tensor([0.25]*N_src),  norm_dn)
 
         # GL_frac = np.maximum(model.Cn2_weights[0,-1].detach().cpu().numpy().item(), 0.9)
         # GL_h    = model.h[0,-1].detach().cpu().numpy().item()
-
         # self.inputs_manager.add('GL_frac', torch.tensor([GL_frac]), norm_GL_frac)
         # self.inputs_manager.add('GL_h',    torch.tensor([GL_h]), norm_GL_h)
 
@@ -307,7 +300,7 @@ class PSFModelNFM:
             self.phase_func = None
 
 
-        self.inputs_manager.to(device)
+        self.inputs_manager.to(self.device)
         self.inputs_manager.to_float()
         
         _ = self.inputs_manager.stack()
@@ -339,7 +332,7 @@ class PSFModelNFM:
         x_dict['wind_speed'] = x_dict['wind_speed_single'].view(-1, 1).repeat(1, self.model.N_L)
 
         # x_dict['Cn2_weights'] = torch.hstack([x_dict['GL_frac'], 1.0 - x_dict['GL_frac']]).unsqueeze(0)
-        # x_dict['h']           = torch.hstack([torch.tensor([0.0], device=device), x_dict['GL_h'].abs()]).unsqueeze(0)
+        # x_dict['h']           = torch.hstack([torch.tensor([0.0], device=self.device), x_dict['GL_h'].abs()]).unsqueeze(0)
 
         x_ = { key: x_dict[key] for key in include_list } if include_list is not None else x_dict
 
