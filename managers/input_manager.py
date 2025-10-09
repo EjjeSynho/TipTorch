@@ -198,6 +198,10 @@ class InputsManager:
         """Get the size of the stacked tensor."""
         return self.inputs_transformer.get_stacked_size()
 
+    def get_transformer(self) -> InputsTransformer:
+        """Get the underlying InputsTransformer."""
+        return self.inputs_transformer
+
     def get_value(self, name: str) -> Any:
         """Get the value of a parameter."""
         return self.parameters[name].value

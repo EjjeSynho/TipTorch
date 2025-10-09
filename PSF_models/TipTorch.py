@@ -65,11 +65,11 @@ class TipTorch(torch.nn.Module):
         
         # Telescope pointing
         self.zenith_angle = torch.deg2rad(min_2d(self.config['telescope']['ZenithAngle'])) # [N_src_tomo, 1]
-        self.airmass      = 1.0 / torch.cos(self.zenith_angle) # [N_src, 1]
+        self.airmass      = 1.0 / torch.cos(self.zenith_angle) # [N_src_tomo, 1]
 
         # Guidestars parameters
         self.GS_wvl      = self.config['sources_HO']['Wavelength'] #[m]
-        self.GS_height   = self.config['sources_HO']['Height'] * self.airmass #[m]
+        self.GS_height   = min_2d(self.config['sources_HO']['Height']) * self.airmass #[m]
         self.GS_angles   = self.config['sources_HO']['Zenith'] / self.rad2arc # defined in [arcsec] from on-axis
         self.GS_azimuths = torch.deg2rad(self.config['sources_HO']['Azimuth']) # defined in [deg] from on-axis
         self.GS_dirs_x   = torch.tan(self.GS_angles) * torch.cos(self.GS_azimuths) # [N_src_tomo, N_GS]
@@ -1170,6 +1170,78 @@ class TipTorch(torch.nn.Module):
             self.ComputeStaticOTF(phase_generator)
         )
 
+
+    def _cleanup_dict_recursive(self, obj):
+        """Recursively clean up tensors in nested dictionaries"""
+        if isinstance(obj, dict):
+            for key in list(obj.keys()):
+                self._cleanup_dict_recursive(obj[key])
+                del obj[key]
+        elif isinstance(obj, (list, tuple)):
+            for item in obj:
+                self._cleanup_dict_recursive(item)
+        elif isinstance(obj, torch.Tensor):
+            del obj
+
+
+    def cleanup(self):
+        """Explicitly clean up GPU memory and release resources"""
+        # Clear cached tensors and computations
+        if hasattr(self, 'OTF_static'):
+            del self.OTF_static
+        if hasattr(self, 'OTF_static_default'):
+            del self.OTF_static_default
+        if hasattr(self, 'OTF'):
+            del self.OTF
+        if hasattr(self, 'PSDs'):
+            del self.PSDs
+        
+        # Clear pupil-related tensors
+        if hasattr(self, 'pupil'):
+            del self.pupil
+        if hasattr(self, 'apodizer'):
+            del self.apodizer
+        if hasattr(self, 'pupil_padder'):
+            del self.pupil_padder
+        
+        # Clear large attribute tensors
+        attrs_to_clear = [
+            'wvl', 'F', 'bg', 'dx', 'dy', 'Jx', 'Jy', 'Jxy','r0', 'L0', 'wind_speed', 'wind_dir',
+            'Cn2_weights', 'Cn2_heights', 'h', 'GS_dirs_x', 'GS_dirs_y', 'src_dirs_x', 'src_dirs_y',
+            'kx', 'ky', 'kx_AO', 'ky_AO', 'U', 'V', 'mask_corrected', 'mask_corrected_AO',
+            'P_beta_DM', 'piston_filter', 'PR'
+        ]
+        
+        for attr_name in attrs_to_clear:
+            if hasattr(self, attr_name):
+                delattr(self, attr_name)
+        
+        # Clean up config dictionary (contains nested tensors)
+        if hasattr(self, 'config'):
+            self._cleanup_dict_recursive(self.config)
+            del self.config
+        
+        # Clear any remaining nn.Module parameters and buffers
+        for name in list(self._parameters.keys()):
+            del self._parameters[name]
+        
+        for name in list(self._buffers.keys()):
+            del self._buffers[name]
+        
+        # Clear CUDA cache if using GPU
+        if self.device.type == 'cuda':
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+    
+
+    def __del__(self):
+        """Destructor to ensure GPU memory is freed"""
+        try:
+            self.cleanup()
+        except:
+            # Silently fail if cleanup has issues during destruction
+            pass
+    
 
     # TODO: timer as a separate class?
     def StartTimer(self):

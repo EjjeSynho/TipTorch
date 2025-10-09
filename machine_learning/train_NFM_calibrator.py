@@ -3,22 +3,28 @@
 %autoreload 2
 
 import sys
+import gc
+
 sys.path.insert(0, '..')
 
 import numpy as np
 import torch
-from torch.utils.data import Dataset, DataLoader, Subset, random_split
+from torch.utils.data import DataLoader, Subset, random_split
 from sklearn.model_selection import train_test_split, KFold
+from pathlib import Path
+from project_settings import *
+from torch.utils.data import Dataset
 
 from managers.config_manager import MultipleTargetsInDifferentObservations
-from data_processing.MUSE_STD_dataset_utils import *
 
-# Define device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
+STD_FOLDER     = MUSE_DATA_FOLDER / 'standart_stars/'
+DATASET_CACHE  = STD_FOLDER / 'dataset_cache'
 
-DATASET_CACHE = STD_FOLDER / 'dataset_cache'
+# from data_processing.MUSE_STD_dataset_utils import *
 
-N_wvl_total = 30
+N_wvl_total = 31
+batch_size = 4
 
 #%%
 class NFMDataset(Dataset):
@@ -44,355 +50,583 @@ class NFMDataset(Dataset):
 
 
 def collate_batch(batch, device):
-    cubes, vecs, confs, idxs = zip(*batch)
-    cubes = torch.stack(cubes, 0).to(device=device, non_blocking=True)
-    vecs = torch.stack(vecs, 0).to(device=device, non_blocking=True)
-    
-    batch_config = MultipleTargetsInDifferentObservations(list(confs), device=device)
+    PSF_cubes, telemetry_vecs, configs, idxs = zip(*batch)
+    PSF_cubes = torch.stack(PSF_cubes, 0).to(device=device, non_blocking=True)
+    telemetry_vecs = torch.stack(telemetry_vecs, 0).to(device=device, non_blocking=True)
+    idxs = torch.tensor(idxs, dtype=torch.long, device=device)
+
+    batch_config = MultipleTargetsInDifferentObservations(list(configs), device=device)
     batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
+    batch_config['telescope']['PupilAngle'] = 0.0
     
-    return cubes, vecs, batch_config, idxs
+    return PSF_cubes, telemetry_vecs, batch_config, idxs
+
 
 
 #%%
 NFM_dataset = NFMDataset()
 print(f"Total dataset size: {len(NFM_dataset)}")
 
-#%%
-# Three-way split: Train/Val (for k-fold cross-validation (CV) + Test (held-out)
-# Strategy: Hold-out test set first, then do k-fold CV on remaining data
 
-def create_train_test_split(dataset, test_size=0.15, random_state=42):
-    """
-    Create initial train/test split with stratification if possible
-    test_size=0.15 means 15% for test, 85% for train/val CV
-    """
-    total_size = len(dataset)
-    indices = np.arange(total_size)
-    
-    # Try to stratify by seeing conditions if telemetry data is available
-    try:
-        # Get seeing values for stratification
-        seeing_values = []
-        for i in range(len(NFM_dataset)):
-            _, _, conf, _ = NFM_dataset[i]
-            conf['atmosphere']['Seeing']
-            seeing_values.append(conf['atmosphere']['Seeing'].item())  # Assuming first element is seeing
+random_idxs = np.random.randint(0, len(NFM_dataset), size=batch_size)
+cubes, vecs, configs, idxs = [], [], [], []
+for random_idx in random_idxs:
+    cube, vec, config, idx = NFM_dataset[random_idx]
+    cubes.append(cube)
+    vecs.append(vec)
+    configs.append(config)
+    idxs.append(idx)
 
-        seeing_values = np.array(seeing_values)
-        # Create stratification bins based on seeing quartiles
-        seeing_bins = np.digitize(seeing_values, np.percentile(seeing_values, [25, 50, 75]))
-        
-        train_val_idx, test_idx = train_test_split(
-            indices, 
-            test_size=test_size, 
-            stratify=seeing_bins,
-            random_state=random_state
-        )
-        print(f"Stratified split by seeing conditions")
-        
-    except Exception as e:
-        print(f"Stratification failed ({e}), using random split")
-        train_val_idx, test_idx = train_test_split(
-            indices, 
-            test_size=test_size, 
-            random_state=random_state
-        )
-    
-    return train_val_idx, test_idx
+cubes = torch.stack(cubes, 0).to(device=device, non_blocking=True)
+vecs  = torch.stack(vecs,  0).to(device=device, non_blocking=True)
+idxs  = torch.tensor(idxs, dtype=torch.long, device=device)
 
-# Create the initial split
-train_val_indices, test_indices = create_train_test_split(NFM_dataset, test_size=0.15)
+N_features = vecs.shape[-1]
 
-print(f"Train/Val indices: {len(train_val_indices)} ({len(train_val_indices)/len(NFM_dataset)*100:.1f}%)")
-print(f"Test indices: {len(test_indices)} ({len(test_indices)/len(NFM_dataset)*100:.1f}%)")
+#%% =============================================================================
+# Example model class placeholder (replace with your actual model)
+# ==============================================================================
+from PSF_models.NFM_wrapper import PSFModelNFM
 
-# Create test dataset (never used during training/validation)
-test_dataset = Subset(NFM_dataset, test_indices)
-train_val_dataset = Subset(NFM_dataset, train_val_indices)
+if 'PSF_model' in locals():
+    PSF_model.cleanup()  # Recursively cleans everything
+    del PSF_model
+    gc.collect()
+    torch.cuda.empty_cache()
 
-print(f"Test set size: {len(test_dataset)}")
-print(f"Available for CV: {len(train_val_dataset)}")
 
-#%%
-# K-fold Cross-Validation setup on the train/val subset
-def create_kfold_splits(dataset, indices, n_splits=5, random_state=42):
-    """
-    Create k-fold cross-validation splits from the train/val dataset
-    Returns list of (train_subset, val_subset, fold_num) tuples
-    """
-    kfold = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    
-    cv_splits = []
-    
-    for fold, (train_idx, val_idx) in enumerate(kfold.split(indices)):
-        # Convert back to original dataset indices
-        fold_train_indices = indices[train_idx]
-        fold_val_indices = indices[val_idx]
-        
-        # Create subsets
-        fold_train_dataset = Subset(dataset, fold_train_indices)
-        fold_val_dataset   = Subset(dataset, fold_val_indices)
-        
-        cv_splits.append({
-            'fold': fold,
-            'train_dataset': fold_train_dataset,
-            'val_dataset':   fold_val_dataset,
-            'train_indices': fold_train_indices,
-            'val_indices':   fold_val_indices,
-            'train_size':    len(fold_train_indices),
-            'val_size':      len(fold_val_indices)
-        })
-        
-        print(f"Fold {fold}: Train={len(fold_train_indices)}, Val={len(fold_val_indices)}")
-    
-    return cv_splits
-
-# Create k-fold splits (typically 5-fold for small datasets)
-n_folds = 5
-cv_splits = create_kfold_splits(NFM_dataset, train_val_indices, n_splits=n_folds)
-
-print(f"\nCreated {len(cv_splits)} CV folds")
-print(f"Average train size per fold: {np.mean([split['train_size'] for split in cv_splits]):.1f}")
-print(f"Average val size per fold: {np.mean([split['val_size'] for split in cv_splits]):.1f}")
-
-#%%
-# Data loader creation for k-fold CV
-def create_fold_data_loaders(cv_split, batch_size=16, num_workers=0):
-    """Create data loaders for a specific CV fold"""
-    
-    train_loader = DataLoader(
-        dataset=cv_split['train_dataset'],
-        batch_size=batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        # pin_memory=True if torch.cuda.is_available() else False,
-        collate_fn=lambda batch: collate_batch(batch, device=device),
-        drop_last=True
+with torch.no_grad():
+    PSF_model = PSFModelNFM(
+        configs,
+        multiple_obs    = True,
+        LO_NCPAs        = True,
+        chrom_defocus   = False,
+        use_splines     = True,
+        Moffat_absorber = False,
+        device          = device
     )
-    
-    val_loader = DataLoader(
-        dataset=cv_split['val_dataset'],
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        # pin_memory=True if torch.cuda.is_available() else False,
-        collate_fn=lambda batch: collate_batch(batch, device=device),
-        drop_last=False
-    )
-    
-    return train_loader, val_loader
+    PSF_model.inputs_manager.delete('Jxy')
+    PSF_model.inputs_manager.delete('bg_ctrl')
+    PSF_model.inputs_manager.delete('dx_ctrl')
+    PSF_model.inputs_manager.delete('dy_ctrl')
 
-# Create test data loader (for final evaluation)
-test_loader = DataLoader(
-    dataset=test_dataset,
-    batch_size=16,
+    print(PSF_model.inputs_manager)
+    N_outputs = PSF_model.inputs_manager.get_stacked_size()
+
+    inputs_transformer = PSF_model.inputs_manager.get_transformer()
+
+gc.collect()
+torch.cuda.empty_cache()
+
+# %%
+λ_full = PSF_model.wavelengths.clone().cpu()
+λ_id_sets = [
+    [0, 5, 10, 15, 20, 25, 29],
+    [1, 6, 11, 16, 21, 26, 29],
+    [2, 7, 12, 17, 22, 27, 29],
+    [0, 3,  8, 13, 18, 23, 28],
+    [0, 4,  9, 14, 19, 24, 28]
+]
+λ_sets = [λ_full[list_id] for list_id in λ_id_sets]
+
+
+#%%
+dx = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
+dy = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
+# b  = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32)
+
+#%%
+# current_λ_set_id = 2
+
+# PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=device))
+# calibrator = lambda x: x @ torch.ones([N_features, N_outputs], device=device, dtype=torch.float32)
+
+# configs_ = MultipleTargetsInDifferentObservations(configs, device=device)
+# configs_['telescope']['PupilAngle'] = 0.0
+
+#%%
+# def run_model(predicted_inputs_vec, config, idx, λ_ids):
+def run_model(x_dict, config, idx, λ_ids):
+    # Unpacking to dictionary format which is understood by PSF_model
+    # x_dict = inputs_transformer.unstack(predicted_inputs_vec)
+    
+    # Set dx/dy for this batch (indexed by sample IDs)
+    x_dict['dx'] = dx[idx[:,None], λ_ids]
+    x_dict['dy'] = dy[idx[:,None], λ_ids]
+
+    # Update simulated wavelengths
+    config['sources_science']['Wavelength'] = λ_sets[λ_ids].unsqueeze(0).to(device=device)
+    
+    # Update internal state of the PSF model for the given batch config
+    PSF_model.model.Update(config=config, init_grids=False, init_pupils=False, init_tomography=True) # Update just AO + model parameters, not grids
+    return PSF_model(x_dict)
+
+
+# for epoch in range(2):
+#     for λ_id in range(len(λ_sets)):
+#         PSF_model.SetWavelengths(λ_sets[λ_id].to(device=device))
+
+#         for batch in range(5):
+#             PSF_1 = run_model(vecs, configs_, idxs, λ_id)
+        
+#         torch.cuda.empty_cache()
+#         torch.cuda.synchronize()
+
+
+#%%
+
+# Keep it shallow - 1-2 hidden layers max
+# Keep it narrow - 24-32 hidden units
+# Strong regularization - Dropout + weight decay + L1
+# Small batches - 8-16 samples
+# Early stopping - Essential to prevent overfitting
+# Data augmentation - If possible, add small noise to inputs
+# Cross-validation - Consider k-fold CV for better estimates
+
+
+import torch.nn as nn
+
+class SmallCalibratorNet(nn.Module):
+    """
+    Compact neural network for calibration with strong regularization.
+    Designed for small datasets (~500 samples).
+    
+    Args:
+        n_features: Number of input features (22)
+        n_outputs: Number of output values (31)
+        hidden_dim: Size of hidden layers (default: 32)
+        dropout_rate: Dropout probability (default: 0.3)
+    """
+    def __init__(self, n_features=22, n_outputs=31, hidden_dim=32, dropout_rate=0.3):
+        super().__init__()
+        
+        self.network = nn.Sequential(
+            # Input layer
+            nn.Linear(n_features, hidden_dim),
+            nn.LayerNorm(hidden_dim),  # Better than BatchNorm for small batches
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            
+            # Hidden layer
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            
+            # Output layer
+            nn.Linear(hidden_dim, n_outputs),
+        )
+        
+        # Initialize weights with smaller values for better regularization
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)  # Smaller gain
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
+    def forward(self, x):
+        return self.network(x)
+
+
+'''
+# Alternative: Even more compact version
+class TinyCalibratorNet(nn.Module):
+    """Ultra-compact version for very small datasets."""
+    def __init__(self, n_features=22, n_outputs=31, hidden_dim=24, dropout_rate=0.4):
+        super().__init__()
+        
+        self.network = nn.Sequential(
+            nn.Linear(n_features, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+            nn.Linear(hidden_dim, n_outputs),
+            nn.Tanh()
+        )
+        
+        self._initialize_weights()
+    
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+    
+    def forward(self, x):
+        return self.network(x)
+'''
+#%%
+import torch.optim as optim
+
+# Data loaders
+train_idx, test_idx = train_test_split(np.arange(len(NFM_dataset)), test_size=0.20, random_state=42)
+
+train_dataset = Subset(NFM_dataset, train_idx)
+val_dataset   = Subset(NFM_dataset, test_idx)
+
+train_loader = DataLoader(
+    dataset=train_dataset,
+    batch_size=batch_size,
+    shuffle=True,
+    num_workers=0,
+    # pin_memory=True if torch.cuda.is_available() else False,
+    collate_fn=lambda batch: collate_batch(batch, device=device),
+    drop_last=True
+)
+
+val_loader = DataLoader(
+    dataset=val_dataset,
+    batch_size=batch_size,
     shuffle=False,
     num_workers=0,
     # pin_memory=True if torch.cuda.is_available() else False,
     collate_fn=lambda batch: collate_batch(batch, device=device),
-    drop_last=False
+    drop_last=True
 )
 
-print(f"Test loader batches: {len(test_loader)}")
+# Initialize calibrator NN
+calibrator = SmallCalibratorNet(
+    n_features=N_features,
+    n_outputs=N_outputs,
+    hidden_dim=32,
+    dropout_rate=0.3
+).to(device)
+
+
+# Optimizer with weight decay (L2 regularization)
+optimizer = optim.AdamW([
+    {'params': calibrator.parameters(), 'lr': 1e-3, 'weight_decay': 1e-3},
+    {'params': [dx, dy], 'lr': 1e-3, 'weight_decay': 1e-4}  # Lower weight decay for dx/dy
+], lr=1e-3, weight_decay=1e-3)  # Default values
+
+scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, verbose=True)
+
+# Loss function
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl_total).to(device).view(1, N_wvl_total, 1, 1)
+wvl_weights = N_wvl_total / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
+
+
+def loss_LO_fn(LO_coefs, w_L2=1e-7, w_first=5e-5):
+    coefs_L2_penalty = LO_coefs.pow(2).sum(-1).mean() * w_L2
+    first_coef_penalty = torch.clamp(-LO_coefs[:, 0], min=0).pow(2).mean() * w_first
+    return coefs_L2_penalty + first_coef_penalty
+
+
+def loss_fn(PSF_pred, PSF_data, coefs, w_MSE, w_MAE, w_L2, w_first, λ_ids):    
+    diff = (PSF_pred-PSF_data) * wvl_weights[0, λ_ids, ...]
+    w = 2e4
+    MSE_loss = diff.pow(2).mean() * w * w_MSE
+    MAE_loss = diff.abs().mean()  * w * w_MAE
+    LO_loss  = loss_LO_fn(coefs, w_L2=w_L2, w_first=w_first) if PSF_model.LO_NCPAs else 0.0
+
+    return MSE_loss + MAE_loss + LO_loss
+
+
+criterion = lambda pred, data, coefs, λ_ids: loss_fn(pred, data, coefs, w_MSE=800.0, w_MAE=1.6, w_L2=1e-7, w_first=5e-5, λ_ids=λ_ids)
+
+# L1 regularization of NN parameters
+def l1_regularization(model, lambda_l1=1e-4):
+    l1_norm = sum(p.abs().sum() for p in model.parameters())
+    return lambda_l1 * l1_norm
 
 #%%
-# Example training loop structure for k-fold CV
-def train_with_kfold_cv(cv_splits, model_class, **training_kwargs):
-    """
-    Template for k-fold cross-validation training
-    """
-    fold_results = []
-    
-    for cv_split in cv_splits:
-        print(f"\n{'='*50}")
-        print(f"Training Fold {cv_split['fold']}")
-        print(f"{'='*50}")
-        
-        # Create data loaders for this fold
-        train_loader, val_loader = create_fold_data_loaders(cv_split)
-        
-        # Initialize fresh model for this fold
-        model = model_class()  # Your model initialization here
-        
-        # Train the model on this fold
-        fold_result = train_single_fold(
-            model, train_loader, val_loader, 
-            fold_num=cv_split['fold'],
-            **training_kwargs
-        )
-        
-        fold_results.append(fold_result)
-    
-    return fold_results
 
+'''
+num_epochs = 5
 
-def train_single_fold(model, train_loader, val_loader, fold_num, num_epochs=50):
-    """Train model on a single fold"""
-    print(f"Fold {fold_num}: Training for {num_epochs} epochs")
-    print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-    
-    # Your training loop here
-    best_val_loss = float('inf')
-    
-    for epoch in range(num_epochs):
-        # Training phase
-        model.train()
-        train_loss = 0.0
-        
-        for batch in train_loader:
-            # Your training step here
-            pass
-        
-        # Validation phase
-        if epoch % 5 == 0:
-            model.eval()
-            val_loss = 0.0
+for epoch in range(num_epochs):
+    for current_λ_set_id in range(len(λ_sets)): # Iterate through all wavelength sets
+        PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=device))
+
+        λ_id_set = λ_id_sets[current_λ_set_id] # which wavelengths ids are currently selected
+
+        for batch_idx, batch in enumerate(train_loader):
+            PSF_cubes, telemetry_inputs, batch_config, idxs = batch
+
+            optimizer.zero_grad()
             
+            #  Calibrator NN predicts corrections
+            NN_output = calibrator(telemetry_inputs)
+            
+            x_pred = inputs_transformer.unstack(NN_output)
+            
+            PSF_pred = run_model(x_pred, batch_config, idxs, current_λ_set_id)
+
+            # Select only the relevant wavelengths
+            loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], λ_id_set)
+
+            loss.backward() # gradients flow to both calibrator and dx/dy
+            # print(loss.item())
+
+            # Gradient clipping (prevents explosion if there is an outlier in the batch)
+            torch.nn.utils.clip_grad_norm_(calibrator.parameters(), max_norm=1.0)
+            
+            optimizer.step()
+            
+        # gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        
+        print(f"Epoch {epoch}, λ set #{current_λ_set_id}: Loss = {loss.item():.6f}")
+'''
+
+
+def validate_with_astrometry_optimization(num_opt_steps=20, lr_dx_dy=1e-3):
+    """
+    Validation routine where:
+    - Calibrator NN weights are FROZEN (in eval mode, no gradients)
+    - dx/dy values for validation samples are OPTIMIZED
+    
+    Args:
+        num_opt_steps: Number of optimization steps per validation sample
+        lr_dx_dy: Learning rate for dx/dy optimization
+    
+    Returns:
+        average validation loss after optimizing dx/dy
+    """
+    # Set calibrator to eval mode (freezes BatchNorm, Dropout, etc.)
+    calibrator.eval()
+    
+    total_loss  = 0
+    num_batches = 0
+    
+    # Iterate through all wavelength sets
+    for current_λ_set_id in range(len(λ_sets)):
+        PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=device))
+        λ_id_set = λ_id_sets[current_λ_set_id]
+        
+        for batch_idx, batch in enumerate(val_loader):
+            PSF_cubes, telemetry_inputs, batch_config, idxs = batch
+            
+            # Create optimizer for ONLY dx/dy (NOT calibrator!)
+            # Only optimize dx/dy for the current validation samples
+            val_dx_dy_optimizer = optim.Adam([
+                {'params': [dx], 'lr': lr_dx_dy},
+                {'params': [dy], 'lr': lr_dx_dy}
+            ])
+            
+            # Optimize dx/dy for this validation batch
+            for opt_step in range(num_opt_steps):
+                val_dx_dy_optimizer.zero_grad()
+                
+                # Forward pass with FROZEN calibrator
+                with torch.no_grad():  # No gradients for calibrator!
+                    NN_output = calibrator(telemetry_inputs)
+                
+                x_pred = inputs_transformer.unstack(NN_output)
+
+                PSF_pred = run_model(x_pred, batch_config, idxs, current_λ_set_id)
+                loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], λ_id_set)
+                
+                loss.backward() # Only dx/dy get gradients
+                
+                # torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=1.0)
+    
+                val_dx_dy_optimizer.step() # Update ONLY dx/dy
+            
+            # Record final loss for this batch
             with torch.no_grad():
-                for batch in val_loader:
-                    # Your validation step here
-                    pass
+                NN_output = calibrator(telemetry_inputs)
+                x_pred = inputs_transformer.unstack(NN_output)
+
+                PSF_pred = run_model(x_pred, batch_config, idxs, current_λ_set_id)
+                final_loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], λ_id_set)
+                
+                print(f"λ set {current_λ_set_id + 1}/{len(λ_sets)}, batch {batch_idx + 1}: val_loss = {final_loss.item():.6f}")
+                
+                total_loss += final_loss.item()
+                num_batches += 1
+
+        # Clear cache between wavelength sets
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+    
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0.0
+    
+    # Set calibrator back to train mode
+    calibrator.train()
+    
+    return avg_loss
+
+
+# Simpler validation without optimization (just evaluate)
+def validate_fixed():
+    """
+    Simple validation: just evaluate with current dx/dy values.
+    No optimization, just forward pass.
+    """
+    calibrator.eval()
+    total_loss = 0
+    num_batches = 0
+    
+    with torch.no_grad():  # No gradients at all
+        for current_λ_set_id in range(len(λ_sets)):
+            PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=device))
+            λ_id_set = λ_id_sets[current_λ_set_id]
             
-            print(f"Fold {fold_num}, Epoch {epoch}: Val Loss = {val_loss:.6f}")
+            for batch in val_loader:
+                PSF_cubes, telemetry_inputs, batch_config, idxs = batch
+                
+                NN_output = calibrator(telemetry_inputs)
+                x_pred = inputs_transformer.unstack(NN_output)
+                
+                PSF_pred = run_model(x_pred, batch_config, idxs, current_λ_set_id)
+
+                loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], λ_id_set)
+                total_loss += loss.item()
+                num_batches += 1
+            
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
     
-    return {'fold': fold_num, 'best_val_loss': best_val_loss}
+    calibrator.train()
+    return total_loss / num_batches if num_batches > 0 else 0.0
 
-#%%
-# Test the CV setup
-print("Testing k-fold CV setup...")
 
-# Test first fold
-fold_0 = cv_splits[0]
-train_loader_0, val_loader_0 = create_fold_data_loaders(fold_0, batch_size=4)
-
-print(f"Fold 0 - Train batches: {len(train_loader_0)}, Val batches: {len(val_loader_0)}")
-
-# Test data loading
-for batch in train_loader_0:
-    cubes, vecs, batch_config, idxs = batch
-    print(f"Fold 0 train batch: Cubes {cubes.shape}, Vecs {vecs.shape}")
-    break
-
-for batch in val_loader_0:
-    cubes, vecs, batch_config, idxs = batch
-    print(f"Fold 0 val batch: Cubes {cubes.shape}, Vecs {vecs.shape}")
-    break
-
-# Test test set
-for batch in test_loader:
-    cubes, vecs, batch_config, idxs = batch
-    print(f"Test batch: Cubes {cubes.shape}, Vecs {vecs.shape}")
-    break
-
-#%%
-# Wavelength selection and parameter initialization
-wvl_ids = np.clip(np.arange(0, (N_wvl_max:=N_wvl_total)+1, 2), a_min=0, a_max=N_wvl_max-1)
-
-# Test wavelength selection with first fold training data
-print("Testing wavelength selection...")
-fold_0 = cv_splits[0]
-train_loader_test, _ = create_fold_data_loaders(fold_0, batch_size=4)
-
-for batch in train_loader_test:
-    cubes, vecs, batch_config, idxs = batch
-    cubes = cubes[:, wvl_ids, :, :]
-    batch_config['sources_science']['Wavelength'] = batch_config['sources_science']['Wavelength'][:, wvl_ids]
-    print(f"After wavelength selection: {cubes.shape}")
-    break
-
-# %%
-# Initialize learnable parameters per sample
-# Astrometric shifts and photometric backgrounds are learned by the network
-print("Initializing learnable parameters...")
-
-# Create parameter tensors for each sample in the dataset
-dx = torch.zeros((len(NFM_dataset), N_wvl_total), dtype=torch.float32, requires_grad=True, device=device)
-dy = torch.zeros((len(NFM_dataset), N_wvl_total), dtype=torch.float32, requires_grad=True, device=device)
-b  = torch.zeros((len(NFM_dataset), N_wvl_total), dtype=torch.float32, requires_grad=True, device=device)
-
-print(f"Parameter shapes: dx={dx.shape}, dy={dy.shape}, b={b.shape}")
-
-#%%
-# Alternative: Create parameter dictionaries for train/val splits
-def create_split_parameters(train_indices, val_indices, n_wavelengths, device):
-    """Create separate parameter tensors for train and validation sets"""
-    
-    train_params = {
-        'dx': torch.zeros((len(train_indices), n_wavelengths), dtype=torch.float32, requires_grad=True, device=device),
-        'dy': torch.zeros((len(train_indices), n_wavelengths), dtype=torch.float32, requires_grad=True, device=device),
-        'b':  torch.zeros((len(train_indices), n_wavelengths), dtype=torch.float32, requires_grad=True, device=device)
-    }
-    
-    val_params = {
-        'dx': torch.zeros((len(val_indices), n_wavelengths), dtype=torch.float32, requires_grad=False, device=device),
-        'dy': torch.zeros((len(val_indices), n_wavelengths), dtype=torch.float32, requires_grad=False, device=device),
-        'b':  torch.zeros((len(val_indices), n_wavelengths), dtype=torch.float32, requires_grad=False, device=device)
-    }
-    
-    return train_params, val_params
-
-# Example usage (uncomment if you want split parameters)
-# if hasattr(train_dataset, 'indices') and hasattr(val_dataset, 'indices'):
-#     train_params, val_params = create_split_parameters(
-#         train_dataset.indices, val_dataset.indices, N_wvl_total, device
-#     )
-#     print(f"Split parameters created - Train: {len(train_dataset.indices)}, Val: {len(val_dataset.indices)}")
-
-#%%
-# K-fold Cross-Validation Training Configuration
-cv_training_config = {
-    'n_folds': n_folds,
-    'num_epochs_per_fold': 50,  # Fewer epochs per fold since you have multiple folds
-    'learning_rate': 1e-3,
-    'weight_decay': 1e-4,
-    'batch_size': 16,
-    'validate_every': 5,
-    'early_stopping_patience': 15,  # Per fold
-    'save_best_models': True,  # Save best model from each fold
-    'final_test_evaluation': True,  # Evaluate on test set after CV
-}
-
-print("K-fold CV Training configuration:")
-for key, value in cv_training_config.items():
-    print(f"  {key}: {value}")
-
-print(f"\nTotal training: {cv_training_config['n_folds']} folds × {cv_training_config['num_epochs_per_fold']} epochs = {cv_training_config['n_folds'] * cv_training_config['num_epochs_per_fold']} total epochs")
-
-#%%
-# Model evaluation strategy for k-fold CV
-def evaluate_kfold_results(fold_results, test_loader=None):
+# Complete training loop with validation
+def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, val_dx_dy_lr=1e-3):
     """
-    Evaluate and summarize k-fold cross-validation results
+    Training loop with validation where dx/dy are optimized during validation.
     """
-    print(f"\n{'='*60}")
-    print("K-FOLD CROSS-VALIDATION RESULTS")
-    print(f"{'='*60}")
-    
-    val_losses = [result['best_val_loss'] for result in fold_results]
-    
-    print(f"Validation Loss Statistics:")
-    print(f"  Mean: {np.mean(val_losses):.6f}")
-    print(f"  Std:  {np.std(val_losses):.6f}")
-    print(f"  Min:  {np.min(val_losses):.6f}")
-    print(f"  Max:  {np.max(val_losses):.6f}")
-    
-    # Find best fold
-    best_fold_idx = np.argmin(val_losses)
-    print(f"  Best fold: {best_fold_idx} (loss: {val_losses[best_fold_idx]:.6f})")
-    
-    # If test set is provided, evaluate final performance
-    if test_loader is not None:
-        print("Final Test Set Evaluation:")
-        # Load best model and evaluate on test set
-        # Implementation depends on your model saving strategy
-        print("  Test evaluation would go here...")
-    
-    return {
-        'mean_val_loss': np.mean(val_losses),
-        'std_val_loss': np.std(val_losses),
-        'best_fold': best_fold_idx,
-        'fold_results': fold_results
-    }
+    best_val_loss = float('inf')
+    patience_counter = 0
+    train_losses, val_losses = [], []
 
 
+    for epoch in range(num_epochs):
+        # ========== TRAINING ==========
+        calibrator.train()
+        epoch_train_loss = 0
+        train_batch_count = 0
+        
+        for current_λ_set_id in range(len(λ_sets)):
+            PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=device))
+            λ_id_set = λ_id_sets[current_λ_set_id]
+            
+            for batch_idx, batch in enumerate(train_loader):
+                PSF_cubes, telemetry_inputs, batch_config, idxs = batch
+                
+                optimizer.zero_grad()
+                
+                # Forward pass
+                NN_output = calibrator(telemetry_inputs)
+                x_pred = inputs_transformer.unstack(NN_output)
+
+                PSF_pred = run_model(x_pred, batch_config, idxs, current_λ_set_id)
+
+                loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], λ_id_set)
+                loss.backward()
+                
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(calibrator.parameters(), max_norm=1.0)
+                
+                # Update both calibrator and dx/dy
+                optimizer.step()
+                
+                epoch_train_loss += loss.item()
+                train_batch_count += 1
+        
+                # Running loss info during wavelength iteration
+          
+                current_lr = optimizer.param_groups[0]['lr']
+                
+                print(f"\rλ set {current_λ_set_id + 1}/{len(λ_sets)} complete | "
+                      f"Running loss: {loss.item():.6f} | LR: {current_lr:.2e}")#, end='', flush=True)
+                
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        
+        avg_train_loss = epoch_train_loss / train_batch_count if train_batch_count > 0 else 0
+        train_losses.append(avg_train_loss)
+        
+        
+        # ========== VALIDATION ==========
+        # Option 1: Validate with dx/dy optimization
+        val_loss = validate_with_astrometry_optimization(num_opt_steps=val_dx_dy_opt_steps, lr_dx_dy=val_dx_dy_lr)
+        
+        # Option 2: Simple validation
+        # val_loss = validate_fixed()
+        
+        val_losses.append(val_loss)
+        
+        # Learning rate scheduling
+        scheduler.step(val_loss)
+        
+        # Early stopping
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+            # Save best model
+            torch.save({
+                'epoch': epoch,
+                'calibrator_state_dict': calibrator.state_dict(),
+                'dx': dx.detach().clone(),
+                'dy': dy.detach().clone(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'train_loss': avg_train_loss,
+                'val_loss': val_loss,
+            }, 'best_calibrator_checkpoint.pth')
+            print(f"✓ Saved best model at epoch {epoch}")
+        else:
+            patience_counter += 1
+        
+        # Print progress
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch:3d}/{num_epochs} | "
+              f"Train Loss: {avg_train_loss:.6f} | "
+              f"Val Loss: {val_loss:.6f} | "
+              f"LR: {current_lr:.2e} | "
+              f"Patience: {patience_counter}/{patience}")
+        
+        # Early stopping check
+        if patience_counter >= patience:
+            print(f"\n⚠ Early stopping at epoch {epoch}")
+            break
+    
+    # Load best model
+    print("\nLoading best model...")
+    checkpoint = torch.load('best_calibrator_checkpoint.pth')
+    calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
+    dx.data = checkpoint['dx']
+    dy.data = checkpoint['dy']
+    
+    print(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {checkpoint['epoch']}")
+    
+    return calibrator, train_losses, val_losses
+
+
+#%%
+print("="*60)
+print("Starting Training with Validation")
+print("="*60)
+
+# Train the model
+calibrator, train_losses, val_losses = train_with_validation(
+    num_epochs=50,
+    patience=10,
+    val_dx_dy_opt_steps=20,  # Optimize dx/dy for 20 steps during validation
+    val_dx_dy_lr=1e-3
+)
+
+print("\n" + "="*60)
+print("Training Complete!")
+print("="*60)
+
+# Plot losses (optional)
+try:
+    import matplotlib.pyplot as plt
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Val Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.title('Training and Validation Losses')
+    plt.grid(True)
+    plt.show()
+except:
+    pass

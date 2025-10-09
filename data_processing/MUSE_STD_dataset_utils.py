@@ -1,4 +1,6 @@
 from MUSE_data_utils import *
+# from torch.utils.data import Dataset
+
 
 STD_FOLDER     = MUSE_DATA_FOLDER / 'standart_stars/'
 CUBES_FOLDER   = STD_FOLDER / 'cubes/'
@@ -268,3 +270,4 @@ def update_label_IDs():
     # Show a concise dataframe summary
     df = pd.DataFrame(results, columns=["original_name","new_name","matched_folder_file","index_changed","labels"])
     df.head()
+    

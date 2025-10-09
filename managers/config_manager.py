@@ -509,8 +509,12 @@ def MultipleTargetsInDifferentObservations(configs, device=None):
         merged_config['atmosphere']['Cn2Heights']    = merged_config['atmosphere']['Cn2Heights'].reshape(N_src, -1)
         merged_config['atmosphere']['WindSpeed']     = merged_config['atmosphere']['WindSpeed'].reshape(N_src, -1)
         merged_config['atmosphere']['WindDirection'] = merged_config['atmosphere']['WindDirection'].reshape(N_src, -1)
-        merged_config['atmosphere']['Seeing']        = merged_config['atmosphere']['Seeing'].reshape(N_src)
         merged_config['sensor_HO']['NumberPhotons']  = merged_config['sensor_HO']['NumberPhotons'].reshape(N_src, -1)
+        merged_config['atmosphere']['Seeing']        = merged_config['atmosphere']['Seeing'].reshape(N_src)
+        merged_config['telescope']['ZenithAngle']    = merged_config['telescope']['ZenithAngle'].reshape(N_src)
+        merged_config['sources_HO']['Height']        = merged_config['sources_HO']['Height'].reshape(N_src)
+        merged_config['sources_HO']['Zenith']        = merged_config['sources_HO']['Zenith'].reshape(N_src, -1)
+        merged_config['sources_HO']['Azimuth']       = merged_config['sources_HO']['Azimuth'].reshape(N_src, -1)
     else:
         config_manager.Convert(merged_config, framework='pytorch', device=device)
         
@@ -519,8 +523,12 @@ def MultipleTargetsInDifferentObservations(configs, device=None):
         merged_config['atmosphere']['Cn2Heights']    = merged_config['atmosphere']['Cn2Heights'].view(N_src, -1)
         merged_config['atmosphere']['WindSpeed']     = merged_config['atmosphere']['WindSpeed'].view(N_src, -1)
         merged_config['atmosphere']['WindDirection'] = merged_config['atmosphere']['WindDirection'].view(N_src, -1)
-        merged_config['atmosphere']['Seeing']        = merged_config['atmosphere']['Seeing'].view(N_src)
         merged_config['sensor_HO']['NumberPhotons']  = merged_config['sensor_HO']['NumberPhotons'].view(N_src, -1)
+        merged_config['atmosphere']['Seeing']        = merged_config['atmosphere']['Seeing'].view(N_src)
+        merged_config['telescope']['ZenithAngle']    = merged_config['telescope']['ZenithAngle'].view(N_src)
+        merged_config['sources_HO']['Height']        = merged_config['sources_HO']['Height'].view(N_src)
+        merged_config['sources_HO']['Zenith']        = merged_config['sources_HO']['Zenith'].view(N_src, -1)
+        merged_config['sources_HO']['Azimuth']       = merged_config['sources_HO']['Azimuth'].view(N_src, -1)
 
     merged_config['NumberSources'] = N_src
     # All stacked sources must have the same wavelengths bins

@@ -4,8 +4,11 @@
 
 import os
 import sys
+
+from tests.MUSE_Torch2Top import PSF
 sys.path.insert(0, '..')
 
+from pathlib import Path
 import pickle
 import torch
 import torch.nn as nn
@@ -13,130 +16,138 @@ import torch.optim as optim
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from tqdm import tqdm
-from tools.plotting import plot_radial_PSF_profiles, cropper, draw_PSF_stack
-from managers.config_manager import ConfigManager
-from project_settings import DATASET_FOLDER, MUSE_DATA_FOLDER, device
-from tools.normalizers import CreateTransformSequenceFromFile
 from copy import copy, deepcopy
+from tqdm import tqdm
+from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
+from tools.utils import cropper, PupilVLT
+from tools.static_phase import MUSEPhaseBump
+from managers.config_manager import ConfigManager
+from data_processing.MUSE_data_utils import MUSE_DATA_FOLDER
+from data_processing.MUSE_STD_dataset_utils import DATASET_FOLDER
+
+from tools.normalizers import CreateTransformSequenceFromFile
 from managers.input_manager import InputsTransformer
+from PSF_models.TipTorch import TipTorch
 
+from project_settings import device, DATA_FOLDER
 
-from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from tools.utils import SausageFeature
+df_transforms_onsky  = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_norm_transforms.pickle')
+df_transforms_fitted = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_fitted_transforms.pickle')
 
-df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/muse_df_norm_transforms.pickle')
-df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/muse_df_fitted_transforms.pickle')
-
-# with open('../data/temp/fitted_df_norm.pickle', 'rb') as handle:
-#     fitted_df_norm = pickle.load(handle)
-
-with open(MUSE_DATA_FOLDER+'muse_df_norm_imputed.pickle', 'rb') as handle:
+with open(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_norm_imputed.pickle', 'rb') as handle:
     muse_df_norm = pickle.load(handle)
 
 config_manager = ConfigManager()
 
-predict_Moffat = True
-# predict_Moffat = False
+predict_Moffat  = True # False
+predict_sausage = True
 
 #%%
 with open(DATASET_FOLDER + 'batch_test.pkl', 'rb') as handle:
     batch_init = pickle.load(handle)
 
-init_config = batch_init['configs']
 wavelength  = batch_init['Wvls']
 
-wavelength_selected = wavelength # For now, the same wvl span is used
-# ids_wavelength_selected = [i for i, wvl in enumerate(wavelength) if wvl in wavelength_selected]
+# wavelength_selected = wavelength
 ids_wavelength_selected = np.arange(0, len(wavelength), 2)
-# ids_wavelength_selected = [11,12]
+N_wvl_train = len(ids_wavelength_selected)
 
-N_wvl = len(ids_wavelength_selected)
+# def get_NN_pretrain_data(batch, predicted_entries):
+#     buf_dict = { entry: batch['fitted data'][entry].to(device) for entry in predicted_entries }
+#     return transformer.stack(buf_dict)
 
-PSF_0_init = batch_init['PSF_0'][:, ids_wavelength_selected, ...]
-config_manager.Convert(init_config, framework='pytorch', device=device)
-AAA = init_config['sources_science']['Wavelength'].clone().detach().cpu().numpy()
-AAA = torch.tensor(AAA[:, ids_wavelength_selected]).to(device)
-init_config['sources_science']['Wavelength'] = AAA
+def get_fixed_inputs(batch, entries):
+    return {
+        entry: \
+            batch['fitted data'][entry][:, ids_wavelength_selected].to(device) \
+            if batch['fitted data'][entry].ndim == 2 else batch['fitted data'][entry].to(device) \
+        for entry in entries
+    }
+
+def get_data(batch, fixed_entries):
+    x_0    = batch['NN input'].float().to(device)
+    PSF_0  = batch['PSF_0'][:, ids_wavelength_selected, ...].float().to(device)
+    config = batch['configs']
+    
+    if config['sources_science']['Wavelength'].shape[-1] != N_wvl_train:
+        buf = config['sources_science']['Wavelength'].clone().detach().cpu().numpy()
+        buf = torch.tensor(buf[:, ids_wavelength_selected])
+        config['sources_science']['Wavelength'] = buf
+        
+    fixed_inputs = get_fixed_inputs(batch, fixed_entries)
+    config_manager.Convert(config, framework='pytorch', device=device)
+        
+    if type(config['NumberSources']) is not int:
+        config['NumberSources'] = config['NumberSources'].int().item()
+    
+    config['DM']['OptimizationAzimuth'] = torch.zeros(config['NumberSources'], device=device)
+        
+    return x_0, fixed_inputs, PSF_0, config
+
+
+_, _, _, init_config = get_data(batch_init, fixed_entries={})
+
+# PSF_0_init = batch_init['PSF_0'][:, ids_wavelength_selected, ...]
+# config_manager.Convert(init_config, framework='pytorch', device=device)
+
+# init_config['sources_science']['Wavelength'] = init_config['sources_science']['Wavelength'][:, ids_wavelength_selected]
+# init_config['NumberSources'] = init_config['NumberSources'].int().item()
+# init_config['DM']['OptimizationAzimuth'] = torch.zeros(init_config['NumberSources'], device=device)
 
 
 #%%
-toy = TipTorch(init_config, 'sum', device, TipTop=True, PSFAO=True, oversampling=1)
-sausage_absorber = SausageFeature(toy)
-sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
+# Initialize TipTorch model
+pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
 
-toy.PSD_include['fitting']         = True
-toy.PSD_include['WFS noise']       = True
-toy.PSD_include['spatio-temporal'] = True
-toy.PSD_include['aliasing']        = False
-toy.PSD_include['chromatism']      = True
-toy.PSD_include['Moffat']          = predict_Moffat
-
-toy.to_float()
-_ = toy()
-toy.s_pow = torch.zeros([toy.N_src,1], device=toy.device).float()
-
-#%%
-transforms = {
-    'r0':    df_transforms_fitted['r0'],
-    'F':     df_transforms_fitted['F'],
-    'bg':    df_transforms_fitted['bg'],
-    'dx':    df_transforms_fitted['dx'],
-    'dy':    df_transforms_fitted['dy'],
-    'Jx':    df_transforms_fitted['Jx'],
-    'Jy':    df_transforms_fitted['Jy'],
-    'Jxy':   df_transforms_fitted['Jxy'],
-    'dn':    df_transforms_fitted['dn'],
-    's_pow': df_transforms_fitted['s_pow'],
-    'amp':   df_transforms_fitted['amp'],
-    'b':     df_transforms_fitted['b'],
-    'alpha': df_transforms_fitted['alpha'],
-    'beta':  df_transforms_fitted['beta'],
-    'ratio': df_transforms_fitted['ratio'],
-    'theta': df_transforms_fitted['theta']
+PSD_include = {
+    'fitting':         True,
+    'WFS noise':       True,
+    'spatio-temporal': True,
+    'aliasing':        False,
+    'chromatism':      True,
+    'diff. refract':   False,
+    'Moffat':          predict_Moffat
 }
 
-fixed_entries      = ['dx', 'dy', 'Jxy', 'bg']
-# additional_params  = ['amp', 'b', 'alpha']
-# predicted_entries  = ['r0', 'F', 'dn', 'Jx', 'Jy', 'amp', 'b', 'alpha', 's_pow']
-predicted_entries  = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow']
+tiptorch = TipTorch(init_config, pupil, PSD_include, 'sum', device, oversampling=1)
+tiptorch.to_float()
 
-if predict_Moffat:
-    predicted_entries += ['amp', 'b', 'alpha']
+if predict_sausage:
+    sausage_absorber = MUSEPhaseBump(tiptorch)
+    sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))
+    tiptorch.s_pow = torch.zeros([tiptorch.N_src, 1], device=tiptorch.device).float()
 
+PSF_1 = tiptorch()
 
+#%%
+all_entries       = ['r0', 'F', 'dn', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 's_pow', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta']
+fixed_entries     = ['dx', 'dy', 'Jxy', 'bg']
+predicted_entries = ['r0', 'F', 'dn', 'Jx', 'Jy']
+
+if predict_sausage: predicted_entries += ['s_pow']
+if predict_Moffat:  predicted_entries += ['amp', 'b', 'alpha']
+
+# Initialize transformations of inputs
+# Here, only the variables that need to be predicted must be added, both order and content matter
+inp_dict = {
+    'r0':    torch.ones ( tiptorch.N_src, device=tiptorch.device)*0.1,
+    'F':     torch.ones ([tiptorch.N_src, N_wvl_train], device=tiptorch.device),
+    'Jx':    torch.ones ([tiptorch.N_src, N_wvl_train], device=tiptorch.device)*10,
+    'Jy':    torch.ones ([tiptorch.N_src, N_wvl_train], device=tiptorch.device)*10,
+    'dn':    torch.ones (tiptorch.N_src, device=tiptorch.device)*1.5,
+    's_pow': torch.zeros(tiptorch.N_src, device=tiptorch.device),
+    'amp':   torch.zeros(tiptorch.N_src, device=tiptorch.device),
+    'b':     torch.zeros(tiptorch.N_src, device=tiptorch.device),
+    'alpha': torch.ones (tiptorch.N_src, device=tiptorch.device)*0.1,
+}
+
+transforms = { entry: df_transforms_fitted[entry] for entry in all_entries }
 transformer = InputsTransformer({ entry: transforms[entry] for entry in predicted_entries })
 
-# Here, only the variables that need to be predicted must be added, order and content matter
-inp_dict = {
-    'r0':    torch.ones ( toy.N_src, device=toy.device)*0.1,
-    'F':     torch.ones ([toy.N_src, N_wvl], device=toy.device),
-    'Jx':    torch.ones ([toy.N_src, N_wvl], device=toy.device)*10,
-    'Jy':    torch.ones ([toy.N_src, N_wvl], device=toy.device)*10,
-    'dn':    torch.ones (toy.N_src, device=toy.device)*1.5,
-    's_pow': torch.zeros(toy.N_src, device=toy.device),
-    'amp':   torch.zeros(toy.N_src, device=toy.device),
-    'b':     torch.zeros(toy.N_src, device=toy.device),
-    'alpha': torch.ones (toy.N_src, device=toy.device)*0.1,
-}
-
-inp_dict_ = {}
-
-for entry in inp_dict.keys():
-    if entry in predicted_entries:
-        inp_dict_[entry] = inp_dict[entry]
-
-inp_dict = inp_dict_
-
-# fitted_buf = {
-#     'Jxy': torch.zeros( toy.N_src, device=toy.device),
-#     'bg':  torch.zeros([toy.N_src, N_wvl], device=toy.device),
-#     'dx':  torch.zeros([toy.N_src, N_wvl], device=toy.device),
-#     'dy':  torch.zeros([toy.N_src, N_wvl], device=toy.device)
-# }
-
-_ = transformer.stack(inp_dict, no_transform=True) # to create index mapping and initial values
-# testo = toy(transformer.unstack(x0) | fitted_buf, None, lambda: sausage_absorber(toy.s_pow.flatten()))
+_ = transformer.stack(
+        args_dict = {entry: inp_dict[entry] for entry in predicted_entries if entry in inp_dict},
+        no_transform = True
+    ) # to create index mapping and initial values
 
 #%%
 class Gnosis(nn.Module):
@@ -169,88 +180,49 @@ net.float()
 
 # net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v1.dict'))
 # net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_some_real_good_weights.dict'))
-net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict'))
+# net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict'))
+
+state_dict = torch.load('../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict', map_location=lambda storage, loc: storage.cuda(0))
+net.load_state_dict(state_dict)
 
 #%%
-crop_all    = cropper(PSF_0_init, 91)
-crop_center = cropper(PSF_0_init, 25)
-wvl_weights = torch.linspace(1.0, 0.5, 13)[ids_wavelength_selected].to(device).view(1, N_wvl, 1, 1) * 2
+wvl_weights = torch.linspace(1.0, 0.5, 13)[ids_wavelength_selected].to(device).view(1, N_wvl_train, 1, 1) * 2
 
 def loss_MSE(A, B):
     diff = (A-B) * wvl_weights
     return diff.pow(2).sum() * 200 / PSF_0.shape[0] / PSF_0.shape[1]
 
-
 def loss_MAE(A, B):
     diff = (A-B) * wvl_weights
     return diff.abs().sum() / PSF_0.shape[0] / PSF_0.shape[1]
 
-
-def img_punish(A, B): 
+def loss_combined(A, B): 
     return loss_MSE(A, B) + loss_MAE(A, B)
-    # return loss_MAE(A, B)# * 0.4
-
 
 #%%
-def get_fixed_inputs(batch, entries):
-    return {
-        entry: \
-            batch['fitted data'][entry][:,ids_wavelength_selected].to(device) \
-            if batch['fitted data'][entry].ndim == 2 else batch['fitted data'][entry].to(device) \
-        for entry in entries
-    }
-
-
-def get_NN_pretrain_data(batch, predicted_entries):
-    buf_dict = { entry: batch['fitted data'][entry].to(device) for entry in predicted_entries }
-    return transformer.stack(buf_dict)
-
-
-def get_data(batch, fixed_entries):
-    x_0    = batch['NN input'].float().to(device)
-    PSF_0  = batch['PSF_0'][:, ids_wavelength_selected, ...].float().to(device)
-    config = batch['configs']
-    
-    if config['sources_science']['Wavelength'].shape[-1] != N_wvl:
-        buf = config['sources_science']['Wavelength'].clone().detach().cpu().numpy()
-        buf = torch.tensor(buf[:, ids_wavelength_selected])
-        config['sources_science']['Wavelength'] = buf
-    
-    fixed_inputs = get_fixed_inputs(batch, fixed_entries)
-    config_manager.Convert(config, framework='pytorch', device=device)
-    return x_0, fixed_inputs, PSF_0, config
-
-
-def run_model(model, batch, predicted_inputs, fixed_inputs={}):
-    current_configs = batch['configs']
-    config_manager.Convert(current_configs, framework='pytorch', device=device)
-
-    model.config = current_configs
-    model.Update(reinit_grids=False, reinit_pupils=True)
+def run_model(model, config, predicted_inputs, fixed_inputs={}):
+    model.Update(
+        config = config,
+        init_grids = False,
+        init_pupils = True,
+        init_tomography = False
+    )
 
     x_unpacked = predicted_inputs | fixed_inputs # It overrides the values from the destacked dictionary
     if 's_pow' in x_unpacked:
-        return model(x_unpacked, None, lambda: sausage_absorber(toy.s_pow.flatten()))
+        return model(x_unpacked, None, lambda: sausage_absorber(tiptorch.s_pow.flatten()))
     else:
         return model(x_unpacked)
 
-
-def func(x_, batch, fixed_inputs):
-    y_pred = net(x_)
-    pred_inputs = transformer.unstack(y_pred)
-    return run_model(toy, batch, pred_inputs, fixed_inputs)
+def func(x_, config, fixed_inputs):
+    pred_inputs = transformer.unstack(net(x_))
+    return run_model(tiptorch, config, pred_inputs, fixed_inputs)
 
 
-def loss_fn(x_, PSF_data, batch):
-    loss = img_punish(func(x_, batch, fixed_inputs), PSF_data)
-    return loss
+# def loss_fn(x_, PSF_data, config, fixed_inputs):
+#     loss = loss_combined(func(x_, config, fixed_inputs), PSF_data)
+#     return loss
 
-#%%
-x0, fixed_inputs, PSF_0, current_config = get_data(batch_init, fixed_entries)
-toy.config = init_config
-toy.Update(reinit_grids=True, reinit_pupils=True)
-
-batch_size = len(batch_init['IDs'])
 
 #%%
 batches_train, batches_val = [], []
@@ -274,17 +246,8 @@ for file in tqdm(val_files):
 train_ids = np.arange(len(batches_train)).tolist()
 val_ids   = np.arange(len(batches_val)).tolist()
 
-#%
-# batch = batches_train[id]
-
-# x, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
-# batch_size = len(batch['IDs'])
-
-# y_pred = net(x)
-# pred_inputs = transformer.unstack(y_pred)
-# PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
-
 #%%
+"""
 optimizer = optim.Adam(net.parameters(), lr=0.00001)
 loss_train, loss_val = [], []
 loss_stats_train, loss_stats_val = [], []
@@ -351,11 +314,10 @@ loss_stats_train = np.array(loss_stats_train)
 plt.plot(loss_stats_val)
 plt.plot(loss_stats_train)
 plt.show()
+"""
 
-
-#%%
 # optimizer = optim.Adam(net.parameters(), lr=5e-6)
-optimizer = optim.Adam(net.parameters(), lr=1e-3)
+optimizer = optim.Adam(net.parameters(), lr=1e-4)
 loss_train, loss_val = [], []
 loss_stats_train, loss_stats_val = [], []
 
@@ -376,14 +338,12 @@ for epoch in range(epochs):
         
         batch = batches_train[id]
 
-        x, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
-        batch_size = len(batch['IDs']) / N_wvl
+        x, fixed_inputs, PSF_0, config = get_data(batch, fixed_entries)
+        batch_size = len(batch['IDs']) / N_wvl_train
         
-        y_pred = net(x)
-        pred_inputs = transformer.unstack(y_pred)
-        PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
+        PSF_pred = run_model(tiptorch, config, transformer.unstack(net(x)), fixed_inputs)
 
-        loss = img_punish(PSF_pred, PSF_0)
+        loss = loss_combined(PSF_pred, PSF_0)
 
         if loss.isnan():
             raise ValueError(f'Loss is NaN, batch {id}' )
@@ -408,13 +368,15 @@ for epoch in range(epochs):
         with torch.no_grad():
             batch = batches_val[id]
             
-            x0, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
+            x0, fixed_inputs, PSF_0, config = get_data(batch, fixed_entries)
 
-            batch_size = len(batch['IDs']) / N_wvl
+            batch_size = len(batch['IDs']) / N_wvl_train
 
-            loss = loss_fn(x0, PSF_0, batch)
-            loss_val.append(loss.item()/batch_size)
-            epoch_val_loss.append(loss.item()/batch_size)
+            PSF_pred = run_model(tiptorch, config, transformer.unstack(net(x0)), fixed_inputs)
+            loss = loss_combined(PSF_pred, PSF_0)
+            
+            loss_val.append(loss.item() / batch_size)
+            epoch_val_loss.append(loss.item() / batch_size)
             
             print(f'Running loss ({i+1}/{len(val_ids)}): {loss.item()/batch_size:.4f}', end="\r", flush=True)
 
@@ -431,7 +393,6 @@ plt.plot(loss_stats_val)
 plt.plot(loss_stats_train)
 plt.show()
 
-#%%
 
 #%%
 def NoiseVarianceIRLOS(r0, WFS_nPix, WFS_Nph, WFS_psInMas, WFS_RON):
@@ -462,7 +423,7 @@ def get_TT_jitter(r0, WFS_nPix, WFS_Nph, WFS_psInMas, WFS_RON):
     TT_OPD = np.sqrt(TT_var) * 0.5e-6 / 2 / np.pi # [nm]
 
     TT_max = 1.9665198 # Value at the edge of tip/tilt mode
-    jitter_STD = lambda TT_WFE: np.arctan(2*TT_max/toy.D * TT_WFE) * rad2mas # [mas], TT_WFE in [m]
+    jitter_STD = lambda TT_WFE: np.arctan(2*TT_max/tiptorch.D * TT_WFE) * rad2mas # [mas], TT_WFE in [m]
 
     return jitter_STD(TT_OPD) # [mas]
 
@@ -486,28 +447,6 @@ def get_jitter_from_ids(ids):
 
 
 #%%
-# batch = batches_train[id]
-
-# x, fixed_inputs, PSF_0, current_config = get_data(batch, fixed_entries)
-# batch_size = len(batch['IDs'])
-
-# y_pred = net(x)
-# pred_inputs = transformer.unstack(y_pred)
-# PSF_pred = run_model(toy, batch, pred_inputs, fixed_inputs)
-
-
-#%
-# np.save('../data/temp/loss_stats_val.npy', loss_stats_val)
-# np.save('../data/temp/loss_stats_train.npy', loss_stats_train)
-
-# torch.save(net.state_dict(), f'../data/weights/gnosis_MUSE_current.dict')
-
-#%
-all_entries = [\
-    'r0', 'F', 'dn', 'dx', 'dy', 'bg', 'Jx', 'Jy', 'Jxy', 's_pow',
-    'amp', 'b', 'alpha', 'beta', 'ratio', 'theta'
-]
-
 base_J = [3.2, 3.1, 3.2, 3.7, 4.4, 5.2, 4.9, 6, 7.7, 8.9, 10, 11.8, 13]
 jitter = [base_J[i] for i in ids_wavelength_selected]
 
@@ -517,7 +456,7 @@ direct_tuned = True
 
 if direct_tuned:
     inputs_direct = {
-        'F':   torch.ones([1, N_wvl]) * 0.8,
+        'F':   torch.ones([1, N_wvl_train]) * 0.8,
         'Jx':  torch.tensor(jitter)*5,
         'Jy':  torch.tensor(jitter)*5,
         'Jxy': torch.zeros([1]),
@@ -526,7 +465,7 @@ if direct_tuned:
     }
 else:
     inputs_direct = {
-        'F':   torch.ones([1, N_wvl]),
+        'F':   torch.ones([1, N_wvl_train]),
         'Jx':  torch.zeros([1]),
         'Jy':  torch.zeros([1]),
         'Jxy': torch.zeros([1]),
@@ -534,31 +473,32 @@ else:
         'amp': torch.zeros([1])
     }
 
-
 PSFs_0_val_poly, PSFs_1_val_poly, PSFs_2_val_poly, PSFs_3_val_poly = [], [], [], []
 net.eval()
 
 pred_inputs_stats = []
 configs = []
 
+#%%
 with torch.no_grad():
     for i in tqdm(val_ids):
-    # for i in tqdm(train_ids):
         # ------------------------- Validate calibrated -------------------------
-        toy.PSD_include['fitting']         = True
-        toy.PSD_include['WFS noise']       = True
-        toy.PSD_include['spatio-temporal'] = True
-        toy.PSD_include['aliasing']        = False
-        toy.PSD_include['chromatism']      = True
-        toy.PSD_include['Moffat']          = predict_Moffat
-        
         batch = batches_val[i]
+        
+        tiptorch.PSD_include = {
+            'fitting':         True,
+            'WFS noise':       True,
+            'spatio-temporal': True,
+            'aliasing':        False,
+            'chromatism':      True,
+            'diff. refract':   True,
+            'Moffat':          predict_Moffat
+        }
         
         ids.append(batch['IDs'])
         bgs.append(batch['bgs'].squeeze()[:, ids_wavelength_selected].numpy())
         norms.append(batch['norms'].squeeze()[:, ids_wavelength_selected].numpy())
         
-        # batch = batches_train[i]
         x0, fixed_inputs, PSF_0, config = get_data(batch, fixed_entries)
         PSFs_0_val_poly.append(PSF_0.cpu())
         current_batch_size = len(batch['IDs'])
@@ -566,23 +506,22 @@ with torch.no_grad():
         pred_inputs_stats.append(transformer.unstack(net(x0)))
         configs.append(deepcopy(config))
         
-        toy.config = config
-        toy.Update(reinit_grids=True, reinit_pupils=True)
-        PSFs_1_val_poly.append(func(x0, batch, fixed_inputs).cpu())
-           
+        PSFs_1_val_poly.append(func(x0, config, fixed_inputs).cpu())
+        
+        
         # ------------------------- Validate direct -------------------------
         _, _, _, config = get_data(batch, fixed_entries)
-        toy.config = config
-        
-        toy.PSD_include['fitting']         = True
-        toy.PSD_include['WFS noise']       = True
-        toy.PSD_include['spatio-temporal'] = True
-        toy.PSD_include['aliasing']        = False
-        toy.PSD_include['chromatism']      = True
-        toy.PSD_include['Moffat']          = False
+       
+        tiptorch.PSD_include = {
+            'fitting':         True,
+            'WFS noise':       True,
+            'spatio-temporal': True,
+            'aliasing':        False,
+            'chromatism':      True,
+            'diff. refract':   True,
+            'Moffat':          False
+        }
 
-        toy.Update(reinit_grids=True, reinit_pupils=True)
-        
         inputs_direct_ = { 
             key: value.float().to(device).repeat(current_batch_size, 1).squeeze() for key, value in inputs_direct.items()
         }
@@ -592,21 +531,24 @@ with torch.no_grad():
             inputs_direct_['Jx'] = torch.tensor(TT_analytical).float().to(device).squeeze()
             inputs_direct_['Jy'] = torch.tensor(TT_analytical).float().to(device).squeeze()
         
-        PSFs_2_val_poly.append(run_model(toy, batch, inputs_direct_).cpu())
+        PSFs_2_val_poly.append(run_model(tiptorch, config, inputs_direct_).cpu())
         
+
         # ------------------------- Validate fitted -------------------------
         _, all_inputs, _, config = get_data(batch, all_entries)
-        toy.config = config
         
-        toy.PSD_include['fitting']         = True
-        toy.PSD_include['WFS noise']       = True
-        toy.PSD_include['spatio-temporal'] = True
-        toy.PSD_include['aliasing']        = False
-        toy.PSD_include['chromatism']      = True
-        toy.PSD_include['Moffat']          = True
+        tiptorch.PSD_include = {
+            'fitting':         True,
+            'WFS noise':       True,
+            'spatio-temporal': True,
+            'aliasing':        False,
+            'chromatism':      True,
+            'diff. refract':   True,
+            'Moffat':          False
+        }
         
-        toy.Update(reinit_grids=True, reinit_pupils=True)
-        PSFs_3_val_poly.append(run_model(toy, batch, {}, all_inputs).cpu())
+        tiptorch.Update(config, init_grids=False, init_pupils=True, init_tomography=False)
+        PSFs_3_val_poly.append(run_model(tiptorch, config, {}, all_inputs).cpu())
 
 
 PSFs_0_val_poly = torch.cat(PSFs_0_val_poly, dim=0).numpy()
@@ -640,7 +582,9 @@ else:
 with open('../data/temp/PSFs_val_fitted_polychrome.pickle', 'wb') as handle:
     pickle.dump(PSFs_3_val_poly, handle)
 
-save_dir = '/home/akuznets/Projects/TipTorch/data/temp/plots/'
+
+save_dir = Path(os.path.dirname(os.getcwd())) / 'data' / 'temp' / 'plots'
+
 
 #%%
 # fig, ax = plt.subplots(1, 3, figsize=(12, 4))
@@ -651,7 +595,7 @@ fig = plt.figure(figsize=(9, 4))
 draw_calibrated = True
 draw_direct     = True
 draw_fitted     = False
-save_profiles   = False
+save_profiles   = True
 draw_white      = True
 
 cutoff = 40
@@ -661,18 +605,18 @@ if draw_white:
     if draw_calibrated:
         plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_1_val_white, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
         if save_profiles:
-            plt.savefig(save_dir+'PSFs_calibrated.pdf', dpi=300)
+            plt.savefig(save_dir / 'PSFs_calibrated.pdf', dpi=300)
 
     if draw_direct:
         plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_2_val_white, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
         if save_profiles:
             postfix = '_tuned' if direct_tuned else '_raw'
-            plt.savefig(save_dir+f'PSFs_direct_{postfix}.pdf', dpi=300)
+            plt.savefig(save_dir / f'PSFs_direct_{postfix}.pdf', dpi=300)
 
     if draw_fitted:
         plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_3_val_white, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
         if save_profiles:
-            plt.savefig(save_dir+'PSFs_fitted.pdf', dpi=300)
+            plt.savefig(save_dir / 'PSFs_fitted.pdf', dpi=300)
 
 else:
     # Polychromatic profiles
@@ -680,18 +624,18 @@ else:
         if draw_calibrated:
             plot_radial_PSF_profiles(PSFs_0_val_poly[:,i,...], PSFs_1_val_poly[:,i,...], 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
             if save_profiles:
-                plt.savefig(save_dir+f'PSFs_calibrated_{wvl}.pdf', dpi=300)
+                plt.savefig(save_dir / f'PSFs_calibrated_{wvl}.pdf', dpi=300)
                 
         if draw_direct:
             plot_radial_PSF_profiles(PSFs_0_val_poly[:,i,...], PSFs_2_val_poly[:,i,...], 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
             if save_profiles:
                 postfix = '_tuned' if direct_tuned else '_raw'
-                plt.savefig(save_dir+f'PSFs_direct_{postfix}_{wvl}.pdf', dpi=300)
+                plt.savefig(save_dir / f'PSFs_direct_{postfix}_{wvl}.pdf', dpi=300)
         
         if draw_fitted:
             plot_radial_PSF_profiles(PSFs_0_val_poly[:,i,...], PSFs_3_val_poly[:,i,...], 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
             if save_profiles:
-                plt.savefig(save_dir+f'PSFs_fitted_{wvl}.pdf', dpi=300)
+                plt.savefig(save_dir / f'PSFs_fitted_{wvl}.pdf', dpi=300)
 
 
 #%%
@@ -809,7 +753,7 @@ def plot_MUSE_PSF(id, save_dir=None):
     # plt.suptitle(f'ID: {}')
     # plt.tight_layout()
     if save_dir is not None:
-        plt.savefig(save_dir+f'PSF_{ids[ii]}.pdf', dpi=300)
+        plt.savefig(save_dir / f'PSF_{ids[ii]}.pdf', dpi=300)
     else:
         plt.show()
 
@@ -823,19 +767,19 @@ for id in tqdm(good_ids):
 #%%
 
 # Read the results
-with open('../data/temp/PSFs_val_data_polychrome.pickle', 'rb') as handle:
+with open('../data/temp/temp_PSFs_MUSE/PSFs_val_data_polychrome.pickle', 'rb') as handle:
     PSFs_0_val_poly_data = pickle.load(handle)
-    
-    
-with open('../data/temp/PSFs_val_calibrated_polychrome.pickle', 'rb') as handle:
+
+
+with open('../data/temp/temp_PSFs_MUSE/PSFs_val_calibrated_polychrome.pickle', 'rb') as handle:
     PSFs_1_val_poly_calib = pickle.load(handle)
 
 
-with open('../data/temp/PSFs_val_tuned_polychrome.pickle', 'rb') as handle:
+with open('../data/temp/temp_PSFs_MUSE/PSFs_val_tuned_polychrome.pickle', 'rb') as handle:
     PSFs_2_val_poly_tuned = pickle.load(handle)
 
 
-with open('../data/temp/PSFs_val_direct_polychrome_raw.pickle', 'rb') as handle:
+with open('../data/temp/temp_PSFs_MUSE/PSFs_val_direct_polychrome_raw.pickle', 'rb') as handle:
     PSFs_2_val_poly_direct = pickle.load(handle)
     
 # with open('../data/temp/PSFs_val_fitted_polychrome.pickle', 'wb') as handle:
@@ -912,66 +856,95 @@ print(f'Median relative FWHM error (direct): {np.median(relative_err_direct):.1f
 print(f'Median absolute FWHM error (direct): {np.median(absolute_err_direct):.1f} [mas]')
 
 #%%
-from tools.utils import hist_thresholded
+from tools.plotting import hist_thresholded
 
 hist_thresholded(
-    datasets=[absolute_err_calib, absolute_err_tuned],
+    datasets=[absolute_err_calib, absolute_err_tuned, absolute_err_direct],
     threshold=np.round( np.percentile(absolute_err_calib, 90)),
     bins=10,
     title="Absolute FWHM error",
     xlabel=r"$\Delta\:$FWHM, [mas]",
     ylabel="Percentage, [%]",
-    labels=['Caibrated', 'Tuned'],
+    labels=['Caibrated', 'Tuned', 'Direct'],
     colors=None,
     alpha=0.6
 )
-# plt.savefig(save_dir+'FWHM_absolute_MUSE.pdf', dpi=300)
+# plt.savefig(save_dir / 'FWHM_absolute_MUSE.pdf', dpi=300)
 
 
 hist_thresholded(
-    datasets=[relative_err_calib, relative_err_tuned],
+    datasets=[relative_err_calib, relative_err_tuned, relative_err_direct],
     threshold=np.round( np.percentile(relative_err_calib, 90)),
     bins=10,
     title="Relative FWHM error",
     xlabel=r"$\Delta\:$FWHM $\, / \,$ FWHM$_{\: data}$, [%]",
     ylabel="Percentage, [%]",
-    labels=['Caibrated', 'Tuned'],
+    labels=['Caibrated', 'Tuned', 'Direct'],
     colors=None,
     alpha=0.6
 )
-# plt.savefig(save_dir+'FWHM_relative_MUSE.pdf', dpi=300)
+# plt.savefig(save_dir / 'FWHM_relative_MUSE.pdf', dpi=300)
 
 #%%
-# PSFs_0_val_poly_data, 
-# PSFs_1_val_poly_calib,
-# PSFs_2_val_poly_tuned,
-# PSFs_2_val_poly_direct
-
-var_data  = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
-var_delta = np.var((PSFs_1_val_poly_calib - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
-
-FVU = var_delta / var_data
-
-print(np.median(FVU))
-
-# plt.hist(FVU, bins=100)
-
-#%%
-var_data  = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
-var_delta = np.var((PSFs_2_val_poly_tuned - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
-
-FVU = var_delta / var_data
-
-print(np.median(FVU))
+hist_thresholded(
+    datasets=[relative_err_calib],
+    threshold=np.round( np.percentile(relative_err_calib, 90)),
+    bins=10,
+    title="Relative FWHM error",
+    xlabel=r"$\Delta\:$FWHM $\, / \,$ FWHM$_{\: data}$, [%]",
+    ylabel="Percentage, [%]",
+    labels=['Caibrated'],
+    colors=None,
+    alpha=0.6
+)
+plt.savefig(save_dir / 'FWHM_relative_calib_MUSE.pdf', dpi=300)
 
 #%%
+ΔSR_tuned  = (PSFs_2_val_poly_tuned  - PSFs_0_val_poly_data).max(axis=(-2,-1))
+ΔSR_calib  = (PSFs_1_val_poly_calib  - PSFs_0_val_poly_data).max(axis=(-2,-1))
+ΔSR_direct = (PSFs_2_val_poly_direct - PSFs_0_val_poly_data).max(axis=(-2,-1))
 
-var_data  = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
-var_delta = np.var((PSFs_2_val_poly_direct - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+ΔSR_tuned  /= PSFs_0_val_poly_data.max(axis=(-2,-1))
+ΔSR_calib  /= PSFs_0_val_poly_data.max(axis=(-2,-1))
+ΔSR_direct /= PSFs_0_val_poly_data.max(axis=(-2,-1))
 
-FVU = var_delta / var_data
+ΔSR_calib_median  = np.median(np.mean(ΔSR_calib,  axis=1))
+ΔSR_direct_median = np.median(np.mean(ΔSR_direct, axis=1))
+ΔSR_tuned_median  = np.median(np.mean(ΔSR_tuned,  axis=1))
 
-print(np.median(FVU))
+print(f'Median ΔSR (calib):  {ΔSR_calib_median*100:.1f}%')
+print(f'Median ΔSR (tuned):  {ΔSR_tuned_median*100:.1f}%')
+print(f'Median ΔSR (direct): {ΔSR_direct_median*100:.1f}%')
+
+#%%
+hist_thresholded(
+    datasets=[np.mean(ΔSR_calib*100,  axis=1)],
+    threshold=np.round( np.percentile(np.mean(ΔSR_calib*100,  axis=1), 90)),
+    bins=10,
+    title="SR error",
+    xlabel=fr"$\Delta$ SR, [%]",
+    ylabel="Percentage, [%]",
+    labels=['Caibrated'],
+    colors=None,
+    alpha=0.6
+)
+
+# save_dir = Path(os.path.dirname(os.getcwd())) / 'data' / 'temp' / 'plots'
+# plt.savefig(save_dir / 'SR_calib_MUSE.pdf', dpi=300)
+
+#%%
+var_data         = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))
+var_delta_calib  = np.var((PSFs_1_val_poly_calib  - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+var_delta_tuned  = np.var((PSFs_2_val_poly_tuned  - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+var_delta_direct = np.var((PSFs_2_val_poly_direct - PSFs_0_val_poly_data).mean(axis=1), axis=(-2,-1))
+
+FVU_calib  = var_delta_calib  / var_data
+FVU_tuned  = var_delta_tuned  / var_data
+FVU_direct = var_delta_direct / var_data
+
+print(f'FVU of calibrated: {np.median(FVU_calib)*100:.1f}%')
+print(f'FVU of tuned: {np.median(FVU_tuned)*100:.1f}%')
+print(f'FVU of direct: {np.median(FVU_direct)*100:.1f}%')
 
 
 #%%
@@ -1041,7 +1014,7 @@ ax[1,3].set_ylabel('')
 plt.suptitle('Predicted parameters distribution')
 plt.tight_layout()
 plt.subplots_adjust(hspace=0.3)  # Increase the space between rows
-plt.savefig(save_dir+'predicted_params_MUSE.pdf', dpi=300)
+plt.savefig(save_dir / 'predicted_params_MUSE.pdf', dpi=300)
 
 #%%
 

@@ -1026,7 +1026,7 @@ def GetSpectralCubeAndHeaderData(
         
     else:
         if verbose: print('Computing wavelength bins...')
-        λ_bins_smart, bins_smart = compute_wavelength_bins(λs, bad_wvls, n_bins=30, min_ratio=0.1)
+        λ_bins_smart, bins_smart = compute_wavelength_bins(λs, bad_wvls, n_bins=31, min_ratio=0.1)
 
     if verbose:
         print('Wavelength bins, [nm]:')
