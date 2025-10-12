@@ -44,7 +44,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 230 # PSF with chromatic displacement
 # ids = 231
 # ids = 344 # intense phase bump
-ids = [344, 179, 451] # intense phase bump
+# ids = [344, 179, 451] # intense phase bump
 # ids = 423 # relatively good one
 
 # ids = 404 # intense streaks
@@ -85,6 +85,8 @@ ids = [344, 179, 451] # intense phase bump
 
 # ids = [451, 468, 338]
 
+ids = 344
+
 PSF_0, norms, bgs, configs = LoadSTDStarData(
     ids                 = ids,
     derotate_PSF        = True,
@@ -103,6 +105,7 @@ PSF_model = PSFModelNFM(
     chrom_defocus   = False,
     use_splines     = True,
     Moffat_absorber = False,
+    Z_mode_max      = 3,
     device          = device
 )
 
@@ -113,6 +116,8 @@ N_wvl = PSF_0.shape[1]
 N_src = PSF_0.shape[0]
 
 wavelengths = PSF_model.wavelengths
+
+# PSF_model.inputs_manager['LO_coefs'][:,0] = 100
 
 #%%
 cmap = mpl.colormaps.get_cmap('gray')  # viridis is the default colormap for imshow
@@ -138,7 +143,8 @@ for j in range(N_src):
 #%%
 from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+# wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
 wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
 # wvl_weights = wvl_weights * 0 + 1
@@ -159,13 +165,13 @@ loss_MSE   = torch.nn.MSELoss(reduction='mean')
 
 
 def loss_fn(x_, w_MSE, w_MAE):    
-    diff = (func(x_)-PSF_0) * wvl_weights
+    diff = (func(x_)-PSF_0) #* wvl_weights
     w = 2e4
     MSE_loss = diff.pow(2).mean() * w * w_MSE
     MAE_loss = diff.abs().mean()  * w * w_MAE
     LO_loss  = loss_LO_fn() if PSF_model.LO_NCPAs else 0.0
 
-    return MSE_loss + MAE_loss + LO_loss
+    return MSE_loss + MAE_loss + LO_loss + Moffat_loss_fn()
 
 
 def loss_LO_fn():
@@ -182,18 +188,42 @@ def loss_LO_fn():
     return LO_loss
 
 
+def Moffat_loss_fn():
+    if PSF_model.Moffat_absorber is False:
+        return 0.0
+    
+    amp = PSF_model.inputs_manager['amp']
+    # alpha = PSF_model.inputs_manager['alpha']
+    # beta = PSF_model.inputs_manager['beta']
+    # b = PSF_model.inputs_manager['b']
+    
+    # Enforce positive amplitude
+    amp_penalty = amp.pow(2).mean() * 2.5e-2
+    
+    # Enforce beta > 1.5
+    # beta_penalty = torch.clamp(1.5 - beta, min=0).pow(2).mean() * 1e-3
+    
+    # # Enforce alpha > 0
+    # alpha_penalty = torch.clamp(-alpha, min=0).pow(2).mean() * 1e-3
+    
+    # # Enforce b > 0
+    # b_penalty = torch.clamp(-b, min=0).pow(2).mean() * 1e-3
+    
+    return amp_penalty #+ beta_penalty + alpha_penalty + b_penalty
+
+
 def loss_fn_Huber(x_):
     PSF_1 = func(x_)
     huber_loss = loss_Huber(PSF_1*wvl_weights*5e5, PSF_0*wvl_weights*5e5)
     MSE_loss = loss_MSE(PSF_1*wvl_weights, PSF_0*wvl_weights) * 2e4 * 800.0
     LO_loss = loss_LO_fn() if PSF_model.LO_NCPAs else 0.0
 
-    return huber_loss + LO_loss + MSE_loss
+    return huber_loss + LO_loss #+ MSE_loss
 
 
-loss_fn1 = lambda x_: loss_fn(x_, w_MSE=800.0, w_MAE=1.6)
-loss_fn2 = lambda x_: loss_fn(x_, w_MSE=1.0,   w_MAE=2.0)
-grad_loss_fn = GradientLoss(p=1, reduction='mean')
+loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6)
+# loss_fn2 = lambda x_: loss_fn(x_, w_MSE=1.0,   w_MAE=2.0)
+# grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
 
 #%
@@ -259,14 +289,14 @@ fit_wind_speed = True
 fit_outerscale = True
 
 include_general = ['r0', 'dn'] + \
-                  (['amp', 'alpha', 'beta', 'b'] if PSF_model.Moffat_absorber else []) + \
+                  (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else []) + \
                   (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else []) + \
                   ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
                   (['L0'] if fit_outerscale else []) + \
                   (['wind_speed_single'] if fit_wind_speed else [])
                 #   ([x+'_x_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
 
-exclude_general = ['ratio', 'theta'] if PSF_model.Moffat_absorber else []
+exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.Moffat_absorber else []
 
 include_LO = (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else [])
 exclude_LO = list(set(include_general + exclude_general) - set(include_LO))

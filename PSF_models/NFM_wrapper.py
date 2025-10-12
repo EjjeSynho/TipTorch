@@ -30,23 +30,25 @@ class PSFModelNFM:
         chrom_defocus   = False,
         use_splines     = False,
         Moffat_absorber = False,
+        Z_mode_max      = 9,
         device          = device
     ):
         
         self.LO_N_params = 75
-        self.Z_mode_max  = 9
+        self.Z_mode_max  = Z_mode_max
         
         self.LO_NCPAs        = LO_NCPAs
         self.multiple_obs    = multiple_obs
         self.device          = device
         self.Moffat_absorber = Moffat_absorber
         self.use_splines     = use_splines
-        self.chrom_defocus   = chrom_defocus
+        self.chrom_defocus   = chrom_defocus and LO_NCPAs
         
         config = self.init_configs(config)
         self.wavelengths = config['sources_science']['Wavelength'].squeeze()
         self.init_model(config)
-        self.init_NCPAs()
+        if LO_NCPAs:
+            self.init_NCPAs()
         # self.polychromatic_params = ['F', 'dx', 'dy', 'Jx', 'Jy']
         self.polychromatic_params = ['F', 'dx', 'dy'] + (['chrom_defocus'] if self.chrom_defocus else ['J'])
 
@@ -175,7 +177,6 @@ class PSFModelNFM:
         # LO NCPAs + phase bump optimized jointly
         composite_basis = torch.concat([
             (sausage_basis.OPD_map).unsqueeze(0).flip(-2)*5e6*self.model.pupil.unsqueeze(0),
-            # sausage_basis.OPD_map.unsqueeze(0).flip(-2)*5e6,
             Z_basis.zernike_basis[2:self.Z_mode_max,...]
         ], dim=0)
 
@@ -267,33 +268,33 @@ class PSFModelNFM:
 
         if self.LO_NCPAs:
             if isinstance(self.LO_basis, PixelmapBasis):
-                self.inputs_manager.add('LO_coefs', torch.zeros([N_src, self.LO_N_params**2]), norm_LO)
+                self.inputs_manager.add('LO_coefs', torch.zeros([self.model.N_src, self.LO_N_params**2]), norm_LO)
                 # self.phase_func = lambda: self.LO_basis(self.inputs_manager["LO_coefs"].view(1, self.LO_N_params, self.LO_N_params))
-                # self.OPD_func   = lambda: self.inputs_manager['LO_coefs'].view(N_src, self.LO_N_params, self.LO_N_params)
+                # self.OPD_func   = lambda: self.inputs_manager['LO_coefs'].view(self.model.N_src, self.LO_N_params, self.LO_N_params)
 
                 self.phase_func = lambda x: self.LO_basis(x.view(1, self.LO_N_params, self.LO_N_params))
-                self.OPD_func   = lambda x: x.view(N_src, self.LO_N_params, self.LO_N_params)
+                self.OPD_func   = lambda x: x.view(self.model.N_src, self.LO_N_params, self.LO_N_params)
 
 
             elif isinstance(self.LO_basis, ZernikeBasis) or isinstance(self.LO_basis, ArbitraryBasis):
-                self.inputs_manager.add('LO_coefs', torch.zeros([N_src, self.LO_N_params]), norm_LO)
-                # self.OPD_func = lambda: self.LO_basis.compute_OPD(self.inputs_manager["LO_coefs"].view(N_src, self.LO_N_params))
-                self.OPD_func = lambda x: self.LO_basis.compute_OPD(x.view(N_src, self.LO_N_params))
+                self.inputs_manager.add('LO_coefs', torch.zeros([self.model.N_src, self.LO_N_params]), norm_LO)
+                # self.OPD_func = lambda: self.LO_basis.compute_OPD(self.inputs_manager["LO_coefs"].view(self.model.N_src, self.LO_N_params))
+                self.OPD_func = lambda x: self.LO_basis.compute_OPD(x.view(self.model.N_src, self.LO_N_params))
 
                 if self.chrom_defocus:
-                    self.inputs_manager.add('chrom_defocus',  torch.tensor([[0.0,]*N_wvl]*N_src),  norm_LO, optimizable=self.chrom_defocus)
+                    self.inputs_manager.add('chrom_defocus', torch.tensor([[0.0,]*N_wvl]*self.model.N_src), norm_LO, optimizable=self.chrom_defocus)
                     defocus_mode_id = 1 # the index of defocus mode
 
                     def phase_func(x):
-                        # coefs_chromatic = self.inputs_manager["LO_coefs"].view(N_src, self.LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1)
-                        # coefs_chromatic[:, :, defocus_mode_id] += self.inputs_manager["chrom_defocus"].view(N_src, N_wvl) # add chromatic defocus
+                        # coefs_chromatic = self.inputs_manager["LO_coefs"].view(self.model.N_src, self.LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1)
+                        # coefs_chromatic[:, :, defocus_mode_id] += self.inputs_manager["chrom_defocus"].view(self.model.N_src, N_wvl) # add chromatic defocus
                         # return self.LO_basis(coefs_chromatic)
                         raise NotImplementedError("Chromatic defocus with callable phase function is not implemented yet.")
                     
                     self.phase_func = phase_func
                 else:
-                    # self.phase_func = lambda: self.LO_basis(self.inputs_manager["LO_coefs"].view(N_src, self.LO_N_params))
-                    self.phase_func = lambda x: self.LO_basis(x.view(N_src, self.LO_N_params))
+                    # self.phase_func = lambda: self.LO_basis(self.inputs_manager["LO_coefs"].view(self.model.N_src, self.LO_N_params))
+                    self.phase_func = lambda x: self.LO_basis(x.view(self.model.N_src, self.LO_N_params))
             else:
                 raise ValueError('Wrong LO type specified.')
         else:
@@ -306,12 +307,9 @@ class PSFModelNFM:
         _ = self.inputs_manager.stack()
 
 
-    def evaluate_splines(self, param_name, x):
-        spline = NaturalCubicSpline(natural_cubic_spline_coeffs(
-            t = self.x_ctrl, #self.inputs_manager[param_name+'_x_ctrl'].squeeze(0),
-            x = self.inputs_manager[param_name+'_ctrl'].T)
-        )
-        return spline.evaluate(x).T
+    def evaluate_splines(self, y_points, x_grid):
+        spline = NaturalCubicSpline(natural_cubic_spline_coeffs(t=self.x_ctrl, x=y_points.T))
+        return spline.evaluate(x_grid).T
 
 
     def forward(self, x_dict=None, include_list=None):
@@ -321,15 +319,15 @@ class PSFModelNFM:
         if self.use_splines:
             for entry in self.polychromatic_params:
                 if entry+'_ctrl' in x_dict:
-                    x_dict[entry] = self.evaluate_splines(entry, self.norm_wvl(self.wavelengths))
-        
+                    x_dict[entry] = self.evaluate_splines(x_dict[entry+'_ctrl'], self.norm_wvl(self.wavelengths))
+
         # Clone J entry to Jx and Jy
         x_dict['Jx'] = x_dict['J']
         x_dict['Jy'] = x_dict['J']
         
-        # if fit_wind_speed:
             # x_dict['wind_dir']   = x_dict['wind_dir_single'].unsqueeze(-1).repeat(1, self.model.N_L)
-        x_dict['wind_speed'] = x_dict['wind_speed_single'].view(-1, 1).repeat(1, self.model.N_L)
+        if 'wind_speed_single' in x_dict:
+            x_dict['wind_speed'] = x_dict['wind_speed_single'].view(-1, 1).repeat(1, self.model.N_L)
 
         # x_dict['Cn2_weights'] = torch.hstack([x_dict['GL_frac'], 1.0 - x_dict['GL_frac']]).unsqueeze(0)
         # x_dict['h']           = torch.hstack([torch.tensor([0.0], device=self.device), x_dict['GL_h'].abs()]).unsqueeze(0)
@@ -344,6 +342,6 @@ class PSFModelNFM:
     def SetWavelengths(self, wavelengths):
         self.model.config['sources_science']['Wavelength'] = wavelengths.view(1,-1) # [nm]
         self.model.Update(init_grids=True, init_pupils=True, init_tomography=True)
-        self.wavelengths = wavelengths * 1e9 # [nm]
+        self.wavelengths = wavelengths # [nm]
 
     __call__ = forward

@@ -6,7 +6,7 @@ STD_FOLDER     = MUSE_DATA_FOLDER / 'standart_stars/'
 CUBES_FOLDER   = STD_FOLDER / 'cubes/'
 RAW_FOLDER     = STD_FOLDER / 'raw/'
 CUBES_CACHE    = STD_FOLDER / 'cached_cubes/'
-DATASET_FOLDER = STD_FOLDER / 'dataset/'
+# DATASET_FOLDER = STD_FOLDER / 'dataset/'
 
 
 def LoadSTDStarCacheByID(id):

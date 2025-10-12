@@ -257,7 +257,7 @@ def plot_radial_PSF_profiles(PSF_0,
             centers = [None]*len(PSFs)
         else:
             if type(centers) is not list:
-                if centers.size == 2: 
+                if len(centers) == 2: 
                     centers = [centers] * len(PSFs)
                 else:
                     centers = [centers[i,...] for i in range(len(PSFs))]
@@ -427,10 +427,10 @@ def draw_PSF_stack(
     
     from matplotlib.colors import LogNorm
     
-    if PSF_in.ndim  == 2:  PSF_in = PSF_in [None, None, ...]
+    if PSF_in.ndim  == 2: PSF_in = PSF_in [None, None, ...]
     if PSF_out.ndim == 2: PSF_out = PSF_out[None, None, ...]
     
-    if PSF_in.ndim  == 3:  PSF_in = PSF_in [None, ...]
+    if PSF_in.ndim  == 3: PSF_in = PSF_in [None, ...]
     if PSF_out.ndim == 3: PSF_out = PSF_out[None, ...]
     
     if isinstance(PSF_in,  np.ndarray): PSF_in  = torch.tensor(PSF_in)

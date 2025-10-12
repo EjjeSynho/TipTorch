@@ -330,9 +330,12 @@ with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
 DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 PSF_cubes, configs, telemetry_records, bad_ids = [], [], [], []
 
-good_samples = muse_df[muse_df['Corrupted'] == False]
 
-for id in tqdm(good_samples.index):
+muse_df = muse_df[muse_df['Corrupted']   == False]
+muse_df = muse_df[muse_df['Bad quality'] == False]
+good_samples = muse_df.index.values
+
+for id in tqdm(good_samples):
     try:
         PSF_data, _, _, model_config = LoadSTDStarData(
             ids = id,
@@ -364,15 +367,6 @@ telemetry_records = np.stack(telemetry_records, axis=0) # N_samples x N_features
 np.save(DATASET_CACHE / 'muse_STD_stars_telemetry.npy', telemetry_records)
 np.save(DATASET_CACHE / 'muse_STD_stars_PSFs.npy', PSF_cubes)
 torch.save(configs, DATASET_CACHE / 'muse_STD_stars_configs.pt')
-
-#%%
-from managers.config_manager import MultipleTargetsInDifferentObservations
-
-configs_list = torch.load(DATASET_CACHE / 'muse_STD_stars_configs.pt')
-
-batch_config = MultipleTargetsInDifferentObservations(configs_list, device=device)
-batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits') # Force right directory to the VLT UT4 pupil
-
 
 #%%
 '''

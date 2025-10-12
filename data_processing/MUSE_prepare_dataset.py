@@ -4,29 +4,26 @@
 
 import os
 import sys
+
 sys.path.insert(0, '..')
 
 import pickle
 import torch
 import numpy as np
-from project_settings import MUSE_DATA_FOLDER, PROJECT_PATH
+from data_processing.MUSE_data_utils import MUSE_DATA_FOLDER, wvl_bins
+from data_processing.MUSE_STD_dataset_utils import LoadSTDStarData, STD_FOLDER
 from tqdm import tqdm
-from data_processing.MUSE_preproc_utils import GetMUSEonsky
-import pandas as pd
 
 
 #%%
-with open(MUSE_DATA_FOLDER+'muse_df.pickle', 'rb') as handle:
+with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
 
-# with open('../data/temp/fitted_df_norm.pickle', 'rb') as handle:
-#     fitted_df_norm = pickle.load(handle)
-
-with open(MUSE_DATA_FOLDER+'MUSE_fitted_df.pkl', 'rb') as handle:
+with open(STD_FOLDER / 'muse_fitted_df.pkl', 'rb') as handle:
     fitted_df = pickle.load(handle)
 
-with open(MUSE_DATA_FOLDER+'muse_df_norm_imputed.pickle', 'rb') as handle:
-    muse_df_norm = pickle.load(handle)
+with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
+    muse_df_norm = pickle.load(handle)['telemetry normalized imputed df']
 
 muse_df = muse_df[muse_df['Corrupted']   == False]
 muse_df = muse_df[muse_df['Bad quality'] == False]
@@ -37,31 +34,22 @@ dx_df = fitted_df['dx_df']
 
 valid_ids = (dx_df)[~dx_df.isna()].index.values.tolist()
 
-# for id in [103, 240, 259, 264, 296, 319, 349, 367, 407]:
-#     if id in valid_ids:
-#         valid_ids.remove(id)
-
 muse_df_norm = muse_df_norm.loc[valid_ids]
 muse_df = muse_df.loc[valid_ids]
 
 #%%
-_, _, _, merged_config = GetMUSEonsky([100], derotate_PSF=True, device=torch.device('cpu'))
-wvls = (merged_config['sources_science']['Wavelength'].numpy() * 1e9).round(0).astype(int).flatten()
-
-column_names = wvls.tolist()
-index_names  = muse_df.index.values
+wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
+wvls = wvl_bins[wvl_ids]
 
 F_fitted_df  = fitted_df['F_df'].loc[valid_ids]
 dx_fitted_df = fitted_df['dx_df'].loc[valid_ids]
 dy_fitted_df = fitted_df['dy_df'].loc[valid_ids]
 bg_fitted_df = fitted_df['bg_df'].loc[valid_ids]
-Jx_fitted_df = fitted_df['Jx_df'].loc[valid_ids]
-Jy_fitted_df = fitted_df['Jy_df'].loc[valid_ids]
+J_fitted_df  = fitted_df['J_df'].loc[valid_ids]
 
 Jxy_fitted_df   = fitted_df['singular_vals_df']['Jxy'].loc[valid_ids]
 r0_fitted_df    = fitted_df['singular_vals_df']['r0'].loc[valid_ids]
 dn_fitted_df    = fitted_df['singular_vals_df']['dn'].loc[valid_ids]
-s_pow_fitted_df = fitted_df['singular_vals_df']['sausage_pow'].loc[valid_ids]
 
 amp_fitted_df   = fitted_df['singular_vals_df']['amp'].loc[valid_ids]
 b_fitted_df     = fitted_df['singular_vals_df']['b'].loc[valid_ids]
@@ -70,21 +58,31 @@ beta_fitted_df  = fitted_df['singular_vals_df']['beta'].loc[valid_ids]
 ratio_fitted_df = fitted_df['singular_vals_df']['ratio'].loc[valid_ids]
 theta_fitted_df = fitted_df['singular_vals_df']['theta'].loc[valid_ids]
 
+LO_fitted_df    = fitted_df['LO_df'].loc[valid_ids]
+
 #%% 
 BATCH_SIZE = 16
 selected_entries_input = muse_df_norm.columns.values.tolist()
 
 def batch_config_and_images(ids):
     data_dict = {}
-    PSF_0, norms, bgs, merged_config = GetMUSEonsky(ids, derotate_PSF=True, device=torch.device('cpu'))
-        
-    data_dict['PSF_0']   = PSF_0
+ 
+    PSFs, configs, norms, bgs  = LoadSTDStarData(
+        ids = ids,
+        derotate_PSF = True,
+        normalize = True,
+        subtract_background = True,
+        ensure_odd_pixels = True,
+        device = torch.device('cpu')
+    )
+
+    data_dict['PSF_0']   = PSFs
     data_dict['norms']   = norms
     data_dict['bgs']     = bgs
-    data_dict['configs'] = merged_config
     data_dict['IDs']     = ids
-    data_dict['Wvls']    = (merged_config['sources_science']['Wavelength'].numpy() * 1e9).round(0).astype(int).flatten()
- 
+    data_dict['Wvls']    = wvls
+    data_dict['configs'] = configs
+
     return data_dict
 
 
@@ -97,16 +95,15 @@ def batch_get_data_dicts(ids):
             'dy':    torch.from_numpy(dy_fitted_df.loc[ids].to_numpy()).float(), 
             'bg':    torch.from_numpy(bg_fitted_df.loc[ids].to_numpy()).float(),
             'dn':    torch.from_numpy(dn_fitted_df.loc[ids].to_numpy()).float(),
-            'Jx':    torch.from_numpy(Jx_fitted_df.loc[ids].to_numpy()).float(),
-            'Jy':    torch.from_numpy(Jy_fitted_df.loc[ids].to_numpy()).float(),
+            'J':     torch.from_numpy(J_fitted_df.loc[ids].to_numpy()).float(),
             'Jxy':   torch.from_numpy(Jxy_fitted_df.loc[ids].to_numpy()).float(),
-            's_pow': torch.from_numpy(s_pow_fitted_df.loc[ids].to_numpy()).float(),
             'amp':   torch.from_numpy(amp_fitted_df.loc[ids].to_numpy()).float(),
             'b':     torch.from_numpy(b_fitted_df.loc[ids].to_numpy()).float(),
             'alpha': torch.from_numpy(alpha_fitted_df.loc[ids].to_numpy()).float(),
             'beta':  torch.from_numpy(beta_fitted_df.loc[ids].to_numpy()).float(),
             'ratio': torch.from_numpy(ratio_fitted_df.loc[ids].to_numpy()).float(),
-            'theta': torch.from_numpy(theta_fitted_df.loc[ids].to_numpy()).float()
+            'theta': torch.from_numpy(theta_fitted_df.loc[ids].to_numpy()).float(),
+            'LO':    torch.from_numpy(LO_fitted_df.loc[ids].to_numpy()).float()
         },
         'onsky data':  muse_df_norm.loc[ids].to_dict(orient='list')
     }
@@ -178,8 +175,8 @@ def WriteTestBatch():
 # %%
 train_ids, val_ids = [], []
 
-folder_train = MUSE_DATA_FOLDER + 'MUSE_dataset_16_backup/train/'
-folder_val   = MUSE_DATA_FOLDER + 'MUSE_dataset_16_backup/validation/'
+folder_train = MUSE_DATA_FOLDER + 'dataset_legacy/train/'
+folder_val   = MUSE_DATA_FOLDER + 'dataset_legacy/validation/'
 
 if not os.path.exists(folder_train):
     print('Copying IDs from the existent dataset...')

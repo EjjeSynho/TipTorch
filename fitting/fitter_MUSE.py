@@ -43,8 +43,7 @@ MUSE_FITTING_FOLDER = STD_FOLDER / 'fitted/'
 
 warnings.filterwarnings("ignore")
 
-# default_device = device
-default_device = torch.device('cuda:0')
+default_device = device
 
 start_id, end_id = -1, -1
 
@@ -110,8 +109,6 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 
 #%%
 def load_and_fit_sample(id):
-    # id = 344
-
     # Load data
     PSF_0, norms, bgs, configs = LoadSTDStarData(
         ids                 = [id],
@@ -130,7 +127,8 @@ def load_and_fit_sample(id):
         LO_NCPAs        = True,
         chrom_defocus   = False,
         use_splines     = False,
-        Moffat_absorber = False,
+        Moffat_absorber = True,
+        Z_mode_max      = 9,
         device          = device
     )
 
@@ -150,14 +148,38 @@ def load_and_fit_sample(id):
     # loss_MSE   = torch.nn.MSELoss(reduction='mean')
     grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
+
     def loss_fn(x_, w_MSE, w_MAE):    
-        diff = (func(x_)-PSF_0) * wvl_weights
+        diff = (func(x_)-PSF_0) #* wvl_weights # NOTE: wvl_weights removed for now
         w = 2e4
         MSE_loss = diff.pow(2).mean() * w * w_MSE
         MAE_loss = diff.abs().mean()  * w * w_MAE
         LO_loss  = loss_LO_fn() if PSF_model.LO_NCPAs else 0.0
+        Moffat_loss = Moffat_loss_fn() if PSF_model.Moffat_absorber else 0.0
 
-        return MSE_loss + MAE_loss + LO_loss
+        return MSE_loss + MAE_loss + LO_loss + Moffat_loss
+
+
+    def Moffat_loss_fn():
+        amp = PSF_model.inputs_manager['amp']
+        # alpha = PSF_model.inputs_manager['alpha']
+        # beta = PSF_model.inputs_manager['beta']
+        # b = PSF_model.inputs_manager['b']
+        
+        # Enforce positive amplitude
+        amp_penalty = amp.pow(2).mean() * 2.5e-2
+        
+        # Enforce beta > 1.5
+        # beta_penalty = torch.clamp(1.5 - beta, min=0).pow(2).mean() * 1e-3
+        
+        # # Enforce alpha > 0
+        # alpha_penalty = torch.clamp(-alpha, min=0).pow(2).mean() * 1e-3
+        
+        # # Enforce b > 0
+        # b_penalty = torch.clamp(-b, min=0).pow(2).mean() * 1e-3
+        
+        return amp_penalty #+ b_penalty + beta_penalty + alpha_penalty
+
 
     def loss_LO_fn():
         if isinstance(PSF_model.LO_basis, PixelmapBasis):
@@ -168,7 +190,7 @@ def load_and_fit_sample(id):
             # Constraint to enforce first element of LO_coefs to be positive
             first_coef_penalty = torch.clamp(-PSF_model.inputs_manager['LO_coefs'][:, 0], min=0).pow(2).mean() * 5e-5
             LO_loss += first_coef_penalty
-            
+        
         return LO_loss
 
     # def loss_fn_Huber(x_):
