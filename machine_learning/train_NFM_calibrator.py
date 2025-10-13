@@ -26,8 +26,8 @@ from torch.utils.data import Dataset
 from managers.config_manager import MultipleTargetsInDifferentObservations
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
-STD_FOLDER     = MUSE_DATA_FOLDER / 'standart_stars/'
-DATASET_CACHE  = STD_FOLDER / 'dataset_cache'
+STD_FOLDER    = MUSE_DATA_FOLDER / 'standart_stars/'
+DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 
 # Set up logging
 log_dir = Path('../data/logs')
@@ -49,6 +49,20 @@ logger.info("="*60)
 logger.info("NFM Calibrator Training Script")
 logger.info("="*60)
 logger.info(f"Log file: {log_filename}")
+
+
+# Add argument inputs
+import argparse
+parser = argparse.ArgumentParser(description="Train NFM Calibrator")
+# parser.add_argument('--weights', type=str, default=str(WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth'), help='Path to the best calibrator weights checkpoint')
+parser.add_argument('--continue-training', action='store_true', help='Whether to continue training from a checkpoint')
+
+# Handle both command line and iPython environments
+try:
+    args = parser.parse_args()
+except SystemExit:
+    # In iPython/Jupyter, parse_args() fails, so use default values
+    args = argparse.Namespace(continue_training=False)
 
 # from data_processing.MUSE_STD_dataset_utils import *
 
@@ -137,8 +151,8 @@ with torch.no_grad():
         LO_NCPAs        = True,
         chrom_defocus   = False,
         use_splines     = True,
-        Moffat_absorber = True,
-        Z_mode_max      = 9,
+        Moffat_absorber = False,
+        Z_mode_max      = 3,
         device          = device
     )
     PSF_model.inputs_manager.delete('Jxy')
@@ -149,7 +163,7 @@ with torch.no_grad():
     PSF_model.inputs_manager.delete('L0')
     
     if PSF_model.Moffat_absorber:
-        PSF_model.inputs_manager.delete('beta')
+        # PSF_model.inputs_manager.delete('beta')
         PSF_model.inputs_manager.delete('theta')
         PSF_model.inputs_manager.delete('ratio')
 
@@ -190,9 +204,37 @@ torch.cuda.empty_cache()
 λ_sets = [λ_full[list_id] for list_id in λ_id_sets]
 
 #%%
-dx = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
-dy = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
-# b  = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32)
+import pickle
+
+pre_init_astrometry = True
+optimize_astrometry = True
+
+fitted_df = pickle.load(open(STD_FOLDER / 'muse_fitted_df.pkl', 'rb'))
+
+wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
+wvl_ids_shift = np.clip(wvl_ids + 1, a_min=0, a_max=N_wvl_max-1)[:-2]
+
+dx_df = fitted_df['dx_df'].sort_index().to_numpy().astype(np.float32)
+dy_df = fitted_df['dy_df'].sort_index().to_numpy().astype(np.float32)
+
+dx_full_arr = np.zeros((dx_df.shape[0], N_wvl_total), dtype=np.float32)
+dy_full_arr = np.zeros((dy_df.shape[0], N_wvl_total), dtype=np.float32)
+
+for i, wvl_id in enumerate(wvl_ids):
+    dx_full_arr[:, wvl_id] = dx_df[:, i]
+    dy_full_arr[:, wvl_id] = dy_df[:, i]
+# Linear interpolation for missing wavelengths
+for i, wvl_id in enumerate(wvl_ids_shift):
+    dx_full_arr[:, wvl_id] = 0.5*(dx_df[:, i] + dx_df[:, i+1])
+    dy_full_arr[:, wvl_id] = 0.5*(dy_df[:, i] + dy_df[:, i+1])
+
+# dx = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
+# dy = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
+
+dx = torch.from_numpy(dx_full_arr).to(device=device, dtype=torch.float32)
+dy = torch.from_numpy(dy_full_arr).to(device=device, dtype=torch.float32)
+
+
 
 #%%
 # def run_model(predicted_inputs_vec, config, idx, λ_ids):
@@ -331,28 +373,41 @@ calibrator = SmallCalibratorNet(
 ).to(device)
 
 
+if args.continue_training:
+    checkpoint_path = WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth'
+    try:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
+        dx = checkpoint['dx'].to(device)
+        dy = checkpoint['dy'].to(device)
+
+        dx.requires_grad_(True)
+        dy.requires_grad_(True)
+
+        logger.info(f"Loaded checkpoint from {checkpoint_path}")
+    except Exception as e:
+        logger.warning(f"Failed to load checkpoint from {checkpoint_path}: {e}. Starting training from scratch.")
+
+
 # Optimizer with weight decay (L2 regularization)
 optimizer = optim.AdamW([
-    {'params': calibrator.parameters(), 'lr': 1e-3, 'weight_decay': 1e-3},
-    {'params': [dx, dy], 'lr': 1e-3, 'weight_decay': 1e-4}  # Lower weight decay for dx/dy
-], lr=1e-3, weight_decay=1e-3)  # Default values
+    {'params': calibrator.parameters(), 'lr': 1e-3, 'weight_decay': 5e-4},
+    {'params': [dx, dy], 'lr': 1e-3, 'weight_decay': 1e-5}  # Lower weight decay for dx/dy
+], lr=1e-3)  # Default values
 
-# More aggressive scheduler for 50 epochs: reduce LR every 3-5 epochs without improvement
-# Key: scheduler patience (3) << early stopping patience (10) so LR actually reduces during training
-# Expected LR schedule over 50 epochs: 1e-3 -> 5e-4 -> 2.5e-4 -> 1.25e-4 -> ... (every ~3-4 epochs of plateau)
+
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, 
-    mode='min', 
-    factor=0.5,      # Reduce by half
-    patience=3,      # Wait only 3 epochs (much less than early stopping patience)
-    verbose=True,
-    min_lr=1e-5      # Don't go below this
+    optimizer,
+    mode     = 'min',
+    factor   = 0.7,
+    patience = 3,
+    verbose  = True,
+    min_lr   = 1e-5
 )
 
-logger.info(f"Scheduler: ReduceLROnPlateau with patience={3}, factor={0.5}, min_lr={1e-6}")
+logger.info(f"Scheduler: ReduceLROnPlateau with patience={3}, factor={0.7}, min_lr={1e-5}")
 
-
-# Loss function
+#%%
 wvl_weights = torch.linspace(1.0, 0.5, N_wvl_total).to(device).view(1, N_wvl_total, 1, 1)
 wvl_weights = N_wvl_total / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
@@ -406,14 +461,15 @@ def loss_fn(PSF_pred, PSF_data, x_dict, w_MSE, w_MAE, w_L2, w_first, λ_ids):
     return MSE_loss + MAE_loss + LO_loss + Moffat_loss
 
 
-criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=900.0, w_MAE=1.6, w_L2=1e-6, w_first=5e-5, λ_ids=λ_ids)
+# criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=900.0, w_MAE=1.6, w_L2=1e-4, w_first=5e-5, λ_ids=λ_ids)
+criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=5000.0, w_MAE=1.6, w_L2=1e-4, w_first=5e-5, λ_ids=λ_ids)
 
 # L1 regularization of NN parameters
 def l1_regularization(model, lambda_l1=1e-4):
     l1_norm = sum(p.abs().sum() for p in model.parameters())
     return lambda_l1 * l1_norm
 
-#%%
+# %%
 '''
 num_epochs = 5
 
@@ -515,7 +571,7 @@ def validate_with_astrometry_optimization(num_opt_steps=20, lr_dx_dy=1e-3):
                 final_loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], x_pred, λ_id_set)
 
                 print(f"\rλ set {current_λ_set_id + 1}/{len(λ_sets)}, batch {batch_idx + 1}: val_loss = {final_loss.item():.6f}", end='', flush=True)
-                logger.debug(f"Validation: λ set {current_λ_set_id + 1}/{len(λ_sets)}, batch {batch_idx + 1}: val_loss = {final_loss.item():.6f}")
+                logger.debug(f"Validation: λ set {current_λ_set_id + 1}/{len(λ_sets)}, batch {batch_idx + 1}/{len(val_loader)}: val_loss = {final_loss.item():.6f}")
                 total_loss += final_loss.item()
                 num_batches += 1
 
@@ -562,7 +618,9 @@ def validate_fixed():
     PSFs_pred_cube = torch.zeros((N_val_samples, N_wvl_total, H, W), dtype=torch.float32, device='cpu')
     PSFs_data_cube = torch.zeros((N_val_samples, N_wvl_total, H, W), dtype=torch.float32, device='cpu')
     validation_ids = torch.zeros((N_val_samples,), dtype=torch.long, device='cpu')
-    
+
+    NN_predictions = torch.zeros((N_val_samples, N_outputs), dtype=torch.float32, device='cpu')
+
     logger.info(f"Validation dataset size: {N_val_dataset}, batches: {N_val_batches}, actual samples: {N_val_samples}")
     logger.info(f"Initializing PSF cubes: predictions and data, shape: {PSFs_pred_cube.shape}")
     logger.info(f"Initializing validation IDs array, shape: {validation_ids.shape}")
@@ -582,6 +640,8 @@ def validate_fixed():
             # Get calibrator predictions (same for all wavelength sets)
             NN_output = calibrator(telemetry_inputs)
             x_pred = inputs_transformer.unstack(NN_output)
+            
+            NN_predictions[batch_start_idx:batch_end_idx, :] = NN_output.cpu()
             
             # Inner loop: iterate through wavelength sets
             for current_λ_set_id in range(len(λ_sets)):
@@ -618,7 +678,7 @@ def validate_fixed():
     logger.info(f"PSF data range: [{PSFs_data_cube.min():.4e}, {PSFs_data_cube.max():.4e}]")
     logger.info(f"Validation IDs range: [{validation_ids.min()}, {validation_ids.max()}]")
 
-    return PSFs_pred_cube, PSFs_data_cube, validation_ids, total_loss / num_batches if num_batches > 0 else 0.0
+    return PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, total_loss / num_batches if num_batches > 0 else 0.0
 
 
 # Helper function to check for NaN values
@@ -666,7 +726,7 @@ def load_checkpoint(calibrator, dx, dy, optimizer, path='checkpoint.pth'):
 
 # Complete training loop with validation
 def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, val_dx_dy_lr=1e-3, 
-                         nan_recovery=True, max_nan_recoveries=3):
+                          nan_recovery=True, max_nan_recoveries=3):
     """
     Training loop with validation where dx/dy are optimized during validation.
     
@@ -741,7 +801,7 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
                             # Reduce learning rate
                             for param_group in optimizer.param_groups:
                                 old_lr = param_group['lr']
-                                param_group['lr'] = old_lr * 0.75
+                                param_group['lr'] = old_lr * 0.7
                                 logger.warning(f"Reduced LR: {old_lr:.2e} -> {param_group['lr']:.2e}")
 
                             print(f"✓ Recovered from checkpoint, LR reduced by 25%")
@@ -775,12 +835,12 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
                 # Running loss info during wavelength iteration
           
                 current_lr = optimizer.param_groups[0]['lr']
-                
-                print(f"\rλ set {current_λ_set_id + 1}/{len(λ_sets)} complete | "
+
+                print(f"\rλ set {current_λ_set_id + 1}/{len(λ_sets)} complete, batch {batch_idx + 1}/{len(train_loader)} | "
                       f"Running loss: {loss.item():.6f} | LR: {current_lr:.2e}", end='', flush=True)
 
                 logger.debug(f"Epoch {epoch}, λ set {current_λ_set_id + 1}/{len(λ_sets)}, "
-                           f"batch {batch_idx + 1}: train_loss = {loss.item():.6f}")
+                           f"batch {batch_idx + 1}/{len(train_loader)}: train_loss = {loss.item():.6f}")
             
             # If NaN was detected, break out of wavelength loop too
             if nan_detected_this_epoch:
@@ -906,7 +966,7 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
     return calibrator, train_losses, val_losses
 
 
-#%%
+# %%
 def main():
     logger.info("="*60)
     logger.info("Starting Training with Validation")
@@ -915,8 +975,8 @@ def main():
     # Train the model with NaN recovery enabled
     calibrator, train_losses, val_losses = train_with_validation(
         num_epochs=500,
-        patience=10,
-        val_dx_dy_opt_steps=5,
+        patience=20,
+        val_dx_dy_opt_steps=3,
         val_dx_dy_lr=1e-4,
         nan_recovery=True,
         max_nan_recoveries=10
@@ -965,9 +1025,8 @@ logger.info(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {check
 print(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {checkpoint['epoch']}")
 
 
-#%%
 # Validate and collect all PSF predictions and data
-PSFs_pred, PSFs_data, validation_ids, final_val_loss = validate_fixed()
+PSFs_pred, PSFs_data, validation_ids, NN_predictions, final_val_loss = validate_fixed()
 
 print(f"\n{'='*60}")
 print(f"Validation Results:")
@@ -995,23 +1054,227 @@ PSFs_data = PSFs_data.cpu()
 validation_ids = validation_ids.cpu()
 
 #%%
+# Dummy optimization routine for debugging loss function and optimization behavior
+def debug_dummy_optimization(num_iters=100, initial_guess=None):
+    """
+    Short debugging optimization loop that directly optimizes model inputs.
+    
+    Args:
+        num_iters: Number of optimization iterations
+        use_calibrator: If True, uses calibrator predictions as starting point; 
+                       if False, optimizes dummy vector directly
+    """
+    logger.info("=" * 40)
+    logger.info("DUMMY OPTIMIZATION DEBUG")
+    logger.info("=" * 40)
+    
+    # Use first batch for debugging
+    dummy_batch = list(val_loader)[0]
+    PSF_cubes, _, batch_config, idxs = dummy_batch
+    
+    logger.info(f"Debug batch size: {PSF_cubes.shape[0]}")
+    logger.info(f"PSF cube shape: {PSF_cubes.shape}")
+    
+    # Use single wavelength set for faster debugging
+    current_λ_set_id = 0
+    PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=device))
+    λ_id_set = λ_id_sets[current_λ_set_id]
+    
+    logger.info(f"Using wavelength set {current_λ_set_id}: {len(λ_id_set)} wavelengths")
+    
+    if initial_guess is not None:
+        # Start with calibrator prediction and add noise
+        with torch.no_grad():
+            dummy_vec = initial_guess.detach().clone().to(device=device)
+            dummy_vec.requires_grad_(True)
+        logger.info("Using initial guess")
+    else:
+        # Random initialization
+        dummy_vec = torch.randn((PSF_cubes.shape[0], N_outputs), device=device, requires_grad=True)
+        logger.info("Using random initialization")
+    
+    # Setup optimizer and scheduler
+    optimizer = optim.Adam([
+        {'params': [dx], 'lr': 1e-3},
+        {'params': [dy], 'lr': 1e-3},
+        {'params': [dummy_vec], 'lr': 1e-1}
+    ], weight_decay=1e-4)
+    
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.7, patience=10, min_lr=1e-6, verbose=True
+    )
+    
+    # Loss tracking
+    losses, grad_norms, param_norms = [], [], []
+    
+    # Initial evaluation
+    with torch.no_grad():
+        x_pred = inputs_transformer.unstack(dummy_vec)
+        PSF_pred = run_model(x_pred, batch_config, idxs, λ_id_set)
+        initial_loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], x_pred, λ_id_set)
+        logger.info(f"Initial loss: {initial_loss.item():.6f}")
+    
+    logger.info(f"Starting optimization for {num_iters} iterations...")
+    
+    
+    # Optimization loop
+    for epoch in range(num_iters):
+        optimizer.zero_grad()
+        
+        # Forward pass
+        x_pred = inputs_transformer.unstack(dummy_vec)
+        PSF_pred = run_model(x_pred, batch_config, idxs, λ_id_set)
+        loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], x_pred, λ_id_set)
+        
+        # Check for NaN
+        if torch.isnan(loss) or torch.isinf(loss):
+            logger.error(f"❌ NaN/Inf loss at iteration {epoch}: {loss.item()}")
+            break
+        
+        # Backward pass
+        loss.backward()
+        
+        # Gradient monitoring
+        dummy_grad_norm = torch.nn.utils.clip_grad_norm_(dummy_vec, max_norm=1.0)
+        dx_dy_grad_norm = torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=10.0)
+        
+        # Optimizer step
+        optimizer.step()
+        
+        # Learning rate scheduling
+        if epoch % 10 == 0:
+            scheduler.step(loss)
+        
+        # Record metrics
+        losses.append(loss.item())
+        grad_norms.append(dummy_grad_norm.item())
+        param_norms.append(dummy_vec.norm().item())
+        
+        # Progress logging
+        if (epoch + 1) % 20 == 0 or epoch == 0:
+            current_lr = optimizer.param_groups[0]['lr']
+            improvement = (initial_loss.item() - loss.item()) / initial_loss.item() * 100
+            
+            progress_msg = (f"Iter {epoch+1:4d}/{num_iters} | "
+                           f"Loss: {loss.item():.6f} | "
+                           f"Improve: {improvement:+.2f}% | "
+                           f"LR: {current_lr:.2e} | "
+                           f"Grad: {dummy_grad_norm:.3f}")
+            print(progress_msg)
+            logger.info(progress_msg)
+    
+    # Final evaluation
+    with torch.no_grad():
+        x_pred = inputs_transformer.unstack(dummy_vec)
+        PSF_pred = run_model(x_pred, batch_config, idxs, λ_id_set)
+        final_loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], x_pred, λ_id_set)
+        
+        total_improvement = (initial_loss.item() - final_loss.item()) / initial_loss.item() * 100
+        
+        logger.info("=" * 40)
+        logger.info("DUMMY OPTIMIZATION RESULTS")
+        logger.info("=" * 40)
+        logger.info(f"Initial loss:    {initial_loss.item():.6f}")
+        logger.info(f"Final loss:      {final_loss.item():.6f}")
+        logger.info(f"Total improvement: {total_improvement:.2f}%")
+        logger.info(f"Iterations:      {len(losses)}")
+        logger.info(f"Final param norm: {dummy_vec.norm().item():.6f}")
+    
+    # Simple visualization
+    if len(losses) > 1:
+        try:
+            import matplotlib.pyplot as plt
+            
+            fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+            
+            # Loss curve
+            axes[0].plot(losses)
+            axes[0].set_title('Loss Evolution')
+            axes[0].set_xlabel('Iteration')
+            axes[0].set_ylabel('Loss')
+            axes[0].set_yscale('log')
+            axes[0].grid(True)
+            
+            # Gradient norms
+            axes[1].plot(grad_norms)
+            axes[1].set_title('Gradient Norm')
+            axes[1].set_xlabel('Iteration')
+            axes[1].set_ylabel('Grad Norm')
+            axes[1].set_yscale('log')
+            axes[1].grid(True)
+            
+            # Parameter norms
+            axes[2].plot(param_norms)
+            axes[2].set_title('Parameter Norm')
+            axes[2].set_xlabel('Iteration')
+            axes[2].set_ylabel('Param Norm')
+            axes[2].grid(True)
+            
+            plt.tight_layout()
+            # plt.savefig(DATA_FOLDER / 'temp' / 'dummy_debug.png', dpi=150, bbox_inches='tight')
+            plt.show()
+            
+            # logger.info(f"Debug plots saved to {DATA_FOLDER / 'temp' / 'dummy_debug.png'}")
+            
+        except Exception as e:
+            logger.warning(f"Could not create plots: {e}")
+    
+    # Cleanup
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+    
+    return {
+        'losses': losses,
+        'grad_norms': grad_norms,
+        'param_norms': param_norms,
+        'initial_loss': initial_loss.item(),
+        'final_loss': final_loss.item(),
+        'improvement_percent': total_improvement,
+        'dummy_vec': dummy_vec.detach().clone(),
+        'final_x_pred': x_pred,
+        'PSF_pred': PSF_pred.detach().clone(),
+        'PSF_cubes': PSF_cubes.detach().clone()
+    }
+
+
+#%%
+results = debug_dummy_optimization(num_iters=100, initial_guess=dummy_vec)
+# results = debug_dummy_optimization(num_iters=200)
+
+#%%
+with torch.no_grad():
+    PSFs_data = results['PSF_cubes'].cpu()
+    PSFs_pred = results['PSF_pred'].cpu()
+
+    x_pred = results['final_x_pred']
+    N_wvl_temp = PSFs_data.shape[1]
+
+    dummy_vec = results['dummy_vec'].cpu()
+    x_test = inputs_transformer.unstack(dummy_vec)
+
+
+#%%
+# Legacy plotting code (for comparison/backup)
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 import matplotlib.pyplot as plt
 
 id_src = np.random.randint(0, PSFs_data.shape[0])
-
 print(f"Randomly selected validation sample ID: {id_src}")
 print(f"Corresponding original dataset index: {validation_ids[id_src].item()}")
 
 PSF_0 = PSFs_data[id_src]
 PSF_1 = PSFs_pred[id_src]
 
+# NN_pred = NN_predictions[id_src].cpu().unsqueeze(0).numpy()
+# x_pred = inputs_transformer.unstack(NN_pred)
+
 vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
 vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
 wvl_select = np.s_[0, N_wvl_total//2, -1]
 
-#%
 draw_PSF_stack(
+    # PSF_0.numpy()[np.s_[0, 16, 28], ...],
+    # PSF_1.numpy()[np.s_[0,  4,  7], ...],
     PSF_0.numpy()[wvl_select, ...],
     PSF_1.numpy()[wvl_select, ...],
     average=True,
@@ -1020,7 +1283,36 @@ draw_PSF_stack(
     crop=100
 )
 
-#%
+#%%
+centers_test = []
+# centers_new = np.stack(centers_test).transpose((1,0,2)) - np.array(PSF_0.shape[-1])//2
+_,_,_,idx = list(val_loader)[0]
+
+# dx_new = dx[idx][:, [0, 16, 28]].detach().cpu().numpy()
+# dy_new = dy[idx][:, [0, 16, 28]].detach().cpu().numpy()
+
+dx_dy = np.stack((dx_new, dy_new), axis=-1)
+
+fig, ax = plt.subplots(1, 3, figsize=(10, 3))
+for ax_idx, (i, j) in enumerate(zip([0, 16, 28], [0, 4, 7])):
+    p_0, p_1, p_err, centers = plot_radial_PSF_profiles(
+        PSFs_data[:,i,...].cpu().numpy(),
+        PSFs_pred[:,j,...].cpu().numpy(),
+        'Data',
+        'TipTorch',
+        cutoff=40,
+        y_min=3e-2,
+        linthresh=1e-2,
+        return_profiles=True,
+        ax=ax[ax_idx],
+        # centers=dx_dy[:, ax_idx, :] + np.array(PSF_0.shape[-1])//2
+    )
+    centers_test.append(centers)
+
+plt.show()
+
+
+#%%
 PSF_disp = lambda x, w: (x[w,...]).cpu().numpy()
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
@@ -1044,16 +1336,19 @@ plt.show()
 #     plt.show()
 
 #%%
-N_wvl = len(λ_full)
-
-wvl_select = np.s_[0, N_wvl//2, -1]
-PSF_disp = lambda x, w: (x[:,w,...]).cpu().numpy()
-
-# center = (PSFs_data.shape[-2]//2, PSFs_data.shape[-1]//2)
+wvl_select = np.s_[0, N_wvl_total//2, -1]
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
-    plot_radial_PSF_profiles( PSF_disp(PSFs_data, lmbd),  PSF_disp(PSFs_pred, lmbd),  'Data', 'TipTorch', cutoff=40,  ax=ax[i])#, centers=center)
+    plot_radial_PSF_profiles(
+        PSFs_data[:, lmbd, ...].cpu().numpy(),
+        PSFs_pred[:, lmbd, ...].cpu().numpy(),
+        'Data',
+        'TipTorch',
+        cutoff=40,
+        ax=ax[i]
+        #, centers=center)
+    )
 plt.show()
 
 #%%

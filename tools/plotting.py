@@ -237,8 +237,8 @@ def calc_profile(data, xycen=None):
     
 def plot_radial_PSF_profiles(PSF_0,
                          PSF_1,
-                         label_0 = 'PSFs #1',
-                         label_1 = 'PSFs #2',
+                         label_0 = 'PSF(s) #1',
+                         label_1 = 'PSF(s) #2',
                          title   = '',
                          scale   = 'log',
                          colors  = ['tab:blue', 'tab:orange', 'tab:green'],
@@ -249,53 +249,50 @@ def plot_radial_PSF_profiles(PSF_0,
                          linthresh = 5e-1,
                          y_min = 1e-2,
                          suppress_plot = False):
-            
+
+    if isinstance(PSF_0, torch.Tensor): PSF_0 = PSF_0.detach().cpu().numpy()
+    if isinstance(PSF_1, torch.Tensor): PSF_1 = PSF_1.detach().cpu().numpy()
+    
+    if PSF_0.ndim == 2: PSF_0 = PSF_0[np.newaxis, ...]
+    if PSF_1.ndim == 2: PSF_1 = PSF_1[np.newaxis, ...]
+
+    N_PSFs = PSF_0.shape[0]
+    assert PSF_1.shape[0] == N_PSFs, "Number of PSFs in both sets must be the same!"
+
     def _radial_profiles(PSFs, centers=None):
         listify_PSF = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
         PSFs = listify_PSF(PSFs)
-        if centers is None:
-            centers = [None]*len(PSFs)
-        else:
-            if type(centers) is not list:
-                if len(centers) == 2: 
-                    centers = [centers] * len(PSFs)
-                else:
-                    centers = [centers[i,...] for i in range(len(PSFs))]
 
         profiles = np.vstack( [calc_profile(PSF, center) for PSF, center in zip(PSFs, centers) if not np.all(np.isnan(PSF))] )
         return profiles
 
-    if PSF_0.ndim == 2:
-        PSF_0 = PSF_0[np.newaxis, ...]
-    
-    if PSF_1.ndim == 2:
-        PSF_1 = PSF_1[np.newaxis, ...]
-    
     if centers is None:
-        centers = safe_centroid(np.nanmean(PSF_0, axis=0))
-        
-    profis_0   = _radial_profiles( PSF_0, centers )
-    profis_1   = _radial_profiles( PSF_1, centers )
-    profis_err = _radial_profiles( PSF_0-PSF_1, centers )
-    
-    # center_0 = safe_centroid(np.abs(np.nanmean(PSF_0, axis=0)))
-    # center_1 = safe_centroid(np.abs(np.nanmean(PSF_1, axis=0)))
-    # center_  = np.mean([center_0, center_1], axis=0)
-    
-    # profis_0 = _radial_profiles( PSF_0, centers )
-    # profis_1 = _radial_profiles( PSF_1, centers )
-    # profis_err = _radial_profiles( PSF_0 - PSF_1, center_ )
+        centers = []
+        # Compute PSF peaks if not provided explicitly
+        for i in range(PSF_0.shape[0]):
+            centers.append( safe_centroid(PSF_0[i,...]))
+    else:
+        # Shared center coordinate provided for all PSFs
+        if len(centers) == 2:
+            centers = [centers] * N_PSFs
+        # Make sure it's a list of centers
+        else:
+            centers = [centers[i,...] for i in range(N_PSFs)]
+
+    profiles_0   = _radial_profiles( PSF_0, centers )
+    profiles_1   = _radial_profiles( PSF_1, centers )
+    profiles_err = _radial_profiles( PSF_0-PSF_1, centers )
 
     if not suppress_plot:
         if ax is None:
             fig = plt.figure(figsize=(6, 4), dpi=300)
             ax  = fig.gca()
     
-    y_max = np.median(profis_0, axis=0).max()
+    y_max = np.median(profiles_0, axis=0).max()
 
-    p_0 = profis_0 / y_max * 100.0
-    p_1 = profis_1 / y_max * 100.0
-    p_err = np.abs(profis_err / y_max * 100.0)
+    p_0 = profiles_0 / y_max * 100.0
+    p_1 = profiles_1 / y_max * 100.0
+    p_err = np.abs(profiles_err / y_max * 100.0)
 
     if not suppress_plot:
         render_profile(p_0,   color=colors[0], label=label_0, linewidth=2, ax=ax)
@@ -324,7 +321,7 @@ def plot_radial_PSF_profiles(PSF_0,
         ax.grid()
 
     if return_profiles:
-        return p_0, p_1, p_err
+        return p_0, p_1, p_err, centers
     
 
 def plot_radial_PSF_profiles_relative(PSF_0,
@@ -341,7 +338,7 @@ def plot_radial_PSF_profiles_relative(PSF_0,
                                   linthresh = 5e-1,
                                   y_min = 1e-2,
                                   suppress_plot = False):
-            
+    
     def _radial_profiles(PSFs, centers=None):
         listify_PSF = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
         PSFs = listify_PSF(PSFs)
