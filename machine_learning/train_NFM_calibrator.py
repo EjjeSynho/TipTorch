@@ -22,12 +22,18 @@ from sklearn.model_selection import train_test_split, KFold
 from pathlib import Path
 from project_settings import *
 from torch.utils.data import Dataset
+import pickle
 
 from managers.config_manager import MultipleTargetsInDifferentObservations
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
-STD_FOLDER    = MUSE_DATA_FOLDER / 'standart_stars/'
+STD_FOLDER = MUSE_DATA_FOLDER / 'standart_stars/'
 DATASET_CACHE = STD_FOLDER / 'dataset_cache'
+
+
+pre_init_astrometry = True
+optimize_astrometry = False
+predict_LOs = False
 
 # Set up logging
 log_dir = Path('../data/logs')
@@ -152,20 +158,23 @@ with torch.no_grad():
         chrom_defocus   = False,
         use_splines     = True,
         Moffat_absorber = False,
-        Z_mode_max      = 3,
+        Z_mode_max      = 9,
         device          = device
     )
     PSF_model.inputs_manager.delete('Jxy')
     PSF_model.inputs_manager.delete('bg_ctrl')
     PSF_model.inputs_manager.delete('dx_ctrl')
     PSF_model.inputs_manager.delete('dy_ctrl')
-    
     PSF_model.inputs_manager.delete('L0')
     
     if PSF_model.Moffat_absorber:
         # PSF_model.inputs_manager.delete('beta')
+        # PSF_model.inputs_manager.delete('b')
         PSF_model.inputs_manager.delete('theta')
         PSF_model.inputs_manager.delete('ratio')
+    
+    if not predict_LOs:
+        PSF_model.inputs_manager.set_optimizable(['LO_coefs'], False)
 
     print(PSF_model.inputs_manager)
     N_outputs = PSF_model.inputs_manager.get_stacked_size()
@@ -204,10 +213,18 @@ torch.cuda.empty_cache()
 λ_sets = [λ_full[list_id] for list_id in λ_id_sets]
 
 #%%
-import pickle
+logger.info(f"Pre-initialize astrometry: {pre_init_astrometry}")
+logger.info(f"Optimize astrometry (dx/dy): {optimize_astrometry}")
 
-pre_init_astrometry = True
-optimize_astrometry = True
+if optimize_astrometry:
+    logger.info("✓ Astrometry parameters (dx/dy) will be optimized during training")
+else:
+    logger.info("✗ Astrometry parameters (dx/dy) will be fixed during training")
+
+if pre_init_astrometry:
+    logger.info("✓ Using pre-fitted astrometry values for initialization")
+else:
+    logger.info("✗ Initializing astrometry with zeros")
 
 fitted_df = pickle.load(open(STD_FOLDER / 'muse_fitted_df.pkl', 'rb'))
 
@@ -228,12 +245,35 @@ for i, wvl_id in enumerate(wvl_ids_shift):
     dx_full_arr[:, wvl_id] = 0.5*(dx_df[:, i] + dx_df[:, i+1])
     dy_full_arr[:, wvl_id] = 0.5*(dy_df[:, i] + dy_df[:, i+1])
 
-# dx = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
-# dy = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
+if optimize_astrometry:
+    if pre_init_astrometry:
+        # Use pre-fitted astrometry values as initialization
+        dx = torch.from_numpy(dx_full_arr).to(device=device, dtype=torch.float32)
+        dy = torch.from_numpy(dy_full_arr).to(device=device, dtype=torch.float32)
+        dx.requires_grad_(True)
+        dy.requires_grad_(True)
+    else:
+        # Initialize astrometry with zeros
+        dx = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
+        dy = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
+else:
+    if pre_init_astrometry:
+        # Use pre-fitted astrometry values (fixed, no gradients)
+        dx = torch.from_numpy(dx_full_arr).to(device=device, dtype=torch.float32)
+        dy = torch.from_numpy(dy_full_arr).to(device=device, dtype=torch.float32)
+    else:
+        # No astrometry optimization, use zeros (fixed)
+        dx = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32)
+        dy = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32)
 
-dx = torch.from_numpy(dx_full_arr).to(device=device, dtype=torch.float32)
-dy = torch.from_numpy(dy_full_arr).to(device=device, dtype=torch.float32)
 
+if not predict_LOs:
+    logger.info("✓ Using pre-fitted NCPAs values for initialization")
+    phase_bump_dataset = fitted_df['LO_df']['Phase bump'].sort_index().to_numpy().astype(np.float32)
+    phase_bump_dataset = torch.from_numpy(phase_bump_dataset).to(device=device, dtype=torch.float32)
+    LO_median = torch.from_numpy(fitted_df['LO_df'].median().to_numpy()[1:]).to(device=device, dtype=torch.float32)
+else:
+    logger.info("✗ Initializing NCPAs with zeros")
 
 
 #%%
@@ -245,9 +285,13 @@ def run_model(x_dict, config, idx, λ_ids):
 
     # Update simulated wavelengths
     config['sources_science']['Wavelength'] = λ_full[λ_ids].unsqueeze(0).to(device=device)
-    
-    # Update internal state of the PSF model for the given batch config
-    PSF_model.model.Update(config=config, init_grids=False, init_pupils=False, init_tomography=True) # Update just AO + model parameters, not grids
+
+    if not predict_LOs:
+        # Set LO NCPAs information from fitting
+        x_dict['LO_coefs'] = torch.hstack( (phase_bump_dataset[idx].unsqueeze(-1), LO_median.repeat(len(idx),1)) )
+
+    # Update internal state of the PSF model for the given batch config. Update just model parameters, not grids
+    PSF_model.model.Update(config=config, init_grids=False, init_pupils=False, init_tomography=True) 
     return PSF_model(x_dict)
 
 #%%
@@ -258,7 +302,6 @@ def run_model(x_dict, config, idx, λ_ids):
 # Early stopping - Essential to prevent overfitting
 # Data augmentation - If possible, add small noise to inputs
 # Cross-validation - Consider k-fold CV for better estimates
-
 
 import torch.nn as nn
 
@@ -389,20 +432,28 @@ if args.continue_training:
         logger.warning(f"Failed to load checkpoint from {checkpoint_path}: {e}. Starting training from scratch.")
 
 
+default_lr = 1e-4
+
 # Optimizer with weight decay (L2 regularization)
-optimizer = optim.AdamW([
-    {'params': calibrator.parameters(), 'lr': 1e-3, 'weight_decay': 5e-4},
-    {'params': [dx, dy], 'lr': 1e-3, 'weight_decay': 1e-5}  # Lower weight decay for dx/dy
-], lr=1e-3)  # Default values
+if optimize_astrometry:
+    optimizer = optim.AdamW([
+        {'params': calibrator.parameters(), 'lr': default_lr, 'weight_decay': 5e-4},
+        {'params': [dx, dy], 'lr': 1e-3, 'weight_decay': 1e-5}  # Lower weight decay for dx/dy
+    ], lr=1e-3)  # Default values
+else:
+    # Only optimize calibrator parameters, not dx/dy
+    optimizer = optim.AdamW([
+        {'params': calibrator.parameters(), 'lr': default_lr, 'weight_decay': 5e-4}
+    ], lr=default_lr)  # Default values
 
 
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
     mode     = 'min',
-    factor   = 0.7,
+    factor   = 0.2,
     patience = 3,
     verbose  = True,
-    min_lr   = 1e-5
+    min_lr   = 1e-6
 )
 
 logger.info(f"Scheduler: ReduceLROnPlateau with patience={3}, factor={0.7}, min_lr={1e-5}")
@@ -421,16 +472,13 @@ def loss_LO_fn(LO_coefs, w_L2=1e-7, w_first=5e-5):
 
 
 def Moffat_loss_fn(x_dict):
-    if PSF_model.Moffat_absorber is False:
-        return 0.0
-
     amp = x_dict['amp']
     # alpha = x_dict['alpha']
     # beta = x_dict['beta']
     # b = x_dict['b']
 
     # Enforce positive amplitude
-    amp_penalty = amp.pow(2).mean() * 2.5e-2
+    amp_penalty = amp.pow(2).mean() * 2.5e-2 * 2
     
     # Enforce beta > 1.5
     # beta_penalty = torch.clamp(1.5 - beta, min=0).pow(2).mean() * 1e-3
@@ -449,8 +497,8 @@ def loss_fn(PSF_pred, PSF_data, x_dict, w_MSE, w_MAE, w_L2, w_first, λ_ids):
     w = 2e4
     MSE_loss = diff.pow(2).mean() * w * w_MSE
     MAE_loss = diff.abs().mean()  * w * w_MAE
-    LO_loss  = loss_LO_fn(x_dict['LO_coefs'], w_L2=w_L2, w_first=w_first) if PSF_model.LO_NCPAs else 0.0
-    Moffat_loss = Moffat_loss_fn(x_dict)
+    LO_loss  = loss_LO_fn(x_dict['LO_coefs'], w_L2=w_L2, w_first=w_first) if PSF_model.LO_NCPAs and predict_LOs else 0.0
+    Moffat_loss = Moffat_loss_fn(x_dict) if PSF_model.Moffat_absorber else 0.0
     
     # Add safety check for NaN in loss components (helps debug NaN sources)
     if torch.isnan(MSE_loss) or torch.isnan(MAE_loss):
@@ -462,7 +510,7 @@ def loss_fn(PSF_pred, PSF_data, x_dict, w_MSE, w_MAE, w_L2, w_first, λ_ids):
 
 
 # criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=900.0, w_MAE=1.6, w_L2=1e-4, w_first=5e-5, λ_ids=λ_ids)
-criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=5000.0, w_MAE=1.6, w_L2=1e-4, w_first=5e-5, λ_ids=λ_ids)
+criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=900.0, w_MAE=1.6, w_L2=5e-7, w_first=5e-5, λ_ids=λ_ids)
 
 # L1 regularization of NN parameters
 def l1_regularization(model, lambda_l1=1e-4):
@@ -513,14 +561,14 @@ def validate_with_astrometry_optimization(num_opt_steps=20, lr_dx_dy=1e-3):
     """
     Validation routine where:
     - Calibrator NN weights are FROZEN (in eval mode, no gradients)
-    - dx/dy values for validation samples are OPTIMIZED
+    - dx/dy values for validation samples are OPTIMIZED (if optimize_astrometry=True)
     
     Args:
         num_opt_steps: Number of optimization steps per validation sample
         lr_dx_dy: Learning rate for dx/dy optimization
     
     Returns:
-        average validation loss after optimizing dx/dy
+        average validation loss after optimizing dx/dy (or just evaluation if astrometry disabled)
     """
     # Set calibrator to eval mode (freezes BatchNorm, Dropout, etc.)
     calibrator.eval()
@@ -536,31 +584,32 @@ def validate_with_astrometry_optimization(num_opt_steps=20, lr_dx_dy=1e-3):
         for batch_idx, batch in enumerate(val_loader):
             PSF_cubes, telemetry_inputs, batch_config, idxs = batch
             
-            # Create optimizer for ONLY dx/dy (NOT calibrator!)
-            # Only optimize dx/dy for the current validation samples
-            val_dx_dy_optimizer = optim.Adam([
-                {'params': [dx], 'lr': lr_dx_dy},
-                {'params': [dy], 'lr': lr_dx_dy}
-            ])
-            
-            # Optimize dx/dy for this validation batch
-            for opt_step in range(num_opt_steps):
-                val_dx_dy_optimizer.zero_grad()
+            if optimize_astrometry:
+                # Create optimizer for ONLY dx/dy (NOT calibrator!)
+                # Only optimize dx/dy for the current validation samples
+                val_dx_dy_optimizer = optim.Adam([
+                    {'params': [dx], 'lr': lr_dx_dy},
+                    {'params': [dy], 'lr': lr_dx_dy}
+                ])
                 
-                # Forward pass with FROZEN calibrator
-                with torch.no_grad():  # No gradients for calibrator!
-                    NN_output = calibrator(telemetry_inputs)
-                
-                x_pred = inputs_transformer.unstack(NN_output)
+                # Optimize dx/dy for this validation batch
+                for opt_step in range(num_opt_steps):
+                    val_dx_dy_optimizer.zero_grad()
+                    
+                    # Forward pass with FROZEN calibrator
+                    with torch.no_grad():  # No gradients for calibrator!
+                        NN_output = calibrator(telemetry_inputs)
+                    
+                    x_pred = inputs_transformer.unstack(NN_output)
 
-                PSF_pred = run_model(x_pred, batch_config, idxs, λ_id_set)
-                loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], x_pred, λ_id_set)
-                
-                loss.backward() # Only dx/dy get gradients
-                
-                # torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=1.0)
-    
-                val_dx_dy_optimizer.step() # Update ONLY dx/dy
+                    PSF_pred = run_model(x_pred, batch_config, idxs, λ_id_set)
+                    loss = criterion(PSF_pred, PSF_cubes[:, λ_id_set, ...], x_pred, λ_id_set)
+                    
+                    loss.backward() # Only dx/dy get gradients
+                    
+                    # torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=1.0)
+        
+                    val_dx_dy_optimizer.step() # Update ONLY dx/dy
             
             # Record final loss for this batch
             with torch.no_grad():
@@ -701,15 +750,21 @@ def check_for_nan(loss, model, epoch, batch_idx, phase="train"):
 
 def save_checkpoint(calibrator, dx, dy, optimizer, epoch, train_loss, val_loss, path='checkpoint.pth'):
     """Save a training checkpoint."""
-    torch.save({
+    checkpoint_data = {
         'epoch': epoch,
         'calibrator_state_dict': calibrator.state_dict(),
-        'dx': dx.detach().clone(),
-        'dy': dy.detach().clone(),
         'optimizer_state_dict': optimizer.state_dict(),
         'train_loss': train_loss,
         'val_loss': val_loss,
-    }, path)
+        'optimize_astrometry': optimize_astrometry,
+        'pre_init_astrometry': pre_init_astrometry,
+    }
+    
+    if optimize_astrometry:
+        checkpoint_data['dx'] = dx.detach().clone()
+        checkpoint_data['dy'] = dy.detach().clone()
+    
+    torch.save(checkpoint_data, path)
     logger.debug(f"Checkpoint saved to {path}")
 
 
@@ -717,8 +772,17 @@ def load_checkpoint(calibrator, dx, dy, optimizer, path='checkpoint.pth'):
     """Load a training checkpoint and restore model state."""
     checkpoint = torch.load(path)
     calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
-    dx.data = checkpoint['dx']
-    dy.data = checkpoint['dy']
+    
+    # Load astrometry parameters if they were saved
+    if optimize_astrometry and 'dx' in checkpoint and 'dy' in checkpoint:
+        dx.data = checkpoint['dx']
+        dy.data = checkpoint['dy']
+        logger.info("✓ Astrometry parameters (dx/dy) loaded from checkpoint")
+    elif optimize_astrometry:
+        logger.warning("⚠ Astrometry optimization enabled but no dx/dy found in checkpoint")
+    else:
+        logger.info("✗ Astrometry optimization disabled, skipping dx/dy loading")
+    
     optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
     logger.warning(f"🔄 Checkpoint loaded from {path} (epoch {checkpoint['epoch']})")
     return checkpoint['epoch'], checkpoint['train_loss'], checkpoint['val_loss']
@@ -821,9 +885,10 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
                 
                 # Gradient clipping (helps prevent NaN)
                 torch.nn.utils.clip_grad_norm_(calibrator.parameters(), max_norm=1.0)
-                torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=10.0)  # Clip dx/dy too
+                if optimize_astrometry:
+                    torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=10.0)  # Clip dx/dy too
                 
-                # Update both calibrator and dx/dy
+                # Update calibrator and optionally dx/dy
                 optimizer.step()
                 
                 epoch_train_loss += loss.item()
@@ -957,8 +1022,10 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
     print("\nLoading best model...")
     checkpoint = torch.load(WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth')
     calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
-    dx.data = checkpoint['dx']
-    dy.data = checkpoint['dy']
+
+    if optimize_astrometry and 'dx' in checkpoint and 'dy' in checkpoint:
+        dx.data = checkpoint['dx']
+        dy.data = checkpoint['dy']
     
     logger.info(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {checkpoint['epoch']}")
     print(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {checkpoint['epoch']}")
@@ -1018,8 +1085,10 @@ logger.info("Loading best model...")
 print("\nLoading best model...")
 checkpoint = torch.load(WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth')
 calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
-dx.data = checkpoint['dx']
-dy.data = checkpoint['dy']
+
+if optimize_astrometry and 'dx' in checkpoint and 'dy' in checkpoint:
+    dx.data = checkpoint['dx']
+    dy.data = checkpoint['dy']
 
 logger.info(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {checkpoint['epoch']}")
 print(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {checkpoint['epoch']}")
@@ -1094,11 +1163,16 @@ def debug_dummy_optimization(num_iters=100, initial_guess=None):
         logger.info("Using random initialization")
     
     # Setup optimizer and scheduler
-    optimizer = optim.Adam([
-        {'params': [dx], 'lr': 1e-3},
-        {'params': [dy], 'lr': 1e-3},
-        {'params': [dummy_vec], 'lr': 1e-1}
-    ], weight_decay=1e-4)
+    if optimize_astrometry:
+        optimizer = optim.Adam([
+            {'params': [dx], 'lr': 1e-3},
+            {'params': [dy], 'lr': 1e-3},
+            {'params': [dummy_vec], 'lr': 1e-1}
+        ], weight_decay=1e-4)
+    else:
+        optimizer = optim.Adam([
+            {'params': [dummy_vec], 'lr': 1e-1}
+        ], weight_decay=1e-4)
     
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.7, patience=10, min_lr=1e-6, verbose=True
@@ -1136,7 +1210,10 @@ def debug_dummy_optimization(num_iters=100, initial_guess=None):
         
         # Gradient monitoring
         dummy_grad_norm = torch.nn.utils.clip_grad_norm_(dummy_vec, max_norm=1.0)
-        dx_dy_grad_norm = torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=10.0)
+        if optimize_astrometry:
+            dx_dy_grad_norm = torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=10.0)
+        else:
+            dx_dy_grad_norm = torch.tensor(0.0)  # No dx/dy gradients
         
         # Optimizer step
         optimizer.step()
@@ -1235,6 +1312,7 @@ def debug_dummy_optimization(num_iters=100, initial_guess=None):
         'PSF_pred': PSF_pred.detach().clone(),
         'PSF_cubes': PSF_cubes.detach().clone()
     }
+
 
 
 #%%

@@ -36,14 +36,14 @@ else:
 
 #%%
 # fitted_samples_folder = STD_FOLDER / 'fitted_no_Moffat/'
-fitted_samples_folder = STD_FOLDER / 'fitted/'
+fitted_samples_folder = STD_FOLDER / 'fitted_with_Moffat_13wvl/'
 
 files = os.listdir(fitted_samples_folder)
 
 with open(fitted_samples_folder / files[0], 'rb') as handle:
     data = pickle.load(handle)
     for x in data.keys():
-        print(x, end=', ')
+        print(x)
 
 df_relevant_entries = [
     'bg', 'F', 'dx', 'dy', 'r0', 'dn', 'J', 'LO_coefs', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta', 'wind_speed_single',
@@ -274,14 +274,23 @@ print("LO stats:")
 # print(LO_df.describe().T)
 
 # LO_df['Phase bump'].hist(bins=30)
-LO_df['Z8'].hist(bins=30)
-plt.title('Z8 distribution')
+LO_df['Phase bump'].hist(bins=30)
+plt.title('Phase bump distribution')
 
 # PRINT MEDIANS FOR EVERY COLUMN
 print(LO_df.median())
 print(LO_df.mean())
 print(LO_df.std())
 plt.show()
+
+#%%
+
+LO_df.median()
+
+#%%
+
+singular_df['beta'].abs().hist(bins=30)
+
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles
@@ -306,7 +315,7 @@ for i, lmbd in enumerate(wvl_select):
         y_min=3e-2,
         linthresh=1e-2,
         return_profiles=True,
-        ax=ax[i]        
+        ax=ax[i]
     )
 plt.show()
 
