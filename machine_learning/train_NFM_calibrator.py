@@ -7,22 +7,23 @@ try:
 except NameError:
     pass
 
-
 import sys
-import gc
-import logging
-from datetime import datetime
-
 sys.path.insert(0, '..')
 
+import gc
+import logging
+import argparse
 import numpy as np
 import torch
+import pickle
+import matplotlib.pyplot as plt
+
 from torch.utils.data import DataLoader, Subset, random_split
 from sklearn.model_selection import train_test_split, KFold
 from pathlib import Path
+from datetime import datetime
 from project_settings import *
 from torch.utils.data import Dataset
-import pickle
 
 from managers.config_manager import MultipleTargetsInDifferentObservations
 
@@ -30,10 +31,9 @@ MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 STD_FOLDER = MUSE_DATA_FOLDER / 'standart_stars/'
 DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 
-
 pre_init_astrometry = True
 optimize_astrometry = False
-predict_LOs = False
+predict_LOs = True
 
 # Set up logging
 log_dir = Path('../data/logs')
@@ -58,7 +58,6 @@ logger.info(f"Log file: {log_filename}")
 
 
 # Add argument inputs
-import argparse
 parser = argparse.ArgumentParser(description="Train NFM Calibrator")
 # parser.add_argument('--weights', type=str, default=str(WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth'), help='Path to the best calibrator weights checkpoint')
 parser.add_argument('--continue-training', action='store_true', help='Whether to continue training from a checkpoint')
@@ -464,7 +463,6 @@ wvl_weights = N_wvl_total / wvl_weights.sum() * wvl_weights # Normalize so that 
 
 # logger.info(f"Wavelength weights range: {wvl_weights.min().item():.4f} - {wvl_weights.max().item():.4f}")
 
-
 def loss_LO_fn(LO_coefs, w_L2=1e-7, w_first=5e-5):
     coefs_L2_penalty = LO_coefs.pow(2).sum(-1).mean() * w_L2
     first_coef_penalty = torch.clamp(-LO_coefs[:, 0], min=0).pow(2).mean() * w_first
@@ -492,8 +490,8 @@ def Moffat_loss_fn(x_dict):
     return amp_penalty #+ beta_penalty + alpha_penalty + b_penalty
 
 
-def loss_fn(PSF_pred, PSF_data, x_dict, w_MSE, w_MAE, w_L2, w_first, λ_ids):    
-    diff = (PSF_pred-PSF_data) * wvl_weights[0, λ_ids, ...]
+def loss_fn(PSF_pred, PSF_data, x_dict, w_MSE, w_MAE, w_L2, w_first, λ_ids):  
+    diff = (PSF_pred-PSF_data) * wvl_weights[:, λ_ids, ...]
     w = 2e4
     MSE_loss = diff.pow(2).mean() * w * w_MSE
     MAE_loss = diff.abs().mean()  * w * w_MAE
@@ -509,13 +507,35 @@ def loss_fn(PSF_pred, PSF_data, x_dict, w_MSE, w_MAE, w_L2, w_first, λ_ids):
     return MSE_loss + MAE_loss + LO_loss + Moffat_loss
 
 
-# criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=900.0, w_MAE=1.6, w_L2=1e-4, w_first=5e-5, λ_ids=λ_ids)
-criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=900.0, w_MAE=1.6, w_L2=5e-7, w_first=5e-5, λ_ids=λ_ids)
+criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=900.0, w_MAE=1.6, w_L2=1e-4, w_first=5e-5, λ_ids=λ_ids)
+# criterion = lambda pred, data, x_dict, λ_ids: loss_fn(pred, data, x_dict, w_MSE=900.0, w_MAE=3.2, w_L2=5e-7, w_first=5e-5, λ_ids=λ_ids)
 
 # L1 regularization of NN parameters
 def l1_regularization(model, lambda_l1=1e-4):
     l1_norm = sum(p.abs().sum() for p in model.parameters())
     return lambda_l1 * l1_norm
+
+loss_Huber = torch.nn.HuberLoss(reduction='mean', delta=0.05)
+
+def loss_fn_Huber(PSF_pred, PSF_data, x_dict, w_L2, w_first, λ_ids):
+    w = 5e5
+    huber_loss = loss_Huber(
+        PSF_pred * wvl_weights[:, λ_ids, ...] * w,
+        PSF_data * wvl_weights[:, λ_ids, ...] * w
+    )
+    LO_loss  = loss_LO_fn(x_dict['LO_coefs'], w_L2=w_L2, w_first=w_first) if PSF_model.LO_NCPAs and predict_LOs else 0.0
+    Moffat_loss = Moffat_loss_fn(x_dict) if PSF_model.Moffat_absorber else 0.0
+    
+    if torch.isnan(huber_loss):
+        logger.error(f"NaN in Huber loss - Huber: {huber_loss.item()}, LO: {LO_loss}")
+        logger.error(f"PSF_pred range: [{PSF_pred.min().item()}, {PSF_pred.max().item()}]")
+        logger.error(f"PSF_data range: [{PSF_data.min().item()}, {PSF_data.max().item()}]")
+    
+    return huber_loss + LO_loss + Moffat_loss
+
+criterion_Huber = lambda pred, data, x_dict, λ_ids: loss_fn_Huber(pred, data, x_dict, w_L2=5e-7, w_first=5e-5, λ_ids=λ_ids)
+
+# criterion = criterion_Huber
 
 # %%
 '''
@@ -1062,7 +1082,6 @@ def main():
 
     # Plot losses (optional)
     try:
-        import matplotlib.pyplot as plt
         plt.figure(figsize=(10, 5))
         plt.plot(train_losses, label='Train Loss')
         plt.plot(val_losses, label='Val Loss')
@@ -1123,6 +1142,74 @@ PSFs_data = PSFs_data.cpu()
 validation_ids = validation_ids.cpu()
 
 #%%
+from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
+
+id_src = np.random.randint(0, PSFs_data.shape[0])
+print(f"Randomly selected validation sample ID: {id_src}")
+print(f"Corresponding original dataset index: {validation_ids[id_src].item()}")
+
+PSF_0 = PSFs_data[id_src]
+PSF_1 = PSFs_pred[id_src]
+
+# NN_pred = NN_predictions[id_src].cpu().unsqueeze(0).numpy()
+# x_pred = inputs_transformer.unstack(NN_pred)
+
+vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
+vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
+wvl_select = np.s_[0, N_wvl_total//2, -1]
+
+draw_PSF_stack(
+    PSF_0.numpy()[wvl_select, ...],
+    PSF_1.numpy()[wvl_select, ...],
+    average=True,
+    min_val=vmin,
+    max_val=vmax,
+    crop=100
+)
+
+#%%
+PSF_disp = lambda x, w: (x[w,...]).cpu().numpy()
+
+fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
+for i, lmbd in enumerate(wvl_select):
+    plot_radial_PSF_profiles(
+        PSF_disp(PSF_0, lmbd),
+        PSF_disp(PSF_1, lmbd),
+        'Data',
+        'TipTorch',
+        cutoff=40,
+        y_min=3e-2,
+        linthresh=1e-2,
+        return_profiles=True,
+        ax=ax[i]        
+    )
+plt.show()
+
+#%%
+wvl_select = np.s_[0, N_wvl_total//2, -1]
+
+fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
+for i, lmbd in enumerate(wvl_select):
+    plot_radial_PSF_profiles(
+        PSFs_data[:, lmbd, ...].cpu().numpy(),
+        PSFs_pred[:, lmbd, ...].cpu().numpy(),
+        'Data',
+        'TipTorch',
+        cutoff=40,
+        ax=ax[i]
+        #, centers=center)
+    )
+plt.show()
+
+#%%
+fig = plt.figure(figsize=(10, 6))
+plt.title('Polychromatic PSF')
+PSF_avg = lambda x: np.mean(x.cpu().numpy(), axis=1)
+plot_radial_PSF_profiles( PSF_avg(PSFs_data), PSF_avg(PSFs_pred), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
+plt.show()
+
+
+#%% ============================================================================================================================================================================================
 # Dummy optimization routine for debugging loss function and optimization behavior
 def debug_dummy_optimization(num_iters=100, initial_guess=None):
     """
@@ -1260,8 +1347,6 @@ def debug_dummy_optimization(num_iters=100, initial_guess=None):
     # Simple visualization
     if len(losses) > 1:
         try:
-            import matplotlib.pyplot as plt
-            
             fig, axes = plt.subplots(1, 3, figsize=(15, 4))
             
             # Loss curve
@@ -1288,11 +1373,8 @@ def debug_dummy_optimization(num_iters=100, initial_guess=None):
             axes[2].grid(True)
             
             plt.tight_layout()
-            # plt.savefig(DATA_FOLDER / 'temp' / 'dummy_debug.png', dpi=150, bbox_inches='tight')
             plt.show()
-            
-            # logger.info(f"Debug plots saved to {DATA_FOLDER / 'temp' / 'dummy_debug.png'}")
-            
+                        
         except Exception as e:
             logger.warning(f"Could not create plots: {e}")
     
@@ -1316,8 +1398,8 @@ def debug_dummy_optimization(num_iters=100, initial_guess=None):
 
 
 #%%
-results = debug_dummy_optimization(num_iters=100, initial_guess=dummy_vec)
-# results = debug_dummy_optimization(num_iters=200)
+# results = debug_dummy_optimization(num_iters=100, initial_guess=dummy_vec)
+results = debug_dummy_optimization(num_iters=1000)
 
 #%%
 with torch.no_grad():
@@ -1332,29 +1414,20 @@ with torch.no_grad():
 
 
 #%%
-# Legacy plotting code (for comparison/backup)
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
-import matplotlib.pyplot as plt
 
 id_src = np.random.randint(0, PSFs_data.shape[0])
-print(f"Randomly selected validation sample ID: {id_src}")
-print(f"Corresponding original dataset index: {validation_ids[id_src].item()}")
 
 PSF_0 = PSFs_data[id_src]
 PSF_1 = PSFs_pred[id_src]
-
-# NN_pred = NN_predictions[id_src].cpu().unsqueeze(0).numpy()
-# x_pred = inputs_transformer.unstack(NN_pred)
 
 vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
 vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
 wvl_select = np.s_[0, N_wvl_total//2, -1]
 
 draw_PSF_stack(
-    # PSF_0.numpy()[np.s_[0, 16, 28], ...],
-    # PSF_1.numpy()[np.s_[0,  4,  7], ...],
-    PSF_0.numpy()[wvl_select, ...],
-    PSF_1.numpy()[wvl_select, ...],
+    PSF_0.numpy()[np.s_[0, 16, 28], ...],
+    PSF_1.numpy()[np.s_[0,  4,  7], ...],
     average=True,
     min_val=vmin,
     max_val=vmax,
@@ -1369,7 +1442,7 @@ _,_,_,idx = list(val_loader)[0]
 # dx_new = dx[idx][:, [0, 16, 28]].detach().cpu().numpy()
 # dy_new = dy[idx][:, [0, 16, 28]].detach().cpu().numpy()
 
-dx_dy = np.stack((dx_new, dy_new), axis=-1)
+# dx_dy = np.stack((dx_new, dy_new), axis=-1)
 
 fig, ax = plt.subplots(1, 3, figsize=(10, 3))
 for ax_idx, (i, j) in enumerate(zip([0, 16, 28], [0, 4, 7])):
@@ -1383,55 +1456,9 @@ for ax_idx, (i, j) in enumerate(zip([0, 16, 28], [0, 4, 7])):
         linthresh=1e-2,
         return_profiles=True,
         ax=ax[ax_idx],
-        # centers=dx_dy[:, ax_idx, :] + np.array(PSF_0.shape[-1])//2
     )
     centers_test.append(centers)
 
 plt.show()
 
-
-#%%
-PSF_disp = lambda x, w: (x[w,...]).cpu().numpy()
-
-fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
-for i, lmbd in enumerate(wvl_select):
-    plot_radial_PSF_profiles(
-        PSF_disp(PSF_0, lmbd),
-        PSF_disp(PSF_1, lmbd),
-        'Data',
-        'TipTorch',
-        cutoff=40,
-        y_min=3e-2,
-        linthresh=1e-2,
-        return_profiles=True,
-        ax=ax[i]        
-    )
-plt.show()
-
-# if PSF_model.LO_NCPAs:
-#     plt.imshow(OPD_map[id_src,...]*1e9)
-#     plt.colorbar()
-#     plt.show()
-
-#%%
-wvl_select = np.s_[0, N_wvl_total//2, -1]
-
-fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
-for i, lmbd in enumerate(wvl_select):
-    plot_radial_PSF_profiles(
-        PSFs_data[:, lmbd, ...].cpu().numpy(),
-        PSFs_pred[:, lmbd, ...].cpu().numpy(),
-        'Data',
-        'TipTorch',
-        cutoff=40,
-        ax=ax[i]
-        #, centers=center)
-    )
-plt.show()
-
-#%%
-fig = plt.figure(figsize=(10, 6))
-plt.title('Polychromatic PSF')
-PSF_avg = lambda x: np.mean(x.cpu().numpy(), axis=1)
-plot_radial_PSF_profiles( PSF_avg(PSFs_data), PSF_avg(PSFs_pred), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
-plt.show()
+# %%
