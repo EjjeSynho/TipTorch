@@ -32,9 +32,8 @@ from data_processing.SPHERE_create_STD_dataset import LoadSTDStarData, process_m
 from PSF_models.IRDIS_wrapper import PSFModelIRDIS
 from managers.config_manager import ConfigManager
 from tools.utils import SR, GradientLoss, mask_circle, FWHM_fitter
-from tools.normalizers import TransformSequence, Uniform
 
-from project_settings import device, DATA_FOLDER
+from project_settings import device
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -112,11 +111,11 @@ def GetNewPhotons(model):
     """Calculate new photon count based on current noise parameters"""
     def func_Nph(x):
         model.WFS_Nph = x
-        var = model.NoiseVariance(model.r0.abs())
+        var = model.NoiseVariance()
         return (WFS_noise_var-var).flatten().abs().sum()
     
     try:
-        WFS_noise_var = model.dn + model.NoiseVariance(model.r0.abs())
+        WFS_noise_var = model.dn + model.NoiseVariance()
         N_ph_0 = model.WFS_Nph.clone()
         result_photons = minimize(func_Nph, N_ph_0, method='bfgs', disp=0)
         model.WFS_Nph = N_ph_0.clone()
@@ -140,7 +139,6 @@ def load_and_fit_sample(id):
         )
 
         PSF_0 = PSF_data[0]['PSF (mean)']
-        # PSF_var = PSF_data[0]['PSF (var)']
         PSF_mask = PSF_data[0]['mask (mean)']
         norms = PSF_data[0]['norm (mean)']
         del PSF_data
@@ -205,7 +203,7 @@ def load_and_fit_sample(id):
                 PSF_model.inputs_manager.unstack(x_, include_all=True, update=True)
                 
                 coefs_LWE = PSF_model.inputs_manager['LWE_coefs']
-                coefs_LO = PSF_model.inputs_manager['LO_coefs']
+                coefs_LO  = PSF_model.inputs_manager['LO_coefs']
                 
                 if use_Zernike:  
                     grad_loss = 0.0
@@ -222,12 +220,12 @@ def load_and_fit_sample(id):
 
         # Perform fitting
         x0 = PSF_model.inputs_manager.stack()
-        result = minimize(loss_fn, x0, max_iter=300, tol=1e-5, method='l-bfgs', disp=2)
+        result = minimize(loss_fn, x0, max_iter=300, tol=1e-5, method='l-bfgs', disp=0)
         x0 = result.x
 
 
         # PTT compensation
-        LWE_OPD, PPT_OPD, NCPA_OPD = PSF_model.compensate_PTT_coupling()
+        _, _, _ = PSF_model.compensate_PTT_coupling()
         x0_compensated = PSF_model.inputs_manager.stack()
 
         PSF_1 = func(x0_compensated)
