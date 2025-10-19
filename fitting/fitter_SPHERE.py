@@ -322,6 +322,7 @@ def load_and_fit_sample(id):
         x0_new['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, model.pupil) 
         x0_new['dx'] -= pixel_shift(PTT_coefs[:, 2])
         x0_new['dy'] -= pixel_shift(PTT_coefs[:, 1])
+        
         x0 = transformer.stack(x0_new)
 
         PSF_1 = func(x0)

@@ -6,8 +6,6 @@ import sys
 import os
 from pathlib import Path
 
-from traitlets import default
-
 # Ensure the project root is in the Python path
 if __name__ == '__main__':
     # When running as a script

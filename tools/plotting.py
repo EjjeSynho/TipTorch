@@ -236,19 +236,19 @@ def calc_profile(data, xycen=None):
 
     
 def plot_radial_PSF_profiles(PSF_0,
-                         PSF_1,
-                         label_0 = 'PSF(s) #1',
-                         label_1 = 'PSF(s) #2',
-                         title   = '',
-                         scale   = 'log',
-                         colors  = ['tab:blue', 'tab:orange', 'tab:green'],
-                         cutoff  = 20,
-                         centers = None,
-                         return_profiles = False,
-                         ax = None,
-                         linthresh = 5e-1,
-                         y_min = 1e-2,
-                         suppress_plot = False):
+                             PSF_1,
+                             label_0 = 'PSF(s) #1',
+                             label_1 = 'PSF(s) #2',
+                             title   = '',
+                             scale   = 'log',
+                             colors  = ['tab:blue', 'tab:orange', 'tab:green'],
+                             cutoff  = 20,
+                             centers = None,
+                             return_profiles = False,
+                             ax = None,
+                             linthresh = 5e-1,
+                             y_min = 1e-2,
+                             suppress_plot = False):
 
     if isinstance(PSF_0, torch.Tensor): PSF_0 = PSF_0.detach().cpu().numpy()
     if isinstance(PSF_1, torch.Tensor): PSF_1 = PSF_1.detach().cpu().numpy()
