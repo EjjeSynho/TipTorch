@@ -83,11 +83,9 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 475 # good one
 # ids = 468 # good one
 
-# ids = [451, 468, 338]
+# ids = 455 # Interesting tomo reconst behaviour
 
-ids = 344
-
-ids = 455 # Interesting tomo reconst behaviour
+ids = 482
 
 PSF_0, norms, bgs, configs = LoadSTDStarData(
     ids                 = ids,

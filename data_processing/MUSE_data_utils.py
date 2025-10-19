@@ -1732,7 +1732,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
 
     model_config['NumberSources'] = 1
     # The bigger size of initialized PSF is needed to extract the flux loss due to cropping to the box_size later
-    model_config['sensor_science']['FieldOfView'] = 111
+    model_config['sensor_science']['FieldOfView'] = 111 #TODO: set from outside
     # Select only a subset of predicted wavelengths and modify the config file accordingly
     λ_binned = model_config['sources_science']['Wavelength'].clone()
     # Assumes that we are not in the pupil tracking mode
@@ -1781,7 +1781,7 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
     wvls  = wvls_ if wvl_ids is None else np.array([wvls_[i] for i in wvl_ids])
         
     config_manager = ConfigManager()
-    config_file    = ParameterParser(DATA_FOLDER / 'parameter_files/muse_ltao.ini').params
+    config_dict    = ParameterParser(DATA_FOLDER / 'parameter_files/muse_ltao.ini').params
 
     h_GL = 2000 # Assumed separation altitude betwee ground and high-altitude layers
 
@@ -1802,38 +1802,38 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
     except:
         GL_frac = 0.9
 
-    config_file['NumberSources'] = 1
+    config_dict['NumberSources'] = 1
 
-    config_file['telescope']['TelescopeDiameter'] = 8.0
-    config_file['telescope']['ZenithAngle'] = [90.0 - sample['MUSE header data']['Tel. altitude'].item()]
-    config_file['telescope']['Azimuth']     = [sample['MUSE header data']['Tel. azimuth'].item()]
+    config_dict['telescope']['TelescopeDiameter'] = 8.0
+    config_dict['telescope']['ZenithAngle'] = [90.0 - sample['MUSE header data']['Tel. altitude'].item()]
+    config_dict['telescope']['Azimuth']     = [sample['MUSE header data']['Tel. azimuth'].item()]
     
-    if 'PupilAngle' not in config_file['telescope']:
-        config_file['telescope']['PupilAngle'] = 0.0
+    if 'PupilAngle' not in config_dict['telescope']:
+        config_dict['telescope']['PupilAngle'] = 0.0
     else:
         try:
-            config_file['telescope']['PupilAngle'] = sample['All data']['Pupil angle'].item()
+            config_dict['telescope']['PupilAngle'] = sample['All data']['Pupil angle'].item()
         except (KeyError, TypeError):
-            config_file['telescope']['PupilAngle'] = 0.0
+            config_dict['telescope']['PupilAngle'] = 0.0
     
     
     if sample['Raw Cn2 data'] is not None:
-        config_file['atmosphere']['L0']  = [sample['All data']['L0Tot'].item()]
+        config_dict['atmosphere']['L0']  = [sample['All data']['L0Tot'].item()]
     else:
-        config_file['atmosphere']['L0']  = [config_file['atmosphere']['L0']]
+        config_dict['atmosphere']['L0']  = [config_dict['atmosphere']['L0']]
                 
-    config_file['atmosphere']['Seeing'] = [sample['MUSE header data']['Seeing (header)'].item()]
-    config_file['atmosphere']['Cn2Weights'] = [[GL_frac, 1-GL_frac]]
-    config_file['atmosphere']['Cn2Heights'] = [[0, h_GL]]
+    config_dict['atmosphere']['Seeing'] = [sample['MUSE header data']['Seeing (header)'].item()]
+    config_dict['atmosphere']['Cn2Weights'] = [[GL_frac, 1-GL_frac]]
+    config_dict['atmosphere']['Cn2Heights'] = [[0, h_GL]]
 
-    config_file['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item(),]*2]
-    config_file['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item(),]*2]
-    config_file['sources_science']['Wavelength'] = wvls
+    config_dict['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item(),]*2]
+    config_dict['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item(),]*2]
+    config_dict['sources_science']['Wavelength'] = wvls
 
-    config_file['sources_LO']['Wavelength'] = (1215 + 1625)/2.0 * 1e-9 # Mean  approx. wavelengths between J and H
+    config_dict['sources_LO']['Wavelength'] = (1215 + 1625)/2.0 * 1e-9 # Mean  approx. wavelengths between J and H
 
-    config_file['sensor_science']['PixelScale'] = sample['MUSE header data']['Pixel scale (science)'].item()
-    config_file['sensor_science']['FieldOfView'] = FoV_science
+    config_dict['sensor_science']['PixelScale'] = sample['MUSE header data']['Pixel scale (science)'].item()
+    config_dict['sensor_science']['FieldOfView'] = FoV_science
 
     try:
         LGS_ph = np.array([sample['All data'][f'LGS{i} photons, [photons/m^2/s]'].item() / 1240e3 for i in range(1,5)])
@@ -1842,35 +1842,35 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
     except:
         LGS_ph = [[2000,]*4]
         
-    config_file['sensor_HO']['NumberPhotons']  = LGS_ph
-    config_file['sensor_HO']['SizeLenslets']   = config_file['sensor_HO']['SizeLenslets'][0]
-    config_file['sensor_HO']['NumberLenslets'] = config_file['sensor_HO']['NumberLenslets'][0]
+    config_dict['sensor_HO']['NumberPhotons']  = LGS_ph
+    config_dict['sensor_HO']['SizeLenslets']   = config_dict['sensor_HO']['SizeLenslets'][0]
+    config_dict['sensor_HO']['NumberLenslets'] = config_dict['sensor_HO']['NumberLenslets'][0]
     # config_file['sensor_HO']['NoiseVariance'] = 4.5
 
     IRLOS_ph_per_subap_per_frame = sample['IRLOS data']['IRLOS photons (cube), [photons/s/m^2]'].item()
     if IRLOS_ph_per_subap_per_frame is not None:
         IRLOS_ph_per_subap_per_frame /= sample['IRLOS data']['frequency'].item() / 4
 
-    config_file['sensor_LO']['PixelScale']    = sample['IRLOS data']['plate scale, [mas/pix]'].item()
-    config_file['sensor_LO']['NumberPhotons'] = [IRLOS_ph_per_subap_per_frame]
-    config_file['sensor_LO']['SigmaRON']      = sample['IRLOS data']['RON, [e-]'].item()
-    config_file['sensor_LO']['Gain']          = [sample['IRLOS data']['gain'].item()]
+    config_dict['sensor_LO']['PixelScale']    = sample['IRLOS data']['plate scale, [mas/pix]'].item()
+    config_dict['sensor_LO']['NumberPhotons'] = [IRLOS_ph_per_subap_per_frame]
+    config_dict['sensor_LO']['SigmaRON']      = sample['IRLOS data']['RON, [e-]'].item()
+    config_dict['sensor_LO']['Gain']          = [sample['IRLOS data']['gain'].item()]
 
-    config_file['RTC']['SensorFrameRate_LO'] = [sample['IRLOS data']['frequency'].item()]
-    config_file['RTC']['SensorFrameRate_HO'] = [config_file['RTC']['SensorFrameRate_HO']]
+    config_dict['RTC']['SensorFrameRate_LO'] = [sample['IRLOS data']['frequency'].item()]
+    config_dict['RTC']['SensorFrameRate_HO'] = [config_dict['RTC']['SensorFrameRate_HO']]
 
-    config_file['RTC']['LoopDelaySteps_HO']  = [config_file['RTC']['LoopDelaySteps_HO']]
-    config_file['RTC']['LoopGain_HO']        = [config_file['RTC']['LoopGain_HO']]
+    config_dict['RTC']['LoopDelaySteps_HO']  = [config_dict['RTC']['LoopDelaySteps_HO']]
+    config_dict['RTC']['LoopGain_HO']        = [config_dict['RTC']['LoopGain_HO']]
 
     # config_file['DM']['DmPitchs'] = [config_file['DM']['DmPitchs'][0]*1.25]
-    config_file['DM']['DmPitchs'][0] = 0.22
+    config_dict['DM']['DmPitchs'][0] = 0.22
 
-    config_file['sensor_HO']['ClockRate'] = np.mean([config_file['sensor_HO']['ClockRate']])
+    config_dict['sensor_HO']['ClockRate'] = np.mean([config_dict['sensor_HO']['ClockRate']])
     
     if convert_config:
-        config_manager.Convert(config_file, framework='pytorch', device=device)
+        config_manager.Convert(config_dict, framework='pytorch', device=device)
 
-    return config_file
+    return config_dict
 
 
 def RotatePSF(PSF_data, angle):

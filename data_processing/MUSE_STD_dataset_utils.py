@@ -33,7 +33,6 @@ def LoadSTDStarData(
     ensure_odd_pixels = False,
     device = device
 ):
-    
     """ Loads data associated with provided list of STD star by their ID """
     
     def get_radial_backround(img):

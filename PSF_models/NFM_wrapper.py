@@ -177,7 +177,7 @@ class PSFModelNFM:
         # LO NCPAs + phase bump optimized jointly
         composite_basis = torch.concat([
             (sausage_basis.OPD_map).unsqueeze(0).flip(-2)*5e6*self.model.pupil.unsqueeze(0),
-            Z_basis.zernike_basis[2:self.Z_mode_max,...]
+            Z_basis.basis[2:self.Z_mode_max,...]
         ], dim=0)
 
         self.LO_basis = ArbitraryBasis(self.model, composite_basis, ignore_pupil=False)
@@ -269,16 +269,12 @@ class PSFModelNFM:
         if self.LO_NCPAs:
             if isinstance(self.LO_basis, PixelmapBasis):
                 self.inputs_manager.add('LO_coefs', torch.zeros([self.model.N_src, self.LO_N_params**2]), norm_LO)
-                # self.phase_func = lambda: self.LO_basis(self.inputs_manager["LO_coefs"].view(1, self.LO_N_params, self.LO_N_params))
-                # self.OPD_func   = lambda: self.inputs_manager['LO_coefs'].view(self.model.N_src, self.LO_N_params, self.LO_N_params)
-
                 self.phase_func = lambda x: self.LO_basis(x.view(1, self.LO_N_params, self.LO_N_params))
                 self.OPD_func   = lambda x: x.view(self.model.N_src, self.LO_N_params, self.LO_N_params)
 
 
             elif isinstance(self.LO_basis, ZernikeBasis) or isinstance(self.LO_basis, ArbitraryBasis):
                 self.inputs_manager.add('LO_coefs', torch.zeros([self.model.N_src, self.LO_N_params]), norm_LO)
-                # self.OPD_func = lambda: self.LO_basis.compute_OPD(self.inputs_manager["LO_coefs"].view(self.model.N_src, self.LO_N_params))
                 self.OPD_func = lambda x: self.LO_basis.compute_OPD(x.view(self.model.N_src, self.LO_N_params))
 
                 if self.chrom_defocus:

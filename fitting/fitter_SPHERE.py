@@ -13,7 +13,7 @@ from torch import nn, optim
 from tools.static_phase import SR, pdims, BuildPTTBasis, decompose_WF, project_WF, calc_WFE, rad2mas, LWEBasis
 from tools.utils import cropper, FitGauss2D
 from PSF_models.TipTorch import TipTorch
-from data_processing.SPHERE_preproc_utils import SPHERE_preprocess, SamplesByIds
+from data_processing.SPHERE_create_STD_dataset import SPHERE_preprocess, SamplesByIds
 from tools.normalizers import TransformSequence, Uniform,
 from managers.input_manager import InputsTransformer
 from managers.config_manager import GetSPHEREonsky, ConfigManager

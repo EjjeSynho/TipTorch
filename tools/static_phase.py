@@ -209,23 +209,26 @@ class PhaseMap:
     def compute_OPD(self, x):
         raise NotImplementedError("Subclass must implement compute_OPD")
 
-    def forward(self, x):
-        # 1) Build OPD map in [m]
-        OPD = self.compute_OPD(x)
-        OPD = OPD.unsqueeze(1) if OPD.ndim == 3 else OPD # (N_src, 1, H, W) or (N_src, N_wvl, H, W)
-
-        # 2) Wave-number factor k = 2jπ / λ
+    def OPD2Phase(self, OPD):
+        # Wave-number factor k = 2jπ / λ
         k = 2j * torch.pi / self.model.wvl.view(1, self.model.N_wvl, 1, 1) # same for all sources
 
-        # 3) Phase term
+        # Phase term
         phase = torch.exp(k * OPD)
 
-        # 4) Optionally multiply through by pupil × apodizer
+        # Optionally multiply through by pupil × apodizer
         if self.ignore_pupil:
             return phase
         
         pupil_apod = pdims(self.model.pupil * self.model.apodizer, -2) if self.model.apodizer is not None else pdims(self.model.pupil, -2)
         return pupil_apod * phase
+    
+    def forward(self, x):
+        # Build OPD map in [m]
+        OPD = self.compute_OPD(x)
+        OPD = OPD.unsqueeze(1) if OPD.ndim == 3 else OPD # (N_src, 1, H, W) or (N_src, N_wvl, H, W)
+
+        return self.OPD2Phase(OPD)
 
     __call__ = forward
 
@@ -288,13 +291,13 @@ class ZernikeBasis(PhaseMap):
         Z.computeZernike(angle=pupil_angle_)
         # store as (N_modes, H, W)
         modes = torch.as_tensor(Z.modesFullRes, device=model.device, dtype=default_torch_type)
-        self.zernike_basis = modes.permute(2, 0, 1)
+        self.basis = modes.permute(2, 0, 1)
         self.N_modes = N_modes
 
     def compute_OPD(self, coefs):
         # coefs: (N_src, N_wvl, N_modes)
         # zernike_basis: (N_modes, H, W)
-        return torch.einsum('om,mhw->ohw', coefs, self.zernike_basis) * 1e-9
+        return torch.einsum('om,mhw->ohw', coefs, self.basis) * 1e-9
 
 
 class MUSEPhaseBump(PhaseMap):

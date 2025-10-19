@@ -9,15 +9,15 @@ import pickle
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from tools.plotting import plot_radial_PSF_profiles, SR, draw_PSF_stack, rad2mas, mask_circle, GradientLoss, OptimizableLO, ZernikeLO
-from data_processing.SPHERE_create_STD_dataset import SPHERE_preprocess, SamplesByIds, process_mask
-from managers.config_manager import GetSPHEREonsky
-from project_settings import SPHERE_DATA_FOLDER, device
+from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
+from tools.utils import SR, mask_circle, GradientLoss, rad2mas
+from data_processing.SPHERE_create_STD_dataset import LoadSTDStarData, process_mask, STD_FOLDER
+from project_settings import device
 from torchmin import minimize
 
 
 #%% Initialize data sample
-with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
+with open(STD_FOLDER / 'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 subset_df = psf_df[psf_df['Corrupted'] == False]
@@ -60,28 +60,36 @@ sample_id = 768
 # sample_id = 1778 # -- eplicit wings
 
 
-PSF_data, data_sample, config_file = SPHERE_preprocess(
-    sample_ids    = [sample_id],
-    norm_regime   = 'sum',
-    split_cube    = False,
-    PSF_loader    = lambda x: SamplesByIds(x, synth=False),
-    config_loader = GetSPHEREonsky,
-    framework     = 'pytorch',
-    device        = device)
+# PSF_data, data_sample, model_config = SPHERE_preprocess(
+#     sample_ids    = [sample_id],
+#     norm_regime   = 'sum',
+#     split_cube    = False,
+#     PSF_loader    = lambda x: SamplesByIds(x, synth=False),
+#     config_loader = GetSPHEREonsky,
+#     framework     = 'pytorch',
+#     device        = device)
 
-PSF_0    = PSF_data[0]['PSF (mean)'].unsqueeze(0)
-PSF_var  = PSF_data[0]['PSF (var)'].unsqueeze(0)
-PSF_mask = PSF_data[0]['mask (mean)'].unsqueeze(0)
+PSF_data, data_sample, model_config = LoadSTDStarData(
+    sample_id,
+    normalize = True,
+    subtract_background = True,
+    ensure_odd_pixels = True,
+    device = device
+)
+
+PSF_0    = PSF_data[0]['PSF (mean)']
+PSF_var  = PSF_data[0]['PSF (var)']
+PSF_mask = PSF_data[0]['mask (mean)']
 norms    = PSF_data[0]['norm (mean)']
-del PSF_data
+# del PSF_data
 
 
-config_file['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
+# config_file['sensor_science']['FieldOfView'] = PSF_0.shape[-1]
 
-config_file['NumberSources'] = config_file['NumberSources'].int().item()
-config_file['DM']['DmHeights'] = torch.tensor(config_file['DM']['DmHeights'], device=device)
-config_file['sources_HO']['Wavelength'] = config_file['sources_HO']['Wavelength']
-config_file['sources_HO']['Height'] = torch.inf
+# config_file['NumberSources'] = config_file['NumberSources'].int().item()
+# config_file['DM']['DmHeights'] = torch.tensor(config_file['DM']['DmHeights'], device=device)
+# config_file['sources_HO']['Wavelength'] = config_file['sources_HO']['Wavelength']
+# config_file['sources_HO']['Height'] = torch.inf
 
 
 # if psf_df.loc[sample_id]['Nph WFS'] < 10:
@@ -89,7 +97,7 @@ config_file['sources_HO']['Height'] = torch.inf
 PSF_mask = process_mask(PSF_mask)
 # LWE_flag   = psf_df.loc[sample_id]['LWE']
 LWE_flag = True
-wings_flag = True
+fit_wind = True
 
 #psf_df.loc[sample_id]['Wings']
 # wings_flag = False
@@ -113,10 +121,8 @@ with open('../data/samples/IRDIS_sample_data.pkl', 'wb') as f:
 # plt.imshow(circ_mask * np.squeeze(PSF_0[0,0,...].cpu().numpy()), norm=LogNorm())
 
 #%% Initialize model
-# from PSF_models.TipTorch import TipTorch
-# from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from PSF_models.TipTorch import TipTorch
-from tools.utils import LWE_basis
+from tools.static_phase import LWEBasis, ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
 # tiptorch = TipTorch(merged_config, None, device, oversampling=1)
 # _ = tiptorch()
@@ -130,13 +136,12 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          False
 }
-model = TipTorch(config_file, 'SCAO', None, PSD_include, 'sum', device, oversampling=1)
+model = TipTorch(model_config, 'SCAO', None, PSD_include, 'sum', device, oversampling=1)
 model.to_float()
 
-basis = LWE_basis(model)
+LWE_basis = LWEBasis(model, ignore_pupil=False)
 
 PSF_1  = model()
-# PSF_DL = tiptorch.DLPSF()
 
 draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, average=True, min_val=1e-5, crop=80, scale='log')
 
@@ -157,18 +162,31 @@ plt.axis('off')
 
 #%% PSF fitting (no early-stopping)
 from tools.normalizers import Uniform
-from tools.utils import OptimizableLO, ZernikeLO
 from managers.input_manager import InputsManager
 
 
-use_Zernike = False
+use_Zernike = True
 
 if use_Zernike:
-    N_modes = 300
-    LO_basis = ZernikeLO(model, N_modes, device)
+    N_modes = 9
+    NCPAs_basis = ZernikeBasis(model, N_modes+2, ignore_pupil=True)
+    NCPAs_basis.basis = NCPAs_basis.basis[2:,...]  # remove tip/tilt
+    
+    # Z_basis = ZernikeBasis(self.model, N_modes=self.LO_N_params, ignore_pupil=False)
+    # sausage_basis = MUSEPhaseBump(self.model, ignore_pupil=False)
+
+    # # LO NCPAs + phase bump optimized jointly
+    # composite_basis = torch.concat([
+    #     (sausage_basis.OPD_map).unsqueeze(0).flip(-2)*5e6*self.model.pupil.unsqueeze(0),
+    #     Z_basis.basis[2:self.Z_mode_max,...]
+    # ], dim=0)
+
+    # self.LO_basis = ArbitraryBasis(self.model, composite_basis, ignore_pupil=False)
+    # self.LO_N_params = self.LO_basis.N_modes
+    
 else:
     LO_map_size = 31
-    LO_basis = OptimizableLO(model, ignore_pupil=True)
+    NCPAs_basis = PixelmapBasis(model, ignore_pupil=True)
 
 inputs_manager = InputsManager()
 
@@ -197,9 +215,9 @@ inputs_manager.add('bg',  torch.tensor([[0.0,]*2]), norm_bg)
 inputs_manager.add('dn',  torch.tensor([0.0]),      norm_dn)
 inputs_manager.add('Jx',  torch.tensor([[7.5]]),    norm_J)
 inputs_manager.add('Jy',  torch.tensor([[7.5]]),    norm_J)
-inputs_manager.add('Jxy', torch.tensor([[18]]),     norm_Jxy)
+inputs_manager.add('Jxy', torch.tensor([[0]]),     norm_Jxy)
 
-if wings_flag:
+if fit_wind:
     # inputs_manager.add('wind_speed', model.wind_speed, norm_wind_spd)
     inputs_manager.add('wind_dir', model.wind_dir,  norm_wind_dir)
 if LWE_flag:
@@ -217,17 +235,25 @@ inputs_manager.to(device)
 
 if use_Zernike:
     if N_modes is not None:
-        inputs_manager.set_optimizable('LO_coefs', False)
+        inputs_manager.set_optimizable('LO_coefs', True)
 else:
     if LO_map_size is not None:
-        inputs_manager.set_optimizable('LO_coefs', False)
+        inputs_manager.set_optimizable('LO_coefs', True)
 
 
 #%%
+def phase_func(LWE_coefs, LO_coefs):
+    LWE_OPD  = LWE_basis.compute_OPD(LWE_coefs)
+    NCPA_OPD = NCPAs_basis.compute_OPD(LO_coefs)
+    return LWE_basis.OPD2Phase(LWE_OPD + NCPA_OPD)
+
 def func(x_):
     model_inp = inputs_manager.unstack(x_)
     if 'basis_coefs' in model_inp:
-        return model(model_inp, None, lambda: basis(model_inp['basis_coefs']))
+        return model(model_inp, None, lambda: phase_func(
+            model_inp['basis_coefs'],
+            model_inp['LO_coefs']
+        ))
     else:
         return model(model_inp)
     
@@ -254,7 +280,7 @@ if LWE_flag:
 
     def loss_fn(x_):
         loss = img_loss(x_)
-        coefs_ = inputs_manager['basis_coefs']
+        coefs_ = inputs_manager['LWE_coefs']
         loss += LWE_regularizer(coefs_) + (coefs_**2).mean()*1e-4
         return loss
 
@@ -265,8 +291,6 @@ else:
 
 x0 = inputs_manager.stack()
 
-# Add small random perturbation to initial guess
-# x0 += torch.randn_like(x0) * 1e-1
 
 #%%
 result = minimize(loss_fn, x0, max_iter=300, tol=1e-5, method='l-bfgs', disp=2)
@@ -275,28 +299,30 @@ x0 = result.x
 PSF_1 = func(x0)
 
 #%%
-from tools.utils import BuildPTTBasis, decompose_WF, project_WF
+from tools.static_phase import BuildPTTBasis, decompose_WF, project_WF
 
-LWE_coefs = inputs_manager['basis_coefs']
+# LWE modes can couple with PTT modes - remove this effect
+LWE_coefs = inputs_manager['LWE_coefs']
 PTT_basis = BuildPTTBasis(model.pupil.cpu().numpy(), True).to(device).float()
 
 TT_max = PTT_basis.abs()[1,...].max().item()
 pixel_shift = lambda coef: 2 * TT_max * rad2mas * 1e-9 * coef / model.psInMas / model.D  / (1-7/model.pupil.shape[-1])
 
-LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, basis.modal_basis)
+LWE_OPD   = torch.einsum('mn,nwh->mwh', LWE_coefs, LWE_basis.modal_basis)
 PPT_OPD   = project_WF  (LWE_OPD, PTT_basis, model.pupil)
 PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, model.pupil)
 
-inputs_manager['basis_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, basis.modal_basis, model.pupil)
+inputs_manager['LWE_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, LWE_basis.modal_basis, model.pupil)
 inputs_manager['dx'] -= pixel_shift(PTT_coefs[:, 2])
 inputs_manager['dy'] -= pixel_shift(PTT_coefs[:, 1])
-x0_new = inputs_manager.stack()
-PSF_1 = func(x0_new)
+x0_compensated = inputs_manager.stack()
+
+PSF_1 = func(x0_compensated).detach()
 
 inputs_manager_new = inputs_manager.copy()
 
 #%
-plt.imshow((LWE_OPD-PPT_OPD)[0,...].cpu().numpy())#, vmin=-0.05, vmax=0.05)
+plt.imshow((LWE_OPD-PPT_OPD)[0,...].detach().cpu().numpy())#, vmin=-0.05, vmax=0.05)
 # plt.imshow((LWE_OPD)[0,...].cpu().numpy())#, vmin=-0.05, vmax=0.05)
 # plt.imshow(PPT_OPD[0,...].cpu().numpy())#, vmin=-0.05, vmax=0.05)
 plt.colorbar()
@@ -319,12 +345,12 @@ def func_LO(x_):
     
     if use_Zernike:  
         phase_func = lambda: \
-            basis(inputs_manager['basis_coefs']) * \
-            LO_basis(inputs_manager['LO_coefs'])
+            LWE_basis(inputs_manager['LWE_coefs']) * \
+            NCPAs_basis(inputs_manager['LO_coefs'])
     else:
         phase_func = lambda: \
-            basis(inputs_manager['basis_coefs']) * \
-            LO_basis(inputs_manager['LO_coefs'].view(1, LO_map_size, LO_map_size))
+            LWE_basis(inputs_manager['LWE_coefs']) * \
+            NCPAs_basis(inputs_manager['LO_coefs'].view(1, LO_map_size, LO_map_size))
 
     return model(model_inp, None, phase_func)
 
@@ -364,7 +390,7 @@ x1 = result.x
 PSF_1 = func_LO(x1)
 #%%
 if use_Zernike:  
-    OPD_map = LO_basis.compute_OPD(inputs_manager['LO_coefs'])[0].detach().cpu().numpy() * 1e9
+    OPD_map = NCPAs_basis.compute_OPD(inputs_manager['LO_coefs'])[0].detach().cpu().numpy() * 1e9
 else:  
     OPD_map = inputs_manager['LO_coefs'].view(1, LO_map_size, LO_map_size)[0].detach().cpu().numpy()
 
@@ -407,9 +433,9 @@ draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, min_val=1e-6, average=True, crop=
 LWE_map = LWE_OPD-PPT_OPD
 
 if use_Zernike:
-    fitted_map = LO_basis.compute_OPD(inputs_manager['LO_coefs'])[0] * 1e9
+    fitted_map = NCPAs_basis.compute_OPD(inputs_manager['LO_coefs'])[0] * 1e9
 else:
-    fitted_map = LO_basis.interp_upscale(inputs_manager['LO_coefs'].view(1, LO_map_size, LO_map_size))
+    fitted_map = NCPAs_basis.interp_upscale(inputs_manager['LO_coefs'].view(1, LO_map_size, LO_map_size))
 
 summa = (model.pupil*(fitted_map+LWE_map)).cpu().numpy().squeeze()
 
@@ -512,7 +538,7 @@ plot_radial_PSF_profiles(destack(PSF_0), destack(PSF_1), 'Data', 'TipToy', title
 
 #%%
 with torch.no_grad():
-    LWE_phase = torch.einsum('mn,nwh->mwh', basis.coefs, basis.modal_basis).cpu().numpy()[0,...]
+    LWE_phase = torch.einsum('mn,nwh->mwh', LWE_basis.coefs, LWE_basis.modal_basis).cpu().numpy()[0,...]
     plt.imshow(LWE_phase)
     plt.axis('off')
     cbar = plt.colorbar()

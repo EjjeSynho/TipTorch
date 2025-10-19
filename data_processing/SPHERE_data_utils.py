@@ -1,14 +1,17 @@
 #%%
-import sys
+import sys, os
 sys.path.insert(0, '..')
 
-import os
+from project_settings import device, xp, use_cupy, default_torch_type
+from project_settings import PROJECT_PATH
+
 import re
+import json
 import pickle
+import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
-import seaborn as sns
 from astropy.io import fits
 from astropy.time import Time
 from astropy.coordinates import SkyCoord
@@ -18,23 +21,108 @@ from copy import deepcopy
 from pathlib import Path
 from tools.utils import GetROIaroundMax, mask_circle
 from scipy.ndimage import center_of_mass
+
+from managers.config_manager import ConfigManager, ParameterParser
+from tools.utils import pad_lists
+
 try:
     from query_eso_archive import query_simbad
 except:
     pass
 
-from project_settings import SPHERE_DATA_FOLDER
+# with open(PROJECT_PATH / Path("project_config.json"), "r") as f:
+#     project_settings = json.load(f)
 
-ROOT      = Path(SPHERE_DATA_FOLDER + 'IRDIS_RAW')
-path_dtts = Path(SPHERE_DATA_FOLDER + 'DTTS/')
-folder_L  = ROOT / 'SPHERE_DC_DATA_LEFT/'
-folder_R  = ROOT / 'SPHERE_DC_DATA_RIGHT/'
+from project_settings import project_settings, DATA_FOLDER
 
-path_output = SPHERE_DATA_FOLDER+'IRDIS_reduced/'
+SPHERE_DATA_FOLDER = Path(project_settings["SPHERE_data_folder"])
+
+ROOT      = SPHERE_DATA_FOLDER / 'IRDIS_RAW'
+path_DTTS = SPHERE_DATA_FOLDER / 'DTTS'
+folder_L  = SPHERE_DATA_FOLDER / 'IRDIS_RAW/SPHERE_DC_DATA_LEFT/'
+folder_R  = SPHERE_DATA_FOLDER / 'IRDIS_RAW/SPHERE_DC_DATA_RIGHT/'
+
+path_output = SPHERE_DATA_FOLDER / 'IRDIS_reduced/'
 
 h = 'HIERARCH ESO '
 
+
 #%%
+def InitIRDISConfig(data_samples, device=device, convert_config=True):
+    def _IRDIS_onsky_config():
+        '''
+        This function composes the SPHERE config understandable by the TipTorch model. It converts the data from an external source
+        (modifier) and puts it into the config.
+        '''
+        
+        conversion_table = [
+            (['atmosphere','Seeing'],          ['seeing','SPARTA']        ),
+            (['atmosphere','WindSpeed'],       ['Wind speed','header']    ),
+            (['atmosphere','WindDirection'],   ['Wind direction','header']),
+            (['sensor_science','Zenith'],      ['telescope','altitude']   ),
+            (['telescope','ZenithAngle'],      ['telescope','altitude']   ),
+            (['sensor_science','Azimuth'],     ['telescope','azimuth']    ),
+            (['sensor_science','SigmaRON'],    ['Detector','ron']         ),
+            (['sensor_science','Gain'],        ['Detector','gain']        ),
+            (['sources_HO', 'Wavelength'],     ['WFS', 'wavelength']      ),
+            (['sensor_HO','NumberPhotons'],    ['WFS','Nph vis']          ),
+            (['sensor_HO','Jitter X'],         ['WFS','TT jitter X']      ),
+            (['sensor_HO','Jitter Y'],         ['WFS','TT jitter Y']      ),
+            (['RTC','SensorFrameRate_HO'],     ['WFS','rate']             ),
+            (['sensor_science','PixelScale'],  ['Detector', 'psInMas']    ),
+            (['sensor_science','SigmaRON'],    ['Detector', 'ron']        ),
+            (['sources_science','Wavelength'], ['spectra']                )
+        ]
+        
+        def processor_func(config, modifier):
+            # config['sources_science']['Zenith'] = 90.0 - modifier['telescope']['altitude'] #TODO: debug it, must be zero for on-axis
+            config['sources_science']['Zenith'] = config['sources_science']['Zenith'] * 0.0 #TODO: debug it, must be zero for on-axis
+            config['telescope']['ZenithAngle']  = 90.0 - modifier['telescope']['altitude']
+            
+            def frame_delay(loop_freq):
+                if not isinstance(loop_freq, torch.Tensor):
+                    loop_freq_ = torch.tensor(loop_freq)
+                return torch.clamp(loop_freq_/1e3 * 2.3, min=1.0)
+            
+            config['RTC']['LoopDelaySteps_HO'] = frame_delay(config['RTC']['SensorFrameRate_HO'])
+
+            return config
+        
+        return conversion_table, processor_func
+    
+    
+    if isinstance(data_samples, dict):
+        data_samples = [data_samples]
+
+    N_src = len(data_samples)
+
+    framework = 'pytorch' if convert_config else 'numpy'
+
+    # Manage config files
+    config_manager = ConfigManager()
+    configdict     = ParameterParser(DATA_FOLDER / 'parameter_files/irdis.ini').params
+    merged_config  = config_manager.Merge([config_manager.Modify(configdict, sample, *_IRDIS_onsky_config()) for sample in data_samples])
+
+    # This is to ensure proper dimensionality
+    merged_config['atmosphere']['Cn2Weights']    = pad_lists(merged_config['atmosphere']['Cn2Weights'], 0)
+    merged_config['atmosphere']['Cn2Heights']    = pad_lists(merged_config['atmosphere']['Cn2Heights'], 1e4)
+    merged_config['atmosphere']['WindDirection'] = pad_lists(merged_config['atmosphere']['WindDirection'], 0)
+    merged_config['atmosphere']['WindSpeed']     = pad_lists(merged_config['atmosphere']['WindSpeed'], 0)
+
+    config_manager.Convert(merged_config, framework=framework, device=device)
+    
+    # Set simulated PSF size
+    # merged_config['sensor_science']['FieldOfView'] = PSF_data.shape[-1]
+
+    merged_config['DM']['DmHeights'] = torch.tensor(merged_config['DM']['DmHeights'], device=device)
+    # merged_config['sources_HO']['Wavelength'] = merged_config['sources_HO']['Wavelength']
+    merged_config['sources_HO']['Height'] = torch.tensor([torch.inf], device=device) if convert_config else [np.inf]
+    merged_config['NumberSources'] = N_src
+    
+    return merged_config
+    
+
+
 """
 def GetFilesList():
     files_L = []
@@ -221,9 +309,9 @@ class SPHERE_loader():
         night_prev = night_current - pd.DateOffset(days=1)
 
         # Add the adjuscent folders
-        path_sub = [path_dtts.joinpath(night_current.strftime('%Y-%m-%d')),
-                    path_dtts.joinpath(night_prev.strftime('%Y-%m-%d')),
-                    path_dtts.joinpath(night_next.strftime('%Y-%m-%d'))]
+        path_sub = [path_DTTS.joinpath(night_current.strftime('%Y-%m-%d')),
+                    path_DTTS.joinpath(night_prev.strftime('%Y-%m-%d')),
+                    path_DTTS.joinpath(night_next.strftime('%Y-%m-%d'))]
 
         # Initialize internal functions
         def table_from_files(path_sub, search_name, condition=lambda x: True):
@@ -647,7 +735,7 @@ class SPHERE_loader():
 
 
 def plot_sample(id):
-    loader = SPHERE_loader(path_dtts)
+    loader = SPHERE_loader(path_DTTS)
     samp = loader.load(files_L[id], files_R[id])
 
     buf = samp['spectra'].copy()
@@ -675,7 +763,7 @@ def plot_sample(id):
 def ReduceIRDISData():
     bad_files, good_files = [], []
 
-    loader = SPHERE_loader(path_dtts)
+    loader = SPHERE_loader(path_DTTS)
 
     for id in range(len(files_L)):
         print('Processing: '+str(id)+'/'+str(len(files_L)))
@@ -738,7 +826,7 @@ def RegenerateImageData(path_output_new):
             raise ValueError('Error: left and right files do not match!')
 
 
-    loader = SPHERE_loader(path_dtts)
+    loader = SPHERE_loader(path_DTTS)
 
     for id in tqdm(range(len(files_stored))):
         # Check if the file is already processed and stored in the output folder
@@ -994,41 +1082,6 @@ def CreateSPHEREdataframe(save_df_dir=None):
     return df
 
 
-def LoadSPHEREsampleByID(id): # searches for the sample with the specified ID in
-    with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
-        request_df = pickle.load(handle)
-
-    file = request_df.loc[request_df.index == id]['Filename'].values[0]
-    full_filename = SPHERE_DATA_FOLDER+'IRDIS_reduced/'+str(id)+'_'+file+'.pickle'
-
-    with open(full_filename, 'rb') as handle:
-        data_sample = pickle.load(handle)
-    return data_sample
-
-
-def plot_sample(id):
-    samp = LoadSPHEREsampleByID(id)
-
-    buf = samp['spectra'].copy()
-    buf = [buf['central L']*1e-9, buf['central R']*1e-9]
-    samp['spectra'] = buf
-
-    PSF_L_0 = samp['PSF L'].sum(axis=0)
-    PSF_R_0 = samp['PSF R'].sum(axis=0)
-
-    ROI = slice(PSF_L_0.shape[0]-32, PSF_L_0.shape[0]+32)
-    ROI = (ROI, ROI)
-
-    fig, axs = plt.subplots(1, 2, figsize=(6, 3))
-    axs[0].imshow(np.log(np.abs(PSF_L_0[ROI])), origin='lower')
-    axs[1].imshow(np.log(np.abs(PSF_R_0[ROI])), origin='lower')
-    axs[0].set_title(str(np.round(samp['spectra'][0]*1e9).astype('uint'))+' [nm]')
-    axs[1].set_title(str(np.round(samp['spectra'][1]*1e9).astype('uint'))+' [nm]')
-    for ax in axs: ax.axis('off')
-    fig.suptitle(id)
-    fig.tight_layout()
-    plt.show()
-    # plt.savefig(save_folder / f'{id}.png', dpi=300)
 
 
 
