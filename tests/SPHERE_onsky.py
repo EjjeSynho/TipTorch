@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 from tools.utils import mask_circle, rad2mas, GradientLoss
-from data_processing.SPHERE_create_STD_dataset import LoadSTDStarData, process_mask, STD_FOLDER
+from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarData, process_mask, STD_FOLDER
 from project_settings import device
 from torchmin import minimize
 

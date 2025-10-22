@@ -152,7 +152,7 @@ class PSFModelIRDIS:
             'FWHM data R': norm_FWHM
         }
 
-        path_transforms = DATA_FOLDER / 'reduced_telemetry/SPHERE/IRDIS_norm_transforms.pickle'
+        path_transforms = DATA_FOLDER / 'reduced_telemetry/SPHERE/IRDIS_model_norm_transforms.pickle'
 
         with open(path_transforms, 'wb') as handle:
             df_transforms_store = {}

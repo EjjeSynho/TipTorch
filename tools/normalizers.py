@@ -275,15 +275,15 @@ class TransformSequence:
 
 def LoadTransforms(state):
     transforms = []
-    for transform in state: #[name, param_1, param_2, ...]
+    for transform in state: # [name, {'param_1': val, 'param_2': val, ...}, ...]
         if type(transform) is str:
             transform = [transform]
-        if   transform[0] == 'YeoJohnson': transforms.append(YeoJohnson(lmbda=transform[1]))
-        elif transform[0] == 'BoxCox':     transforms.append(BoxCox(lmbda=transform[1]))
+        if   transform[0] == 'YeoJohnson': transforms.append(YeoJohnson(lmbda=transform[1]['lmbda']))
+        elif transform[0] == 'BoxCox':     transforms.append(BoxCox(lmbda=transform[1]['lmbda']))
         elif transform[0] == 'Gaussify':   transforms.append(Gaussify())
-        elif transform[0] == 'Uniform':    transforms.append(Uniform(a=transform[1][0], b=transform[1][1]))
-        elif transform[0] == 'Uniform0_1': transforms.append(Uniform0_1(a=transform[1][0], b=transform[1][1]))
-        elif transform[0] == 'Gauss':      transforms.append(Gauss(mu=transform[1][0], std=transform[1][1]))
+        elif transform[0] == 'Uniform':    transforms.append(Uniform(a=transform[1]['a'], b=transform[1]['b']))
+        elif transform[0] == 'Uniform0_1': transforms.append(Uniform0_1(a=transform[1]['a'], b=transform[1]['b']))
+        elif transform[0] == 'Gauss':      transforms.append(Gauss(mu=transform[1]['mu'], std=transform[1]['std']))
         elif transform[0] == 'Invert':     transforms.append(Invert())
         elif transform[0] == 'Logify':     transforms.append(Logify())
         else:

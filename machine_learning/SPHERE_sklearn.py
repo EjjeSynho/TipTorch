@@ -4,6 +4,7 @@
 
 import os
 import sys
+from tabnanny import verbose
 sys.path.append('..')
 
 import torch
@@ -11,7 +12,7 @@ import torch.nn as nn
 import torch.optim as optim
 import pickle
 from sklearn.datasets import load_wine
-from sklearn.model_selection import train_test_splitö
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
@@ -20,7 +21,8 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error
-from data_processing.project_settings import SPHERE_DATA_FOLDER, DATA_FOLDER
+from project_settings import DATA_FOLDER
+from data_processing.SPHERE_STD_dataset_utils import STD_FOLDER
 import pandas as pd
 import seaborn as sns
 import matplotlib.pyplot as plt
@@ -75,26 +77,26 @@ def AnalyseImpurities(model, feature_names, X_test=None, y_test=None, save_dir=N
     return forest_importances_MDI, forest_importances_MDI_std, forest_importances_perm, forest_importances_perm_std
 
 #%% Initialize data sample
-with open(SPHERE_DATA_FOLDER+'sphere_df.pickle', 'rb') as handle:
+with open(STD_FOLDER / 'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
-with open(SPHERE_DATA_FOLDER+'fitted_df.pickle', 'rb') as handle:
+with open(STD_FOLDER / 'sphere_fitted_df.pickle', 'rb') as handle:
     fitted_df = pickle.load(handle)
 
-with open('../data/temp/fitted_df_norm.pickle', 'rb') as handle:
+with open(STD_FOLDER / 'sphere_fitted_df_norm.pickle', 'rb') as handle:
     fitted_df_norm = pickle.load(handle)
 
-with open('../data/temp/psf_df_norm.pickle', 'rb') as handle:
+with open(STD_FOLDER / 'sphere_df_norm.pickle', 'rb') as handle:
     psf_df_norm = pickle.load(handle)
 
-with open(SPHERE_DATA_FOLDER+'images_df.pickle', 'rb') as handle:
+with open(STD_FOLDER / 'IRDIS_images_df.pickle', 'rb') as handle:
     images_df = pickle.load(handle)
 
 SPHERE_pupil = fits.getdata('../data/calibrations/VLT_CALIBRATION/VLT_PUPIL/ALC2LyotStop_measured.fits')
-LWE_basis = np.load('../data/LWE_basis_SPHERE.npy')
+LWE_basis = np.load('../data/misc/LWE_basis_SPHERE.npy')
 
-df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/psf_df_norm_transforms.pickle')
-df_transforms_fitted = CreateTransformSequenceFromFile('../data/temp/fitted_df_norm_transforms.pickle')
+df_transforms_onsky  = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/SPHERE/sphere_telemetry_scaler.pickle')
+df_transforms_fitted = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/SPHERE/IRDIS_model_norm_transforms.pickle')
 
 get_ids = lambda df: set( df.index.values.tolist() )
 
@@ -117,7 +119,6 @@ for entry in ['r0', 'Jx', 'Jy', 'Jxy']: #,'F L','F R']:
 
 
 #%% ================================== Predict Strehl ==================================
-# =======================================================================================
 df_norm = pd.concat([psf_df_norm, fitted_df_norm], axis=1)#.fillna(0)
 
 selected_entries_X = [
@@ -151,7 +152,6 @@ selected_entries_X = [
     'λ left (nm)',  'λ right (nm)',
     # 'Δλ left (nm)', 'Δλ right (nm)',
     # 'mag V', 'mag R', 'mag G', 'mag J', 'mag H', 'mag K'
-#--------------------------------------------------------------------------------------------------------
 ]
 
 selected_entries_Y = ['Strehl']
@@ -169,7 +169,7 @@ Y = df_norm[selected_entries_Y].to_numpy()
 #%%
 X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
 
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
+gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42, verbose=1)
 gbr.fit(X_train, y_train)
 y_pred = gbr.predict(X_test)
 
@@ -178,8 +178,9 @@ test_df = pd.DataFrame({
     'SR from data': df_transforms_onsky['Strehl'].backward(y_test.flatten()),
 })
 corr_plot(test_df, 'SR predicted', 'SR from data')
-# plt.savefig('C:/Users/akuznets/Desktop/thesis_results/SPHERE/SR_pred/SR_corr_plot.pdf', dpi=300)
-_ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test) #, save_dir='C:/Users/akuznets/Desktop/thesis_results/SPHERE/SR_pred/SR_corr')
+
+_ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
+
 
 #%% ================================== Predict all ==================================
 # =======================================================================================
@@ -210,7 +211,6 @@ corr_plot(test_df, param_to_plot+' predicted', param_to_plot+' from fitted')
 
 
 #%% ================================== Predict LWE WFE ==================================
-# =======================================================================================
 
 # df_norm = df_norm[df_norm['LWE'] == True]
 X = df_norm[selected_entries_X].to_numpy()
@@ -218,8 +218,9 @@ Y = df_norm['LWE coefs'].apply(lambda x: np.linalg.norm(x, ord=2)) # Just calcul
 
 X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
 
-gbr_LWE = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
+gbr_LWE = GradientBoostingRegressor(n_estimators=200, learning_rate=0.05, max_depth=10, random_state=42, verbose=1, n_iter_no_change=100)
 gbr_LWE.fit(X_train, y_train)
+
 y_pred = gbr_LWE.predict(X_test)
 
 #%%
@@ -229,8 +230,7 @@ test_df = pd.DataFrame({
 })
 corr_plot(test_df, 'LWE predicted', 'LWE from fitted', lims=[0, 200])
 
-# plt.savefig('C:/Users/akuznets/Desktop/thesis_results/SPHERE/LWE_pred/LWE_corr_plot.pdf', dpi=300)
-_ = AnalyseImpurities(gbr_LWE, selected_entries_X, X_test, y_test) #, 'C:/Users/akuznets/Desktop/thesis_results/SPHERE/LWE_pred/LWE_corr')
+# _ = AnalyseImpurities(gbr_LWE, selected_entries_X, X_test, y_test)
 
 #%%
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, explained_variance_score, median_absolute_error
@@ -265,8 +265,8 @@ Y_pca = pca.transform(LWE_coefs)
 # Make dataframes from the PCA results
 X_train, X_test, y_train_pca, y_test_pca = train_test_split(X, Y_pca, test_size=0.2, random_state=42)
 
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42)
-mor = MultiOutputRegressor(gbr, n_jobs=-1)
+gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42, verbose=1)
+mor = MultiOutputRegressor(gbr, n_jobs=-1, verbose=1)
 mor.fit(X_train, y_train_pca)
 y_pred_pca = mor.predict(X_test)
 
@@ -319,7 +319,7 @@ for i in range(0, 4):
     names[i]   += f' {i+1}'
     names[i+4] += f' {i+1}'
     names[i+8] += f' {i+1}'
-# names.pop(0)
+
 
 MDIs, MDI_stds, PIs, PI_stds = [], [], [], []
 
@@ -329,7 +329,6 @@ for i in tqdm(range(0, 11)):
         names[i]+' from data [nm RMS]': df_transforms_fitted['LWE coefs'].backward(y_test[:,i]),
     })
     corr_plot(test_df, names[i]+' predicted [nm RMS]', names[i]+' from data [nm RMS]', title=names[i])
-    # plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/LWE/LWE_coefs_corr_plots/LWE_coefs_{i}.png')
 
     MDI, MDI_std, PI, PI_std = AnalyseImpurities(mor.estimators_[ 0], selected_entries_X, X_test, y_test[:,i])
 
@@ -362,7 +361,6 @@ ax[1].set_ylabel("Mean accuracy decrease")
 ax[1].set_xticklabels(selected_entries_X, rotation=40, ha='right')
 
 fig.tight_layout()
-plt.savefig('C:/Users/akuznets/Desktop/presa_buf/LWE/LWE_coefs_importances.png')
 
 #%%
 phase_pred  = np.dot(y_pred, LWE_basis.reshape(12,-1))

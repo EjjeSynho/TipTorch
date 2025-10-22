@@ -8,7 +8,7 @@ sys.path.insert(0, '..')
 import pickle
 import torch
 import numpy as np
-from data_processing.SPHERE_create_STD_dataset import SPHERE_preprocess, SamplesByIds
+from data_processing.SPHERE_STD_dataset_utils import SPHERE_preprocess, SamplesByIds
 from managers.config_manager import GetSPHEREonsky
 from project_settings import SPHERE_DATA_FOLDER
 import pandas as pd

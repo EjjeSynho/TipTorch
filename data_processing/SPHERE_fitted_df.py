@@ -1,31 +1,37 @@
 #%%
+%reload_ext autoreload
+%autoreload 2
+
+from fileinput import filename
 import sys
 sys.path.append('..')
 
 import os
 import pickle
-from project_settings import SPHERE_DATA_FOLDER
+from data_processing.SPHERE_STD_dataset_utils import STD_FOLDER
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from tools.utils import cropper
+from project_settings import DATA_FOLDER
 
 #%%
-fitted_samples_folder = SPHERE_DATA_FOLDER + 'IRDIS_fitted/'
+fitted_samples_folder = STD_FOLDER / 'fitted/'
 
 files = os.listdir(fitted_samples_folder)
 
-with open(fitted_samples_folder + files[0], 'rb') as handle:
+with open(fitted_samples_folder / files[0], 'rb') as handle:
     data = pickle.load(handle)
 
 for x in data.keys():
     print(x, end=', ')
 
 df_relevant_entries = [
-    'bg', 'F', 'dx', 'dy', 'r0', 'n', 'dn', 'Jx', 'Jy', 'Jxy', 'Nph WFS (new)', 'Wind dir',
+    'bg', 'F', 'dx', 'dy', 'r0', 'n', 'dn', 'Jx', 'Jy', 'Jxy', 'Nph WFS (new)', 'Wind dir', 'Wind speed',
     'SR data', 'SR fit', 'FWHM fit', 'FWHM data', 'LWE coefs'
 ]
+
+df_relevant_entries = list(set(df_relevant_entries).intersection(set(data.keys())))
 
 #%% Create fitted parameters dataset
 fitted_dict_raw = {key: [] for key in df_relevant_entries}
@@ -37,7 +43,7 @@ Hessians, variances = [], []
 for file in tqdm(files):
     id = int(file.split('.')[0])
 
-    with open(fitted_samples_folder + file, 'rb') as handle:
+    with open(fitted_samples_folder / file, 'rb') as handle:
         data = pickle.load(handle)
     
     images_data.append( data['Img. data'] )
@@ -82,34 +88,31 @@ fitted_df['LWE coefs'] = fitted_df['LWE coefs'].apply(lambda x: np.array(x))
 fitted_df_filtered = fitted_df.dropna()
 print('\n>>>> Samples remained:', len(fitted_df_filtered))
 
-with open(SPHERE_DATA_FOLDER + 'fitted_df.pickle', 'wb') as handle:
+with open(STD_FOLDER / 'sphere_fitted_df.pickle', 'wb') as handle:
     pickle.dump(fitted_df_filtered, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 #%%
 from tools.normalizers import CreateTransformSequenceFromFile
 
-df_transforms = CreateTransformSequenceFromFile('../data/temp/fitted_df_norm_transforms.pickle')
+df_transforms = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/SPHERE/IRDIS_model_norm_transforms.pickle')
 
 fitted_df_normalized = fitted_df_filtered.copy()
 
-for entry in df_transforms:
+for entry in list(set(df_transforms).intersection(set(fitted_df_filtered.columns))):
     fitted_df_normalized[entry] = df_transforms[entry].forward(fitted_df_normalized[entry].values)
 
-
-with open('../data/temp/fitted_df_norm.pickle', 'wb') as handle:
+with open(STD_FOLDER / 'sphere_fitted_df_norm.pickle', 'wb') as handle:
     pickle.dump(fitted_df_normalized, handle, protocol=pickle.HIGHEST_PROTOCOL)
-   
    
 #%% Write images
 
-# crop_imgs = cropper(images_data[0], 80)
 
 im_d_ = [img for img in images_data  ]
 im_f_ = [img for img in images_fitted]
 
 images_df = { id: (im_d_[i], im_f_[i]) for i, id in enumerate(ids) }
 
-with open(SPHERE_DATA_FOLDER + 'images_df.pickle', 'wb') as handle:
+with open(STD_FOLDER / 'IRDIS_images_df.pickle', 'wb') as handle:
     pickle.dump(images_df, handle, protocol=pickle.HIGHEST_PROTOCOL)       
     
  

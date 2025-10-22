@@ -1,16 +1,20 @@
 #%%
+%reload_ext autoreload
+%autoreload 2
+
 import sys
 sys.path.append('..')
 
 import pickle
-from project_settings import SPHERE_DATA_FOLDER
+from data_processing.SPHERE_STD_dataset_utils import STD_FOLDER
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
+from project_settings import DATA_FOLDER
 
 
 #%% Initialize data sample
-with open(SPHERE_DATA_FOLDER + 'sphere_df.pickle', 'rb') as handle:
+with open(STD_FOLDER / 'sphere_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 # psf_df['Nph WFS (log)' ] = np.log(psf_df['Nph WFS'])
@@ -49,7 +53,6 @@ plt.show()
 
 psf_df = psf_df[ids_select]
 print(f'Remaining number of samples: {len(psf_df)}')
-
 
 # listo = ['Bad center', 'Central hole', 'Corrupted', 'Crossed', 'Extra',
     #    'High SNR', 'High quality', 'LWE', 'Low quality', 'Medium quality',
@@ -180,10 +183,10 @@ for entry in df_transforms:
 
 #%%
 # Storing for later usages in the project
-with open('../data/temp/psf_df_norm.pickle', 'wb') as handle:
+with open(STD_FOLDER / 'sphere_df_norm.pickle', 'wb') as handle:
     pickle.dump(psf_df_normalized, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-with open('../data/temp/psf_df_norm_transforms.pickle', 'wb') as handle:
+with open(DATA_FOLDER / 'reduced_telemetry/SPHERE/sphere_telemetry_scaler.pickle', 'wb') as handle:
     df_transforms_store = {}
     for entry in df_transforms:
         df_transforms_store[entry] = df_transforms[entry].store()
