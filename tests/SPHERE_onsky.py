@@ -57,7 +57,7 @@ del PSF_data
 PSF_mask = process_mask(PSF_mask)
 LWE_flag = True
 fit_wind = True
-use_Zernike = True
+LO_NCPAs = False
 
 # Handle central hole if present
 if psf_df.loc[sample_id]['Central hole'] == True:
@@ -69,12 +69,14 @@ PSF_model = PSFModelIRDIS(
     model_config,
     LWE_flag=LWE_flag,
     fit_wind=fit_wind,
-    use_Zernike=use_Zernike,
+    LO_NCPAs=LO_NCPAs,
+    use_Zernike=True,
     N_modes=9,
     LO_map_size=31,
     device=device
 )
 
+#%%
 func = lambda x_: PSF_model(PSF_model.inputs_manager.unstack(x_))
 PSF_1 = func(x0 := PSF_model.inputs_manager.stack())
 
@@ -104,25 +106,34 @@ if LWE_flag:
 
     LWE_regularizer = lambda c: sum(Gauss_err(pattern, c) for pattern in patterns)
 
-    if not use_Zernike:  
-        grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
+if not PSF_model.use_Zernike:  
+    grad_loss_fn = GradientLoss(p=1, reduction='mean')
+
+if PSF_model.LWE_flag or PSF_model.LO_NCPAs:
     def loss_fn(x_):
         loss = img_loss(x_)
         
         # Update inputs manager to access coefficients
         PSF_model.inputs_manager.unstack(x_, include_all=True, update=True)
         
-        coefs_LWE = PSF_model.inputs_manager['LWE_coefs']
-        coefs_LO = PSF_model.inputs_manager['LO_coefs']
+        if PSF_model.LWE_flag:
+            coefs_LWE = PSF_model.inputs_manager['LWE_coefs']
+            loss += LWE_regularizer(coefs_LWE) + (coefs_LWE**2).mean()*1e-4
         
-        if use_Zernike:  
+        if PSF_model.LO_NCPAs:
+            coefs_LO = PSF_model.inputs_manager['LO_coefs']
+
+            if PSF_model.use_Zernike:  
+                grad_loss = 0.0
+            else:  
+                grad_loss = grad_loss_fn(coefs_LO.view(1, 1, PSF_model.LO_map_size, PSF_model.LO_map_size)) * 1e-4
+            
+            L2_loss_coefs = coefs_LO.pow(2).sum()*5e-9
+        else:
+            L2_loss_coefs = 0.0
             grad_loss = 0.0
-        else:  
-            grad_loss = grad_loss_fn(coefs_LO.view(1, 1, PSF_model.LO_map_size, PSF_model.LO_map_size)) * 1e-4
-        L2_loss_coefs = coefs_LO.pow(2).sum()*5e-9
-        
-        loss += LWE_regularizer(coefs_LWE) + (coefs_LWE**2).mean()*1e-4
+            
         return loss + L2_loss_coefs + grad_loss 
 
 else:
@@ -143,6 +154,9 @@ LWE_OPD, PPT_OPD, NCPA_OPD = PSF_model.compensate_PTT_coupling()
 x0_compensated = PSF_model.inputs_manager.stack()
 
 PSF_1 = func(x0_compensated).detach()
+
+if NCPA_OPD is None:
+    NCPA_OPD = 0.0
 
 OPD_map = LWE_OPD + NCPA_OPD
 

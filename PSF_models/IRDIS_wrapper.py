@@ -10,7 +10,7 @@ from warnings import warn
 import gc
 
 from PSF_models.TipTorch import TipTorch
-from tools.static_phase import LWEBasis, ArbitraryBasis, PixelmapBasis, ZernikeBasis
+from tools.static_phase import LWEBasis, PixelmapBasis, ZernikeBasis
 from managers.input_manager import InputsManager
 from tools.normalizers import Uniform
 from tools.utils import GradientLoss, rad2mas
@@ -22,6 +22,7 @@ class PSFModelIRDIS:
         self,
         config,
         LWE_flag        = True,
+        LO_NCPAs        = False,
         fit_wind        = True,
         use_Zernike     = True,
         N_modes         = 9,
@@ -30,15 +31,16 @@ class PSFModelIRDIS:
     ):
         
         self.LWE_flag        = LWE_flag
+        self.LO_NCPAs        = LO_NCPAs
         self.fit_wind        = fit_wind
-        self.use_Zernike     = use_Zernike
+        self.use_Zernike     = use_Zernike & LO_NCPAs
         self.N_modes         = N_modes
         self.LO_map_size     = LO_map_size
         self.device          = device
         
         self.init_model(config)
-        if use_Zernike or LO_map_size is not None:
-            self.init_NCPAs()
+        # Initialize NCPAs (including LWE basis if needed)
+        self.init_NCPAs()
         self.init_model_inputs()
         
         if self.device.type == 'cuda':
@@ -101,14 +103,18 @@ class PSFModelIRDIS:
 
 
     def init_NCPAs(self):
-        self.LWE_basis = LWEBasis(self.model, ignore_pupil=False)
+        # Always initialize LWE basis if LWE_flag is True
+        if self.LWE_flag:
+            self.LWE_basis = LWEBasis(self.model, ignore_pupil=False)
         
-        if self.use_Zernike:
-            self.NCPAs_basis = ZernikeBasis(self.model, self.N_modes+2, ignore_pupil=False)
-            self.NCPAs_basis.basis = self.NCPAs_basis.basis[2:,...]  # remove tip/tilt
-        else:
-            self.NCPAs_basis = PixelmapBasis(self.model, ignore_pupil=False)
-        
+        # Initialize NCPAs basis only if LO_NCPAs flag is True
+        if self.LO_NCPAs:
+            if self.use_Zernike:
+                self.NCPAs_basis = ZernikeBasis(self.model, self.N_modes+2, ignore_pupil=False)
+                self.NCPAs_basis.basis = self.NCPAs_basis.basis[2:,...]  # remove tip/tilt
+            else:
+                self.NCPAs_basis = PixelmapBasis(self.model, ignore_pupil=False)
+            
     def store_transforms(self):
         from tools.normalizers import TransformSequence, Uniform
         from project_settings import DATA_FOLDER
@@ -179,7 +185,7 @@ class PSFModelIRDIS:
 
 
         # Add parameters to InputsManager with their normalizers
-        self.inputs_manager.add('r0',  self.model.r0,                 norm_r0)
+        self.inputs_manager.add('r0',  self.model.r0.clone().cpu(), norm_r0)
         self.inputs_manager.add('F',   torch.tensor([[1.0,]*2]), norm_F)
         self.inputs_manager.add('dx',  torch.tensor([[0.0,]*2]), norm_dxy)
         self.inputs_manager.add('dy',  torch.tensor([[0.0,]*2]), norm_dxy)
@@ -190,87 +196,90 @@ class PSFModelIRDIS:
         self.inputs_manager.add('Jxy', torch.tensor([[0]]),      norm_Jxy)
 
         if self.fit_wind:
-            self.inputs_manager.add('wind_dir', self.model.wind_dir, norm_wind_dir)
+            self.inputs_manager.add('wind_dir', self.model.wind_dir.clone().cpu(), norm_wind_dir)
             
         if self.LWE_flag:
             self.inputs_manager.add('LWE_coefs', torch.zeros([1,12]), norm_LWE)
 
-        if self.use_Zernike:
-            if self.N_modes is not None:
-                self.inputs_manager.add('LO_coefs', torch.zeros([1, self.N_modes]), norm_LO)
-        else:
-            if self.LO_map_size is not None:
-                self.inputs_manager.add('LO_coefs', torch.zeros([1, self.LO_map_size**2]), norm_LO)
+        if self.LO_NCPAs:
+            if self.use_Zernike:
+                if self.N_modes is not None:
+                    self.inputs_manager.add('LO_coefs', torch.zeros([1, self.N_modes]), norm_LO)
+                    self.inputs_manager.set_optimizable('LO_coefs', True)
+            else:
+                if self.LO_map_size is not None:
+                    self.inputs_manager.add('LO_coefs', torch.zeros([1, self.LO_map_size**2]), norm_LO)
+                    self.inputs_manager.set_optimizable('LO_coefs', True)
 
         self.inputs_manager.to_float()
         self.inputs_manager.to(self.device)
 
-        # Set optimizable parameters
-        if self.use_Zernike:
-            if self.N_modes is not None:
-                self.inputs_manager.set_optimizable('LO_coefs', True)
-        else:
-            if self.LO_map_size is not None:
-                self.inputs_manager.set_optimizable('LO_coefs', True)
 
+    def phase_func(self, x_dict):
+        """Create phase function based on configuration and coefficients"""
+        
+        if self.LWE_flag or self.LO_NCPAs:
+        
+            OPD = 0.0
+            
+            # Add LWE component if available
+            if 'LWE_coefs' in x_dict:
+                OPD += self.LWE_basis.compute_OPD(x_dict['LWE_coefs'])
+            
+            # Add NCPAs component if available
+            if self.LO_NCPAs and hasattr(self, 'NCPAs_basis') and 'LO_coefs' in x_dict:
+                if self.use_Zernike:
+                    NCPAs_OPD = self.NCPAs_basis.compute_OPD(x_dict['LO_coefs'])
+                else:
+                    NCPAs_OPD = self.NCPAs_basis.compute_OPD(x_dict['LO_coefs'].view(1, self.LO_map_size, self.LO_map_size))
+                OPD += NCPAs_OPD
+
+            OPD = OPD.unsqueeze(1) if OPD.ndim == 3 else OPD # (N_src, 1, H, W) or (N_src, N_wvl, H, W)
+
+            if hasattr(self, 'LWE_basis'):
+                return self.LWE_basis.OPD2Phase(OPD)
+            else:
+                return self.NCPAs_basis.OPD2Phase(OPD)
+
+        return None
+    
 
     def forward(self, x_dict=None):
         if x_dict is None:
             x_dict = self.inputs_manager.to_dict()
-    
-        # Create phase function based on configuration
-        if self.LWE_flag and 'LWE_coefs' in x_dict:
-            if hasattr(self, 'NCPAs_basis') and 'LO_coefs' in x_dict:
-                if self.use_Zernike:  
-                    phase_func_lambda = lambda: \
-                        self.LWE_basis(x_dict['LWE_coefs']) * \
-                        self.NCPAs_basis(x_dict['LO_coefs'])
-                else:
-                    phase_func_lambda = lambda: \
-                        self.LWE_basis(x_dict['LWE_coefs']) * \
-                        self.NCPAs_basis(x_dict['LO_coefs'].view(1, self.LO_map_size, self.LO_map_size))
-            else:
-                # Fallback to LWE only
-                phase_func_lambda = lambda: self.LWE_basis(x_dict['LWE_coefs'])
-                
-            return self.model(x_dict, None, phase_func_lambda)
-        elif hasattr(self, 'NCPAs_basis') and 'LO_coefs' in x_dict:
-            # LO only case
-            if self.use_Zernike:  
-                phase_func_lambda = lambda: self.NCPAs_basis(x_dict['LO_coefs'])
-            else:
-                phase_func_lambda = lambda: self.NCPAs_basis(x_dict['LO_coefs'].view(1, self.LO_map_size, self.LO_map_size))
-            return self.model(x_dict, None, phase_func_lambda)
-        else:
-            return self.model(x_dict)
+            
+        return self.model(x_dict, None, lambda: self.phase_func(x_dict))
 
 
     def compensate_PTT_coupling(self):
         """Compensate for PTT coupling in LWE modes"""
         from tools.static_phase import BuildPTTBasis, decompose_WF, project_WF
         
-        if not self.LWE_flag:
-            return
+        if not self.LWE_flag or not hasattr(self, 'LWE_basis'):
+            return None, None, None
             
-        NCPAs_coefs = self.inputs_manager['LO_coefs'] if hasattr(self, 'NCPAs_basis') else None
         PTT_basis = BuildPTTBasis(self.model.pupil.cpu().numpy(), True).to(self.device).float()
-
-        if self.use_Zernike:
-            NCPA_OPD = self.NCPAs_basis.compute_OPD(NCPAs_coefs) * 1e9  # [nm]
-        else:
-            # TODO: fix strange normalization here
-            NCPA_OPD = self.NCPAs_basis.interp_upscale(NCPAs_coefs.view(1, self.LO_map_size, self.LO_map_size))[0,...] #* 1e9  # [nm]
-
         TT_max = PTT_basis.abs()[1,...].max().item()
         pixel_shift = lambda coef: 2 * TT_max * rad2mas * 1e-9 * coef / self.model.psInMas / self.model.D / (1-7/self.model.pupil.shape[-1])
 
+        # Compute LWE OPD using compute_OPD method
         LWE_OPD = self.LWE_basis.compute_OPD(self.inputs_manager['LWE_coefs']) * 1e9  # [nm]
         PPT_OPD = project_WF(LWE_OPD, PTT_basis, self.model.pupil)
         PTT_coefs = decompose_WF(LWE_OPD, PTT_basis, self.model.pupil)
 
+        # Update LWE coefficients and pixel shifts
         self.inputs_manager['LWE_coefs'] = decompose_WF(LWE_OPD-PPT_OPD, self.LWE_basis.modal_basis, self.model.pupil)
         self.inputs_manager['dx'] -= pixel_shift(PTT_coefs[:, 2])
         self.inputs_manager['dy'] -= pixel_shift(PTT_coefs[:, 1])
+
+        # Compute NCPA OPD if available
+        NCPA_OPD = None
+        if self.LO_NCPAs and hasattr(self, 'NCPAs_basis') and 'LO_coefs' in self.inputs_manager.to_dict():
+            if self.use_Zernike:
+                NCPA_OPD = self.NCPAs_basis.compute_OPD(self.inputs_manager['LO_coefs']) * 1e9  # [nm]
+            else:
+                # Use compute_OPD method instead of direct interpolation
+                NCPA_OPD = self.NCPAs_basis.compute_OPD(self.inputs_manager['LO_coefs'].view(1, self.LO_map_size, self.LO_map_size)) * 1e9  # [nm]
 
         LWE_OPD -= PPT_OPD
 
@@ -279,23 +288,31 @@ class PSFModelIRDIS:
 
     def get_OPD_map(self):
         """Get the combined OPD map"""
-        if not hasattr(self, 'NCPAs_basis'):
-            return None
-            
-        if self.use_Zernike:
-            NCPA_OPD = self.NCPAs_basis.compute_OPD(self.inputs_manager['LO_coefs']) * 1e9  # [nm]
-        else:
-            NCPA_OPD = self.inputs_manager['LO_coefs'].view(1, self.LO_map_size, self.LO_map_size)
-            
-        if self.LWE_flag:
+        combined_OPD = None
+        
+        # Get LWE OPD if available
+        if self.LWE_flag and hasattr(self, 'LWE_basis'):
             LWE_OPD = self.LWE_basis.compute_OPD(self.inputs_manager['LWE_coefs']) * 1e9  # [nm]
+            
             # Compensate for PTT if needed
             from tools.static_phase import BuildPTTBasis, project_WF
             PTT_basis = BuildPTTBasis(self.model.pupil.cpu().numpy(), True).to(self.device).float()
             PPT_OPD = project_WF(LWE_OPD, PTT_basis, self.model.pupil)
-            return LWE_OPD - PPT_OPD + NCPA_OPD
-        else:
-            return NCPA_OPD
+            combined_OPD = LWE_OPD - PPT_OPD
+        
+        # Get NCPA OPD if available
+        if self.LO_NCPAs and hasattr(self, 'NCPAs_basis'):
+            if self.use_Zernike:
+                NCPA_OPD = self.NCPAs_basis.compute_OPD(self.inputs_manager['LO_coefs']) * 1e9  # [nm]
+            else:
+                NCPA_OPD = self.NCPAs_basis.compute_OPD(self.inputs_manager['LO_coefs'].view(1, self.LO_map_size, self.LO_map_size)) * 1e9  # [nm]
+            
+            if combined_OPD is not None:
+                combined_OPD = combined_OPD + NCPA_OPD
+            else:
+                combined_OPD = NCPA_OPD
+        
+        return combined_OPD
 
 
     def GetNewPhotons(self):

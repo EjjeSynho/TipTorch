@@ -2,7 +2,6 @@
 %reload_ext autoreload
 %autoreload 2
 
-from fileinput import filename
 import sys
 sys.path.append('..')
 
@@ -33,6 +32,21 @@ df_relevant_entries = [
 
 df_relevant_entries = list(set(df_relevant_entries).intersection(set(data.keys())))
 
+#%%
+with open(fitted_samples_folder / files[0], 'rb') as handle:
+    data = pickle.load(handle)
+
+#%%
+with open(STD_FOLDER / 'sphere_df.pickle', 'rb') as handle:
+    psf_df = pickle.load(handle)
+
+LWE_df = psf_df[psf_df['LWE']==True]
+LWE_df = LWE_df[LWE_df['High quality']==True]
+LWE_df = LWE_df[LWE_df['Medium quality']==False]
+LWE_df = LWE_df[LWE_df['Crossed']==False]
+LWE_df = LWE_df[LWE_df['Central hole']==False]
+
+
 #%% Create fitted parameters dataset
 fitted_dict_raw = {key: [] for key in df_relevant_entries}
 ids = []
@@ -54,6 +68,14 @@ for file in tqdm(files):
     for key in fitted_dict_raw.keys():
         fitted_dict_raw[key].append(data[key])
     ids.append(id)
+    
+#%%
+
+with open(fitted_samples_folder / file, 'rb') as handle:
+    data = pickle.load(handle)
+    
+data['Img. data']
+data['Img. fit']
     
 #%%
 fitted_dict = {}
@@ -105,8 +127,6 @@ with open(STD_FOLDER / 'sphere_fitted_df_norm.pickle', 'wb') as handle:
     pickle.dump(fitted_df_normalized, handle, protocol=pickle.HIGHEST_PROTOCOL)
    
 #%% Write images
-
-
 im_d_ = [img for img in images_data  ]
 im_f_ = [img for img in images_fitted]
 
@@ -114,8 +134,11 @@ images_df = { id: (im_d_[i], im_f_[i]) for i, id in enumerate(ids) }
 
 with open(STD_FOLDER / 'IRDIS_images_df.pickle', 'wb') as handle:
     pickle.dump(images_df, handle, protocol=pickle.HIGHEST_PROTOCOL)       
-    
- 
+
+#%%
+
+images_df[3733]
+
 #%% =============================================================================
 names = ['Piston',]*4 + ['Tip',]*4 + ['Tilt',]*4
 
@@ -206,4 +229,3 @@ plt.yticks(np.flip(np.arange(Hessians_Snyders_cut.shape[1]),0), names[:Hessians_
 plt.xlim(-0.5,10.5)
 plt.ylim(-0.5,10.5)
 plt.colorbar()
-

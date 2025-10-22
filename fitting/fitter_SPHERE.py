@@ -6,6 +6,7 @@ import sys
 import os
 from pathlib import Path
 
+
 # Ensure the project root is in the Python path
 if __name__ == '__main__':
     # When running as a script
@@ -145,9 +146,7 @@ def load_and_fit_sample(id):
 
         # Process mask like in original
         PSF_mask = process_mask(PSF_mask)
-        LWE_flag = True
         fit_wind = True
-        use_Zernike = True
 
         # Handle central hole if present
         if psf_df.loc[id]['Central hole'] == True:
@@ -162,9 +161,10 @@ def load_and_fit_sample(id):
         # Initialize PSF model using wrapper
         PSF_model = PSFModelIRDIS(
             model_config,
-            LWE_flag=LWE_flag,
+            LWE_flag=True,
             fit_wind=fit_wind,
-            use_Zernike=use_Zernike,
+            LO_NCPAs=False,
+            use_Zernike=True,
             N_modes=9,
             LO_map_size=31,
             device=device
@@ -175,7 +175,7 @@ def load_and_fit_sample(id):
         # Create loss functions (like in original and refactored version)
         img_loss = lambda x: ((func(x) - PSF_0) * PSF_mask).flatten().abs().sum()
 
-        if LWE_flag:
+        if PSF_model.LWE_flag:
             A = 50.0
             patterns = [
                 [0,0,0,0,  0,-1,1,0,  1,0,0,-1], # pattern_pos
@@ -193,36 +193,42 @@ def load_and_fit_sample(id):
             Gauss_err = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, A/2)).flatten().abs().sum()
             LWE_regularizer = lambda c: sum(Gauss_err(pattern, c) for pattern in patterns)
 
-            if not use_Zernike:  
-                grad_loss_fn = GradientLoss(p=1, reduction='mean')
+        if not PSF_model.use_Zernike:  
+            grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
+        if PSF_model.LWE_flag or PSF_model.LO_NCPAs:
             def loss_fn(x_):
                 loss = img_loss(x_)
                 
                 # Update inputs manager to access coefficients
                 PSF_model.inputs_manager.unstack(x_, include_all=True, update=True)
                 
-                coefs_LWE = PSF_model.inputs_manager['LWE_coefs']
-                coefs_LO  = PSF_model.inputs_manager['LO_coefs']
+                if PSF_model.LWE_flag:
+                    coefs_LWE = PSF_model.inputs_manager['LWE_coefs']
+                    loss += LWE_regularizer(coefs_LWE) + (coefs_LWE**2).mean()*1e-4
                 
-                if use_Zernike:  
+                if PSF_model.LO_NCPAs:
+                    coefs_LO = PSF_model.inputs_manager['LO_coefs']
+
+                    if PSF_model.use_Zernike:  
+                        grad_loss = 0.0
+                    else:  
+                        grad_loss = grad_loss_fn(coefs_LO.view(1, 1, PSF_model.LO_map_size, PSF_model.LO_map_size)) * 1e-4
+                    
+                    L2_loss_coefs = coefs_LO.pow(2).sum()*5e-9
+                else:
+                    L2_loss_coefs = 0.0
                     grad_loss = 0.0
-                else:  
-                    grad_loss = grad_loss_fn(coefs_LO.view(1, 1, PSF_model.LO_map_size, PSF_model.LO_map_size)) * 1e-4
-                L2_loss_coefs = coefs_LO.pow(2).sum()*5e-9
-                
-                loss += LWE_regularizer(coefs_LWE) + (coefs_LWE**2).mean()*1e-4
+                    
                 return loss + L2_loss_coefs + grad_loss 
         else:
             def loss_fn(x_):
                 return img_loss(x_)
 
-
         # Perform fitting
         x0 = PSF_model.inputs_manager.stack()
         result = minimize(loss_fn, x0, max_iter=300, tol=1e-5, method='l-bfgs', disp=0)
         x0 = result.x
-
 
         # PTT compensation
         _, _, _ = PSF_model.compensate_PTT_coupling()
@@ -272,13 +278,13 @@ def load_and_fit_sample(id):
         LWE_coefs_final = PSF_model.inputs_manager['LWE_coefs']
         
         # Get individual OPD components
-        if LWE_flag and hasattr(PSF_model, 'LWE_basis'):
+        if PSF_model.LWE_flag and hasattr(PSF_model, 'LWE_basis'):
             LWE_OPD_final = PSF_model.LWE_basis.compute_OPD(LWE_coefs_final) * 1e9  # [nm]
         else:
             LWE_OPD_final = None
             
         if hasattr(PSF_model, 'NCPAs_basis'):
-            if use_Zernike:
+            if PSF_model.use_Zernike:
                 NCPA_OPD_final = PSF_model.NCPAs_basis.compute_OPD(PSF_model.inputs_manager['LO_coefs']) * 1e9
             else:
                 NCPA_OPD_final = PSF_model.NCPAs_basis.interp_upscale(
@@ -304,10 +310,10 @@ def load_and_fit_sample(id):
             'Wind dir':      to_store(PSF_model.model.wind_dir),
             'Nph WFS':       to_store(PSF_model.model.WFS_Nph),
             'Nph WFS (new)': to_store(GetNewPhotons(PSF_model.model)),
-            'LWE coefs':     to_store(LWE_coefs_final),
-            'LO coefs':      to_store(PSF_model.inputs_manager['LO_coefs']),
-            'LWE OPD':       to_store(LWE_OPD_final),
-            'NCPA OPD':      to_store(NCPA_OPD_final),
+            'LWE coefs':     to_store(LWE_coefs_final) if PSF_model.LWE_flag else None,
+            'LO coefs':      to_store(PSF_model.inputs_manager['LO_coefs']) if PSF_model.LO_NCPAs else None,
+            'LWE OPD':       to_store(LWE_OPD_final) if PSF_model.LWE_flag else None,
+            'NCPA OPD':      to_store(NCPA_OPD_final) if PSF_model.LO_NCPAs else None,
             'Hessian':       to_store(hessian_mat_),
             'Variances':     to_store(variance_estimates),
             'Inv.H Ls':      to_store(L),
@@ -323,9 +329,9 @@ def load_and_fit_sample(id):
             'Data norms':    to_store(norms),
             'Model norms':   to_store(PSF_model.model.norm_scale) if hasattr(PSF_model.model, 'norm_scale') else None,
             'loss':          loss_val,
-            'use_Zernike':   use_Zernike,
-            'LWE_flag':      LWE_flag,
-            'fit_wind':      fit_wind,
+            'use_Zernike':   PSF_model.use_Zernike,
+            'LWE_flag':      PSF_model.LWE_flag,
+            'fit_wind':      PSF_model.fit_wind,
         }
 
         # Add fitted parameters to save data
