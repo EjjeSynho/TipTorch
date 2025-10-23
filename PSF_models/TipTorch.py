@@ -658,8 +658,8 @@ class TipTorch(torch.nn.Module):
         self.Rx = torch.conj(self.SxAv) / gPSD
         self.Ry = torch.conj(self.SyAv) / gPSD
         
-        self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-9 # For numerical stability TODO: do we need this, though?
-        self.Ry[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-9
+        self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-12 # For numerical stability TODO: do we need this, though?
+        self.Ry[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-12
 
     '''
     def ReconstructionFilter_new(self, WFS):
@@ -1088,7 +1088,7 @@ class TipTorch(torch.nn.Module):
         Jxy = pdims(min_2d(self.Jxy), 2)
                 
         # Removing the DC component
-        PSD[..., self.nOtf_y//2, self.nOtf_x] = 0.0
+        PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0
         
         # Computing OTF from PSD, real is to remove the imaginary part that appears due to numerical errors
         # cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(PSD.abs(), dim=(-2,-1)), dim=-2).abs())

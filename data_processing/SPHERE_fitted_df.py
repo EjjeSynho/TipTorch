@@ -70,12 +70,11 @@ for file in tqdm(files):
     ids.append(id)
     
 #%%
-
 with open(fitted_samples_folder / file, 'rb') as handle:
     data = pickle.load(handle)
     
-data['Img. data']
-data['Img. fit']
+# data['Img. data']
+# data['Img. fit']
     
 #%%
 fitted_dict = {}
@@ -134,10 +133,6 @@ images_df = { id: (im_d_[i], im_f_[i]) for i, id in enumerate(ids) }
 
 with open(STD_FOLDER / 'IRDIS_images_df.pickle', 'wb') as handle:
     pickle.dump(images_df, handle, protocol=pickle.HIGHEST_PROTOCOL)       
-
-#%%
-
-images_df[3733]
 
 #%% =============================================================================
 names = ['Piston',]*4 + ['Tip',]*4 + ['Tilt',]*4

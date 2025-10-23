@@ -214,9 +214,20 @@ psf_df_common = psf_df_common.loc[fitted_df_common.index]
 
 print('Common PSF df shape:', psf_df_common.shape)
 
-
+'''
 # psf_df_common = psf_df_old.copy()
 # fitted_df_common = fitted_df_old.copy()
+
+# psf_df_common = psf_df_new.copy()
+# fitted_df_common = fitted_df_new.copy()
+
+# Mathc by index
+psf_df_common = psf_df_common[psf_df_common.index.isin(fitted_df_common.index)]
+fitted_df_common = fitted_df_common.loc[psf_df_common.index]
+print('Common PSF df shape:', psf_df_common.shape)
+'''
+
+assert len(psf_df_common) == len(fitted_df_common), "PSF and fitted dataframes have different lengths after matching."
 
 #%%
 fitted_df_norm = fitted_df_common.copy()
@@ -281,9 +292,9 @@ selected_entries_X = [
 # X = df_norm[selected_entries_X].to_numpy()
 
 input_features = psf_df_norm.select_dtypes(include=[np.number])
-
+# input_features = input_features[selected_entries_X]
 # Select K best
-from sklearn.feature_selection import SelectKBest, f_regression
+# from sklearn.feature_selection import SelectKBest, f_regression
 
 X = input_features.to_numpy()
 Y = df_norm['LWE coefs'].apply(lambda x: np.linalg.norm(x, ord=2)) # Just calculate the normalized LWE WFE
@@ -317,6 +328,10 @@ test_df = pd.DataFrame({
 corr_plot(test_df, 'LWE predicted', 'LWE from fitted', lims=[0, 200])
 
 # _ = AnalyseImpurities(gbr_LWE, selected_entries_X, X_test, y_test)
+#%%
+
+
+
 
 #%%
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, explained_variance_score, median_absolute_error
@@ -334,9 +349,108 @@ print( 'Mean absolute percentage error (MAPE): {:.3f}'.format(MAPE) )
 print( 'Explained Variance Score (EVP) {:.3f}'.format(EVP) )
 print( 'Median absolute error (MedAE) {:.3f}'.format(MedAE) )
 
-#%% ============================ Predict LWE coefficients ============================
-# ====================================================================================
+#%% ============================ SHAP Analysis for LWE WFE Predictor ============================
 
+import shap
+
+print("\n" + "="*60)
+print("SHAP ANALYSIS FOR LWE WFE PREDICTOR")
+print("="*60)
+
+# Get feature names (use numerical column names from psf_df_norm)
+feature_names = input_features.columns.tolist()
+
+# Calculate SHAP values for test set (use subset for speed)
+# X_shap = X_test[:min(100, len(X_test))]  # Use first 100 samples or all if less
+X_shap = X_test.copy()
+
+'''
+# Try TreeExplainer first, fallback to other explainers if it fails
+try:
+    # Create SHAP explainer for XGBoost
+    explainer = shap.TreeExplainer(gbr_LWE.predict)
+    shap_values = explainer.shap_values(X_shap)
+    print("Using TreeExplainer")
+    
+except (ValueError, Exception) as tree_error:
+    print(f"TreeExplainer failed ({tree_error}), trying Explainer...")
+    try:
+        # Fallback to general Explainer
+        # Use a separate background sample that doesn't overlap with test data
+        background_indices = np.random.choice(len(X_train), size=min(100, len(X_train)), replace=False)
+        X_background = X_train[background_indices]
+        explainer = shap.Explainer(gbr_LWE.predict, X_background)
+        shap_values = explainer(X_shap).values
+        print("Using general Explainer with separate background data")
+        
+    except Exception as general_error:
+        print(f"General Explainer failed ({general_error}), trying KernelExplainer...")
+    '''
+
+# Last resort: KernelExplainer (slower but more robust)
+# Use random sample from training data as background (standard practice for KernelExplainer)
+background = shap.sample(X_train, 50)  # Use 50 background samples
+explainer = shap.KernelExplainer(gbr_LWE.predict, background)
+shap_values = explainer.shap_values(X_shap)
+print("Using KernelExplainer")
+
+print(f"Calculated SHAP values for {X_shap.shape[0]} test samples")
+print(f"Feature importance shape: {shap_values.shape}")
+#%%
+# Summary plot
+plt.figure(figsize=(12, 8))
+shap.summary_plot(shap_values, X_shap, feature_names=feature_names, show=False)
+plt.title('SHAP Summary Plot - LWE WFE Prediction')
+plt.tight_layout()
+# plt.show()
+plt.savefig('C:/Users/akuznets/Desktop/SHAP_summary_LWE_WFE_prediction.pdf', dpi=300)
+
+# Feature importance plot
+plt.figure(figsize=(12, 6))
+shap.summary_plot(shap_values, X_shap, feature_names=feature_names, plot_type="bar", show=False)
+plt.title('SHAP Feature Importance - LWE WFE Prediction')
+plt.tight_layout()
+# plt.show()
+plt.savefig('C:/Users/akuznets/Desktop/SHAP_feature_importance_LWE_WFE_prediction.pdf', dpi=300)
+
+# Get mean absolute SHAP values for ranking
+mean_shap = np.abs(shap_values).mean(0)
+importance_df = pd.DataFrame({
+    'feature': feature_names,
+    'importance': mean_shap
+}).sort_values('importance', ascending=False)
+
+print("\nTop 10 Most Important Features (SHAP):")
+print("-" * 45)
+for idx, row in importance_df.head(10).iterrows():
+    print(f"{row['feature']:30s}: {row['importance']:.4f}")
+
+# Waterfall plot for a single prediction
+if len(X_shap) > 0:
+    sample_idx = 0
+    plt.figure(figsize=(12, 8))
+    shap.waterfall_plot(explainer.expected_value, shap_values[sample_idx], X_shap[sample_idx], 
+                        feature_names=feature_names, show=False)
+    plt.title(f'SHAP Waterfall Plot - Sample {sample_idx}')
+    plt.tight_layout()
+    plt.show()
+
+# Store SHAP results for later use
+shap_results = {
+    'explainer': explainer,
+    'shap_values': shap_values,
+    'feature_names': feature_names,
+    'importance_ranking': importance_df
+}
+
+print("="*60)
+
+# except ImportError:
+#     print("SHAP not available. Install with: pip install shap")
+# except Exception as e:
+#     print(f"SHAP analysis failed: {e}")
+
+#%% ============================ Predict LWE coefficients ============================
 from sklearn.decomposition import PCA
 
 LWE_coefs = np.array([x for x in df_norm['LWE coefs'].to_numpy()])
@@ -355,14 +469,65 @@ Y_pca = pca.transform(LWE_coefs)
 # Make dataframes from the PCA results
 X_train, X_test, y_train_pca, y_test_pca = train_test_split(X, Y_pca, test_size=0.2, random_state=42)
 
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42, verbose=1)
-mor = MultiOutputRegressor(gbr, n_jobs=-1, verbose=1)
+# gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42, verbose=1)
+# mor = MultiOutputRegressor(gbr, n_jobs=-1, verbose=1)
+
+# Try simpler model for individual coefficients
+xgb_model = xgb.XGBRegressor(
+    n_estimators=500,     # More trees
+    learning_rate=0.02,   # Lower learning rate
+    max_depth=4,          # Shallower trees
+    subsample=0.9,
+    colsample_bytree=0.9,
+    reg_alpha=0.5,        # More L1 regularization
+    reg_lambda=0.5,       # More L2 regularization
+    random_state=42,
+    n_jobs=-1
+)
+mor = MultiOutputRegressor(xgb_model, n_jobs=-1)
 mor.fit(X_train, y_train_pca)
+
+
 y_pred_pca = mor.predict(X_test)
 
 y_pred  = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_pred_pca))
 y_test  = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_test_pca))
 y_train = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_train_pca))
+
+#%% Evaluate LWE coefficients prediction performance
+print("\n" + "="*60)
+print("LWE COEFFICIENTS PREDICTION METRICS")
+print("="*60)
+
+# Calculate metrics for each coefficient
+coef_metrics = []
+for i in range(y_pred.shape[1]):
+    r2_coef    = r2_score(y_test[:, i], y_pred[:, i])
+    mape_coef  = mean_absolute_percentage_error(np.abs(y_test[:, i]) + 1e-8, np.abs(y_pred[:, i]) + 1e-8)  # Add small epsilon for numerical stability
+    evp_coef   = explained_variance_score(y_test[:, i], y_pred[:, i])
+    medae_coef = median_absolute_error(y_test[:, i], y_pred[:, i])
+    
+    coef_metrics.append({
+        'coefficient': i,
+        'r2':    r2_coef,
+        'mape':  mape_coef,
+        'evp':   evp_coef,
+        'medae': medae_coef
+    })
+    
+    print(f'Coef {i+1:2d} - R²: {r2_coef:.3f}, MAPE: {mape_coef:.3f}, EVP: {evp_coef:.3f}, MedAE: {medae_coef:.3f}')
+
+# Overall metrics (flattened arrays)
+y_test_flat = y_test.flatten()
+y_pred_flat = y_pred.flatten()
+
+r2_overall    = r2_score(y_test_flat, y_pred_flat)
+mape_overall  = mean_absolute_percentage_error(np.abs(y_test_flat) + 1e-8, np.abs(y_pred_flat) + 1e-8)
+evp_overall   = explained_variance_score(y_test_flat, y_pred_flat)
+medae_overall = median_absolute_error(y_test_flat, y_pred_flat)
+
+print(f'\n{"OVERALL":>8} - R²: {r2_overall:.3f}, MAPE: {mape_overall:.3f}, EVP: {evp_overall:.3f}, MedAE: {medae_overall:.3f}')
+print("="*60)
 
 #%%
 from joblib import dump, load

@@ -3,6 +3,8 @@
 %autoreload 2
 
 import sys
+
+from tests.SPHERE_dynesty import LWE_coefs
 sys.path.insert(0, '..')
 
 import pickle
@@ -82,13 +84,16 @@ PSF_1 = func(x0 := PSF_model.inputs_manager.stack())
 
 draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, average=True, min_val=1e-5, crop=80, scale='log')
 
-# PSF_model.store_transforms()
-
 #%% Create loss functions (like in original SPHERE_onsky.py)
 img_loss = lambda x: ((func(x) - PSF_0) * PSF_mask).flatten().abs().sum()
 
+LWE_gauss_penalty_weight = 50.0
+# LWE_gauss_penalty_weight = 100.0
+LO_NCPAs_penalty_weight  = 5e-9
+LWE_coefs_penalty_weight = 1e-4
+# LWE_coefs_penalty_weight = 1e-5
+
 if LWE_flag:
-    A = 50.0
     patterns = [
         [0,0,0,0,  0,-1,1,0,  1,0,0,-1], # pattern_pos
         [0,0,0,0,  0,1,-1,0, -1,0,0, 1], # pattern_neg
@@ -99,10 +104,10 @@ if LWE_flag:
         [-1,1,1,-1,  0,0,0,0,  0,0,0,0], # pattern_piston_horiz
         [1,-1,-1,1,  0,0,0,0,  0,0,0,0]  # pattern_piston_vert
     ]
-    patterns = [torch.tensor([p]).to(device).float() * A for p in patterns]
+    patterns = [torch.tensor([p]).to(device).float() * LWE_gauss_penalty_weight for p in patterns]
     
     gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
-    Gauss_err = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, A/2)).flatten().abs().sum()
+    Gauss_err = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, LWE_gauss_penalty_weight/2)).flatten().abs().sum()
 
     LWE_regularizer = lambda c: sum(Gauss_err(pattern, c) for pattern in patterns)
 
@@ -119,7 +124,7 @@ if PSF_model.LWE_flag or PSF_model.LO_NCPAs:
         
         if PSF_model.LWE_flag:
             coefs_LWE = PSF_model.inputs_manager['LWE_coefs']
-            loss += LWE_regularizer(coefs_LWE) + (coefs_LWE**2).mean()*1e-4
+            loss += LWE_regularizer(coefs_LWE) + (coefs_LWE**2).mean() * LWE_coefs_penalty_weight
         
         if PSF_model.LO_NCPAs:
             coefs_LO = PSF_model.inputs_manager['LO_coefs']
@@ -128,8 +133,8 @@ if PSF_model.LWE_flag or PSF_model.LO_NCPAs:
                 grad_loss = 0.0
             else:  
                 grad_loss = grad_loss_fn(coefs_LO.view(1, 1, PSF_model.LO_map_size, PSF_model.LO_map_size)) * 1e-4
-            
-            L2_loss_coefs = coefs_LO.pow(2).sum()*5e-9
+
+            L2_loss_coefs = coefs_LO.pow(2).sum() * LO_NCPAs_penalty_weight
         else:
             L2_loss_coefs = 0.0
             grad_loss = 0.0
