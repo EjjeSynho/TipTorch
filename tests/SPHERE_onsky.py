@@ -196,7 +196,7 @@ print(f"Estimated WFS photons: {Nph_new.item():.1f}")
 if LWE_flag and hasattr(PSF_model, 'NCPAs_basis'):
     LWE_map = LWE_OPD - PPT_OPD
 
-    if use_Zernike:
+    if PSF_model.use_Zernike:
         fitted_map = PSF_model.NCPAs_basis.compute_OPD(PSF_model.inputs_manager['LO_coefs'])[0] * 1e9
     else:
         fitted_map = PSF_model.NCPAs_basis.interp_upscale(PSF_model.inputs_manager['LO_coefs'].view(1, PSF_model.LO_map_size, PSF_model.LO_map_size))

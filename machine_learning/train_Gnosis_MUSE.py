@@ -5,7 +5,6 @@
 import os
 import sys
 
-from tests.MUSE_Torch2Top import PSF
 sys.path.insert(0, '..')
 
 from pathlib import Path
@@ -23,16 +22,18 @@ from tools.utils import cropper, PupilVLT
 from tools.static_phase import MUSEPhaseBump
 from managers.config_manager import ConfigManager
 from data_processing.MUSE_data_utils import MUSE_DATA_FOLDER
-from data_processing.MUSE_STD_dataset_utils import DATASET_FOLDER
+from data_processing.MUSE_STD_dataset_utils import STD_FOLDER
 
-from tools.normalizers import CreateTransformSequenceFromFile
+# from tools.normalizers import CreateTransformSequenceFromFile
 from managers.input_manager import InputsTransformer
 from PSF_models.TipTorch import TipTorch
 
 from project_settings import device, DATA_FOLDER
 
-df_transforms_onsky  = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_norm_transforms.pickle')
-df_transforms_fitted = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_fitted_transforms.pickle')
+DATASET_FOLDER = STD_FOLDER / 'dataset/'
+
+# df_transforms_onsky  = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_norm_transforms.pickle')
+# df_transforms_fitted = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_fitted_transforms.pickle')
 
 with open(DATA_FOLDER / 'reduced_telemetry/MUSE/old/muse_df_norm_imputed.pickle', 'rb') as handle:
     muse_df_norm = pickle.load(handle)
@@ -587,6 +588,12 @@ save_dir = Path(os.path.dirname(os.getcwd())) / 'data' / 'temp' / 'plots'
 
 
 #%%
+
+PSFs_0_val_white = np.mean(PSFs_0_val_poly_data, axis=1)
+PSFs_1_val_white = np.mean(PSFs_1_val_poly_calib, axis=1)
+PSFs_2_val_white = np.mean(PSFs_2_val_poly_direct, axis=1)
+PSFs_3_val_white = np.mean(PSFs_2_val_poly_tuned, axis=1)
+
 # fig, ax = plt.subplots(1, 3, figsize=(12, 4))
 # plt.tight_layout()
 
@@ -595,29 +602,30 @@ fig = plt.figure(figsize=(9, 4))
 draw_calibrated = True
 draw_direct     = True
 draw_fitted     = False
-save_profiles   = True
+save_profiles   = False
 draw_white      = True
 
 cutoff = 40
 
-if draw_white:
-    # White profiles
-    if draw_calibrated:
-        plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_1_val_white, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
-        if save_profiles:
-            plt.savefig(save_dir / 'PSFs_calibrated.pdf', dpi=300)
+# if draw_white:
+# White profiles
+if draw_calibrated:
+    plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_1_val_white, 'Data', 'TipTorch', title='Calibrated prediction', cutoff=cutoff)#, ax=ax[0])
+    if save_profiles:
+        plt.savefig(save_dir / 'PSFs_calibrated.pdf', dpi=300)
 
-    if draw_direct:
-        plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_2_val_white, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
-        if save_profiles:
-            postfix = '_tuned' if direct_tuned else '_raw'
-            plt.savefig(save_dir / f'PSFs_direct_{postfix}.pdf', dpi=300)
+if draw_direct:
+    plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_2_val_white, 'Data', 'TipTorch', title='Direct prediction', cutoff=cutoff)#, ax=ax[1])
+    if save_profiles:
+        postfix = '_tuned' if direct_tuned else '_raw'
+        plt.savefig(save_dir / f'PSFs_direct_{postfix}.pdf', dpi=300)
 
-    if draw_fitted:
-        plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_3_val_white, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
-        if save_profiles:
-            plt.savefig(save_dir / 'PSFs_fitted.pdf', dpi=300)
+if draw_fitted:
+    plot_radial_PSF_profiles(PSFs_0_val_white, PSFs_3_val_white, 'Data', 'TipTorch', title='Fitted', cutoff=cutoff)#, ax=ax[2])
+    if save_profiles:
+        plt.savefig(save_dir / 'PSFs_fitted.pdf', dpi=300)
 
+#%%
 else:
     # Polychromatic profiles
     for i, wvl in tqdm(enumerate(wavelength_selected[ids_wavelength_selected].tolist())):
@@ -765,7 +773,6 @@ for id in tqdm(good_ids):
 
 
 #%%
-
 # Read the results
 with open('../data/temp/temp_PSFs_MUSE/PSFs_val_data_polychrome.pickle', 'rb') as handle:
     PSFs_0_val_poly_data = pickle.load(handle)
@@ -931,6 +938,12 @@ hist_thresholded(
 
 # save_dir = Path(os.path.dirname(os.getcwd())) / 'data' / 'temp' / 'plots'
 # plt.savefig(save_dir / 'SR_calib_MUSE.pdf', dpi=300)
+#%%
+ii = np.random.randint(0, PSFs_0_val_poly_data.shape[0])
+# testo = np.log10(PSFs_2_val_poly_direct[67,-1,...])
+testo = np.abs(PSFs_2_val_poly_direct[ii,...].sum(axis=0))
+plt.imshow(np.log10(testo))
+print(testo.max())
 
 #%%
 var_data         = np.var(PSFs_0_val_poly_data.mean(axis=1), axis=(-2,-1))

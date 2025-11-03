@@ -326,12 +326,21 @@ test_df = pd.DataFrame({
     'LWE from fitted': df_transforms_fitted['LWE coefs'].backward(y_test),
 })
 corr_plot(test_df, 'LWE predicted', 'LWE from fitted', lims=[0, 200])
+plt.savefig('C:/Users/akuznets/Desktop/LWE_WFE_prediction_correlation.pdf', dpi=300)
 
 # _ = AnalyseImpurities(gbr_LWE, selected_entries_X, X_test, y_test)
 #%%
 
+a = df_transforms_fitted['LWE coefs'].backward(y_pred)
+b = df_transforms_fitted['LWE coefs'].backward(y_test)
 
+err = np.abs(a - b)
 
+_ = plt.figure(figsize=(10, 7))
+_ = plt.hist(err, bins=30)
+plt.title('LWE WFE Prediction Error Distribution')
+plt.xlabel('Absolute Error [nm RMS]')
+plt.ylabel('Number of Samples')
 
 #%%
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, explained_variance_score, median_absolute_error
@@ -350,7 +359,6 @@ print( 'Explained Variance Score (EVP) {:.3f}'.format(EVP) )
 print( 'Median absolute error (MedAE) {:.3f}'.format(MedAE) )
 
 #%% ============================ SHAP Analysis for LWE WFE Predictor ============================
-
 import shap
 
 print("\n" + "="*60)
@@ -560,7 +568,13 @@ y_pred_norm *= WFE_pred_pow[:,None]
 WFE_pred = np.linalg.norm(y_pred_norm, ord=2, axis=1)
 WFE_test = np.linalg.norm(y_test, ord=2, axis=1)
 
-plt.scatter(WFE_test, WFE_pred, s=2)
+test_df = pd.DataFrame({
+    'LWE predicted (from coefs)':   WFE_pred,
+    'LWE from fitted (from coefs)': WFE_test,
+})
+corr_plot(test_df, 'LWE predicted (from coefs)', 'LWE from fitted (from coefs)', lims=[0, 200])
+
+# plt.scatter(WFE_test, WFE_pred, s=2)
 # plt.scatter(WFE_pred, WFE_pred_pow, s=2)
 
 # plt.xlim(0, 200)

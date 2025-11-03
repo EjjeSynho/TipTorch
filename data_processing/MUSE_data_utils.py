@@ -1684,7 +1684,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     if os.path.exists(cache_path):
         if verbose: print('Loading existing cached data cube...')
         with open(cache_path, 'rb') as f:
-            data_cached, _ = pickle.load(f)
+            data_cached = pickle.load(f)
     else:
         if verbose: print('Generating new cached data cube...')
 
@@ -1727,7 +1727,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     cube_binned = cube_binned * (cube_full.sum(axis=0).max() /  cube_binned.sum(axis=0).max())
 
     # Extract config file and update it
-    model_config, cube_binned = InitNFMConfig(data_cached, cube_binned, device=device, convert_config=True)
+    model_config = InitNFMConfig(data_cached, cube_binned, device=device, convert_config=True)
     cube_binned = cube_binned.squeeze()
 
     model_config['NumberSources'] = 1
