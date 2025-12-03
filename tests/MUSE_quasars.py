@@ -1,4 +1,4 @@
-#%%
+%%
 try:
     ipy = get_ipython()        # NameError if not running under IPython
     if ipy:
@@ -28,7 +28,7 @@ from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUS
 from tools.normalizers import CreateTransformSequenceFromFile
 
 
-#%
+#%%
 '''
 import os
 from astropy.io import fits
@@ -48,10 +48,10 @@ def parse_muse_cube_header(cube_path):
 
 def find_raw_muse_exposures(prog_id, obs_block, eso=None):
     eso = eso or Eso()
-    # If you haven’t yet, authenticate for proprietary data:
+    # If you haven't yet, authenticate for proprietary data:
     # eso.login(store_password=True)
     
-    # (Optional) Inspect what filters and columns the MUSE‐form supports:
+    # (Optional) Inspect what filters and columns the MUSE-form supports:
     # eso.query_instrument('muse', help=True)
     
     with warnings.catch_warnings():
