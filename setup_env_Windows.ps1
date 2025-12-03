@@ -226,9 +226,12 @@ if ($LASTEXITCODE -eq 0) {
     exit 1
 }
 
-# ─── 6.5) Install CuPy via conda ───────────────────────────────────────────
-Write-Host "`n→ Installing CuPy via conda…" -ForegroundColor Cyan
+# ─── 6.5) Install CUDA development toolkit and CuPy via conda ──────────────
+Write-Host "`n" -NoNewline
 if ($CudaPresent) {
+    Write-Host "→ Installing CUDA development headers for CuPy…" -ForegroundColor Cyan
+    & conda run -n $EnvName pip install cuda-python
+    
     Write-Host "→ Installing CuPy for CUDA 12.x…" -ForegroundColor Cyan
     & conda run -n $EnvName pip install cupy-cuda12x
 } else {
@@ -272,30 +275,24 @@ if ($LASTEXITCODE -eq 0) {
     }
 }
 
-# ─── 8) Install torchcubicspline, prefer pip then fallback to GitHub ────────
-Write-Host "`n→ Attempting to install 'torchcubicspline' from PyPI…" -ForegroundColor Cyan
-& conda run -n $EnvName pip install torchcubicspline
+# ─── 8) Install torchcubicspline from GitHub (not available on PyPI) ─────────
+Write-Host "`n→ Installing 'torchcubicspline' from GitHub (not available on PyPI)…" -ForegroundColor Cyan
+
+if (-not (Test-Path "../torchcubicspline")) {
+    Write-Host "→ Cloning torchcubicspline to ../torchcubicspline…" -ForegroundColor Cyan
+    git clone https://github.com/patrick-kidger/torchcubicspline.git ../torchcubicspline
+} else {
+    Write-Host "→ Found existing torchcubicspline at ../torchcubicspline" -ForegroundColor Green
+}
+
+Write-Host "→ Installing 'torchcubicspline' from local Git repository at ../torchcubicspline…" -ForegroundColor Cyan
+& conda run -n $EnvName pip install -e ../torchcubicspline
 
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "✅ Successfully installed 'torchcubicspline' from PyPI." -ForegroundColor Green
+    Write-Host "✅ Successfully installed 'torchcubicspline' from GitHub." -ForegroundColor Green
 } else {
-    Write-Host "⚠️  'torchcubicspline' not found on PyPI or installation failed. Falling back to GitHub…" -ForegroundColor Yellow
-
-    if (-not (Test-Path "../torchcubicspline")) {
-        Write-Host "→ Cloning torchcubicspline to ../torchcubicspline…" -ForegroundColor Cyan
-        git clone https://github.com/patrick-kidger/torchcubicspline.git ../torchcubicspline
-    } else {
-        Write-Host "→ Found existing torchcubicspline at ../torchcubicspline" -ForegroundColor Green
-    }
-    Write-Host "→ Installing 'torchcubicspline' from local Git repository at ../torchcubicspline…" -ForegroundColor Cyan
-    & conda run -n $EnvName pip install -e ../torchcubicspline
-
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "✅ Successfully installed 'torchcubicspline' from GitHub." -ForegroundColor Green
-    } else {
-        Write-Host "❌ Failed to install 'torchcubicspline' from GitHub." -ForegroundColor Red
-        exit 1
-    }
+    Write-Host "❌ Failed to install 'torchcubicspline' from GitHub." -ForegroundColor Red
+    exit 1
 }
 
 Write-Host "`n🎉 Environment setup complete!" -ForegroundColor Green

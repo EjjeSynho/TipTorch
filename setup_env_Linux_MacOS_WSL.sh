@@ -272,10 +272,12 @@ else
   exit 1
 fi
 
-# ─── 5.5) Install CuPy for CUDA systems ────────────────────────────────────
+# ─── 5.5) Install CUDA development toolkit and CuPy for CUDA systems ──────
 echo
-echo "→ Installing CuPy…"
 if [[ "$CUDA_AVAILABLE" == "true" ]]; then
+  echo "→ Installing CUDA development headers for CuPy…"
+  conda run -n "$ENV_NAME" pip install cuda-python
+  
   echo "→ Installing CuPy for CUDA 12.x…"
   conda run -n "$ENV_NAME" pip install cupy-cuda12x
   
@@ -316,32 +318,25 @@ else
   fi
 fi
 
-# ─── 7) Install torchcubicspline, prefer pip then fallback to GitHub ────────
+# ─── 7) Install torchcubicspline from GitHub (not available on PyPI) ─────────
 echo
-echo "→ Attempting to install 'torchcubicspline' from PyPI…"
-conda run -n "$ENV_NAME" pip install torchcubicspline
+echo "→ Installing 'torchcubicspline' from GitHub (not available on PyPI)…"
+
+if [[ ! -d "../torchcubicspline" ]]; then
+  echo "→ Cloning torchcubicspline to ../torchcubicspline…"
+  git clone https://github.com/patrick-kidger/torchcubicspline.git ../torchcubicspline
+else
+  echo "→ Found existing torchcubicspline at ../torchcubicspline"
+fi
+
+echo "→ Installing 'torchcubicspline' from local Git repository at ../torchcubicspline…"
+conda run -n "$ENV_NAME" pip install -e ../torchcubicspline
 
 if [[ $? -eq 0 ]]; then
-  echo "✅ Successfully installed 'torchcubicspline' from PyPI."
+  echo "✅ Successfully installed 'torchcubicspline' from GitHub."
 else
-  echo "⚠️  'torchcubicspline' not found on PyPI or installation failed. Falling back to GitHub…"
-
-  if [[ ! -d "../torchcubicspline" ]]; then
-    echo "→ Cloning torchcubicspline to ../torchcubicspline…"
-    git clone https://github.com/patrick-kidger/torchcubicspline.git ../torchcubicspline
-  else
-    echo "→ Found existing torchcubicspline at ../torchcubicspline"
-  fi
-  
-  echo "→ Installing 'torchcubicspline' from local Git repository at ../torchcubicspline…"
-  conda run -n "$ENV_NAME" pip install -e ../torchcubicspline
-
-  if [[ $? -eq 0 ]]; then
-    echo "✅ Successfully installed 'torchcubicspline' from GitHub."
-  else
-    echo "❌ Failed to install 'torchcubicspline' from GitHub."
-    exit 1
-  fi
+  echo "❌ Failed to install 'torchcubicspline' from GitHub."
+  exit 1
 fi
 
 echo
