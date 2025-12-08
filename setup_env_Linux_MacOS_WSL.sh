@@ -166,7 +166,6 @@ fi
 
 # Common packages
 cat >> "$ENV_YML" <<EOF
-  - pillow
   - pandas
   - matplotlib
   - seaborn
@@ -209,6 +208,7 @@ fi
 cat >> "$ENV_YML" <<EOF
   - pip
   - pip:
+    - pillow
     - opencv-python
     - dynesty
     - refractiveindex

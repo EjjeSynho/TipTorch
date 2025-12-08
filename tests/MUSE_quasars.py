@@ -1,4 +1,4 @@
-%%
+#%%
 try:
     ipy = get_ipython()        # NameError if not running under IPython
     if ipy:

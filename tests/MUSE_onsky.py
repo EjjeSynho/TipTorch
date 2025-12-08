@@ -23,10 +23,10 @@ from PSF_models.NFM_wrapper import PSFModelNFM
 
 
 #%%
-# import pickle
+import pickle
 
-# with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
-#     muse_df = pickle.load(handle)
+with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
+    muse_df = pickle.load(handle)
     
 # muse_df.index[muse_df['Wind speed (header)'] > 16]
 
@@ -83,9 +83,10 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 475 # good one
 # ids = 468 # good one
 
-# ids = 455 # Interesting tomo reconst behaviour
+ids = 455 # Interesting tomo reconst behaviour
 
-ids = 482
+# ids = 449
+# ids = 440
 
 PSF_0, norms, bgs, configs = LoadSTDStarData(
     ids                 = ids,
@@ -105,7 +106,7 @@ PSF_model = PSFModelNFM(
     chrom_defocus   = False,
     use_splines     = True,
     Moffat_absorber = False,
-    Z_mode_max      = 3,
+    Z_mode_max      = 9,
     device          = device
 )
 
@@ -309,8 +310,8 @@ x0, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general,
 # x0, PSF_1, OPD_map = minimize_params(loss_fn_Huber, include_general, exclude_general, 150)
 
 # if fit_LO:
-    # x1, PSF_1, OPD_map = minimize_params(loss_fn2, include_LO, exclude_LO, 50)
-    # x2, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 50)
+#     x1, PSF_1, OPD_map = minimize_params(loss_fn2, include_LO, exclude_LO, 50)
+#     x2, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 50)
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles
@@ -351,6 +352,81 @@ if PSF_model.LO_NCPAs:
     plt.imshow(OPD_map[id_src,...]*1e9)
     plt.colorbar()
     plt.show()
+
+#%%
+import torch.nn.functional as F
+
+N_λ = len(wavelengths) // 8
+W_orig = H_orig = 69
+
+PSF_model.SetWavelengths(wavelengths[::8])  # in nm
+PSF_model.SetImageSize(W_orig)
+
+torch.cuda.empty_cache()
+
+#%%
+center_y, center_x = PSF_0.shape[-2] // 2, PSF_0.shape[-1] // 2
+half_crop = H_orig // 2
+ROI = slice(center_y - half_crop, center_y + half_crop)
+
+# Downsampling factor to reduce memory usage
+pool_size = 3
+W = H = W_orig // pool_size
+
+PSF_0_pooled = F.max_pool2d(PSF_0[:, ::8, ROI, ROI], kernel_size=pool_size, stride=pool_size)
+
+# TODO: test if PSF stays the same when the image size is shrunk down
+
+#%%
+def run_diff_small(x_):  
+    """Compute PSF and apply maxpooling to reduce memory footprint."""
+    psf = func(x_)
+    # Apply 2D maxpooling: (N_src, N_λ, H, W) -> (N_src, N_λ, H//pool, W//pool)
+    psf_pooled = F.max_pool2d(psf, kernel_size=pool_size, stride=pool_size)
+    return psf_pooled.reshape(-1)
+
+x_grad = x0.clone().detach().requires_grad_(True)
+
+N_params = x_grad.shape[-1]
+
+# Jacobian of PSF wrt parameters: shape (N, P)
+J = torch.autograd.functional.jacobian(
+    run_diff_small,
+    x_grad,
+    vectorize=True   # if supported; otherwise drop this argument
+)   # (N, P)
+torch.cuda.empty_cache()
+
+#%%
+J_per_param = PSF_model.inputs_manager.inputs_transformer.unstack(J.squeeze())
+for k, v in J_per_param.items():
+    J_per_param[k] = J_per_param[k].reshape(N_λ, H, W, -1)
+
+#%%
+# Downsample target PSF for comparison
+res_vec = (run_diff_small(x_grad).reshape_as(PSF_0_pooled) - PSF_0_pooled).reshape(-1)   # (N,)
+res_vec = res_vec.reshape(N_λ, H, W).unsqueeze(-1)  # (1, N_λ, H, W)
+
+sensitivity_map = {}
+J_per_param = PSF_model.inputs_manager.inputs_transformer.unstack(J.squeeze())
+for k, v in J_per_param.items():
+    J_per_param[k] = J_per_param[k].reshape(N_λ, H, W, -1)
+    # sensitivity_map[k] = res_vec * J_per_param[k]
+    sensitivity_map[k] = J_per_param[k]
+
+
+#%%
+
+studied_param = 'L0'
+
+final_map = sensitivity_map[studied_param][0,...,0].cpu().detach().numpy()
+final_map -= final_map.mean()
+
+plt.imshow(final_map, cmap='seismic', vmin=-np.percentile(np.abs(final_map), 99), vmax=np.percentile(np.abs(final_map), 99))
+plt.colorbar()
+plt.title(rf"Sensitivity map $\partial$PSF/$\partial${studied_param}")
+plt.show()
+
 
 #%%
 from data_processing.MUSE_STD_dataset_utils import GetROIaroundMax, GetSpectrum

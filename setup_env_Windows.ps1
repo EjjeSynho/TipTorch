@@ -119,7 +119,6 @@ if ($IntelCPU) {
 }
 
 # Common Conda packages
-$Yml += '  - pillow'
 $Yml += '  - pandas'
 $Yml += '  - matplotlib'
 $Yml += '  - seaborn'
@@ -167,6 +166,7 @@ if ($IntelCPU) {
 
 # Add pip packages
 $PipPackages = @(
+    'pillow',
     'refractiveindex',
     'unlzw3'
 )

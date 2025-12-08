@@ -261,7 +261,7 @@ class TipTorch(torch.nn.Module):
         self.k2 = self.kx**2 + self.ky**2
         self.k = torch.sqrt(self.k2)
 
-        self._stabilize(self.kx)
+        self._stabilize(self.kx) #TODO: is it necessary, after all?
         self._stabilize(self.ky)
         self._stabilize(self.k2)
         self._stabilize(self.k )
@@ -1045,7 +1045,6 @@ class TipTorch(torch.nn.Module):
     
 
     def OTF2PSF(self, OTF): 
-        # PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF*self.center_aligner, dim=(-2,-1))), dim=(-2,-1)).abs()
         PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF, dim=(-2,-1))), dim=(-2,-1)).abs()
         
         PSF = []
@@ -1066,16 +1065,6 @@ class TipTorch(torch.nn.Module):
 
         return torch.hstack(PSF)
 
-        # PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF*self.center_aligner, dim=(-2,-1))), dim=(-2,-1)).abs()
-
-        # PSF = []
-        # for i in range(self.wvl.shape[-1]):
-        #     n = 0 if PSF_big.shape[1] == 1 else i # In the case OTF is only computed for minimal sampling
-        #     transform = transforms.CenterCrop((self.nOtfs[i], self.nOtfs[i]))
-        #     PSF.append(interpolate(transform(PSF_big[:,n,...]).unsqueeze(1), size=(self.nPix, self.nPix), mode='bilinear') if OTF.shape[-1] != self.nPix else transform(PSF_big[:,n,...]).unsqueeze(1))
-            
-        # return torch.hstack(PSF)
-
 
     def PSD2PSF(self, PSD, OTF_static):
         # Ensure that wavelength dimension is present
@@ -1091,9 +1080,7 @@ class TipTorch(torch.nn.Module):
         PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0
         
         # Computing OTF from PSD, real is to remove the imaginary part that appears due to numerical errors
-        # cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(PSD.abs(), dim=(-2,-1)), dim=-2).abs())
         cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(torch.fft.ifftshift(PSD.abs(), dim=(-2,-1)), dim=(-2,-1)), dim=-2).real)
-        # cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(PSD.abs(), dim=(-2,-1)), dim=-2).abs())
 
         # Computing the Structure Function from the covariance
         SF = 2*(cov.abs().amax(dim=(-2,-1), keepdim=True) - cov).real

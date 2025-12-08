@@ -400,6 +400,90 @@ def CompareConfigs(dict1, dict2, tolerance=1e-6, path=""):
     return differences
 
 
+def SingleTargetInSingleObservation(config_file, device=None):
+    '''
+    Restructures config file for a single target in a single observation.
+    This function properly initializes dimensions for a single source scenario,
+    ensuring all arrays have the correct shape for processing by the PSF model.
+    '''
+    config_manager = ConfigManager()
+    config = deepcopy(config_file)
+    
+    # Determine framework based on device parameter or existing data
+    if device is not None:
+        config_manager.Convert(config, framework='pytorch', device=device)
+    else:
+        config_manager.Convert(config, framework='numpy')
+    
+    config['NumberSources'] = 1
+    
+    if device is not None:
+        # PyTorch operations for single target
+        config['sources_science']['Wavelength'] = config['sources_science']['Wavelength'].squeeze()
+        config['sources_HO']['Wavelength'] = config['sources_HO']['Wavelength'].squeeze()
+        
+        if type(config['sensor_science']['FieldOfView']) == torch.Tensor:
+            config['sensor_science']['FieldOfView'] = config['sensor_science']['FieldOfView'].int().item() #TODO: fix it
+            
+        config['sources_HO']['Height'] = config['sources_HO']['Height'].unsqueeze(-1)
+        
+        config['atmosphere']['Cn2Weights'] = config['atmosphere']['Cn2Weights'].unsqueeze(0)
+        config['atmosphere']['Cn2Heights'] = config['atmosphere']['Cn2Heights'].unsqueeze(0)
+        config['atmosphere']['WindSpeed']  = config['atmosphere']['WindSpeed'].unsqueeze(0)
+        config['atmosphere']['WindDirection'] = config['atmosphere']['WindDirection'].unsqueeze(0)
+        config['atmosphere']['L0']     = config['atmosphere']['L0']
+        config['atmosphere']['Seeing'] = config['atmosphere']['Seeing']
+        
+        config['telescope']['ZenithAngle'] = config['telescope']['ZenithAngle'].float()
+        
+        config['sources_HO']['Zenith']  = config['sources_HO']['Zenith'].float()
+        config['sources_HO']['Azimuth'] = config['sources_HO']['Azimuth'].float()
+        
+        config['RTC']['SensorFrameRate_HO'] = config['RTC']['SensorFrameRate_HO']
+        config['RTC']['LoopDelaySteps_HO']  = config['RTC']['LoopDelaySteps_HO']
+        config['RTC']['LoopGain_HO']        = config['RTC']['LoopGain_HO']
+        
+        config['DM']['OptimizationZenith']  = config['DM']['OptimizationZenith']
+        config['DM']['OptimizationAzimuth'] = config['DM']['OptimizationAzimuth']
+        config['DM']['OptimizationWeight']  = config['DM']['OptimizationWeight']
+        
+        config['sensor_HO']['NumberPhotons'] = config['sensor_HO']['NumberPhotons'].unsqueeze(0)
+        config['sensor_HO']['ClockRate'] = config['sensor_HO']['ClockRate']
+        
+    else:
+        # NumPy operations for single target
+        config['sources_science']['Wavelength'] = config['sources_science']['Wavelength'].squeeze()
+        config['sources_HO']['Wavelength'] = config['sources_HO']['Wavelength'].squeeze()
+        config['sensor_science']['FieldOfView'] = int(config['sensor_science']['FieldOfView'])
+        
+        config['sources_HO']['Height'] = np.expand_dims(config['sources_HO']['Height'], axis=-1)
+        
+        config['atmosphere']['Cn2Weights'] = np.expand_dims(config['atmosphere']['Cn2Weights'], axis=0)
+        config['atmosphere']['Cn2Heights'] = np.expand_dims(config['atmosphere']['Cn2Heights'], axis=0)
+        config['atmosphere']['WindSpeed']  = np.expand_dims(config['atmosphere']['WindSpeed'], axis=0)
+        config['atmosphere']['WindDirection'] = np.expand_dims(config['atmosphere']['WindDirection'], axis=0)
+        config['atmosphere']['L0'] = config['atmosphere']['L0']
+        config['atmosphere']['Seeing'] = config['atmosphere']['Seeing']
+        
+        config['telescope']['ZenithAngle'] = config['telescope']['ZenithAngle']
+        
+        config['sources_HO']['Zenith']  = float(config['sources_HO']['Zenith'])
+        config['sources_HO']['Azimuth'] = float(config['sources_HO']['Azimuth'])
+        
+        config['RTC']['SensorFrameRate_HO'] = config['RTC']['SensorFrameRate_HO']
+        config['RTC']['LoopDelaySteps_HO']  = config['RTC']['LoopDelaySteps_HO']
+        config['RTC']['LoopGain_HO']        = config['RTC']['LoopGain_HO']
+        
+        config['DM']['OptimizationZenith']  = config['DM']['OptimizationZenith']
+        config['DM']['OptimizationAzimuth'] = config['DM']['OptimizationAzimuth']
+        config['DM']['OptimizationWeight']  = config['DM']['OptimizationWeight']
+        
+        config['sensor_HO']['NumberPhotons'] = np.expand_dims(config['sensor_HO']['NumberPhotons'], axis=0)
+        config['sensor_HO']['ClockRate'] = config['sensor_HO']['ClockRate']
+    
+    return config
+
+
 def MultipleTargetsInOneObservation(config_file, N_srcs, device=None):
     '''
     Restructures config file in such a way that multiple sources are observed in one observation.
@@ -537,3 +621,4 @@ def MultipleTargetsInDifferentObservations(configs, device=None):
     merged_config['sensor_science']['FieldOfView'] = int(merged_config['sensor_science']['FieldOfView'])
 
     return merged_config
+

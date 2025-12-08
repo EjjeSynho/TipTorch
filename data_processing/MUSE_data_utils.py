@@ -705,9 +705,9 @@ def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
 
     Parameters:
     -----------
-    data : ndarray, torch.Tensor
+    data : ndarray, torch.Tensor, CuPy array
         The 3D data cube with shape (wavelength, y, x)
-    point : list, ndarray, pd.Series, torch.Tensor
+    point : list, tuple, ndarray, pd.Series, torch.Tensor, CuPy array
         The (x, y) coordinates of the point
     radius : int, default=1
         Radius of the region around the point to compute the spectrum from. Despite the naming, it's a square region
@@ -716,23 +716,27 @@ def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
 
     Returns:
     --------
-    1D array of spectral data
+    1D array of spectral data (same type as data input)
     """
-    # Determine the input type
-    
-    if   type(point) == tuple:        point = list(point)
-    if   type(point) == list:         point = check_framework(point[0]).array(point)
-    elif type(point) == pd.Series:    point = point.to_numpy()
-    elif type(point) == torch.Tensor: point = point.cpu().numpy()
-    else:
-        raise ValueError('Point must be a list, tuple, ndarray, pandas.Series, torch.Tensor, or CuPy array')
-
-    if hasattr(point, 'device'): # Detect CuPy array
+    # Convert point to NumPy array
+    if isinstance(point, (list, tuple)):
+        point = np.array(point)
+        
+    elif isinstance(point, pd.Series):
+        point = point.to_numpy()
+        
+    elif torch.is_tensor(point):
+        point = point.cpu().numpy()
+        
+    elif hasattr(point, 'get'):  # CuPy array
         point = point.get()
+        
+    elif not isinstance(point, np.ndarray):
+        raise TypeError(f'Unsupported point type: {type(point).__name__}')
 
     x, y = point[:2].astype('int')
     
-    if radius == 0: # No averaging over a radius
+    if radius == 0:  # No averaging over a radius
         return data[:, y, x]
     
     y_min = max(0, y - radius)
@@ -740,43 +744,26 @@ def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
     y_max = min(data.shape[1], y + radius + 1)
     x_max = min(data.shape[2], x + radius + 1)
 
-    # Handle different array types
+    # Handle different data array types
     if torch.is_tensor(data):
+        roi = data[:, y_min:y_max, x_min:x_max]
         if debug_show_ROI:
-            plt.imshow(torch.nansum(data[:, y_min:y_max, x_min:x_max], dim=0).cpu().numpy(), origin='lower')
+            plt.imshow(torch.nansum(roi, dim=0).cpu().numpy(), origin='lower')
             plt.show()
-
-        return torch.nanmean(data[:, y_min:y_max, x_min:x_max], dim=(-2,-1))
-    else:
-        array_module = check_framework(data) # Check if data is a CuPy array
-
+        return torch.nanmean(roi, dim=(-2, -1))
+    
+    else:  # NumPy or CuPy array
+        array_module = check_framework(data)
+        roi = data[:, y_min:y_max, x_min:x_max]
         if debug_show_ROI:
-            plt.imshow(array_module.nansum(data[:, y_min:y_max, x_min:x_max], axis=0), origin='lower')
+            plt.imshow(array_module.nansum(roi, axis=0), origin='lower')
             plt.show()
-
-        return np.nanmean(data[:, y_min:y_max, x_min:x_max], axis=(-2,-1))
+        return array_module.nanmean(roi, axis=(-2, -1))
 
 
 def range_overlap(v_min, v_max, h_min, h_max):
     start_of_overlap, end_of_overlap = max(v_min, h_min), min(v_max, h_max)
     return 0.0 if start_of_overlap > end_of_overlap else (end_of_overlap-start_of_overlap) / (v_max-v_min)
-
-
-def compute_wavelength_bins_old(λs, bad_wvls):
-    λ_max  = λs.max()
-    # Before the sodium filter
-    # if verbose: print('Generating smart wavelength bins...')
-    λ_bin = (bad_wvls[1][0]-bad_wvls[0][1])/3.0
-    λ_bins_before = bad_wvls[0][1] + np.arange(4)*λ_bin
-    bin_ids_before = [find_closest_λ(wvl, λs) for wvl in λ_bins_before]
-
-    # After the sodium filter
-    λ_bins_num    = (λ_max-bad_wvls[1][1]) / np.diff(λ_bins_before).mean()
-    λ_bins_after  = bad_wvls[1][1] + np.arange(λ_bins_num+1)*λ_bin
-    bin_ids_after = [find_closest_λ(wvl, λs) for wvl in λ_bins_after]
-    bins_smart    = bin_ids_before + bin_ids_after
-    λ_bins_smart  = λs[bins_smart]
-    return λ_bins_smart, bins_smart
 
 
 def compute_wavelength_bins(λs, bad_ranges, n_bins=None, target_width=None, min_ratio=0.1):

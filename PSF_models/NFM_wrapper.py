@@ -125,6 +125,58 @@ class PSFModelNFM:
             torch.mps.empty_cache()
             torch.mps.synchronize()
     
+    '''
+    def copy(self):
+        """
+        Create a deep copy of the PSFModelNFM instance, including the internal TipTorch model.
+        
+        Returns:
+        --------
+        PSFModelNFM
+            A new instance with copied parameters and model state
+        """
+        import copy
+        
+        # Create a new instance with the same configuration
+        new_instance = PSFModelNFM(
+            config=self.model.config,
+            multiple_obs=self.multiple_obs,
+            LO_NCPAs=self.LO_NCPAs,
+            chrom_defocus=self.chrom_defocus,
+            use_splines=self.use_splines,
+            Moffat_absorber=self.Moffat_absorber,
+            Z_mode_max=self.Z_mode_max,
+            device=self.device
+        )
+        
+        # Deep copy the TipTorch model state
+        if hasattr(self.model, 'state_dict'):
+            new_instance.model.load_state_dict(copy.deepcopy(self.model.state_dict()))
+        
+        # Copy wavelengths (already handled by config, but ensure reference is correct)
+        new_instance.wavelengths = self.wavelengths.clone()
+        
+        # Deep copy the inputs manager using its built-in copy method
+        if hasattr(self, 'inputs_manager'):
+            new_instance.inputs_manager = self.inputs_manager.copy()
+        
+        # Copy spline control points if using splines
+        if self.use_splines and hasattr(self, 'x_ctrl'):
+            new_instance.x_ctrl = self.x_ctrl.clone()
+            if hasattr(self, 'norm_wvl'):
+                new_instance.norm_wvl = copy.deepcopy(self.norm_wvl)
+        
+        # Copy LO basis if it exists
+        if hasattr(self, 'LO_basis'):
+            # The basis is already recreated in __init__, but we need to ensure
+            # it has the same state if there are any learned parameters
+            if hasattr(self.LO_basis, 'basis'):
+                new_instance.LO_basis.basis = self.LO_basis.basis.clone()
+            if hasattr(self.LO_basis, 'OPD_map'):
+                new_instance.LO_basis.OPD_map = self.LO_basis.OPD_map.clone()
+        
+        return new_instance
+    '''
 
     def __del__(self):
         """Destructor to ensure GPU memory is freed"""
@@ -340,4 +392,9 @@ class PSFModelNFM:
         self.model.Update(init_grids=True, init_pupils=True, init_tomography=True)
         self.wavelengths = wavelengths # [nm]
 
+    def SetImageSize(self, img_size):
+        self.model.config['sensor_science']['FieldOfView'] = img_size
+        self.model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+
     __call__ = forward
+
