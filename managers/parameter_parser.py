@@ -71,10 +71,6 @@ class ParameterParser():
                 params[section][entry] = None
             else:
                 params[section][entry] = self.find_file(params[section][entry])
-                #if params[section][entry][0] == '\\' or params[section][entry][0] == '/':
-                #    params[section][entry] = params[section][entry][1:]
-                #params[section][entry] = os.path.normpath(params[section][entry])
-                
 
         # -------- Grabbing main parameters -----------
         if 'TelescopeDiameter' not in params['telescope']:
@@ -195,7 +191,7 @@ class ParameterParser():
             check_value('sensor_LO', 'NewValueThrPix', 0.0)
             check_value('sensor_LO', 'ExcessNoiseFactor', 1.0)
 
-        # Real-time-computer
+        # Real-time controller
         check_value('RTC', 'LoopGain_HO', 0.5)
         check_value('RTC', 'SensorFrameRate_HO', 500.0)
         check_value('RTC', 'LoopDelaySteps_HO', 2)

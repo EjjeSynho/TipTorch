@@ -21,7 +21,6 @@ from project_settings import device
 
 from PSF_models.NFM_wrapper import PSFModelNFM
 
-
 #%%
 import pickle
 
@@ -88,6 +87,9 @@ ids = 455 # Interesting tomo reconst behaviour
 # ids = 449
 # ids = 440
 
+# ids = [455, 456]
+ids = 456
+
 PSF_0, norms, bgs, configs = LoadSTDStarData(
     ids                 = ids,
     derotate_PSF        = True,
@@ -110,6 +112,7 @@ PSF_model = PSFModelNFM(
     device          = device
 )
 
+#%%
 func = lambda x_: PSF_model( PSF_model.inputs_manager.unstack(x_) )
 PSF_1 = func(x0 := PSF_model.inputs_manager.stack() )
 
@@ -472,7 +475,6 @@ plot_chromatic_PSF_slice(PSF_0.abs(), wavelengths, window_size=40, scale='linear
 
 
 #%%
-
 for j in range(N_src):
     for i in range(N_wvl):
         im = (PSF_1-PSF_0).abs()[j,i,...].cpu().numpy()

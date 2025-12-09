@@ -1,0 +1,63 @@
+telescope:
+- PathPupil
+- PathApodizer
+- PupilAngle
+- TelescopeDiameter
+- ZenithAngle
+
+sources_science:
+- Wavelength
+- Zenith
+- Azimuth
+
+sources_HO:
+- Wavelength
+- Height
+- Zenith
+- Azimuth
+
+atmosphere:
+- Wavelength
+- WindSpeed
+- WindDirection
+- Cn2Weights
+- Cn2Heights
+- Seeing
+- L0
+
+sources_LO:
+- Wavelength
+- Zenith
+- Azimuth
+
+sensor_LO:
+- PixelScale
+- SigmaRON
+- Gain
+
+sensor_science:
+- PixelScale
+- FieldOfView
+
+sensor_HO:
+- SizeLenslets
+- NumberLenslets
+- ClockRate
+- FieldOfView
+- SigmaRON
+- PixelScale
+- SpotFWHM
+- ExcessNoiseFactor
+- NumberPhotons
+
+DM:
+- DmPitchs
+- DmHeights
+- OptimizationZenith
+- OptimizationAzimuth
+- OptimizationWeight
+
+RTC:
+- SensorFrameRate_HO
+- LoopDelaySteps_HO
+- LoopGain_HO

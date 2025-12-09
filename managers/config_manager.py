@@ -1,11 +1,11 @@
 import sys
 sys.path.insert(0, '..')
 
-from managers.parameter_parser import ParameterParser, default_torch_type
-
 import math
 import torch
 import numpy as np
+from pathlib import Path
+import yaml
 
 try:
     import cupy as cp
@@ -16,6 +16,8 @@ from copy import deepcopy
 from functools import reduce
 import operator
 
+from managers.parameter_parser import ParameterParser, default_torch_type
+
 """
 This module is used to manage the configuration files of TipTorch. Configuration files are used to set the up
 the initial state of the TipTorch simulation. This module is used to parse the configuration files and manipulate
@@ -23,57 +25,86 @@ the configs, i.e., splitting and merging them, converting to different framework
 Since TipTorch configs support for multiple targets, splitting and joining different configs is necessary.
 """
 
-class ConfigManager():
-    def __init__(self, uniqualized_values=None):
-        #'uniqualized' paremeters are those are defined only one in a config file for all targets
-        if uniqualized_values is None:
-            self.uniqualized_values = [
-                ['atmosphere', 'Wavelength'],
-                ['DM', 'AoArea'],
-                ['DM', 'DmHeights'],
-                ['DM', 'DmPitchs'],
-                ['DM', 'InfCoupling'],
-                ['DM', 'InfModel'],
-                ['DM', 'NumberActuators'],
-                # ['DM', 'OptimizationAzimuth'],
-                ['DM', 'OptimizationConditioning'],
-                # ['DM', 'OptimizationWeight'],
-                ['sensor_HO', 'Algorithm'],
-                ['sensor_LO', 'Algorithm'],
-                ['sensor_HO', 'Binning'],
-                ['sensor_HO', 'Dispersion'],
-                ['sensor_HO', 'ExcessNoiseFactor'],
-                ['sensor_HO', 'FieldOfView'],
-                ['sensor_HO', 'Modulation'],
-                ['sensor_HO', 'NewValueThrPix'],
-                ['sensor_HO', 'NoiseVariance'],
-                ['sensor_HO', 'NumberLenslets'],
-                ['sensor_HO', 'PixelScale'],
-                ['sensor_HO', 'SigmaRON'],
-                ['sensor_HO', 'SizeLenslets'],
-                ['sensor_HO', 'ThresholdWCoG'],
-                ['sensor_HO', 'WfsType'],
-                ['sensor_LO', 'WfsType'],
-                ['sensor_HO', 'WindowRadiusWCoG'],
-                ['sensor_science', 'Binning'],
-                ['sensor_science', 'ExcessNoiseFactor'],
-                ['sensor_science', 'FieldOfView'],
-                ['sensor_science', 'Name'],
-                ['sensor_science', 'PixelScale'],
-                ['sensor_science', 'Saturation'],
-                ['sensor_science', 'SigmaRON'],
-                ['telescope', 'ObscurationRatio'],
-                ['telescope', 'PathApodizer'],
-                ['telescope', 'PathPupil'],
-                ['telescope', 'PathStatModes'],
-                ['telescope', 'PathStaticOff'],
-                ['telescope', 'PathStaticOn'],
-                ['telescope', 'PathStaticPos'],
-                # ['telescope', 'PupilAngle'],
-                ['telescope', 'Resolution'],
-                ['telescope', 'TelescopeDiameter']
-            ]
+# These values remain the same for the entire config, regardless of the number of targets
+SINGLETON_VALUES = [
+    ['atmosphere', 'Wavelength'],
+    ['DM', 'AoArea'],
+    ['DM', 'DmHeights'],
+    ['DM', 'DmPitchs'],
+    ['DM', 'InfCoupling'],
+    ['DM', 'InfModel'],
+    ['DM', 'NumberActuators'],
+    ['DM', 'OptimizationConditioning'],
+    # ['DM', 'OptimizationAzimuth'],
+    # ['DM', 'OptimizationWeight'],
+    ['sensor_HO', 'Algorithm'],
+    ['sensor_LO', 'Algorithm'],
+    ['sensor_HO', 'Binning'],
+    ['sensor_HO', 'Dispersion'],
+    # ['sensor_HO', 'ExcessNoiseFactor'],
+    ['sensor_HO', 'FieldOfView'],
+    ['sensor_HO', 'Modulation'],
+    ['sensor_HO', 'NewValueThrPix'],
+    ['sensor_HO', 'NoiseVariance'],
+    ['sensor_HO', 'NumberLenslets'],
+    ['sensor_HO', 'PixelScale'],
+    # ['sensor_HO', 'SigmaRON'],
+    ['sensor_HO', 'SizeLenslets'],
+    ['sensor_HO', 'ThresholdWCoG'],
+    ['sensor_HO', 'WfsType'],
+    ['sensor_LO', 'WfsType'],
+    ['sensor_HO', 'WindowRadiusWCoG'],
+    ['sensor_science', 'Binning'],
+    # ['sensor_science', 'ExcessNoiseFactor'],
+    ['sources_science', 'Wavelength'],
+    ['sensor_science', 'FieldOfView'],
+    ['sensor_science', 'Name'],
+    ['sensor_science', 'PixelScale'],
+    ['sensor_science', 'Saturation'],
+    # ['sensor_science', 'SigmaRON'],
+    ['telescope', 'ObscurationRatio'],
+    ['telescope', 'PathApodizer'],
+    ['telescope', 'PathPupil'],
+    ['telescope', 'PupilAngle'],
+    ['telescope', 'PathStatModes'],
+    ['telescope', 'PathStaticOff'],
+    ['telescope', 'PathStaticOn'],
+    ['telescope', 'PathStaticPos'],
+    ['telescope', 'Resolution'],
+    ['telescope', 'TelescopeDiameter']
+]
 
+# Thee values remain scalars and must not be converted to arrays/lists when modifying configs
+SCALAR_VALUES = [
+    ['sensor_HO', 'FieldOfView'],
+    ['sensor_HO', 'PixelScale'],
+    ['sensor_science', 'PixelScale'],
+    ['sensor_science', 'FieldOfView'],
+    ['telescope', 'PupilAngle'],
+    ['telescope', 'TelescopeDiameter']
+]
+
+class ConfigManager():
+    def __init__(self):
+        # Load required fields specification
+        required_fields_path = Path(__file__).parent.parent / 'data' / 'parameter_files' / 'required_fields.yaml'
+        
+        with open(required_fields_path, 'r') as f:
+            self.required_fields = yaml.safe_load(f)
+
+    def Load(self, path_ini):
+        """ Loads and preprocesses a config file from the given path. """
+        if not isinstance(path_ini, str): path_ini = str(path_ini)
+        
+        config_manager = ConfigManager()
+        config = ParameterParser(path_ini).params
+
+        config['NumberSources'] = 1 # Assumes by default that it's a single-source config
+        config = config_manager.select_required_fields(config)
+        config = config_manager.wrap_scalars_to_lists(config)
+        config = config_manager.ensure_dimensions(config, 1)
+        return config
+    
 
     def set_value(self, root, items, value):
         """Set a value in a nested object in root by item sequence."""
@@ -166,13 +197,19 @@ class ConfigManager():
 
         all_entries = get_all_entries(new_config)
         for entry in all_entries:
-            if entry in self.uniqualized_values:
+            if entry in SINGLETON_VALUES:
                 value_to_set = self.get_value(configs[0], entry)
             else:
                 value_to_set = [self.get_value(config, entry) for config in configs]
             self.set_value(new_config, entry, value_to_set)
 
-        new_config['NumberSources'] = int(len(configs))
+        N_src = 0
+        for config in configs:
+            N_src += config['NumberSources']
+            
+        new_config['NumberSources'] = N_src
+        new_config = self.ensure_dimensions(new_config, N_src)
+        
         return new_config
 
 
@@ -212,8 +249,8 @@ class ConfigManager():
                 path = entry.split('|')
                 value = reduce(operator.getitem, path, original_config)
 
-                # Decide how to split the value based on its type and whether it's uniqualized
-                if path in self.uniqualized_values or not isinstance(value, (list, tuple)):
+                # Decide how to split the value based on its type and whether it's a singleton
+                if path in SINGLETON_VALUES or not isinstance(value, (list, tuple)):
                     # Set the same value for all configs if it's uniqualized or not a list/tuple
                     for split_config in split_configs:
                         self.set_value(split_config, path, deepcopy(value))
@@ -290,210 +327,268 @@ class ConfigManager():
                 self.Convert(value, framework, device)  
             else:
                 config[entry] = process_value(value)  # Assign the converted value back
-
-    
-'''
-def ConfigFromFile(ini_file_path, device):
-    config_manager = ConfigManager()
-    config = ParameterParser(ini_file_path).params
-    config_manager.Convert(config, framework='pytorch', device=device)
-
-    config['NumberSources'] = 1
-
-    config['telescope']['ZenithAngle'] = torch.tensor([config['telescope']['ZenithAngle']], device=device)
-
-    config['atmosphere']['Cn2Weights'] = config['atmosphere']['Cn2Weights'].unsqueeze(0)
-    config['atmosphere']['Cn2Heights'] = config['atmosphere']['Cn2Heights'].unsqueeze(0)
-
-    config['RTC']['SensorFrameRate_HO'] = torch.tensor(config['RTC']['SensorFrameRate_HO'], device=device)
-    config['RTC']['LoopDelaySteps_HO'] = torch.tensor(config['RTC']['LoopDelaySteps_HO'], device=device)
-    config['RTC']['LoopGain_HO'] = torch.tensor(config['RTC']['LoopGain_HO'], device=device)
-
-    config['atmosphere']['L0'] = torch.tensor(config['atmosphere']['L0'], device=device)
-
-    config['sensor_science']['FieldOfView'] = config['sensor_science']['FieldOfView'].int().item()
-
-    config['sensor_HO']['SizeLenslets'] = config['sensor_HO']['SizeLenslets'] [0]
-    config['sensor_HO']['ClockRate']    = config['sensor_HO']['ClockRate'][0]
-
-    return config
-'''
-
-def are_equal(a, b, tolerance):
-    """Check if two values are equal within the given tolerance, handling tensors and nested structures."""
-    # Handle dictionaries
-    if isinstance(a, dict) and isinstance(b, dict):
-        return len(CompareConfigs(a, b, tolerance)) == 0
-    # Handle lists and tuples
-    elif isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
-        if len(a) != len(b):
-            return False
-        for x, y in zip(a, b):
-            if not are_equal(x, y, tolerance):
-                return False
-        return True
-    # Handle tensors and numbers
-    elif torch.is_tensor(a) or torch.is_tensor(b):
-        a_tensor = torch.is_tensor(a)
-        b_tensor = torch.is_tensor(b)
-        if a_tensor and b_tensor:
-            a_cpu = a.cpu()
-            b_cpu = b.cpu()
-            return torch.allclose(a_cpu, b_cpu, atol=tolerance, rtol=tolerance)
-        elif a_tensor:
-            if a.numel() != 1:
-                return False
-            a_val = a.item()
-            return isinstance(b, (int, float)) and math.isclose(a_val, b, abs_tol=tolerance)
-        elif b_tensor:
-            if b.numel() != 1:
-                return False
-            b_val = b.item()
-            return isinstance(a, (int, float)) and math.isclose(a, b_val, abs_tol=tolerance)
-        else:
-            return False
-    # Handle numbers (int/float)
-    elif isinstance(a, (int, float)) and isinstance(b, (int, float)):
-        return math.isclose(a, b, abs_tol=tolerance)
-    # Handle other types (strings, None, etc.)
-    else:
-        return a == b
+                
+        return config
 
 
-def CompareConfigs(dict1, dict2, tolerance=1e-6, path=""):
-    """Recursively compare two dictionaries and return a list of differences."""
-    differences = []
-    # Check for missing keys
-    for key in dict1:
-        if key not in dict2:
-            differences.append(f"Key {path}.{key} not in dict2")
-    for key in dict2:
-        if key not in dict1:
-            differences.append(f"Key {path}.{key} not in dict1")
-    # Compare common keys
-    common_keys = set(dict1.keys()) & set(dict2.keys())
-    for key in common_keys:
-        current_path = f"{path}.{key}" if path else key
-        val1 = dict1[key]
-        val2 = dict2[key]
-        # Check if both are dictionaries
-        if isinstance(val1, dict) and isinstance(val2, dict):
-            sub_diffs = CompareConfigs(val1, val2, tolerance, current_path)
-            differences.extend(sub_diffs)
-        else:
-            # Check for lists or tuples
-            if isinstance(val1, (list, tuple)) and isinstance(val2, (list, tuple)):
+    def CompareConfigs(self, dict1, dict2, tolerance=1e-6, path=""):
+        """
+        Recursively compare two config dictionaries and return a list of differences.
+        Handles nested structures, arrays, tensors, and numeric comparisons with tolerance.
+        
+        Parameters:
+        -----------
+        dict1 : dict
+            First configuration dictionary
+        dict2 : dict
+            Second configuration dictionary
+        tolerance : float
+            Absolute tolerance for numeric comparisons (default: 1e-6)
+        path : str
+            Current path in nested structure (for error reporting)
+            
+        Returns:
+        --------
+        list
+            List of difference descriptions. Empty list means configs are equal.
+        """
+        def _are_equal(a, b):
+            """Check if two values are equal within tolerance."""
+            # Handle dictionaries
+            if isinstance(a, dict) and isinstance(b, dict):
+                return len(self.CompareConfigs(a, b, tolerance)) == 0
+            
+            # Handle lists and tuples
+            elif isinstance(a, (list, tuple)) and isinstance(b, (list, tuple)):
+                if len(a) != len(b):
+                    return False
+                return all(_are_equal(x, y) for x, y in zip(a, b))
+            
+            # Handle tensors and tensor-scalar comparisons
+            elif torch.is_tensor(a) or torch.is_tensor(b):
+                a_tensor = torch.is_tensor(a)
+                b_tensor = torch.is_tensor(b)
+                
+                # Both tensors: compare on CPU with tolerance
+                if a_tensor and b_tensor:
+                    return torch.allclose(a.cpu(), b.cpu(), atol=tolerance, rtol=tolerance)        
+                # Tensor vs scalar: check if tensor is single element
+                elif a_tensor and isinstance(b, (int, float)):
+                    return a.numel() == 1 and math.isclose(a.item(), b, abs_tol=tolerance)
+                # Scalar vs tensor: check if tensor is single element
+                elif b_tensor and isinstance(a, (int, float)):
+                    return b.numel() == 1 and math.isclose(a, b.item(), abs_tol=tolerance)
+                else:
+                    return False
+            
+            # Handle NumPy arrays
+            elif isinstance(a, np.ndarray) or isinstance(b, np.ndarray):
+                try:
+                    return np.allclose(a, b, atol=tolerance, rtol=tolerance)
+                except (TypeError, ValueError):
+                    return False
+            
+            # Handle numeric types
+            elif isinstance(a, (int, float)) and isinstance(b, (int, float)):
+                return math.isclose(a, b, abs_tol=tolerance)
+            
+            # Handle strings, None, and other types
+            else:
+                return a == b
+        
+        differences = []
+        
+        # Check for missing keys
+        for key in dict1:
+            if key not in dict2:
+                differences.append(f"Key '{path}.{key}' exists in dict1 but not in dict2" if path else f"Key '{key}' exists in dict1 but not in dict2")
+        
+        for key in dict2:
+            if key not in dict1:
+                differences.append(f"Key '{path}.{key}' exists in dict2 but not in dict1" if path else f"Key '{key}' exists in dict2 but not in dict1")
+        
+        # Compare common keys
+        common_keys = set(dict1.keys()) & set(dict2.keys())
+        for key in common_keys:
+            current_path = f"{path}.{key}" if path else key
+            val1 = dict1[key]
+            val2 = dict2[key]
+            
+            # Recursively compare nested dictionaries
+            if isinstance(val1, dict) and isinstance(val2, dict):
+                sub_diffs = self.CompareConfigs(val1, val2, tolerance, current_path)
+                differences.extend(sub_diffs)
+            
+            # Compare list/tuple elements
+            elif isinstance(val1, (list, tuple)) and isinstance(val2, (list, tuple)):
                 if len(val1) != len(val2):
-                    differences.append(f"Mismatch in {current_path}: lengths {len(val1)} vs {len(val2)}")
+                    differences.append(f"Length mismatch at '{current_path}': {len(val1)} vs {len(val2)}")
                 else:
                     for i, (x, y) in enumerate(zip(val1, val2)):
                         elem_path = f"{current_path}[{i}]"
                         if isinstance(x, dict) and isinstance(y, dict):
-                            sub_diffs = CompareConfigs(x, y, tolerance, elem_path)
+                            sub_diffs = self.CompareConfigs(x, y, tolerance, elem_path)
                             differences.extend(sub_diffs)
-                        else:
-                            if not are_equal(x, y, tolerance):
-                                differences.append(f"Mismatch in {elem_path}: {x} vs {y}")
-            else:
-                if not are_equal(val1, val2, tolerance):
-                    differences.append(f"Mismatch in {current_path}: {val1} vs {val2}")
-    return differences
-
-
-def SingleTargetInSingleObservation(config_file, device=None):
-    '''
-    Restructures config file for a single target in a single observation.
-    This function properly initializes dimensions for a single source scenario,
-    ensuring all arrays have the correct shape for processing by the PSF model.
-    '''
-    config_manager = ConfigManager()
-    config = deepcopy(config_file)
-    
-    # Determine framework based on device parameter or existing data
-    if device is not None:
-        config_manager.Convert(config, framework='pytorch', device=device)
-    else:
-        config_manager.Convert(config, framework='numpy')
-    
-    config['NumberSources'] = 1
-    
-    if device is not None:
-        # PyTorch operations for single target
-        config['sources_science']['Wavelength'] = config['sources_science']['Wavelength'].squeeze()
-        config['sources_HO']['Wavelength'] = config['sources_HO']['Wavelength'].squeeze()
-        
-        if type(config['sensor_science']['FieldOfView']) == torch.Tensor:
-            config['sensor_science']['FieldOfView'] = config['sensor_science']['FieldOfView'].int().item() #TODO: fix it
+                        elif not _are_equal(x, y):
+                            differences.append(f"Value mismatch at '{elem_path}': {x} vs {y}")
             
-        config['sources_HO']['Height'] = config['sources_HO']['Height'].unsqueeze(-1)
+            # Compare scalar values
+            else:
+                if not _are_equal(val1, val2):
+                    differences.append(f"Value mismatch at '{current_path}': {val1} vs {val2}")
         
-        config['atmosphere']['Cn2Weights'] = config['atmosphere']['Cn2Weights'].unsqueeze(0)
-        config['atmosphere']['Cn2Heights'] = config['atmosphere']['Cn2Heights'].unsqueeze(0)
-        config['atmosphere']['WindSpeed']  = config['atmosphere']['WindSpeed'].unsqueeze(0)
-        config['atmosphere']['WindDirection'] = config['atmosphere']['WindDirection'].unsqueeze(0)
-        config['atmosphere']['L0']     = config['atmosphere']['L0']
-        config['atmosphere']['Seeing'] = config['atmosphere']['Seeing']
-        
-        config['telescope']['ZenithAngle'] = config['telescope']['ZenithAngle'].float()
-        
-        config['sources_HO']['Zenith']  = config['sources_HO']['Zenith'].float()
-        config['sources_HO']['Azimuth'] = config['sources_HO']['Azimuth'].float()
-        
-        config['RTC']['SensorFrameRate_HO'] = config['RTC']['SensorFrameRate_HO']
-        config['RTC']['LoopDelaySteps_HO']  = config['RTC']['LoopDelaySteps_HO']
-        config['RTC']['LoopGain_HO']        = config['RTC']['LoopGain_HO']
-        
-        config['DM']['OptimizationZenith']  = config['DM']['OptimizationZenith']
-        config['DM']['OptimizationAzimuth'] = config['DM']['OptimizationAzimuth']
-        config['DM']['OptimizationWeight']  = config['DM']['OptimizationWeight']
-        
-        config['sensor_HO']['NumberPhotons'] = config['sensor_HO']['NumberPhotons'].unsqueeze(0)
-        config['sensor_HO']['ClockRate'] = config['sensor_HO']['ClockRate']
-        
-    else:
-        # NumPy operations for single target
-        config['sources_science']['Wavelength'] = config['sources_science']['Wavelength'].squeeze()
-        config['sources_HO']['Wavelength'] = config['sources_HO']['Wavelength'].squeeze()
-        config['sensor_science']['FieldOfView'] = int(config['sensor_science']['FieldOfView'])
-        
-        config['sources_HO']['Height'] = np.expand_dims(config['sources_HO']['Height'], axis=-1)
-        
-        config['atmosphere']['Cn2Weights'] = np.expand_dims(config['atmosphere']['Cn2Weights'], axis=0)
-        config['atmosphere']['Cn2Heights'] = np.expand_dims(config['atmosphere']['Cn2Heights'], axis=0)
-        config['atmosphere']['WindSpeed']  = np.expand_dims(config['atmosphere']['WindSpeed'], axis=0)
-        config['atmosphere']['WindDirection'] = np.expand_dims(config['atmosphere']['WindDirection'], axis=0)
-        config['atmosphere']['L0'] = config['atmosphere']['L0']
-        config['atmosphere']['Seeing'] = config['atmosphere']['Seeing']
-        
-        config['telescope']['ZenithAngle'] = config['telescope']['ZenithAngle']
-        
-        config['sources_HO']['Zenith']  = float(config['sources_HO']['Zenith'])
-        config['sources_HO']['Azimuth'] = float(config['sources_HO']['Azimuth'])
-        
-        config['RTC']['SensorFrameRate_HO'] = config['RTC']['SensorFrameRate_HO']
-        config['RTC']['LoopDelaySteps_HO']  = config['RTC']['LoopDelaySteps_HO']
-        config['RTC']['LoopGain_HO']        = config['RTC']['LoopGain_HO']
-        
-        config['DM']['OptimizationZenith']  = config['DM']['OptimizationZenith']
-        config['DM']['OptimizationAzimuth'] = config['DM']['OptimizationAzimuth']
-        config['DM']['OptimizationWeight']  = config['DM']['OptimizationWeight']
-        
-        config['sensor_HO']['NumberPhotons'] = np.expand_dims(config['sensor_HO']['NumberPhotons'], axis=0)
-        config['sensor_HO']['ClockRate'] = config['sensor_HO']['ClockRate']
-    
-    return config
+        return differences
 
+
+    def select_required_fields(self, config):
+        """
+        Filters a config dictionary to keep only the required fields specified in a YAML file.
+        Modifies the dictionary in place.
+        """
+        # Remove unwanted top-level keys (except NumberSources)
+        for key in list(config.keys()):
+            if key not in self.required_fields and key != 'NumberSources':
+                config.pop(key)
+
+        # Filter fields within each allowed category
+        for category, allowed_fields in self.required_fields.items():
+            if category not in config:
+                continue
+
+            for field in list(config[category].keys()):
+                if field not in allowed_fields:
+                    config[category].pop(field)
+
+        return config
+
+
+    def wrap_scalars_to_lists(self, config):
+        """
+        Walks through a config dictionary and wraps all scalar numeric values (int, float)
+        into single-element lists, except for SCALAR_VALUES which remain as scalars.
+        Modifies the dict in place.
+        """
+        # Convert SCALAR_VALUES to set of tuples for efficient lookup
+        exception_set = {tuple(path) for path in SCALAR_VALUES}
+        
+        def walk(node, path):
+            if not isinstance(node, dict):
+                return
+
+            for key, value in node.items():
+                new_path = (*path, key)
+
+                if isinstance(value, dict):
+                    walk(value, new_path)
+                elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                    if new_path not in exception_set:
+                        node[key] = [value]
+
+        # Start the recursive walk, skipping 'NumberSources' at top level
+        for key, value in config.items():
+            if key == 'NumberSources':
+                continue
+            if isinstance(value, dict):
+                walk(value, (key,))
+
+        return config
+
+
+    def ensure_dims(self, x, N, flatten=False):
+        """ Ensures a selected tensor has correct dimensions. """
+        if type(x) is np.ndarray:  # NumPy array
+            x = np.atleast_1d(x).squeeze()
+            result = np.atleast_2d(x).reshape(N, -1)
+            return result.flatten() if flatten else result
+        
+        elif hasattr(x, 'is_cuda'):  # PyTorch tensor
+            x = torch.atleast_1d(x).squeeze()
+            result = torch.atleast_2d(x).view(N, -1)
+            return result.flatten() if flatten else result
+        
+        elif hasattr(x, 'get'):  # CuPy array
+            x = cp.atleast_1d(x).squeeze()
+            result = cp.atleast_2d(x).reshape(N, -1)
+            return result.flatten() if flatten else result
+        
+        else:  # Fallback to NumPy
+            x = np.atleast_1d(np.array(x)).squeeze()
+            result = np.atleast_2d(x).reshape(N, -1)
+            return result.flatten() if flatten else result
+
+
+    def ensure_dimensions(self, config, N_src):
+        """ Ensures that all relevant config entries have correct dimensions. """
+        
+        # NOTE: requires that config entries are already converted to the target framework (NumPy, PyTorch, CuPy).
+        # Check only one known field to accelerate the process
+        sample_value = config['atmosphere']['Seeing']
+        
+        if not isinstance(sample_value, (np.ndarray, torch.Tensor, cp.ndarray)):
+            config = self.Convert(config, framework='numpy')
+        
+        entries_2d = [\
+            ['atmosphere', 'Cn2Weights'],
+            ['atmosphere', 'Cn2Heights'],
+            ['atmosphere', 'WindSpeed'],
+            ['atmosphere', 'WindDirection'],
+            ['sensor_HO', 'NumberPhotons'],
+            ['sensor_HO', 'SpotFWHM'],
+            ['telescope', 'ZenithAngle'],
+            ['sources_HO', 'Height'],
+            ['sources_HO', 'Zenith'],
+            ['sources_HO', 'Azimuth']
+        ]
+
+        entries_flatten = [\
+            ['atmosphere', 'Seeing'],
+            ['atmosphere', 'L0'],
+            ['sources_HO', 'Wavelength'],
+            ['sources_science', 'Zenith'],
+            ['sources_science', 'Azimuth']
+        ]
+        
+        entries_singleton = [\
+            ['sensor_HO', 'ClockRate'],
+            ['sensor_HO', 'NumberLenslets'],
+            ['sensor_HO', 'SizeLenslets']
+        ]
+
+        for section, entry in entries_2d:
+            config[section][entry] = self.ensure_dims(config[section][entry], N_src, flatten=False)
+
+        for section, entry in entries_flatten:
+            config[section][entry] = self.ensure_dims(config[section][entry], N_src, flatten=True)
+
+        # Doing this assumes that these parameters are the same for all WFSs
+        for section, entry in entries_singleton:
+            config[section][entry] = self.ensure_dims(config[section][entry], 1, flatten=False)
+            config[section][entry] = config[section][entry][:,0]
+
+        return config
+
+
+    def debug_dims(self, config):
+        # Print all shapes for verification
+        for section, subdict in config.items():
+            if isinstance(subdict, dict):
+                for entry, value in subdict.items():
+                    if isinstance(value, (np.ndarray, torch.Tensor, cp.ndarray)):
+                        print(f"{section} -> {entry}: {value.shape}")
+                    else:
+                        print(f"{section} -> {entry}: {type(value)}")
+                        
 
 def MultipleTargetsInOneObservation(config_file, N_srcs, device=None):
     '''
     Restructures config file in such a way that multiple sources are observed in one observation.
     Initializing the config file this way allows to avoid computing tomographic reconstructor
     multiple times for the same atmospheric conditions. This involves initializing the proper dimensions
-    for the input arrays. Given the right dimensionality, the PSF model will automatically understand what to do.
+    for the input arrays. Given the right dimensionality, TipTorch will automatically understand what to do.
     '''
 
     config_manager = ConfigManager()
-    config  = config_manager.Merge([config_file,]*N_srcs)
+    config  = config_manager.Merge([config_file,] * N_srcs) # First, copy the same config for all sources in the field
 
     # Determine framework based on device parameter or existing data
     if device is not None:
@@ -503,80 +598,52 @@ def MultipleTargetsInOneObservation(config_file, N_srcs, device=None):
     
     config['NumberSources'] = N_srcs
 
-    if device is not None:
-        # PyTorch operations
-        config['sources_science']['Wavelength'] = config['sources_science']['Wavelength'][0]
-        config['sources_HO']['Height']          = config['sources_HO']['Height'].unsqueeze(-1)
-        config['sources_HO']['Wavelength']      = config['sources_HO']['Wavelength'].squeeze()
-        config['sensor_science']['FieldOfView'] = config['sensor_science']['FieldOfView'].int().item()
-        config['atmosphere']['Cn2Weights']      = config['atmosphere']['Cn2Weights'].squeeze()
-        config['atmosphere']['Cn2Heights']      = config['atmosphere']['Cn2Heights'].squeeze()
-        config['sensor_HO']['NumberPhotons']    = config['sensor_HO']['NumberPhotons'].squeeze()
-        
-        config['telescope']['ZenithAngle']    = config['telescope']['ZenithAngle'][0,...]
-
-        config['atmosphere']['L0']            = config['atmosphere']['L0'][0]
-        config['atmosphere']['Seeing']        = config['atmosphere']['Seeing'][0]
-        config['atmosphere']['Cn2Weights']    = config['atmosphere']['Cn2Weights'][0,...].unsqueeze(0)
-        config['atmosphere']['Cn2Heights']    = config['atmosphere']['Cn2Heights'][0,...].unsqueeze(0)
-        config['atmosphere']['WindSpeed']     = config['atmosphere']['WindSpeed'][0,...].unsqueeze(0)
-        config['atmosphere']['WindDirection'] = config['atmosphere']['WindDirection'][0,...].unsqueeze(0)
-
-        config['sources_HO']['Height']        = config['sources_HO']['Height'][0,...].unsqueeze(0)
-        config['sources_HO']['Zenith']        = config['sources_HO']['Zenith'][0,...]
-        config['sources_HO']['Azimuth']       = config['sources_HO']['Azimuth'][0,...]
-
-        config['RTC']['SensorFrameRate_HO']   = config['RTC']['SensorFrameRate_HO'][0]
-        config['RTC']['LoopDelaySteps_HO']    = config['RTC']['LoopDelaySteps_HO'][0]
-        config['RTC']['LoopGain_HO']          = config['RTC']['LoopGain_HO'][0]
-
-        config['DM']['OptimizationZenith' ]   = config['DM']['OptimizationZenith'][0]
-        config['DM']['OptimizationAzimuth']   = config['DM']['OptimizationAzimuth'][0]
-        config['DM']['OptimizationWeight']    = config['DM']['OptimizationWeight'][0]
-        
-        config['sensor_HO']['NumberPhotons']  = config['sensor_HO']['NumberPhotons'][0,...].unsqueeze(0)
-        config['sensor_HO']['ClockRate']      = config['sensor_HO']['ClockRate'][0]
-        
-    else:
-        # NumPy operations
-        config['sources_science']['Wavelength'] = config['sources_science']['Wavelength'][0]
-        config['sources_HO']['Height']          = np.expand_dims(config['sources_HO']['Height'], axis=-1)
-        config['sources_HO']['Wavelength']      = config['sources_HO']['Wavelength'].squeeze()
-        config['sensor_science']['FieldOfView'] = int(config['sensor_science']['FieldOfView'])
-        config['atmosphere']['Cn2Weights']      = config['atmosphere']['Cn2Weights'].squeeze()
-        config['atmosphere']['Cn2Heights']      = config['atmosphere']['Cn2Heights'].squeeze()
-        config['sensor_HO']['NumberPhotons']    = config['sensor_HO']['NumberPhotons'].squeeze()
-        
-        config['telescope']['ZenithAngle']    = config['telescope']['ZenithAngle'][0,...]
-        
-        config['atmosphere']['L0']            = config['atmosphere']['L0'][0]
-        config['atmosphere']['Seeing']        = config['atmosphere']['Seeing'][0]
-        config['atmosphere']['Cn2Weights']    = np.expand_dims(config['atmosphere']['Cn2Weights'][0,...], axis=0)
-        config['atmosphere']['Cn2Heights']    = np.expand_dims(config['atmosphere']['Cn2Heights'][0,...], axis=0)
-        config['atmosphere']['WindSpeed']     = np.expand_dims(config['atmosphere']['WindSpeed'][0,...], axis=0)
-        config['atmosphere']['WindDirection'] = np.expand_dims(config['atmosphere']['WindDirection'][0,...], axis=0)
-
-        config['sources_HO']['Height']        = np.expand_dims(config['sources_HO']['Height'][0,...], axis=0)
-        config['sources_HO']['Zenith']        = config['sources_HO']['Zenith'][0,...]
-        config['sources_HO']['Azimuth']       = config['sources_HO']['Azimuth'][0,...]
-
-        config['RTC']['SensorFrameRate_HO']   = config['RTC']['SensorFrameRate_HO'][0]
-        config['RTC']['LoopDelaySteps_HO']    = config['RTC']['LoopDelaySteps_HO'][0]
-        config['RTC']['LoopGain_HO']          = config['RTC']['LoopGain_HO'][0]
-
-        config['DM']['OptimizationZenith' ]   = config['DM']['OptimizationZenith'][0]
-        config['DM']['OptimizationAzimuth']   = config['DM']['OptimizationAzimuth'][0]
-        config['DM']['OptimizationWeight']    = config['DM']['OptimizationWeight'][0]
-        
-        config['sensor_HO']['NumberPhotons']  = np.expand_dims(config['sensor_HO']['NumberPhotons'][0,...], axis=0)
-        config['sensor_HO']['ClockRate']      = config['sensor_HO']['ClockRate'][0]
+    # The entries which are the same for all sources in the field
+    shared_entries = [\
+        ['telescope',  'ZenithAngle'],
+        ['atmosphere', 'L0'],
+        ['atmosphere', 'Seeing'],
+        ['atmosphere', 'Cn2Weights'],
+        ['atmosphere', 'Cn2Heights'],
+        ['atmosphere', 'WindSpeed'],
+        ['atmosphere', 'WindDirection'],
+        ['sources_HO', 'Height'],
+        ['sources_HO', 'Zenith'],
+        ['sources_HO', 'Azimuth'],
+        ['RTC', 'SensorFrameRate_HO'],
+        ['RTC', 'LoopDelaySteps_HO'],
+        ['RTC', 'LoopGain_HO'],
+        ['DM',  'OptimizationZenith'],
+        ['DM',  'OptimizationAzimuth'],
+        ['DM',  'OptimizationWeight'],
+        ['sensor_HO',  'NumberPhotons'],
+        ['sensor_HO',  'SpotFWHM'],
+        ['sensor_HO',  'SigmaRON'],
+        ['sensor_HO',  'ExcessNoiseFactor'],
+        ['sources_HO', 'Wavelength']
+    ]
     
+    entries_flatten = [\
+        ['atmosphere', 'Seeing'],
+        ['atmosphere', 'L0'],
+        ['sources_HO', 'Wavelength'],
+        ['sources_science', 'Zenith'],
+        ['sources_science', 'Azimuth']
+    ]
+    
+    # In theory, the only remaining per-source values, in this case, are sources_science Azimuth and Zenith.
+    # All other entries must be shared among all sources. But just in case, the full merge of configs is done
+    for section, entry in shared_entries:
+        config[section][entry] = config[section][entry][0,...]
+        to_flatten = [section, entry] in entries_flatten
+        config[section][entry] = config_manager.ensure_dims(config[section][entry], 1, flatten=to_flatten)
+
     return config
 
 
 def MultipleTargetsInDifferentObservations(configs, device=None):
     '''
-    Merges multiple config files into one config file for multiple targets observed in different observations.
+    A wrapper unction that merges multiple config files into one for multiple targets observed in different conditions.
     Useful when training calibrator NN on multiple targets.
     '''
     config_manager = ConfigManager()
@@ -584,41 +651,13 @@ def MultipleTargetsInDifferentObservations(configs, device=None):
 
     N_src = len(configs)
     
-    if device is None:
-        config_manager.Convert(merged_config, framework='numpy')
-        
-        # All stacked sources must have the same wavelengths bins
-        merged_config['sources_HO']['Height']        = np.expand_dims(merged_config['sources_HO']['Height'], axis=-1)
-        merged_config['atmosphere']['Cn2Weights']    = merged_config['atmosphere']['Cn2Weights'].reshape(N_src, -1)
-        merged_config['atmosphere']['Cn2Heights']    = merged_config['atmosphere']['Cn2Heights'].reshape(N_src, -1)
-        merged_config['atmosphere']['WindSpeed']     = merged_config['atmosphere']['WindSpeed'].reshape(N_src, -1)
-        merged_config['atmosphere']['WindDirection'] = merged_config['atmosphere']['WindDirection'].reshape(N_src, -1)
-        merged_config['sensor_HO']['NumberPhotons']  = merged_config['sensor_HO']['NumberPhotons'].reshape(N_src, -1)
-        merged_config['atmosphere']['Seeing']        = merged_config['atmosphere']['Seeing'].reshape(N_src)
-        merged_config['telescope']['ZenithAngle']    = merged_config['telescope']['ZenithAngle'].reshape(N_src)
-        merged_config['sources_HO']['Height']        = merged_config['sources_HO']['Height'].reshape(N_src)
-        merged_config['sources_HO']['Zenith']        = merged_config['sources_HO']['Zenith'].reshape(N_src, -1)
-        merged_config['sources_HO']['Azimuth']       = merged_config['sources_HO']['Azimuth'].reshape(N_src, -1)
-    else:
+    # Convert to target framework
+    if device is not None:
         config_manager.Convert(merged_config, framework='pytorch', device=device)
-        
-        merged_config['sources_HO']['Height']        = merged_config['sources_HO']['Height'].unsqueeze(-1)
-        merged_config['atmosphere']['Cn2Weights']    = merged_config['atmosphere']['Cn2Weights'].view(N_src, -1)
-        merged_config['atmosphere']['Cn2Heights']    = merged_config['atmosphere']['Cn2Heights'].view(N_src, -1)
-        merged_config['atmosphere']['WindSpeed']     = merged_config['atmosphere']['WindSpeed'].view(N_src, -1)
-        merged_config['atmosphere']['WindDirection'] = merged_config['atmosphere']['WindDirection'].view(N_src, -1)
-        merged_config['sensor_HO']['NumberPhotons']  = merged_config['sensor_HO']['NumberPhotons'].view(N_src, -1)
-        merged_config['atmosphere']['Seeing']        = merged_config['atmosphere']['Seeing'].view(N_src)
-        merged_config['telescope']['ZenithAngle']    = merged_config['telescope']['ZenithAngle'].view(N_src)
-        merged_config['sources_HO']['Height']        = merged_config['sources_HO']['Height'].view(N_src)
-        merged_config['sources_HO']['Zenith']        = merged_config['sources_HO']['Zenith'].view(N_src, -1)
-        merged_config['sources_HO']['Azimuth']       = merged_config['sources_HO']['Azimuth'].view(N_src, -1)
-
+    else:
+        config_manager.Convert(merged_config, framework='numpy')
+    
+    # Use ensure_dimensions to properly reshape all arrays
     merged_config['NumberSources'] = N_src
-    # All stacked sources must have the same wavelengths bins
-    merged_config['sources_science']['Wavelength'] = merged_config['sources_science']['Wavelength'].view(N_src, -1)[0,...].unsqueeze(0)
-    merged_config['sources_HO']['Wavelength']      = merged_config['sources_HO']['Wavelength'].squeeze()
-    merged_config['sensor_science']['FieldOfView'] = int(merged_config['sensor_science']['FieldOfView'])
 
     return merged_config
-

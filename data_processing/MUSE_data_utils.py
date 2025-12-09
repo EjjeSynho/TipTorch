@@ -1758,6 +1758,10 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
 
 
 def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_config=True):
+    """
+    Spcialized routine for loading configs for the cached MUSE NFM data samples.
+    It largely overloads the standart config creation routine from the ConfigManager class and tailors it to MUSE NFM PSF data format.
+    """
     if PSF_data is None:
         PSF_data = sample['images']['cube']
         
@@ -1767,13 +1771,14 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
     wvls_ = (sample['spectral data']['wvls binned']*1e-9).tolist()
     wvls  = wvls_ if wvl_ids is None else np.array([wvls_[i] for i in wvl_ids])
         
+    # Load the default MUSE NFM config file
     config_manager = ConfigManager()
-    config_dict    = ParameterParser(DATA_FOLDER / 'parameter_files/muse_ltao.ini').params
+    config_dict = config_manager.Load(DATA_FOLDER / 'parameter_files/muse_ltao.ini')
 
-    h_GL = 2000 # Assumed separation altitude betwee ground and high-altitude layers
+    h_GL = 2000 # [m], an assumed separation altitude between the ground and high-altitude layers
+    # For NFM it's save to assume gound layer to be below 2 km, for WFM it's even lower than that
 
     try:
-        # For NFM it's save to assume gound layer to be below 2 km, for WFM it's lower than that
         Cn2_weights = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
         altitudes   = np.array([sample['All data'][f'ALT{i}'].item() for i in range(1, 9)])*100 # in meters
 
@@ -1840,7 +1845,7 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
 
     config_dict['sensor_LO']['PixelScale']    = sample['IRLOS data']['plate scale, [mas/pix]'].item()
     config_dict['sensor_LO']['NumberPhotons'] = [IRLOS_ph_per_subap_per_frame]
-    config_dict['sensor_LO']['SigmaRON']      = sample['IRLOS data']['RON, [e-]'].item()
+    config_dict['sensor_LO']['SigmaRON']      = float(sample['IRLOS data']['RON, [e-]'].item())
     config_dict['sensor_LO']['Gain']          = [sample['IRLOS data']['gain'].item()]
 
     config_dict['RTC']['SensorFrameRate_LO'] = [sample['IRLOS data']['frequency'].item()]
@@ -1854,8 +1859,13 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
 
     config_dict['sensor_HO']['ClockRate'] = np.mean([config_dict['sensor_HO']['ClockRate']])
     
+    config_dict = config_manager.wrap_scalars_to_lists(config_dict)
+    config_dict = config_manager.ensure_dimensions(config_dict, N_src=1) # Config for a single given source
+    
     if convert_config:
         config_manager.Convert(config_dict, framework='pytorch', device=device)
+    else:
+        config_manager.Convert(config_dict, framework='list') # for later storing in the file
 
     return config_dict
 

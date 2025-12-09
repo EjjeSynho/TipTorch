@@ -46,6 +46,7 @@ class PSFModelNFM:
         
         config = self.init_configs(config)
         self.wavelengths = config['sources_science']['Wavelength'].squeeze()
+        
         self.init_model(config)
         if LO_NCPAs:
             self.init_NCPAs()
@@ -205,9 +206,10 @@ class PSFModelNFM:
                 if not torch.allclose(pupil_angle, pupil_angle[0]):
                     warn('Different pupil angles for different observations are not supported yet.')
             pupil_angle = pupil_angle[0]
+            
             config['telescope']['PupilAngle'] = pupil_angle
        
-        pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=pupil_angle.cpu().numpy().item()), device=self.device )
+        pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=pupil_angle), device=self.device )
         PSD_include = {
             'fitting':         True,
             'WFS noise':       True,

@@ -7,6 +7,8 @@ import sys
 import os
 import tempfile
 
+from cv2 import merge
+
 sys.path.append('..')
 
 from project_settings import DATA_FOLDER, PROJECT_PATH, DATA_FOLDER
@@ -69,45 +71,37 @@ p3_noise = tiptop_HO_model.noisePSD().squeeze()
 %reload_ext autoreload
 %autoreload 2
 
-import torch
 from PSF_models.TipTorch import TipTorch
-from tools.utils import PupilVLT
-from managers.config_manager import ConfigManager, SingleTargetInSingleObservation
-from managers.parameter_parser import ParameterParser
+from managers.config_manager import ConfigManager, MultipleTargetsInOneObservation
+# from managers.parameter_parser import ParameterParser
 from project_settings import device, DATA_FOLDER
-import numpy as np
+# import numpy as np
+from pprint import pprint
+# import torch
+# import cupy as cp
 
 #%%
-path_ini = str(DATA_FOLDER / "parameter_files/muse_ltao.ini")
+path_ini = DATA_FOLDER / "parameter_files/muse_ltao.ini"
 
 config_manager = ConfigManager()
-config_dict = ParameterParser(path_ini).params
-
-config_dict['NumberSources'] = 1  # Single on-axis source for PSD comparison
-
-config_dict['sources_HO']['Height'] = np.array([config_dict['sources_HO']['Height']])  # Single source height
-config_dict['telescope']['ZenithAngle'] = np.array([config_dict['telescope']['ZenithAngle']])  # Ensure correct type
-
-config_dict['RTC']['SensorFrameRate_HO'] =  np.array([config_dict['RTC']['SensorFrameRate_HO']])
-config_dict['RTC']['LoopDelaySteps_HO'] =  np.array([config_dict['RTC']['LoopDelaySteps_HO']])
-config_dict['RTC']['LoopGain_HO'] =  np.array([config_dict['RTC']['LoopGain_HO']])
-
-config_dict['sensor_HO']['SizeLenslets'] = np.array([config_dict['sensor_HO']['SizeLenslets'][0]])
-config_dict['sensor_HO']['NumberLenslets'] = np.array([config_dict['sensor_HO']['NumberLenslets'][0]])
-
-config_dict['sensor_HO']['ClockRate'] = np.array([config_dict['sensor_HO']['ClockRate'][0]])
-config_dict['atmosphere']['L0'] = np.array([config_dict['atmosphere']['L0']])
-
-config_dict = SingleTargetInSingleObservation(config_dict, device=device)
+config_dict = config_manager.Load(path_ini)
 
 #%%
+common_dict = MultipleTargetsInOneObservation(config_dict, N_srcs=10, device=device)
+debug_dims = config_manager.debug_dims(common_dict)
 
+#%%
+merged_dict = config_manager.Merge([config_dict,]*3)
+merged_dict = config_manager.Convert(merged_dict, 'pytorch', device=device)
+debug_dims = config_manager.debug_dims(merged_dict)
+
+# MultipleTargetsInDifferentObservations([config_dict,]*3, device=device)
+
+#%%
 # TODO:
 # - fix default pupil loading errors
 # - compute noise variance for every WFS separately and then average it
 # - make function to preserve only necessary entries in configs
-
-#%%
 
 # pupil = torch.tensor(PupilVLT(samples=320, rotation_angle=0)).to(device)
 
@@ -124,7 +118,7 @@ PSD_include = {
 
 # Initialize TipTorch model
 tiptorch_model = TipTorch(
-    AO_config=config_dict,
+    AO_config=common_dict,
     AO_type='LTAO',
     PSD_include=PSD_include,
     norm_regime='sum',
@@ -136,4 +130,3 @@ tiptorch_model = TipTorch(
 PSF_1 = tiptorch_model()
 
 #%%
-tiptorch_model.PSDs['WFS noise'].shape
