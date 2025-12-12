@@ -15,7 +15,7 @@ from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis, MUSE
 from tools.utils import PupilVLT
 from managers.config_manager import MultipleTargetsInDifferentObservations
 from managers.input_manager  import InputsManager
-from tools.normalizers import Uniform, Uniform0_1
+from tools.normalizers import Uniform, Uniform0_1, Atanh
 from warnings import warn
 from project_settings import device
 import gc
@@ -219,7 +219,15 @@ class PSFModelNFM:
             'diff. refract':   True,
             'Moffat':          self.Moffat_absorber
         }
-        self.model = TipTorch(config, 'LTAO', pupil, PSD_include, 'sum', self.device, oversampling=1)
+        self.model = TipTorch(
+            AO_config = config,
+            AO_type = 'LTAO',
+            pupil = pupil,
+            PSD_include = PSD_include,
+            norm_regime = 'sum',
+            device = self.device,
+            oversampling = 1
+        )
         # _ = self.model()
 
 
@@ -263,22 +271,15 @@ class PSFModelNFM:
         # norm_wind_dir    = Uniform(a=0, b=360)
         # norm_sausage_pow = Uniform(a=0, b=1)
         norm_LO          = Uniform(a=-100, b=100)
-        # norm_GL_h        = Uniform(a=0.0, b=2000.0)
-        # norm_GL_frac     = Atanh()
+        norm_GL_h        = Uniform(a=0.0, b=10000.0)
+        norm_GL_frac     = Atanh()
 
         # Add base parameters
         if self.use_splines:
-
             self.inputs_manager.add('F_ctrl',  torch.tensor([[1.0,]*self.N_spline_ctrl]*N_src),  norm_F)
             self.inputs_manager.add('dx_ctrl', torch.tensor([[0.0,]*self.N_spline_ctrl]*N_src),  norm_dxy)
             self.inputs_manager.add('dy_ctrl', torch.tensor([[0.0,]*self.N_spline_ctrl]*N_src),  norm_dxy)
             self.inputs_manager.add('bg_ctrl', torch.tensor([[0.0,]*self.N_spline_ctrl]*N_src),  norm_bg)
-            
-            # self.inputs_manager.add('F_x_ctrl',  torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
-            # self.inputs_manager.add('dx_x_ctrl', torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
-            # self.inputs_manager.add('dy_x_ctrl', torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
-            # self.inputs_manager.add('bg_x_ctrl', torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
-                    
         else:
             self.inputs_manager.add('F',  torch.tensor([[1.0,]*N_wvl]*N_src),  norm_F)
             self.inputs_manager.add('dx', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_dxy)
@@ -305,10 +306,11 @@ class PSFModelNFM:
         self.inputs_manager.add('Jxy', torch.tensor([[0.0]]*N_src), norm_Jxy, optimizable=False)
         self.inputs_manager.add('dn',  torch.tensor([0.25]*N_src),  norm_dn)
 
-        # GL_frac = np.maximum(model.Cn2_weights[0,-1].detach().cpu().numpy().item(), 0.9)
-        # GL_h    = model.h[0,-1].detach().cpu().numpy().item()
-        # self.inputs_manager.add('GL_frac', torch.tensor([GL_frac]), norm_GL_frac)
-        # self.inputs_manager.add('GL_h',    torch.tensor([GL_h]), norm_GL_h)
+        GL_frac = self.model.Cn2_weights[:, 0].view(N_src, 1).detach().clone().abs()
+        self.inputs_manager.add('GL_frac', GL_frac, norm_GL_frac)#, optimizable=False)
+        
+        # GL_h = self.model.Cn2_heights[:, -1].view(N_src, 1).detach().clone().abs()
+        # self.inputs_manager.add('GL_h', GL_h, norm_GL_h)#, optimizable=False)
 
         # Add Moffat parameters if needed
         if self.Moffat_absorber:
@@ -379,12 +381,12 @@ class PSFModelNFM:
         if 'wind_speed_single' in x_dict:
             x_dict['wind_speed'] = x_dict['wind_speed_single'].view(-1, 1).repeat(1, self.model.N_L)
 
-        # x_dict['Cn2_weights'] = torch.hstack([x_dict['GL_frac'], 1.0 - x_dict['GL_frac']]).unsqueeze(0)
-        # x_dict['h']           = torch.hstack([torch.tensor([0.0], device=self.device), x_dict['GL_h'].abs()]).unsqueeze(0)
+        x_dict['Cn2_weights'] = torch.hstack([x_dict['GL_frac'].abs(), 1.0 - x_dict['GL_frac'].abs()])
+        # x_dict['Cn2_heights'] = torch.nn.functional.pad(x_dict['GL_h'].abs(), (1, 0), value=0.0)
 
         x_ = { key: x_dict[key] for key in include_list } if include_list is not None else x_dict
 
-        phase_ = lambda: self.phase_func(x_dict['LO_coefs']) if self.LO_NCPAs else None
+        phase_ = (lambda: self.phase_func(x_dict['LO_coefs'])) if self.LO_NCPAs else None
 
         return self.model(x_, None, phase_generator=phase_)
 

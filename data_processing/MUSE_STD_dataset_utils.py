@@ -57,7 +57,7 @@ def LoadSTDStarData(
         if ensure_odd_pixels:
             if PSF_data.shape[-1] % 2 == 0:
                 PSF_data = PSF_data[:,:-1,:-1]
-                PSF_STD  = PSF_STD[:,:-1,:-1]
+                PSF_STD  = PSF_STD [:,:-1,:-1]
         
         if subtract_background:
             backgrounds = np.array([ get_radial_backround(PSF_data[i,:,:]) for i in range(PSF_data.shape[0]) ])[:,None,None]
@@ -111,12 +111,7 @@ def LoadSTDStarData(
     norms = torch.tensor(np.array(norms), dtype=default_torch_type, device=device)
     bgs   = torch.tensor(np.array(bgs),   dtype=default_torch_type, device=device)
 
-    # merged_config = MultipleTargetsInDifferentObservations(configs, device=device)
-
-    # if derotate_PSF:
-        # merged_config['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated
-
-    return PSFs, norms, bgs, configs #merged_config
+    return PSFs, norms, bgs, configs 
 
 
 def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
@@ -269,4 +264,44 @@ def update_label_IDs():
     # Show a concise dataframe summary
     df = pd.DataFrame(results, columns=["original_name","new_name","matched_folder_file","index_changed","labels"])
     df.head()
+
+
+def AOF_Cn2_profiles_stats(STD_stars_df, store=False):
+    # Compute median Cn2 profile for MUSE NFM
+    all_Cn2_alts, all_Cn2_fracs = [], []
+
+    for idx in STD_stars_df.index:
+        Cn2_alt_sample  = [STD_stars_df[f'ALT{i}'].loc[idx].item()          for i in range(1, 9)]
+        Cn2_frac_sample = [STD_stars_df[f'CN2_FRAC_ALT{i}'].loc[idx].item() for i in range(1, 9)]
+        all_Cn2_alts.append(Cn2_alt_sample)
+        all_Cn2_fracs.append(Cn2_frac_sample)
+
+    all_Cn2_alts  = np.array(all_Cn2_alts)
+    all_Cn2_fracs = np.array(all_Cn2_fracs)
+
+    # Filter out unreasonable values
+    all_Cn2_alts [all_Cn2_alts > 100] = np.nan
+    all_Cn2_alts [all_Cn2_alts < 0]   = np.nan
+    all_Cn2_fracs[all_Cn2_fracs > 1]  = np.nan
+    all_Cn2_fracs[all_Cn2_fracs < 0]  = np.nan
+    all_Cn2_alts[:,-1][all_Cn2_alts[:,-1] < 1e-12] = np.nan
+
+    # Compute median and percentiles (ignoring NaNs)
+    median_Cn2_alts  = np.nanmedian(all_Cn2_alts, axis=0)
+    p16_Cn2_alts     = np.nanpercentile(all_Cn2_alts, 16, axis=0)
+    p84_Cn2_alts     = np.nanpercentile(all_Cn2_alts, 84, axis=0)
+
+    median_Cn2_fracs = np.nanmedian(all_Cn2_fracs, axis=0)
+    p16_Cn2_fracs    = np.nanpercentile(all_Cn2_fracs, 16, axis=0)
+    p84_Cn2_fracs    = np.nanpercentile(all_Cn2_fracs, 84, axis=0)
     
+    if store:
+        import json
+        Cn2_profile_dict = {
+            'median_Cn2_alts':  median_Cn2_alts.tolist(),
+            'median_Cn2_fracs': median_Cn2_fracs.tolist()
+        }
+        with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'w') as json_file:
+            json.dump(Cn2_profile_dict, json_file)
+
+    return (median_Cn2_alts, median_Cn2_fracs), (p16_Cn2_alts, p84_Cn2_fracs), (p16_Cn2_fracs, p84_Cn2_alts)

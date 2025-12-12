@@ -8,26 +8,21 @@ sys.path.insert(0, '..')
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
 import matplotlib as mpl
-
+from matplotlib.colors import LogNorm
 from torchmin import minimize
 
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
 from tools.utils import GradientLoss
-
 from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarData
-from project_settings import device
-
 from PSF_models.NFM_wrapper import PSFModelNFM
+from project_settings import device
 
 #%%
 import pickle
 
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
-    
-# muse_df.index[muse_df['Wind speed (header)'] > 16]
 
 #%%
 # wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 5), a_min=0, a_max=N_wvl_max-1)
@@ -54,7 +49,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 184 # weak wind patterns
 # ids = 338 # blurry
 # ids = 470 # blurry
-# ids = 346 # blurry
+# ids = 346 # blurry (very)
 # ids = 206 # blurry, good for red debugging
 # ids = 179 # blurry
 # ids = 174
@@ -78,17 +73,12 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 
 # ids = 482 # good one
 # ids = 494 # good one
-# ids = 462 # good one
-# ids = 475 # good one
+ids = 462 # good one
+# ids = 475 # good one, mb DM correction radius mismatch
 # ids = 468 # good one
 
-ids = 455 # Interesting tomo reconst behaviour
-
-# ids = 449
-# ids = 440
-
-# ids = [455, 456]
-ids = 456
+# ids = 455 # large tomographic error (?)
+# ids = 456 # large tomographic error
 
 PSF_0, norms, bgs, configs = LoadSTDStarData(
     ids                 = ids,
@@ -112,7 +102,6 @@ PSF_model = PSFModelNFM(
     device          = device
 )
 
-#%%
 func = lambda x_: PSF_model( PSF_model.inputs_manager.unstack(x_) )
 PSF_1 = func(x0 := PSF_model.inputs_manager.stack() )
 
@@ -132,6 +121,8 @@ for j in range(N_src):
         im = PSF_0[j,i,...].cpu().numpy()
         vmin = np.percentile(im[im > 0], 10) if np.any(im > 0) else 1
         vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
+        # vmin = np.percentile(im[im > 0], 97) if np.any(im > 0) else 1
+        # vmax = np.percentile(im[im > 0], 99.95) if np.any(im > 0) else im.max()
 
         plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
         plt.axis('off')
@@ -139,10 +130,8 @@ for j in range(N_src):
         
     plt.show()
 
-#%
 # plot_chromatic_PSF_slice(PSF_0, wavelengths, norms, window_size=40)
 # plot_chromatic_PSF_slice(PSF_0, wavelengths, window_size=100, slices=['horizontal'])
-
 
 #%%
 from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
@@ -177,16 +166,21 @@ def loss_fn(x_, w_MSE, w_MAE):
 
     return MSE_loss + MAE_loss + LO_loss + Moffat_loss_fn()
 
+suppress_sausage = False
+suppress_LO = False
+
+suppress_sausage = 1e3 if suppress_sausage else 1
+suppress_LO = 1e3 if suppress_LO else 1
 
 def loss_LO_fn():
     if isinstance(PSF_model.LO_basis, PixelmapBasis):
-        LO_loss = grad_loss_fn(PSF_model.OPD_func.unsqueeze(1)) * 5e-5
+        # LO_loss = grad_loss_fn(PSF_model.OPD_func.unsqueeze(1)) * 5e-5
+        raise NotImplementedError("Gradient loss for PixelmapBasis is not implemented yet.")
         
     elif isinstance(PSF_model.LO_basis, ZernikeBasis) or isinstance(PSF_model.LO_basis, ArbitraryBasis):
-        LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * 1e-7
-        # print(LO_loss)
+        LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * 1e-7 * suppress_LO
         # Constraint to enforce first element of LO_coefs to be positive
-        first_coef_penalty = torch.clamp(-PSF_model.inputs_manager['LO_coefs'][:, 0], min=0).pow(2).mean() * 5e-5
+        first_coef_penalty = torch.clamp(-PSF_model.inputs_manager['LO_coefs'][:, 0], min=0).pow(2).mean() * 5e-5 * suppress_sausage
         LO_loss += first_coef_penalty
         
     return LO_loss
@@ -273,7 +267,7 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True)
     result = lim_lambda('l-bfgs', 1e-4)
     
     # Retry with BFGS if convergence issues detected
-    if result['nit'] < max_iter * 0.3 or result['fun'] > 1:
+    if result['nit'] < max_iter * 0.3 or result['fun'] > 1: # If converged earlier than 30% of the iterations or final loss is too high
         if verbose:
             reason = "stopped too early" if result['nit'] < max_iter * 0.3 else "final loss is high"
             print(f"Warning: minimization {reason}. Perhaps, convergence wasn't reached? Trying BFGS...")
@@ -288,7 +282,6 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True)
 
     return result.x, func(result.x), OPD_map
 
-
 fit_wind_speed = True
 fit_outerscale = True
 
@@ -297,7 +290,8 @@ include_general = ['r0', 'dn'] + \
                   (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else []) + \
                   ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
                   (['L0'] if fit_outerscale else []) + \
-                  (['wind_speed_single'] if fit_wind_speed else [])
+                  (['wind_speed_single'] if fit_wind_speed else []) #+ \
+                #   ['GL_h_c']
                 #   ([x+'_x_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
 
 exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.Moffat_absorber else []
@@ -356,6 +350,7 @@ if PSF_model.LO_NCPAs:
     plt.colorbar()
     plt.show()
 
+
 #%%
 import torch.nn.functional as F
 
@@ -370,7 +365,7 @@ torch.cuda.empty_cache()
 #%%
 center_y, center_x = PSF_0.shape[-2] // 2, PSF_0.shape[-1] // 2
 half_crop = H_orig // 2
-ROI = slice(center_y - half_crop, center_y + half_crop)
+ROI = slice( center_y - half_crop, center_y + half_crop+(PSF_0.shape[0] % 2) )
 
 # Downsampling factor to reduce memory usage
 pool_size = 3
@@ -417,10 +412,15 @@ for k, v in J_per_param.items():
     # sensitivity_map[k] = res_vec * J_per_param[k]
     sensitivity_map[k] = J_per_param[k]
 
+#%%
+
+# List all shapes of sensitivity maps
+for k, v in J_per_param.items():
+    print(f"{k:15s}: {v.shape}")
 
 #%%
 
-studied_param = 'L0'
+studied_param = 'dn'
 
 final_map = sensitivity_map[studied_param][0,...,0].cpu().detach().numpy()
 final_map -= final_map.mean()

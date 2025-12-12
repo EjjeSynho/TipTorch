@@ -85,19 +85,20 @@ class TipTorch(torch.nn.Module):
         self.Cn2_weights = self.config['atmosphere']['Cn2Weights']
         self.Cn2_heights = self.config['atmosphere']['Cn2Heights'] * self.airmass # [m]
         
-        self.stretch  = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
-        self.h   = self.Cn2_heights * self.stretch
+        # self.h   = self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height)) # [N_obs x N_layers]
         self.N_L = self.Cn2_heights.shape[-1]
-
+        
         # N_obs is very important! It must = 1 if all simulated targets share the same observational conditions.
         # Doing so can dramatically reduce the computational cost. Otherwise, for multiple targets in multiple conditions,
         # it must be equal to the number of simulated targets
-        self.N_obs = self.h.shape[0]
+        # self.N_obs = self.h.shape[0]
+        self.N_obs = self.Cn2_heights.shape[0]
+        
         assert self.N_obs == 1 or self.N_obs == self.N_src
 
         # Deformable mirror(s) parameters
         self.pitch = self.config['DM']['DmPitchs'] #[m]
-        self.kc    = 1.0 / (2.0 * self.pitch) # TODO: support multiple DMs, just select biggest pitch among all of them
+        self.kc    = 1.0 / (2.0 * self.pitch) # TODO: support multiple DMs, just select the biggest pitch among all of them
         
         self.h_DM  = self.config['DM']['DmHeights'] # [m]
         self.N_DM  = self.h_DM.shape[0]
@@ -387,7 +388,7 @@ class TipTorch(torch.nn.Module):
         
         # PyTorch doesn't support interpolation of complex tensors yet
         OTF_ = self.interp(OTF.real, self.sampling_min) + self.interp(OTF.imag, self.sampling_min)*1j
-        return OTF_ / OTF_.abs().amax(dim=(-2,-1), keepdim=True)
+        return OTF_ / OTF_.abs().amax(dim=(-2,-1), keepdim=True) # normalize OTF
     
     
     def ComputeStaticOTF(self, phase_generator=None):
@@ -508,7 +509,10 @@ class TipTorch(torch.nn.Module):
         
         if    self.norm_regime == 'sum': self.normalizer = torch.sum
         elif  self.norm_regime == 'max': self.normalizer = torch.amax
-        else: self.normalizer = lambda x, dim, keepdim: self.make_tensor(1.0)
+        else: self.normalizer = lambda x, dim, keepdim: x # no normalization
+        
+        # Default inversion method for tomographic reconstruction
+        self.inversion_method = 'lstsq'
         
         # Piston filters           
         self.piston_filter = None # piston mode filter in the AO-corrected freq. domain
@@ -547,7 +551,10 @@ class TipTorch(torch.nn.Module):
     # TODO: allow to input the atmospheric params externaly to account user-assumed atmospheric layers instead of simulated ones
     def OptimalDMProjector(self):
         h_dm = self.h_DM.view(1, 1, 1, self.N_DM)
-        h    = self.h.view(self.N_obs, 1, 1, 1, self.N_L)
+        # h    = self.h.view(self.N_obs, 1, 1, 1, self.N_L)
+        stretch = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
+        h = (self.Cn2_heights * stretch).view(self.N_obs, 1, 1, 1, self.N_L)
+        
         opt_w = self.DM_opt_weight.view(self.N_obs, 1, 1, self.N_optdir, 1, 1)
 
         theta_x = self.DM_opt_dir_x.view(self.N_obs, 1, 1, self.N_optdir)
@@ -700,8 +707,10 @@ class TipTorch(torch.nn.Module):
         else:
             kx = pdims(self.kx_AO, 1)
             ky = pdims(self.ky_AO, 1)
-            h  = self.h.view(self.N_obs, 1, 1, self.N_L)
-            
+            # h  = self.h.view(self.N_obs, 1, 1, self.N_L)
+            stretch = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
+            h = (self.Cn2_heights * stretch).view(self.N_obs, 1, 1, self.N_L)
+        
             beta_x = self.src_dirs_x.view(self.N_src, 1, 1, 1)
             beta_y = self.src_dirs_y.view(self.N_src, 1, 1, 1)
             
@@ -782,7 +791,10 @@ class TipTorch(torch.nn.Module):
 
     def DifferentialRefractionPSD(self):
         # TODO: account for the pupil angle
-        h = self.h.view(self.N_obs, 1, 1, 1, self.N_L)
+        # h = self.h.view(self.N_obs, 1, 1, 1, self.N_L)
+        stretch = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
+        h = (self.Cn2_heights * stretch).view(self.N_obs, 1, 1, 1, self.N_L)
+        
         w = self.Cn2_weights.view(self.N_obs, 1, 1, 1, self.N_L)
         k = self.k_AO.view(1, 1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
         # [N_src x 1 x nOtf_AO_y x nOtf_AO_x]
@@ -790,7 +802,7 @@ class TipTorch(torch.nn.Module):
         # [N_src x N_wvl]
         tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle))
         
-        return self.W_atm.unsqueeze(1) * ( 2*w*(1-torch.cos(2*torch.pi*h*k * pdims(tan_theta,3) * pdims(cos_ang,1))) ).sum(dim=-1)
+        return self.W_atm.unsqueeze(1) * ( 2*w*(1-torch.cos(2*torch.pi*h*k * pdims(tan_theta,3) * pdims(cos_ang,1))) ).sum(dim=-1) * self.mask_corrected_AO
     
 
     def JitterKernel(self, Jx, Jy, Jxy):
@@ -825,34 +837,6 @@ class TipTorch(torch.nn.Module):
 
         return varNoise
 
-    '''
-    def NoiseVariance_new(self, WFS): #TODO: fix excessive CPU->GPU copying
-        WFS_wvl = WFS['wvl']
-        WFS_Nph = WFS['Nph'].abs().view(self.N_src, self.N_GS)
-        r0_WFS = r0_new(self.r0.view(self.N_src), WFS_wvl, self.wvl_atm).abs()
-        WFS_nPix = WFS['FOV'] / WFS['n_sub']
-        WFS_pixelScale = WFS['psInMas'] / 1e3  # [arcsec]
-
-        # Read-out noise calculation
-        nD = torch.maximum(
-            self.rad2arc * WFS_wvl / WFS['d_sub'] / WFS_pixelScale, 
-            self.make_tensor(1.0)
-        )  # spot FWHM in pixels without turbulence
-
-        # Photon-noise calculation
-        nT = torch.maximum(
-            torch.hypot(self.WFS_spot_FWHM.max() / 1e3, self.rad2arc * WFS_wvl / r0_WFS) / WFS_pixelScale,
-            self.make_tensor(1.0)
-        )
-
-        varRON  = np.pi**2 / 3 * (WFS['RON']**2 / WFS_Nph**2) * (WFS_nPix**2 / nD).unsqueeze(-1)**2
-        varShot = np.pi**2 / (2*WFS_Nph) * (nT/nD).unsqueeze(-1)**2
-
-        # Noise variance calculation
-        varNoise = WFS['excessive_factor'] * (varRON + varShot) * (self.wvl_atm / WFS_wvl).unsqueeze(-1)**2
-
-        return varNoise
-    '''
 
     def TomographicReconstructors(self, WFS_noise_var, inv_method='lstsq'):
         '''        
@@ -860,7 +844,9 @@ class TipTorch(torch.nn.Module):
         then it's possible to compute one tomographic reconstructor for all simulated sources.
         For example, this is the case when all objects are within one FoV and belong to one observation
         '''
-        h = self.h.view(self.N_obs, 1, 1, 1, self.N_L)
+        # h = self.h.view(self.N_obs, 1, 1, 1, self.N_L)
+        stretch = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
+        h = (self.Cn2_heights * stretch).view(self.N_obs, 1, 1, 1, self.N_L)
         
         kx = pdims(self.kx_AO, 2)
         ky = pdims(self.ky_AO, 2)
@@ -886,7 +872,7 @@ class TipTorch(torch.nn.Module):
 
         # Inversion happens relative to the last two dimensions of the these tensors
         if inv_method == 'standart':
-            self.W_tomo = (self.C_phi @ MP_t) @ torch.linalg.pinv(MP @ self.C_phi @ MP_t + self.C_b, rcond=1e-2)
+            self.W_tomo = (self.C_phi @ MP_t) @ torch.linalg.pinv(MP @ self.C_phi @ MP_t + self.C_b, rcond=1e-3) #1e-4
 
         elif inv_method == 'lstsq':
             # if Tikhonov_reg:
@@ -978,7 +964,7 @@ class TipTorch(torch.nn.Module):
             self.ReconstructionFilter(WFS_noise_var)
                         
             if self.tomography:
-                self.TomographicReconstructors(WFS_noise_var, inv_method='lstsq')
+                self.TomographicReconstructors(WFS_noise_var, inv_method=self.inversion_method)
                 if not self.on_axis:
                     self.DMProjector()
 
@@ -1009,6 +995,7 @@ class TipTorch(torch.nn.Module):
         #TODO: anisoplanatism for non-tomography!
         #TODO: SLAO support!
         
+        # Resulting dimensions are: [N_scr x N_wvl x nOtf_AO x nOtf_AO]
         PSD = self.PSDs['fitting'] + self.PSD_padder(
               self.PSDs['WFS noise'] + \
               self.PSDs['spatio-temporal'] + \
@@ -1016,12 +1003,14 @@ class TipTorch(torch.nn.Module):
               self.PSDs['chromatism'] + \
               self.PSDs['Moffat'] + \
               self.PSDs['diff. refract'])
-        # Resulting dimensions are: [N_scr x N_wvl x nOtf_AO x nOtf_AO]
+      
+        # Removing the DC component
+        PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0
       
         # All PSDs are computed in [rad^2] at the atmospheric wvls and then normalized to [nm^2] OPD at tscience wvl
         PSD_norm = (self.dk*self.wvl_atm*1e9/2/torch.pi)**2
         # Recover the full-size PSD from the half-sized one
-        self.PSD = self.half_PSD_to_full(PSD * PSD_norm) # [nm^2]
+        self.PSD = self.half_PSD_to_full(PSD * PSD_norm) # [nm^2]    
         
         return self.PSD
     
@@ -1076,9 +1065,6 @@ class TipTorch(torch.nn.Module):
         Jy  = pdims(min_2d(self.Jy ), 2)
         Jxy = pdims(min_2d(self.Jxy), 2)
                 
-        # Removing the DC component
-        PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0
-        
         # Computing OTF from PSD, real is to remove the imaginary part that appears due to numerical errors
         cov = self._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(torch.fft.ifftshift(PSD.abs(), dim=(-2,-1)), dim=(-2,-1)), dim=-2).real)
 

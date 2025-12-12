@@ -144,8 +144,11 @@ def cropper(x, win, center=None):
 def safe_centroid(data):       
     xycen = centroid_quadratic(np.abs(data))
     
-    if np.any(np.isnan(xycen)): xycen = centroid_com(np.abs(data))
-    if np.any(np.isnan(xycen)): xycen = np.array(data.shape)//2
+    if np.any(np.isnan(xycen)):
+        xycen = centroid_com(np.abs(data))
+        
+    if np.any(np.isnan(xycen)):
+        xycen = np.array(data.shape)//2
     
     return xycen
 

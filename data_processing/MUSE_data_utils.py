@@ -27,8 +27,7 @@ from pathlib import Path
 from tools.utils import GetROIaroundMax, GetJmag, check_framework
 from tools.network import DownloadFromRemote
 from tools.plotting import wavelength_to_rgb
-from managers.parameter_parser import ParameterParser
-from managers.config_manager import ConfigManager, MultipleTargetsInDifferentObservations
+from managers.config_manager import ConfigManager
 from scipy.ndimage import rotate
 import logging
 
@@ -1770,32 +1769,83 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
 
     wvls_ = (sample['spectral data']['wvls binned']*1e-9).tolist()
     wvls  = wvls_ if wvl_ids is None else np.array([wvls_[i] for i in wvl_ids])
-        
-    # Load the default MUSE NFM config file
+
+
+    # >>>>>>> Load the default MUSE NFM config file
     config_manager = ConfigManager()
     config_dict = config_manager.Load(DATA_FOLDER / 'parameter_files/muse_ltao.ini')
 
-    h_GL = 2000 # [m], an assumed separation altitude between the ground and high-altitude layers
-    # For NFM it's save to assume gound layer to be below 2 km, for WFM it's even lower than that
 
-    try:
-        Cn2_weights = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
-        altitudes   = np.array([sample['All data'][f'ALT{i}'].item() for i in range(1, 9)])*100 # in meters
+    # >>>>>>> Compute simplified Cn2 profile
+    # Read median Cn2 profile from the json file
+    with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'r') as f:
+        median_Cn2_profile = json.load(f)
+    
+    median_Cn2_alts  = np.array(median_Cn2_profile['median_Cn2_alts'])
+    median_Cn2_fracs = np.array(median_Cn2_profile['median_Cn2_fracs'])
+    
+    Cn2_alt  = np.array([sample['All data'][f'ALT{i}'].item()          for i in range(1, 9)])
+    Cn2_frac = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
 
-        Cn2_weights[Cn2_weights > 1] = 0.0
-        Cn2_weights[Cn2_weights < 0] = 0.0
+    # Check if all NaN, if yes, replace with median profile
+    if np.all(np.isnan(Cn2_alt)) or np.all(np.isnan(Cn2_frac)) or sample['Raw Cn2 data'] is None:
+        print(f"Warning: Cn2 profile data is missing or invalid. Replacing with the median profile.")
+        Cn2_alt  = median_Cn2_alts
+        Cn2_frac = median_Cn2_fracs
 
-        Cn2_weights_GL = Cn2_weights[altitudes < h_GL]
-        altitudes_GL   = altitudes  [altitudes < h_GL]
+    # Remove unphysical values
+    Cn2_alt [Cn2_alt > 100] = np.nan
+    Cn2_alt [Cn2_alt < 0]   = np.nan
+    Cn2_frac[Cn2_frac > 1]  = np.nan
+    Cn2_frac[Cn2_frac < 0]  = np.nan
+    Cn2_alt[-1] = np.nan if Cn2_alt[-1] < 1e-12 else Cn2_alt[-1]
 
-        GL_frac  = Cn2_weights_GL.sum()  # Ground layer fraction   
-        Cn2_w_GL = np.interp(h_GL, altitudes, Cn2_weights)
-        
-    except:
-        GL_frac = 0.9
+    # Replace NaN values with median ones
+    nan_mask_alt = np.isnan(Cn2_alt)
+    Cn2_alt[nan_mask_alt] = median_Cn2_alts[nan_mask_alt]
 
-    config_dict['NumberSources'] = 1
+    # make sure all altitudes are increasing
+    for i in range(1,8):
+        Cn2_alt[i] = np.maximum(Cn2_alt[i], Cn2_alt[i-1])
 
+    nan_mask_frac = np.isnan(Cn2_frac)
+    Cn2_frac[nan_mask_frac] = 0.0
+
+    h_GL = 20.0 # [km], this is not the ground layer, but rather an optimal separation height
+
+    Cn2_w_GL = np.interp(h_GL, Cn2_alt, Cn2_frac)
+
+    Cn2_alt_lower = np.concatenate((Cn2_alt[Cn2_alt < h_GL], [h_GL]))
+    Cn2_alt_upper = np.concatenate(([h_GL], Cn2_alt[Cn2_alt >= h_GL]))
+
+    Cn2_frac_lower = np.concatenate((Cn2_frac[Cn2_alt < h_GL], [Cn2_w_GL]))
+    Cn2_frac_upper = np.concatenate(([Cn2_w_GL], Cn2_frac[Cn2_alt >= h_GL]))
+
+    # Compute fraction below GL
+    total_integral    = np.trapezoid(Cn2_frac, Cn2_alt)
+    fraction_below_GL = np.trapezoid(Cn2_frac_lower, Cn2_alt_lower) / total_integral
+    fraction_above_GL = np.trapezoid(Cn2_frac_upper, Cn2_alt_upper) / total_integral
+
+    if fraction_below_GL > 1-1e-6:
+        print("Warning: Cn2 fraction below GL is ~1. Adjusting to avoid numerical issues.")
+        fraction_below_GL = np.float64(0.99)
+        fraction_above_GL = np.float64(0.01)
+
+    plt.plot(Cn2_frac, Cn2_alt, 'o-')
+    plt.scatter(Cn2_w_GL, h_GL, color='red', label='GL Cn2 fraction')
+    plt.axhline(h_GL, color='gray', linestyle='--', label='GL Height')
+    plt.xlim(-0.01, 1)
+    plt.ylim(0, 30)
+    plt.xlabel('Cn2 Fraction')
+    plt.ylabel('Altitude (km)')
+    plt.title(f'AOF Cn2 profile')
+    plt.legend()
+
+    print(f"Fraction of Cn2 below GL (h≤{h_GL} km): {fraction_below_GL:.4f}")
+    print(f"Fraction of Cn2 above GL (h>{h_GL} km): {fraction_above_GL:.4f}")
+
+
+    # >>>>>>> Modify the config file according to the data for this particular sample
     config_dict['telescope']['TelescopeDiameter'] = 8.0
     config_dict['telescope']['ZenithAngle'] = [90.0 - sample['MUSE header data']['Tel. altitude'].item()]
     config_dict['telescope']['Azimuth']     = [sample['MUSE header data']['Tel. azimuth'].item()]
@@ -1808,24 +1858,26 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
         except (KeyError, TypeError):
             config_dict['telescope']['PupilAngle'] = 0.0
     
-    
     if sample['Raw Cn2 data'] is not None:
         config_dict['atmosphere']['L0']  = [sample['All data']['L0Tot'].item()]
     else:
         config_dict['atmosphere']['L0']  = [config_dict['atmosphere']['L0']]
                 
     config_dict['atmosphere']['Seeing'] = [sample['MUSE header data']['Seeing (header)'].item()]
-    config_dict['atmosphere']['Cn2Weights'] = [[GL_frac, 1-GL_frac]]
-    config_dict['atmosphere']['Cn2Heights'] = [[0, h_GL]]
+
+    config_dict['atmosphere']['Cn2Heights'] = [[0.0, h_GL*1e3]]  # convert to [m]
+    config_dict['atmosphere']['Cn2Weights'] = [[fraction_below_GL.item(), fraction_above_GL.item()]]
 
     config_dict['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item(),]*2]
     config_dict['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item(),]*2]
     config_dict['sources_science']['Wavelength'] = wvls
 
-    config_dict['sources_LO']['Wavelength'] = (1215 + 1625)/2.0 * 1e-9 # Mean  approx. wavelengths between J and H
+    config_dict['sources_LO']['Wavelength'] = (1215 + 1625)/2.0 * 1e-9 # Mean approx. wavelengths of IRLOS between J and H
+    config_dict['sources_HO']['Zenith']     = [[10,]*4] # [arcsec], LGSs angular separation from on-axis
 
     config_dict['sensor_science']['PixelScale'] = sample['MUSE header data']['Pixel scale (science)'].item()
     config_dict['sensor_science']['FieldOfView'] = FoV_science
+
 
     try:
         LGS_ph = np.array([sample['All data'][f'LGS{i} photons, [photons/m^2/s]'].item() / 1240e3 for i in range(1,5)])
@@ -1834,9 +1886,10 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
     except:
         LGS_ph = [[2000,]*4]
         
-    config_dict['sensor_HO']['NumberPhotons']  = LGS_ph
-    config_dict['sensor_HO']['SizeLenslets']   = config_dict['sensor_HO']['SizeLenslets'][0]
-    config_dict['sensor_HO']['NumberLenslets'] = config_dict['sensor_HO']['NumberLenslets'][0]
+    config_dict['sensor_HO']['NumberPhotons'] = LGS_ph
+    config_dict['sensor_HO']['ClockRate']     = np.mean([config_dict['sensor_HO']['ClockRate']])
+    # config_dict['sensor_HO']['SizeLenslets']   = config_dict['sensor_HO']['SizeLenslets'][0]
+    # config_dict['sensor_HO']['NumberLenslets'] = config_dict['sensor_HO']['NumberLenslets'][0]
     # config_file['sensor_HO']['NoiseVariance'] = 4.5
 
     IRLOS_ph_per_subap_per_frame = sample['IRLOS data']['IRLOS photons (cube), [photons/s/m^2]'].item()
@@ -1856,9 +1909,9 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
 
     # config_file['DM']['DmPitchs'] = [config_file['DM']['DmPitchs'][0]*1.25]
     config_dict['DM']['DmPitchs'][0] = 0.22
-
-    config_dict['sensor_HO']['ClockRate'] = np.mean([config_dict['sensor_HO']['ClockRate']])
+        
     
+    # >>>>>>> Finalize the config file
     config_dict = config_manager.wrap_scalars_to_lists(config_dict)
     config_dict = config_manager.ensure_dimensions(config_dict, N_src=1) # Config for a single given source
     
