@@ -6,6 +6,7 @@ import sys
 import os
 import tempfile
 import numpy as np
+import cupy as cp
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 import matplotlib.cm as cm
@@ -14,17 +15,15 @@ sys.path.append('..')
 
 from project_settings import DATA_FOLDER, PROJECT_PATH, DATA_FOLDER
 
+TIPTOP_PATH = PROJECT_PATH / '../astro-tiptop'
+
 # import TIPTOP dependencies
 for module in ['MASTSEL', 'P3', 'SEEING', 'SYMAO', 'TIPTOP']:
-    sys.path.append(str(TIPTOP_PATH:=(PROJECT_PATH / '../astro-tiptop') / f'{module}'))
-    sys.path.append(str(TIPTOP_PATH:=(PROJECT_PATH / '../astro-tiptop') / f'{module}/{module.lower()}'))
+    sys.path.append(str(TIPTOP_PATH / f'{module}'))
+    sys.path.append(str(TIPTOP_PATH / f'{module}/{module.lower()}'))
 
-sys.path.append(str(TIPTOP_PATH:=(PROJECT_PATH / '../astro-tiptop')))
+sys.path.append(str(TIPTOP_PATH))
 from aoSystem.fourierModel import fourierModel
-
-# Verify paths
-# for i, path in enumerate(sys.path):
-    # print(f"{i}: {path}")
 
 #%%
 path_ini = str(DATA_FOLDER / "parameter_files/muse_ltao.ini")
@@ -42,7 +41,7 @@ with os.fdopen(temp_fd, 'w') as temp_file:
     temp_file.write(modified_content)
 
 # Run P3 Fourier model
-tiptop_HO_model = fourierModel(
+P3_model = fourierModel(
     temp_path_ini,
     path_root=None,
     calcPSF=False,
@@ -55,30 +54,60 @@ tiptop_HO_model = fourierModel(
     displayContour=False
 )
 
+W_tomo_P3    = P3_model.tomographicReconstructor().get() # extract tomographic reconstructor
+W_alpha_P3   = P3_model.Walpha.get()               # extract layer-to-alpha-direction projector
+P_beta_DM_P3 = P3_model.PbetaDM[0].get()         # extract projection from DMs to directions of interest
 # Remove temp config
 os.remove(temp_path_ini)
 
 #%%
 # Compute different P3 PSD contributors and pack into dictionary
 P3_PSDs = {
-    'fitting':         tiptop_HO_model.fittingPSD().squeeze().copy(),
-    'aliasing':        tiptop_HO_model.aliasingPSD().squeeze().copy(),
-    'diff. refract':   tiptop_HO_model.differentialRefractionPSD().squeeze().copy(),
-    'chromatism':      tiptop_HO_model.chromatismPSD().squeeze().copy(),
-    'spatio-temporal': tiptop_HO_model.spatioTemporalPSD().squeeze().copy(),
-    'WFS noise':       tiptop_HO_model.noisePSD().squeeze().copy()
+    'fitting':         P3_model.fittingPSD().squeeze().copy(),
+    'aliasing':        P3_model.aliasingPSD().squeeze().copy(),
+    'diff. refract':   P3_model.differentialRefractionPSD().squeeze().copy(),
+    'chromatism':      P3_model.chromatismPSD().squeeze().copy(),
+    'spatio-temporal': P3_model.spatioTemporalPSD().squeeze().copy(),
+    'WFS noise':       P3_model.noisePSD().squeeze().copy()
 }
 
-#%%
-# %reload_ext autoreload
-# %autoreload 2
+# Manually compute spatio-temporal terms for verification
+nK = P3_model.freq.resAO
+nH = P3_model.ao.atm.nL
+Hs = P3_model.ao.atm.heights * P3_model.strechFactor
+deltaT = P3_model.ao.rtc.holoop['delay'] / P3_model.ao.rtc.holoop['rate']
+wDir_x = np.cos(P3_model.ao.atm.wDir*np.pi/180)
+wDir_y = np.sin(P3_model.ao.atm.wDir*np.pi/180)
 
+freq_t = [0,] * nH
+
+s = 0 # single source
+
+Beta = [P3_model.ao.src.direction[0,s], P3_model.ao.src.direction[1,s]]
+
+PbetaL = cp.zeros([nK, nK, 1, nH], dtype=complex)
+fx = Beta[0]*P3_model.freq.kxAO_
+fy = Beta[1]*P3_model.freq.kyAO_
+
+for j in range(nH):
+    freq_t[j] = wDir_x[j]*P3_model.freq.kxAO_+ wDir_y[j]*P3_model.freq.kyAO_
+    delta_h = Hs[j]*(fx+fy) - deltaT * P3_model.ao.atm.wSpeed[j]*freq_t[j]
+    PbetaL[: , :, 0, j] = cp.exp(1j*2*cp.pi*delta_h)
+
+proj = PbetaL - np.matmul(P3_model.PbetaDM[s], P3_model.Walpha)
+proj_t = np.conj(proj.transpose(0, 1, 3, 2))
+tmp = np.matmul(proj,np.matmul(P3_model.Cphi, proj_t))
+
+P_beta_L_P3 = PbetaL.get()
+freq_t_P3 = cp.stack(freq_t, axis=2).get()
+
+#%%
 from PSF_models.TipTorch import TipTorch
 from managers.config_manager import ConfigManager
 from project_settings import device, DATA_FOLDER, default_torch_type
+import torch
 
 #%%
-# path_ini = DATA_FOLDER / "parameter_files/muse_ltao.ini"
 config_manager = ConfigManager()
 config_dict = config_manager.Load(path_ini)
 config_dict = config_manager.Convert(config_dict, framework='pytorch', device=device, dtype=default_torch_type)
@@ -93,19 +122,85 @@ tiptorch_model = TipTorch(
 )
 
 # Update oversampling to match P3 model exactly
-match_sampling = (tiptop_HO_model.freq.k_.min().get() / tiptorch_model.sampling_factor.item()) * 1.001
+match_sampling = (P3_model.freq.k_.min().get() / tiptorch_model.sampling_factor.item()) * 1.001
 tiptorch_model.oversampling = match_sampling
 tiptorch_model.Update(init_grids=True, init_pupils=True, init_tomography=True)
 
-PSF_1 = tiptorch_model()
+wvl_src = tiptorch_model.wvl.item()
+wvl_atm = tiptorch_model.wvl_atm.item()
+GS_wvl  = tiptorch_model.GS_wvl.item()
+
+factor = (wvl_src / wvl_atm)**2 # Scaling factor for PSDs due to the wavelength difference
 
 #%%
+# Update r0 parameters to match P3
+# tiptorch_model.r0 = tiptorch_model.r0 * (wvl_src / wvl_atm)**(6/5) # Re-scale r0 to src wavelength
+
+
+#%%
+# Correct the mismatch in the noise variance between TipTorch and P3 models
+# tiptorch_model.dn = torch.tensor(\
+#     P3_model.ao.wfs.processing.noiseVar.flatten()[0].item() - \
+#     tiptorch_model.NoiseVariance().flatten()[0].item(),
+#     device=device,
+#     dtype=default_torch_type
+# )
+
+# tiptorch_model.IOR_src_wvl = n_air_P3(tiptorch_model.wvl)
+# tiptorch_model.IOR_wvl_atm = n_air_P3(tiptorch_model.wvl_atm)
+# tiptorch_model.IOR_GS_wvl  = n_air_P3(tiptorch_model.GS_wvl) # GS_wvl may depend on the filter for SCAO or on LGS wavelength
+
+_ = tiptorch_model()
+
+# Restore from half to full size
+def half_to_full_reconstructor(W_half):
+    """Convert half reconstructor matrix to full size by mirroring."""
+    W_half = W_half[0,...].detach().clone() # Remove batch dim and clone to avoid in-place ops
+    return torch.cat([W_half, torch.flip(W_half[:,:-1,...], dims=(0,1))], dim=1).cpu().numpy()[:-1,:-1,...]
+
+AO_mask = tiptorch_model.mask_corrected_AO.unsqueeze(-1).unsqueeze(-1)
+
+W_tomo_torch    = half_to_full_reconstructor(tiptorch_model.W_tomo)
+W_alpha_torch   = half_to_full_reconstructor(tiptorch_model.W_alpha * AO_mask)
+P_beta_DM_torch = half_to_full_reconstructor(tiptorch_model.P_beta_DM * AO_mask)
+P_beta_L_torch  = half_to_full_reconstructor(tiptorch_model.P_beta_L * AO_mask)
+freq_t_torch    = half_to_full_reconstructor(tiptorch_model.freq_t)
+
+#%
+# n2 =  23.7+6839.4/(130-(GS_wvl*1.e6)**(-2))+45.47/(38.9-(GS_wvl*1.e6)**(-2))
+# n1 =  23.7+6839.4/(130-(wvl_ref*1.e6)**(-2))+45.47/(38.9-(wvl_ref*1.e6)**(-2))
+
+def refractionIndex(wvl,nargout=1):
+    ''' Refraction index -1 as a fonction of the wavelength.
+    Valid for lambda between 0.2 and 4µm with 1 atm of pressure and 15 degrees Celsius
+        Inputs : wavelength in meters
+        Outputs : n-1 and dn/dwvl
+    '''
+    c1 = 64.328
+    c2 = 29498.1
+    c3 = 146.0
+    c4 = 255.4
+    c5 = 41.0
+    wvlRef = wvl*1e6
+
+    nm1 = 1e-6 * (c1 +  c2/(c3-1.0/wvlRef**2) + c4/(c5 - 1.0/wvlRef**2) )
+    dndw= -2e-6 * (c1 +  c2/(c3-1.0/wvlRef**2)**2 + c4/(c5 - 1.0/wvlRef**2)**2 )/wvlRef**3
+    if nargout == 1:
+        return nm1
+    else:
+        return (nm1,dndw)
+
+#%%
+C = 1 / factor
+# C = 1
+
+# Make PSDs displayable and comparable for both models
 def PSD_preprocess(psd_data):
     """ Convert both PSDs to numpy arrays and get real part. Handles half PSD for TipTorch, too. """
     if hasattr(psd_data, 'cpu'):
         PSD_buf = tiptorch_model.half_PSD_to_full(psd_data).squeeze().cpu().numpy().real
         PSD_buf[PSD_buf.shape[0]//2, PSD_buf.shape[1]//2] = 0.0
-        return PSD_buf[:-1,:-1]
+        return PSD_buf[:-1,:-1] * C
     elif hasattr(psd_data, 'get'): # Convert from Cupy to Numpy
         return psd_data.squeeze().get().real
     else:
@@ -116,105 +211,116 @@ for key in P3_PSDs.keys():
     TipTorch_PSDs[key] = PSD_preprocess(tiptorch_model.PSDs[key].clone())
     P3_PSDs[key] = PSD_preprocess(P3_PSDs[key])
 
-# print(P3_PSDs['fitting'].shape)
-# print(TipTorch_PSDs['fitting'].shape)
-
 #%%
-def display_PSD(im, title=None, cmap='viridis', show_axis=True, fontsize=12, ax=None, vmin=None, vmax=None):
-    """ Display a PSD with log normalization. Returns axis object and image for colorbar creation. """
+def display_map(im, title='', cmap='viridis', show_axis=True, fontsize=12, ax=None, vmin=None, vmax=None, scale='log', colorbar=True):
+    """ Display a PSD with log or linear normalization. Returns axis object and image for colorbar creation. """
+    if ax is None:
+        _, ax = plt.subplots(figsize=(5,5))
     
-    # Use provided vmin/vmax or calculate percentiles for log normalization
+    # Use provided vmin/vmax or calculate percentiles for normalization
     if vmin is None or vmax is None:
-        vmin = np.percentile(im[im > 0], 1e1)    if np.any(im > 0) else 1
-        vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
+        if scale == 'log':
+            vmin = np.percentile(im[im > 0], 1e1)    if np.any(im > 0) else 1
+            vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
+        else:  # linear
+            vmin = np.percentile(im, 1)
+            vmax = np.percentile(im, 99)
     
-    im_plot = ax.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
-    
-    if not show_axis:
-        ax.axis('off')
+    if scale == 'log':
+        im_plot = ax.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
+    elif scale == 'linear':
+        im_plot = ax.imshow(im, cmap=cmap, vmin=vmin, vmax=vmax)
     else:
-        ax.tick_params(axis='both', which='major', labelsize=fontsize)
+        raise ValueError("Scale must be either 'log' or 'linear'.")
     
-    if title: ax.set_title(title, fontsize=fontsize)
+    ax.tick_params(axis='both', which='major', labelsize=fontsize) if not show_axis else ax.axis('off')
+    
+    if title:
+        ax.set_title(title, fontsize=fontsize)
+    
+    if colorbar:
+        plt.colorbar(im_plot, ax=ax, fraction=0.046, pad=0.04)
     
     return ax, im_plot
 
 
-# Iterate over all PSD contributors and create 1x2 subplots for each
-for key in P3_PSDs.keys():
-    if key in TipTorch_PSDs:
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-                
-        torch_data = TipTorch_PSDs[key]
-        p3_data = P3_PSDs[key]
+def plot_side_by_side(torch_data, P3_data, title, scale='log'):
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
         
-        # Calculate common vmin/vmax from both datasets
-        combined_positive = np.concatenate([p3_data[p3_data > 0].flatten(), torch_data[torch_data > 0].flatten()])
-        vmin = np.percentile(combined_positive, 10)
-        vmax = np.percentile(combined_positive, 99.975)
+    # Calculate common vmin/vmax from both images
+    combined_positive = np.concatenate([P3_data[P3_data > 0].flatten(), torch_data[torch_data > 0].flatten()])
+    vmin = np.percentile(combined_positive, 10)
+    vmax = np.percentile(combined_positive, 99.975)    
+
+    ax1, im1 = display_map(P3_data, title=f'P3 {title}', ax=ax1, vmin=vmin, vmax=vmax, scale=scale, colorbar=False)
+    ax2, im2 = display_map(torch_data, title=f'TipTorch {title}', ax=ax2, vmin=vmin, vmax=vmax, scale=scale, colorbar=False)
         
-        # Plot P3 PSD on the left
-        ax1, im1 = display_PSD(P3_PSDs[key], title=f'P3 {key} PSD', ax=ax1, vmin=vmin, vmax=vmax)
-        # Plot TipTorch PSD on the right
-        ax2, im2 = display_PSD(TipTorch_PSDs[key], title=f'TipTorch {key} PSD', ax=ax2, vmin=vmin, vmax=vmax)
-        # Add shared colorbar - thicker and on the right
-        cbar = fig.colorbar(im2, ax=[ax1, ax2], label='PSD Value', fraction=0.03, pad=0.02, aspect=15, shrink=1.8)
-        cbar.ax.tick_params(labelsize=12)
+    # Add shared colorbar - thicker and on the right
+    cbar = fig.colorbar(im2, ax=[ax1, ax2], label='Value', fraction=0.03, pad=0.02, aspect=15, shrink=1.8)
+    cbar.ax.tick_params(labelsize=12)
         
-        plt.tight_layout()
-        plt.subplots_adjust(right=0.8)
-        plt.show()
+    plt.tight_layout()
+    plt.subplots_adjust(right=0.8)
+    plt.show()
+
+
+def plot_difference_map(torch_data, P3_data, title):
+    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+    
+    # Calculate percentage difference: (TipTorch - P3) / P3 * 100
+    # Avoid division by zero by adding small epsilon
+    diff_normalized = ((torch_data - P3_data) / (P3_data + 1e-15)) * 100
+    
+    # Set reasonable limits for the difference plot
+    vmin = np.percentile(diff_normalized, 2.5)
+    vmax = np.percentile(diff_normalized, 97.5)
+    
+    # Plot the normalized difference
+    im = ax.imshow(diff_normalized, cmap='RdBu_r', vmin=vmin, vmax=vmax)
+    ax.set_title(f'Normalized Difference: {title}\n(TipTorch - P3) / P3 x 100%', fontsize=12)
+    
+    # Add colorbar
+    cbar = fig.colorbar(im, ax=ax, label='Percentage Difference (%)', fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=10)
+    
+    plt.tight_layout()
+    plt.show()
+    
+
+def compute_difference_stats(torch_data, P3_data, title='', verbose=True):
+    diff_normalized = ((torch_data - P3_data) / (P3_data + 1e-15)) * 100  # [%]
+    diff_stats = {
+        'diff_array': diff_normalized,
+        'mean': np.mean(diff_normalized),
+        'std':  np.std(diff_normalized),
+        'max':  np.max(np.abs(diff_normalized))
+    }
+    if verbose:
+        print(f"{title}: Mean: {diff_stats['mean']:.2f}%, STD: {diff_stats['std']:.2f}%, Max: {diff_stats['max']:.2f}%")
+        
+    return diff_stats 
+
 
 #%%
+# Iterate over all PSD contributors and create 1 x 2 subplots for each
+for key in P3_PSDs.keys():
+    if key in TipTorch_PSDs:     
+        plot_side_by_side(TipTorch_PSDs[key], P3_PSDs[key], title=key+' PSD')
+
 # Calculate and plot normalized difference maps (as percentages)
 for key in P3_PSDs.keys():
     if key in TipTorch_PSDs:
-        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-        
-        torch_data = TipTorch_PSDs[key]
-        p3_data = P3_PSDs[key]
-        
-        # Calculate percentage difference: (TipTorch - P3) / P3 * 100
-        # Avoid division by zero by adding small epsilon where P3 is zero
-        epsilon = 1e-15
-        diff_normalized = ((torch_data - p3_data) / (p3_data + epsilon)) * 100
-        
-        # Set reasonable limits for the difference plot
-        vmin = np.percentile(diff_normalized, 2.5)
-        vmax = np.percentile(diff_normalized, 97.5)
-        
-        # Plot the normalized difference
-        im = ax.imshow(diff_normalized, cmap='RdBu_r', vmin=vmin, vmax=vmax)
-        ax.set_title(f'Normalized Difference: {key} PSD\n(TipTorch - P3) / P3 x 100%', fontsize=12)
-        
-        # Add colorbar
-        cbar = fig.colorbar(im, ax=ax, label='Percentage Difference (%)', fraction=0.046, pad=0.04)
-        cbar.ax.tick_params(labelsize=10)
-        
-        plt.tight_layout()
-        plt.show()
-
-#%%
-diffs = {}
+        plot_difference_map(TipTorch_PSDs[key], P3_PSDs[key], title=key+' PSD')
 
 # Print error statistics
-for key in P3_PSDs.keys():
-    if key in TipTorch_PSDs:
-        torch_data = TipTorch_PSDs[key]
-        p3_data    = P3_PSDs[key]
-        
-        epsilon = 1e-15 
-        diff_normalized = ((torch_data - p3_data) / (p3_data + epsilon)) * 100 # [%]
-        diffs[key] = diff_normalized.copy()
-        
-        mean_diff = np.mean(diff_normalized)
-        std_diff  = np.std(diff_normalized)
-        max_diff  = np.max(np.abs(diff_normalized))
-        
-        print(f"{key}: Mean: {mean_diff:.2f}%, STD: {std_diff:.2f}%, Max: {max_diff:.2f}%")
+for key in TipTorch_PSDs.keys():
+    diff_stats = compute_difference_stats(TipTorch_PSDs[key], P3_PSDs[key], title=key+' PSD')
 
 # %%
 from photutils.profiles import RadialProfile
+
+# choice = ['fitting', 'WFS noise']
+choice = ['fitting', 'spatio-temporal']
 
 def plot_PSD_radial_profile(img, title, linestyle='-', color=None):
     xycen = (img.shape[-1]//2, img.shape[-2]//2)
@@ -236,11 +342,9 @@ def plot_PSD_radial_profile(img, title, linestyle='-', color=None):
     
 plt.figure(figsize=(12,8))
 
-plot_PSD_radial_profile(P3_PSDs['fitting'], 'P3 fitting', linestyle='--', color='C0')
-plot_PSD_radial_profile(TipTorch_PSDs['fitting'], 'TipTorch fitting', linestyle='-', color='C0')
-
-plot_PSD_radial_profile(P3_PSDs['WFS noise'], 'P3 WFS noise', linestyle='--', color='C1')
-plot_PSD_radial_profile(TipTorch_PSDs['WFS noise'], 'TipTorch WFS noise', linestyle='-', color='C1')
+for i, key in enumerate(choice):
+    plot_PSD_radial_profile(P3_PSDs[key], f'P3 {key}', linestyle='--', color=f'C{i}')
+    plot_PSD_radial_profile(TipTorch_PSDs[key], f'TipTorch {key}', linestyle='-', color=f'C{i}')
 
 plt.title('PSD Radial Profile Comparison')
 plt.legend()
@@ -248,3 +352,48 @@ plt.tight_layout()
 plt.show()
 
 # %%
+# Compare TipTorch and P3 tomographic reconstructors
+
+i_layer = 0
+j_GS = 0
+
+W_tomo_torch_data = np.abs(W_tomo_torch)[..., i_layer, j_GS]
+W_tomo_P3_data    = np.abs(W_tomo_P3)   [..., i_layer, j_GS]
+
+W_alpha_torch_data = np.abs(W_alpha_torch)[..., 0, i_layer]
+W_alpha_P3_data    = np.abs(W_alpha_P3)   [..., 0, i_layer]
+
+P_beta_DM_torch_data = np.abs(P_beta_DM_torch)[..., 0, 0]
+P_beta_DM_P3_data    = np.abs(P_beta_DM_P3)   [..., 0, 0]
+
+P_beta_L_torch_data = np.abs(P_beta_L_torch)[..., 0, i_layer]
+P_beta_L_P3_data    = np.abs(P_beta_L_P3)   [..., 0, i_layer]
+
+freq_t_torch_data = np.abs(freq_t_torch)[..., i_layer]
+freq_t_P3_data    = np.abs(freq_t_P3)   [..., i_layer]
+
+# plot_side_by_side(W_tomo_torch_data, W_tomo_P3_data, title='W_tomo')
+plot_difference_map(W_tomo_torch_data, W_tomo_P3_data, title='W_tomo')
+
+# plot_side_by_side(W_alpha_torch_data, W_alpha_P3_data, title='W_alpha')
+# plot_difference_map(W_alpha_torch_data, W_alpha_P3_data, title='W_alpha')
+
+plot_difference_map(P_beta_DM_torch_data, P_beta_DM_P3_data, title='P_beta_DM')
+
+
+#%%
+_ = compute_difference_stats(W_tomo_torch_data, W_tomo_P3_data, title='W_tomo')
+_ = compute_difference_stats(W_alpha_torch_data, W_alpha_P3_data, title='W_alpha')
+_ = compute_difference_stats(P_beta_DM_torch_data, P_beta_DM_P3_data, title='P_beta_DM')
+_ = compute_difference_stats(freq_t_torch, freq_t_P3, title='freq_t')
+_ = compute_difference_stats(P_beta_L_torch_data, P_beta_L_P3_data, title='P_beta_L')
+
+#%%
+np.abs(P_beta_L_torch - P_beta_L_P3).mean()
+
+
+#%%
+# display_map(freq_t_torch_data, scale='linear', colorbar=True)
+
+plot_side_by_side(freq_t_torch_data, freq_t_P3_data, title='freq_t')
+

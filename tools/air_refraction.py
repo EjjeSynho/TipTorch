@@ -99,7 +99,7 @@ def n_air(lmbd, t=20, p=1e5, h=0, xc=0):
 #%%
 class AirRefractiveIndexCalculator:
     def __init__(self, device=None, dtype=torch.float64):
-        # Use provided device or default to CPU.
+        # Use provided a device or CPU (default).
         self.device = device if device is not None else torch.device("cpu")
         self.dtype = dtype
 
@@ -297,13 +297,10 @@ with profiler.profile(
 # Print profiler summary
 print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 # prof.export_chrome_trace("trace.json")
-
 """
-
 
 #%%
 """
-        
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Create an instance of the calculator.
@@ -321,7 +318,4 @@ n = n_air(lmbd=wavelength, t=temperature, p=pressure, h=humidity, xc=co2)
 
 # print("Refractive index:", n.item())
 print("Refractive index:", n)
-
-
 """
-# %%
