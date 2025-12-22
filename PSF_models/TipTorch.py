@@ -124,6 +124,14 @@ class TipTorch(torch.nn.Module):
         self.WFS_excessive_factor = self.config['sensor_HO']['ExcessNoiseFactor']
         self.WFS_Nph = self.config['sensor_HO']['NumberPhotons']
 
+        self.WFS_algorithm = self.config['sensor_HO']['Algorithm'].lower()
+        self.WFS_algo_settings = self.config['sensor_HO']['WindowRadiusWCoG']
+        self.WFS_type = self.config['sensor_HO']['WfsType'].upper()
+
+        # Check WFS type
+        self.is_SH      = (self.WFS_type == 'SHACK-HARTMANN')
+        self.is_pyramid = (self.WFS_type == 'PYRAMID')
+
         # HO WFSs parameters stored in a dictionary       
         self.HOloop_rate  = self.config['RTC']['SensorFrameRate_HO'].flatten() # [Hz]
         self.HOloop_delay = self.config['RTC']['LoopDelaySteps_HO'].flatten() # [ms] (?)
@@ -473,8 +481,8 @@ class TipTorch(torch.nn.Module):
             self.bessel_j1 = lambda x: torch.special.bessel_j1(x)
 
         # Initialize constants
-        self.var_RON_const  = self.make_tensor(torch.pi**2/3)
-        self.var_Shot_const = self.make_tensor(torch.pi**2)
+        # self.var_RON_const  = self.make_tensor(torch.pi**2/3)
+        # self.var_Shot_const = self.make_tensor(torch.pi**2)
 
         self.mas2arc  = self.make_tensor(1e-3) #TODO: do we need it, though?
         self.zero_gpu = self.make_tensor(0.)
@@ -533,9 +541,9 @@ class TipTorch(torch.nn.Module):
         f = (beta_x*kx + beta_y*ky) * self.mask_corrected_AO.unsqueeze(-1)
 
         self.P_beta_DM = torch.exp( 2j*torch.pi*h_DM * f ).unsqueeze(-2) # [N_src x nOtf_AO x nOtf_AO x 1 x N_L]
-        #TODO: support multiple DMs?
+        # TODO: support multiple DMs?
 
-    # TODO: allow to input the atmospheric params externaly to account user-assumed atmospheric layers instead of simulated ones
+
     def OptimalDMProjector(self, inv_method='lstsq'):
         h_dm = self.h_DM.view(1, 1, 1, self.N_DM)
         stretch = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
@@ -590,9 +598,9 @@ class TipTorch(torch.nn.Module):
                     
         return hInt, rtfInt, atfInt, ntfInt
 
-    # TODO: also for LO WFS?
+
     # TODO: accelerate this function
-    def NoiseGain(self, nF=1000):
+    def NoiseGain(self, nF = 1000):
         Ts = 1.0 / self.HOloop_rate  # sampling time
         delay    = self.HOloop_delay # latency between the measurement and the correction
         loopGain = self.HOloop_gain
@@ -690,7 +698,7 @@ class TipTorch(torch.nn.Module):
             psd_ST = torch.squeeze(torch.squeeze(torch.abs((proj @ self.C_phi @ proj_t)))) * self.piston_filter * self.mask_corrected_AO
 
         return psd_ST
-        
+
 
     def NoisePSD(self, WFS_noise_var):
         if not self.tomography:
@@ -704,7 +712,6 @@ class TipTorch(torch.nn.Module):
             
             # Averaging over all GSs if there are several of them assumed to have the same noise variance
             varNoise = WFS_noise_var.mean(dim=1) if WFS_noise_var.shape[1] > 1 else WFS_noise_var
-            
             noisePSD = noisePSD * self.noise_gain * pdims(varNoise,2) * self.mask_corrected_AO * self.piston_filter
             
         return noisePSD
@@ -786,24 +793,97 @@ class TipTorch(torch.nn.Module):
     
 
     def NoiseVariance(self):
-        WFS_wvl = self.WFS_wvl
-        WFS_Nph = self.WFS_Nph.abs().view(self.N_obs, self.N_GS)
-        r0_WFS  = self.r0_new(self.r0_(), WFS_wvl, self.wvl_atm)
+        """
+        Compute WFS noise variance with fully vectorized implementation.
+        For now, it assumes the same type of WFS for all GSs for greater parallelism.
+        
+        For SH, it supports multiple centroiding algorithms:
+        - 'cog':  Center of Gravity (standard)
+        - 'tcog': Thresholded CoG
+        - 'wcog': Weighted CoG
+        - 'qc':   Quad Cell
+        Also support pyramid WFS.
+        
+        Returns:
+            sigma_noise_sqr: [N_obs x N_GS] noise variance tensor
+        """
+        # Parse WFS parameters
+        WFS_wvl  = self.WFS_wvl
+        WFS_Nph  = self.WFS_Nph.abs().view(self.N_obs, self.N_GS)
+        r0_WFS   = self.r0_new(self.r0_(), WFS_wvl, self.wvl_atm)
         WFS_nPix = self.WFS_FOV / self.WFS_n_sub
-        WFS_pixelScale = self.WFS_psInMas * self.mas2arc # [arcsec]
-        
-        # Read-out noise calculation
-        nD = torch.maximum( self.rad2arc*WFS_wvl/self.WFS_d_sub/WFS_pixelScale, self.one_gpu) #spot FWHM in pixels and without turbulence
-        # Photon-noise calculation
-        nT = torch.maximum( torch.hypot(self.WFS_spot_FWHM.max()*self.mas2arc, self.rad2arc*WFS_wvl/r0_WFS) / WFS_pixelScale, self.one_gpu)
+        WFS_pixelScale = self.WFS_psInMas * self.mas2arc  # [arcsec]
+        WFS_RON = self.WFS_RON
 
-        varRON  =  self.var_RON_const  * (self.WFS_RON / WFS_Nph)**2 * (WFS_nPix**2/nD).unsqueeze(-1)**2
-        varShot =  self.var_Shot_const / (2*WFS_Nph) * (nT/nD).unsqueeze(-1)**2
+        # nD: spot FWHM in pixels without turbulence (diffraction-limited)
+        nD = torch.maximum(
+            self.rad2arc * WFS_wvl / self.WFS_d_sub / WFS_pixelScale, 
+            self.one_gpu
+        )
         
-        # Noise variance calculation
-        varNoise = self.WFS_excessive_factor * (varRON + varShot) * (self.wvl_atm / WFS_wvl).unsqueeze(-1)**2 # Also rescale to the atmospheric wavelength
-
-        return varNoise * 0 + 0.5945844430459982 # TODO: REMOVE IT AFTER TESTING
+        # nT: spot FWHM in pixels with turbulence
+        nT = torch.maximum(
+            torch.hypot(
+                self.WFS_spot_FWHM.max() * self.mas2arc,
+                self.rad2arc * WFS_wvl / r0_WFS
+            ) / WFS_pixelScale,
+            self.one_gpu
+        )
+        
+        # Shack-Hartmann WFS calculations
+        if self.is_SH:
+            # Center of gravity
+            if self.WFS_algorithm == 'cog':
+                sigma_sqr_RON  = (torch.pi**2 / 3) * (WFS_RON / WFS_Nph)**2 * (WFS_nPix**2 / nD).unsqueeze(-1)**2
+                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * (nT / nD).unsqueeze(-1)**2
+            
+            # Truncated CoG algorithm
+            elif self.WFS_algorithm == 'tcog':
+                nPix_eff = torch.ceil(nT**2 * torch.pi / 4)
+                sigma_sqr_RON  = (torch.pi**2 / 3) * (WFS_RON / WFS_Nph)**2 * (nPix_eff / nD).unsqueeze(-1)**2
+                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * (nT / nD).unsqueeze(-1)**2
+            
+            # Weighted CoG algorithm
+            elif self.WFS_algorithm == 'wcog':
+                nW = torch.maximum(self.WFS_algo_settings, nT)  # Ensure nW >= nT
+                
+                nT_nW_sum = nT**2 + nW**2
+                sigma_sqr_RON = (torch.pi**3 / (32 * torch.log(torch.tensor(2.0))**2)) * \
+                                (WFS_RON / WFS_Nph)**2 * \
+                                (nT_nW_sum**4 / (nD**2 * nW**4))
+                        
+                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * \
+                                 (nT / nD).unsqueeze(-1)**2 * \
+                                 (nT_nW_sum**4 / ((2 * nT**2 + nW**2)**2 * nW**4))
+            
+            # Quad Cell algorithm
+            elif self.WFS_algorithm == 'qc':
+                k = torch.where(nT > nD,
+                    torch.sqrt(2 * torch.pi) * nT / (2 * torch.sqrt(2 * torch.log(torch.tensor(2.0)))) / nD,
+                    self.one_gpu
+                ).unsqueeze(-1)
+                
+                sigma_sqr_RON  = k * 4 * torch.pi**2 * (WFS_RON / WFS_Nph)**2
+                sigma_sqr_shot = k * torch.pi**2 / WFS_Nph
+            
+            # Limit unreasonably high variances
+            sigma_sqr_RON  = torch.clamp(sigma_sqr_RON,  max=3.0)
+            sigma_sqr_shot = torch.clamp(sigma_sqr_shot, max=3.0)
+            
+            # TODO: maybe use soft clamp for better differentiability?
+            # sigma_sqr_RON  = 3.0 * torch.tanh(sigma_sqr_RON / 3.0)
+            # sigma_sqr_shot = 3.0 * torch.tanh(sigma_sqr_shot / 3.0)
+        
+        # Pyramid WFS calculations
+        elif self.is_pyramid:
+            sigma_sqr_RON  = 4 * WFS_RON**2 / WFS_Nph**2
+            sigma_sqr_shot = WFS_Nph / WFS_Nph**2
+        
+        # Total noise variance
+        sigma_noise_sqr = self.WFS_excessive_factor * (sigma_sqr_RON + sigma_sqr_shot) * (self.wvl_atm / WFS_wvl).unsqueeze(-1)**2
+        
+        return sigma_noise_sqr
+        # return sigma_noise_sqr * 0 + 0.5945844430459982 # TODO: REMOVE IT AFTER TESTING
 
 
     def TomographicReconstructors(self, WFS_noise_var, inv_method='lstsq'):
@@ -832,7 +912,7 @@ class TipTorch(torch.nn.Module):
         fix_dims = lambda x_, N: torch.diag_embed(x_).view(self.N_obs, 1, 1, N, N).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, N, N)
         
         # Note, that size of WFS_noise_var == N_obs
-        WFS_noise_variance = WFS_noise_var.to(dtype=MP.dtype)
+        WFS_noise_variance = WFS_noise_var.to(dtype=MP.dtype) # Convert to complex
         # As previosuly mentioned, if the same tomo reconstructor is used for all targets, then WFS_noise_variance also must be the same for all targets
         self.C_b = fix_dims( WFS_noise_variance[:self.N_obs], self.N_GS )
         kernel = self.VonKarmanSpectrum(self.r0_().to(dtype=MP.dtype), self.L0.abs(), self.k2_AO) * self.piston_filter
@@ -975,7 +1055,7 @@ class TipTorch(torch.nn.Module):
         # Removing the DC component
         PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0
       
-        # All PSDs are computed in [rad^2] at the atmospheric wvls and then normalized to [nm^2] OPD at tscience wvl
+        # All PSDs are computed in [rad^2] at the atmospheric wvls and then normalized to [nm^2] OPD at science wvl
         PSD_norm = (self.dk*self.wvl_atm*1e9/2/torch.pi)**2
         # Recover the full-size PSD from the half-sized one
         self.PSD = self.half_PSD_to_full(PSD * PSD_norm) # [nm^2]    

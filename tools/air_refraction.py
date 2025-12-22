@@ -160,7 +160,7 @@ class AirRefractiveIndexCalculator:
         self.Ma_std = 1e-3 * (28.9635 + 12.011e-6 * (std_xc - 400))  # Molar mass of dry air (kg/mol)
         self.Mw = torch.tensor(0.018015, device=self.device, dtype=self.dtype)  # Molar mass of water vapor (kg/mol)
         self.rhoaxs = std_p_air * self.Ma_std / (self.Za * self.R * std_T_air)
-        self.rhows  = std_p_wv * self.Mw   / (self.Zw * self.R * std_T_wv)
+        self.rhows  = std_p_wv  * self.Mw     / (self.Zw * self.R * std_T_wv)
         
         self.t_def  = torch.tensor(20,  device=self.device, dtype=self.dtype)
         self.p_def  = torch.tensor(1e5, device=self.device, dtype=self.dtype)
@@ -180,18 +180,6 @@ class AirRefractiveIndexCalculator:
             (self.c0 + self.c1 * t) * xw**2
         ) + (p / T)**2 * (self.d + self.e * xw**2)
 
-    # def _maybe_tensor(self, x):
-    #     """
-    #     Returns x as a tensor on the proper device and dtype.
-    #     If x is already such a tensor, it is returned unchanged.
-    #     """
-    #     if isinstance(x, torch.Tensor):
-    #         if x.device == self.device and x.dtype == self.dtype:
-    #             return x
-    #         else:
-    #             return x.to(device=self.device, dtype=self.dtype)
-    #     else:
-    #         return torch.tensor(x, device=self.device, dtype=self.dtype)
 
     def n_air(self, lmbd, t=None, p=None, h=None, xc=None):
         """

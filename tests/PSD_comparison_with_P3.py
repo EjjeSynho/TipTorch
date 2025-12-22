@@ -2,6 +2,8 @@
 %reload_ext autoreload
 %autoreload 2
 
+from email import message
+import string
 import sys
 import os
 import tempfile
@@ -86,8 +88,8 @@ s = 0 # single source
 Beta = [P3_model.ao.src.direction[0,s], P3_model.ao.src.direction[1,s]]
 
 PbetaL = cp.zeros([nK, nK, 1, nH], dtype=complex)
-fx = Beta[0]*P3_model.freq.kxAO_
-fy = Beta[1]*P3_model.freq.kyAO_
+fx = Beta[0] * P3_model.freq.kxAO_
+fy = Beta[1] * P3_model.freq.kyAO_
 
 for j in range(nH):
     freq_t[j] = wDir_x[j]*P3_model.freq.kxAO_+ wDir_y[j]*P3_model.freq.kyAO_
@@ -116,7 +118,7 @@ config_dict = config_manager.Convert(config_dict, framework='pytorch', device=de
 tiptorch_model = TipTorch(
     AO_config=config_dict,
     AO_type='LTAO',
-    norm_regime='sum',
+    norm_regime=None, #'sum',
     device=device,
     oversampling=1
 )
@@ -130,12 +132,9 @@ wvl_src = tiptorch_model.wvl.item()
 wvl_atm = tiptorch_model.wvl_atm.item()
 GS_wvl  = tiptorch_model.GS_wvl.item()
 
-factor = (wvl_src / wvl_atm)**2 # Scaling factor for PSDs due to the wavelength difference
+norm_factor = (wvl_src / wvl_atm)**2 # Scaling factor for PSDs due to the wavelength difference
 
-#%%
-# Update r0 parameters to match P3
-# tiptorch_model.r0 = tiptorch_model.r0 * (wvl_src / wvl_atm)**(6/5) # Re-scale r0 to src wavelength
-
+PSF_1 = tiptorch_model()
 
 #%%
 # Correct the mismatch in the noise variance between TipTorch and P3 models
@@ -164,34 +163,19 @@ W_tomo_torch    = half_to_full_reconstructor(tiptorch_model.W_tomo)
 W_alpha_torch   = half_to_full_reconstructor(tiptorch_model.W_alpha * AO_mask)
 P_beta_DM_torch = half_to_full_reconstructor(tiptorch_model.P_beta_DM * AO_mask)
 P_beta_L_torch  = half_to_full_reconstructor(tiptorch_model.P_beta_L * AO_mask)
-freq_t_torch    = half_to_full_reconstructor(tiptorch_model.freq_t)
+freq_t_torch    = half_to_full_reconstructor(tiptorch_model.freq_t / tiptorch_model.wind_speed.view(1,1,1,-1))
 
 #%
 # n2 =  23.7+6839.4/(130-(GS_wvl*1.e6)**(-2))+45.47/(38.9-(GS_wvl*1.e6)**(-2))
 # n1 =  23.7+6839.4/(130-(wvl_ref*1.e6)**(-2))+45.47/(38.9-(wvl_ref*1.e6)**(-2))
 
-def refractionIndex(wvl,nargout=1):
-    ''' Refraction index -1 as a fonction of the wavelength.
-    Valid for lambda between 0.2 and 4µm with 1 atm of pressure and 15 degrees Celsius
-        Inputs : wavelength in meters
-        Outputs : n-1 and dn/dwvl
-    '''
-    c1 = 64.328
-    c2 = 29498.1
-    c3 = 146.0
-    c4 = 255.4
-    c5 = 41.0
-    wvlRef = wvl*1e6
-
-    nm1 = 1e-6 * (c1 +  c2/(c3-1.0/wvlRef**2) + c4/(c5 - 1.0/wvlRef**2) )
-    dndw= -2e-6 * (c1 +  c2/(c3-1.0/wvlRef**2)**2 + c4/(c5 - 1.0/wvlRef**2)**2 )/wvlRef**3
-    if nargout == 1:
-        return nm1
-    else:
-        return (nm1,dndw)
+def refractionIndex(wvl):
+    c = [64.328, 29498.1, 146.0, 255.4, 41.0]
+    wvlRef = wvl*1e6  # Convert from [m] to [um]
+    return 1e-6 * (c[0] +  c[1]/(c[2]-1.0/wvlRef**2) + c[3]/(c[4] - 1.0/wvlRef**2) )
 
 #%%
-C = 1 / factor
+C = 1 / norm_factor
 # C = 1
 
 # Make PSDs displayable and comparable for both models
@@ -209,6 +193,11 @@ def PSD_preprocess(psd_data):
 TipTorch_PSDs = {}
 for key in P3_PSDs.keys():
     TipTorch_PSDs[key] = PSD_preprocess(tiptorch_model.PSDs[key].clone())
+    
+    if key == 'WFS noise':
+        # Apply wavelength scaling for noise PSD only
+        TipTorch_PSDs[key] /= norm_factor
+    
     P3_PSDs[key] = PSD_preprocess(P3_PSDs[key])
 
 #%%
@@ -252,8 +241,8 @@ def plot_side_by_side(torch_data, P3_data, title, scale='log'):
     vmin = np.percentile(combined_positive, 10)
     vmax = np.percentile(combined_positive, 99.975)    
 
-    ax1, im1 = display_map(P3_data, title=f'P3 {title}', ax=ax1, vmin=vmin, vmax=vmax, scale=scale, colorbar=False)
-    ax2, im2 = display_map(torch_data, title=f'TipTorch {title}', ax=ax2, vmin=vmin, vmax=vmax, scale=scale, colorbar=False)
+    ax1, im1 = display_map(torch_data, title=f'TipTorch {title}', ax=ax1, vmin=vmin, vmax=vmax, scale=scale, colorbar=False)
+    ax2, im2 = display_map(P3_data, title=f'P3 {title}', ax=ax2, vmin=vmin, vmax=vmax, scale=scale, colorbar=False)
         
     # Add shared colorbar - thicker and on the right
     cbar = fig.colorbar(im2, ax=[ax1, ax2], label='Value', fraction=0.03, pad=0.02, aspect=15, shrink=1.8)
@@ -292,11 +281,12 @@ def compute_difference_stats(torch_data, P3_data, title='', verbose=True):
     diff_stats = {
         'diff_array': diff_normalized,
         'mean': np.mean(diff_normalized),
+        'median': np.median(diff_normalized),
         'std':  np.std(diff_normalized),
         'max':  np.max(np.abs(diff_normalized))
     }
     if verbose:
-        print(f"{title}: Mean: {diff_stats['mean']:.2f}%, STD: {diff_stats['std']:.2f}%, Max: {diff_stats['max']:.2f}%")
+        print(f"{title}: Mean: {diff_stats['mean']:.1f}%, Median: {diff_stats['median']:.1f}%, STD: {diff_stats['std']:.1f}%, Max: {diff_stats['max']:.1f}%")
         
     return diff_stats 
 
@@ -319,8 +309,8 @@ for key in TipTorch_PSDs.keys():
 # %%
 from photutils.profiles import RadialProfile
 
-# choice = ['fitting', 'WFS noise']
-choice = ['fitting', 'spatio-temporal']
+choice = ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'diff. refract', 'chromatism']
+# choice = ['fitting', 'spatio-temporal']
 
 def plot_PSD_radial_profile(img, title, linestyle='-', color=None):
     xycen = (img.shape[-1]//2, img.shape[-2]//2)
@@ -330,24 +320,26 @@ def plot_PSD_radial_profile(img, title, linestyle='-', color=None):
     spatial_freq = rp.radius * tiptorch_model.dk.cpu().numpy()
     plt.plot(spatial_freq, rp.profile, linestyle=linestyle, color=color, label=title, linewidth=1)
 
-    # plt.ylabel(rf'PSD [nm$^2$/(1/m)$^2$]')
-    plt.xscale('symlog', linthresh=5e-2)
-
-    plt.xlim(1e-1, 1e1)
-
-    plt.grid(True, which='both', alpha=0.3)
-    plt.legend()
-    plt.xlabel('Spatial frequency (1/m)')
-    
     
 plt.figure(figsize=(12,8))
 
-for i, key in enumerate(choice):
+for i, key in (enumerate(choice)):
     plot_PSD_radial_profile(P3_PSDs[key], f'P3 {key}', linestyle='--', color=f'C{i}')
     plot_PSD_radial_profile(TipTorch_PSDs[key], f'TipTorch {key}', linestyle='-', color=f'C{i}')
 
-plt.title('PSD Radial Profile Comparison')
-plt.legend()
+
+plt.xscale('symlog', linthresh=5e-2)
+plt.yscale('symlog', linthresh=1e-3)
+
+plt.xlim(1e-1, 1e1)
+
+plt.grid(True, which='both', alpha=0.3)
+plt.xlabel('Spatial frequency (1/m)')
+
+plt.title('PSD radial profile comparison')
+plt.ylabel(rf'PSD [rad$^2$/(1/m)$^2$]')
+
+plt.legend(ncol=2)
 plt.tight_layout()
 plt.show()
 
@@ -385,7 +377,7 @@ plot_difference_map(P_beta_DM_torch_data, P_beta_DM_P3_data, title='P_beta_DM')
 _ = compute_difference_stats(W_tomo_torch_data, W_tomo_P3_data, title='W_tomo')
 _ = compute_difference_stats(W_alpha_torch_data, W_alpha_P3_data, title='W_alpha')
 _ = compute_difference_stats(P_beta_DM_torch_data, P_beta_DM_P3_data, title='P_beta_DM')
-_ = compute_difference_stats(freq_t_torch, freq_t_P3, title='freq_t')
+_ = compute_difference_stats(freq_t_torch_data, freq_t_P3_data, title='freq_t')
 _ = compute_difference_stats(P_beta_L_torch_data, P_beta_L_P3_data, title='P_beta_L')
 
 #%%

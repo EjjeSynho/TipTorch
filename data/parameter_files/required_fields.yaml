@@ -31,6 +31,8 @@ sources_LO:
 - Azimuth
 
 sensor_LO:
+- Algorithm
+- WindowRadiusWCoG
 - PixelScale
 - SigmaRON
 - Gain
@@ -46,6 +48,9 @@ sensor_HO:
 - FieldOfView
 - SigmaRON
 - PixelScale
+- Algorithm
+- WindowRadiusWCoG
+- WfsType
 - SpotFWHM
 - ExcessNoiseFactor
 - NumberPhotons
