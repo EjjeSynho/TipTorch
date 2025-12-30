@@ -2,8 +2,6 @@
 %reload_ext autoreload
 %autoreload 2
 
-from email import message
-import string
 import sys
 import os
 import tempfile
@@ -11,7 +9,6 @@ import numpy as np
 import cupy as cp
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
-import matplotlib.cm as cm
 
 sys.path.append('..')
 
@@ -61,6 +58,7 @@ W_alpha_P3   = P3_model.Walpha.get()               # extract layer-to-alpha-dire
 P_beta_DM_P3 = P3_model.PbetaDM[0].get()         # extract projection from DMs to directions of interest
 # Remove temp config
 os.remove(temp_path_ini)
+
 
 #%%
 # Compute different P3 PSD contributors and pack into dictionary
@@ -118,23 +116,24 @@ config_dict = config_manager.Convert(config_dict, framework='pytorch', device=de
 tiptorch_model = TipTorch(
     AO_config=config_dict,
     AO_type='LTAO',
-    norm_regime=None, #'sum',
+    norm_regime=None,
     device=device,
     oversampling=1
 )
 
 # Update oversampling to match P3 model exactly
-match_sampling = (P3_model.freq.k_.min().get() / tiptorch_model.sampling_factor.item()) * 1.001
+match_sampling = (P3_model.freq.k_.min().get() / tiptorch_model.sampling_factor.cpu().numpy().max()) * 1.001
 tiptorch_model.oversampling = match_sampling
 tiptorch_model.Update(init_grids=True, init_pupils=True, init_tomography=True)
 
 wvl_src = tiptorch_model.wvl.item()
 wvl_atm = tiptorch_model.wvl_atm.item()
-GS_wvl  = tiptorch_model.GS_wvl.item()
+wvl_GS  = tiptorch_model.GS_wvl.item()
 
 norm_factor = (wvl_src / wvl_atm)**2 # Scaling factor for PSDs due to the wavelength difference
 
 PSF_1 = tiptorch_model()
+
 
 #%%
 # Correct the mismatch in the noise variance between TipTorch and P3 models
@@ -171,12 +170,11 @@ freq_t_torch    = half_to_full_reconstructor(tiptorch_model.freq_t / tiptorch_mo
 
 def refractionIndex(wvl):
     c = [64.328, 29498.1, 146.0, 255.4, 41.0]
-    wvlRef = wvl*1e6  # Convert from [m] to [um]
+    wvlRef = wvl * 1e6  # Convert from [m] to [um]
     return 1e-6 * (c[0] +  c[1]/(c[2]-1.0/wvlRef**2) + c[3]/(c[4] - 1.0/wvlRef**2) )
 
 #%%
 C = 1 / norm_factor
-# C = 1
 
 # Make PSDs displayable and comparable for both models
 def PSD_preprocess(psd_data):
@@ -185,6 +183,7 @@ def PSD_preprocess(psd_data):
         PSD_buf = tiptorch_model.half_PSD_to_full(psd_data).squeeze().cpu().numpy().real
         PSD_buf[PSD_buf.shape[0]//2, PSD_buf.shape[1]//2] = 0.0
         return PSD_buf[:-1,:-1] * C
+    
     elif hasattr(psd_data, 'get'): # Convert from Cupy to Numpy
         return psd_data.squeeze().get().real
     else:
@@ -194,11 +193,18 @@ TipTorch_PSDs = {}
 for key in P3_PSDs.keys():
     TipTorch_PSDs[key] = PSD_preprocess(tiptorch_model.PSDs[key].clone())
     
-    if key == 'WFS noise':
-        # Apply wavelength scaling for noise PSD only
-        TipTorch_PSDs[key] /= norm_factor
-    
     P3_PSDs[key] = PSD_preprocess(P3_PSDs[key])
+
+#%%
+noise_variance_P3 = P3_model.ao.wfs.computeNoiseVarianceAtWavelength(
+    wvl_science=wvl_src,
+    wvl_wfs=wvl_GS,
+    r0_at_500nm=tiptorch_model.r0_().item(), 
+)[0] * (wvl_src / wvl_atm)**2 # scaled to atmosphere wavelength
+
+noise_variance_tiptorch = tiptorch_model.NoiseVariance()[0,0].item() # at atmosphere wavelength by default
+
+print(f"Noise variance - P3: {noise_variance_P3:.4f}, TipTorch: {noise_variance_tiptorch:.4f}, Difference: {noise_variance_P3 - noise_variance_tiptorch:.4f}")
 
 #%%
 def display_map(im, title='', cmap='viridis', show_axis=True, fontsize=12, ax=None, vmin=None, vmax=None, scale='log', colorbar=True):
@@ -280,8 +286,8 @@ def compute_difference_stats(torch_data, P3_data, title='', verbose=True):
     diff_normalized = ((torch_data - P3_data) / (P3_data + 1e-15)) * 100  # [%]
     diff_stats = {
         'diff_array': diff_normalized,
-        'mean': np.mean(diff_normalized),
         'median': np.median(diff_normalized),
+        'mean': np.mean(diff_normalized),
         'std':  np.std(diff_normalized),
         'max':  np.max(np.abs(diff_normalized))
     }
@@ -309,8 +315,8 @@ for key in TipTorch_PSDs.keys():
 # %%
 from photutils.profiles import RadialProfile
 
-choice = ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'diff. refract', 'chromatism']
-# choice = ['fitting', 'spatio-temporal']
+# choice = ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'diff. refract', 'chromatism']
+choice = ['fitting', 'WFS noise']
 
 def plot_PSD_radial_profile(img, title, linestyle='-', color=None):
     xycen = (img.shape[-1]//2, img.shape[-2]//2)
@@ -380,12 +386,8 @@ _ = compute_difference_stats(P_beta_DM_torch_data, P_beta_DM_P3_data, title='P_b
 _ = compute_difference_stats(freq_t_torch_data, freq_t_P3_data, title='freq_t')
 _ = compute_difference_stats(P_beta_L_torch_data, P_beta_L_P3_data, title='P_beta_L')
 
-#%%
-np.abs(P_beta_L_torch - P_beta_L_P3).mean()
-
 
 #%%
 # display_map(freq_t_torch_data, scale='linear', colorbar=True)
-
 plot_side_by_side(freq_t_torch_data, freq_t_P3_data, title='freq_t')
 

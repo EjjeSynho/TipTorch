@@ -2,7 +2,6 @@
 import sys
 sys.path.insert(0, '..')
 
-import time
 import numpy as np
 import torch
 from torch import fft, nn
@@ -15,7 +14,7 @@ from tools.air_refraction import AirRefractiveIndexCalculator
 from pathlib import Path
 import warnings
 
-#%%
+
 class TipTorch(torch.nn.Module): 
     def InitPupils(self):       
         # If not provided externally, TipTorch tries to load pupil and apodizer from the config file
@@ -35,9 +34,6 @@ class TipTorch(torch.nn.Module):
         self.OTF_static_default = self.ComputeStaticOTF()
         self.OTF_static = self.OTF_static_default.clone()
         
-        # Diffraction-limited PSF (switched off by default)
-        # if self.compute_PSF_DL:
-
 
     def InitValues(self):
         # Reading parameters from the config file
@@ -229,7 +225,7 @@ class TipTorch(torch.nn.Module):
         
     def InitGrids(self):
         # Initialize grids
-        # for all generated PSDs within one batch sampling must be the same
+        # for all generated PSDs and OTFs within one PSF batch the sampling must be the same
        
         pixels_per_l_D = self.wvl * self.rad2mas / (self.psInMas * self.D)
         # self.sampling_factor = torch.maximum(2./pixels_per_l_D, self.one_gpu) * self.oversampling
@@ -244,7 +240,7 @@ class TipTorch(torch.nn.Module):
         self.dk    = 1.0 / self.D / self.sampling.min() # PSD spatial frequency step
                 
         # Initialize PSD spatial frequencies
-        # This assumes thaat pupil rotation is the same for all simulated objects
+        # This assumes thaat pupil rotation is the same for all simulated PSFs in the batch
         if self.pupil_angle != 0.0:
             kx, ky = self._gen_grid(self.nOtf)
             rot_ang = torch.deg2rad(self.pupil_angle)
@@ -329,7 +325,7 @@ class TipTorch(torch.nn.Module):
             self.ky2 = pdims( self.ky2, -1 )[..., :self.nOtf_y, :self.nOtf_x]
 
         if self.PSD_include['aliasing']:
-            # Comb samples count involved in alising PSD calculation
+            # Spatial freq comb samples count involved in aliasing PSD calculation
             n_times_y = int(np.ceil(self.nOtf/self.nOtf_AO/2))
             n_times_x = int(np.ceil(self.nOtf/self.nOtf_AO/2)) - 1
             # -1 since when using a halfed frequency grid, the last sample is truncated (from both sides)
@@ -339,8 +335,8 @@ class TipTorch(torch.nn.Module):
             n_times_x, n_times_y = min(max(2, n_times_y), n_times_limit), min(max(2, n_times_x), n_times_limit)
             ids = np.array( [[i, j] for i in range(-n_times_y+1, n_times_y) for j in range(-n_times_x+1, n_times_x) if i != 0 or j != 0] )
             
-            # The 0-th dimension is used to store shifted spatial frequency
-            # This is thing is 4D: (aliased combs) x (atmo. layers) x (kx) x (ky)
+            # The 0-th dimension is used to store the shifted spatial frequency
+            # This is thing is 4D: [N_combs x N_L x kx x ky]
             m = self.make_tensor(ids[:,0])
             n = self.make_tensor(ids[:,1])
             self.N_combs = m.shape[0]
@@ -514,9 +510,7 @@ class TipTorch(torch.nn.Module):
         self.apodizer = None
         # self.apodizer = self.make_tensor(1.0) # default apodizer
         self.PR = None # piston mode filter in alised freqs domain
-
-        # self.compute_PSF_DL = False # set to "True" to compute the diffraction-limited PSF
-        
+ 
         # Read data and initialize AO system
         self.Update(
             config = AO_config,
@@ -807,31 +801,30 @@ class TipTorch(torch.nn.Module):
         Returns:
             sigma_noise_sqr: [N_obs x N_GS] noise variance tensor
         """
+        
         # Parse WFS parameters
         WFS_wvl  = self.WFS_wvl
+        WFS_RON  = self.WFS_RON
         WFS_Nph  = self.WFS_Nph.abs().view(self.N_obs, self.N_GS)
         r0_WFS   = self.r0_new(self.r0_(), WFS_wvl, self.wvl_atm)
         WFS_nPix = self.WFS_FOV / self.WFS_n_sub
         WFS_pixelScale = self.WFS_psInMas * self.mas2arc  # [arcsec]
-        WFS_RON = self.WFS_RON
 
-        # nD: spot FWHM in pixels without turbulence (diffraction-limited)
-        nD = torch.maximum(
-            self.rad2arc * WFS_wvl / self.WFS_d_sub / WFS_pixelScale, 
-            self.one_gpu
-        )
-        
-        # nT: spot FWHM in pixels with turbulence
-        nT = torch.maximum(
-            torch.hypot(
-                self.WFS_spot_FWHM.max() * self.mas2arc,
-                self.rad2arc * WFS_wvl / r0_WFS
-            ) / WFS_pixelScale,
-            self.one_gpu
-        )
-        
         # Shack-Hartmann WFS calculations
         if self.is_SH:
+            # nD: spot FWHM in pixels without turbulence (diffraction-limited), for DL: nT = nD = 2
+            nD = torch.maximum(
+                self.rad2arc * WFS_wvl / self.WFS_d_sub / WFS_pixelScale, 
+                self.one_gpu
+            )   
+            spot_FWHM_turb = 0.98 * self.rad2arc * WFS_wvl / r0_WFS / torch.sqrt(self.one_gpu*2.)  # [arcsec]
+            
+            # nT: spot FWHM in pixels with turbulence and TT removed according to [Thomas et al. 2006]
+            nT = torch.maximum(
+                torch.hypot(self.WFS_spot_FWHM.max() * self.mas2arc, spot_FWHM_turb) / WFS_pixelScale,
+                self.one_gpu
+            )
+            
             # Center of gravity
             if self.WFS_algorithm == 'cog':
                 sigma_sqr_RON  = (torch.pi**2 / 3) * (WFS_RON / WFS_Nph)**2 * (WFS_nPix**2 / nD).unsqueeze(-1)**2
@@ -880,7 +873,7 @@ class TipTorch(torch.nn.Module):
             sigma_sqr_shot = WFS_Nph / WFS_Nph**2
         
         # Total noise variance
-        sigma_noise_sqr = self.WFS_excessive_factor * (sigma_sqr_RON + sigma_sqr_shot) * (self.wvl_atm / WFS_wvl).unsqueeze(-1)**2
+        sigma_noise_sqr = (self.WFS_excessive_factor * sigma_sqr_shot + sigma_sqr_RON) * (self.WFS_wvl / self.wvl_atm).unsqueeze(-1)**2
         
         return sigma_noise_sqr
         # return sigma_noise_sqr * 0 + 0.5945844430459982 # TODO: REMOVE IT AFTER TESTING
@@ -1262,22 +1255,4 @@ class TipTorch(torch.nn.Module):
         except:
             # Silently fail if cleanup has issues during destruction
             pass
-    
-
-    # TODO: timer as a separate class?
-    def StartTimer(self):
-        if self.device.type == 'cuda': 
-            self.start.record()
-        else:
-            self.start = time.time()
-
-    def EndTimer(self):
-        if self.device.type == 'cuda':
-            self.end.record()
-            torch.cuda.synchronize()
-            return self.start.elapsed_time(self.end)
-        else:
-            self.end = time.time()
-            return (self.end-self.start)*1000.0 # in [ms]
         
-# %%

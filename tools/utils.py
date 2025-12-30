@@ -1,9 +1,8 @@
 #%%
-from attr import has
+import time
 import numpy as np
 import torch
 from torch import nn
-# from scipy.ndimage import center_of_mass
 from photutils.centroids import centroid_quadratic, centroid_com, centroid_com, centroid_quadratic
 from astropy.modeling import models, fitting
 import matplotlib.pyplot as plt
@@ -31,26 +30,6 @@ asec2rad = np.pi / 180 / 3600
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
 r0     = lambda seeing, lmbd: rad2arc*0.976*lmbd/seeing # [m]
-
-
-# def check_framework(x):
-#     """ Determine whether an array is NumPy or CuPy. """
-#     if hasattr(x, '__module__'):
-#         module_name = x.__module__.split('.')[0]
-#         if   module_name == 'numpy': return np
-#         elif module_name == 'cupy':  return xp
-
-#     # Default to NumPy if not using GPU, otherwise CuPy
-#     return np if not use_cupy else xp
-
-
-def check_framework(x):
-    """Return the array library (numpy or cupy) that matches the input array."""
-    if isinstance(x, np.ndarray):
-        return np
-    if use_cupy and hasattr(x, 'device'):
-        return xp
-    return np
 
 
 def to_little_endian(array):
@@ -110,6 +89,37 @@ def compare_dicts(d1, d2, path=''):
         new_path = f"{path}.{k}" if path else k
         if k not in d1.keys():
             print(f"{new_path} not in d1")
+
+
+class Timer:
+    def __init__(self, device_type='cpu'):
+        self.device_type = device_type
+
+    def start(self):
+        if self.device_type == 'cuda': 
+            start = torch.cuda.Event(enable_timing=True)
+            start.record()
+            return start
+        else:
+            return time.time()
+
+    def elapsed(self, start):
+        if self.device_type == 'cuda':
+            end = torch.cuda.Event(enable_timing=True)
+            end.record()
+            torch.cuda.synchronize()
+            return start.elapsed_time(end)
+        else:
+            return (time.time()-start) * 1000.0 # in [ms]
+
+
+def check_framework(x):
+    """Return the array library (numpy or cupy) that matches the input array."""
+    if isinstance(x, np.ndarray):
+        return np
+    if use_cupy and hasattr(x, 'device'):
+        return xp
+    return np
 
 
 def pad_lists(input_list, pad_value):
@@ -448,57 +458,6 @@ def register_hooks(var):
     return make_dot
 
 
-class EarlyStopping:
-    def __init__(self, patience=2, tolerance=1e-1, relative=False):
-        self.__patience  = patience
-        self.__tolerance = tolerance
-        self.__previous_loss = 1e16
-        self.__counter = 0
-        self.__relative = relative
-        self.stop = False
-
-    def __compare(self, a, b):
-        return abs(a/b-1) < self.__tolerance if self.__relative else abs(a-b) < self.__tolerance
-
-    def __call__(self, current_loss):
-        if self.__compare(self.__previous_loss, current_loss.item()):
-            self.__counter += 1 
-            self.stop = True if self.__counter >= self.__patience else False
-        else: self.__counter = 0
-        self.__previous_loss = current_loss.item()
-
-
-'''
-def FitGauss2D(PSF):
-    nPix_crop = 16
-    crop = slice(PSF.shape[0]//2-nPix_crop//2, PSF.shape[0]//2+nPix_crop//2)
-    PSF_cropped = torch.tensor(PSF[crop,crop], requires_grad=False, device=PSF.device)
-    PSF_cropped = PSF_cropped / PSF_cropped.max()
-
-    px, py = torch.meshgrid(
-        torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=PSF.device),
-        torch.linspace(-nPix_crop/2, nPix_crop/2-1, nPix_crop, device=PSF.device),
-        indexing = 'ij')
-
-    def Gauss2D(X):
-        return X[0]*torch.exp( -((px-X[1])/(2*X[3]))**2 - ((py-X[2])/(2*X[4]))**2 )
-
-    X0 = torch.tensor([1.0, 0.0, 0.0, 1.1, 1.1], requires_grad=True, device=PSF.device)
-
-    loss_fn = nn.MSELoss()
-    optimizer = optim.LBFGS([X0], history_size=10, max_iter=4, line_search_fn="strong_wolfe")
-
-    for _ in range(20):
-        optimizer.zero_grad()
-        loss = loss_fn(Gauss2D(X0), PSF_cropped)
-        loss.backward()
-        optimizer.step(lambda: loss_fn(Gauss2D(X0), PSF_cropped))
-
-    FWHM = lambda x: 2*np.sqrt(2*np.log(2)) * np.abs(x)
-
-    return FWHM(X0[3].detach().cpu().numpy()), FWHM(X0[4].detach().cpu().numpy())
-'''
-
 def FitMoffat2D_astropy(PSF):
     nPix_crop = 22  # Can be even or odd
     N = PSF.shape[0]
@@ -771,10 +730,9 @@ class GradientLoss(nn.Module):
         return loss
 
 
+'''
 def check_types(obj, prefix=''):
-    '''
-    Recursively checks and prints the types of elements in a nested dictionary or tensor structure.
-    '''
+    # Recursively checks and prints the types of elements in a nested dictionary or tensor structure.
     if isinstance(obj, dict):
         for key, value in obj.items():
             full_key = f'{prefix}{key}' if not prefix else f'{prefix}.{key}'
@@ -787,6 +745,7 @@ def check_types(obj, prefix=''):
                 print(f'{full_key}: {type(value).__name__}')
     else:
         print(f'{prefix}: {type(obj).__name__}')
+'''
 
 class CombinedLoss:
     def __init__(self, data, func, wvl_weights, mae_weight=2500, mse_weight=1120):

@@ -11,7 +11,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from torch import nn, optim
-from tools.plotting import plot_radial_PSF_profiles, SR, draw_PSF_stack, rad2mas, cropper, EarlyStopping
+from tools.plotting import plot_radial_PSF_profiles, SR, draw_PSF_stack, rad2mas, cropper
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE_STD_dataset_utils import SPHERE_preprocess, SamplesByIds
 from managers.config_manager import GetSPHEREonsky
