@@ -394,7 +394,7 @@ class TipTorch(torch.nn.Module):
         return self.OTF_static
 
 
-    def Update(self, config=None, init_grids=False, init_pupils=False, init_tomography=False):
+    def Update(self, config=None, grids=False, pupils=False, tomography=False):
         # Update the model with a new configuration. To ensure optimal performance, different
         # components can be updated independently when needed. By default, only values are updated
         
@@ -403,11 +403,11 @@ class TipTorch(torch.nn.Module):
         self.InitValues()
 
         if self.is_float: self.to_float()
-        if init_grids:    self.InitGrids()
-        if init_pupils:   self.InitPupils()
+        if grids:    self.InitGrids()
+        if pupils:   self.InitPupils()
         
         # If the number of sources have changed, reinitialize the tomography projector
-        if (self.tomography and init_tomography) or (self.tomography and init_grids):
+        if (self.tomography and tomography) or (self.tomography and grids):
             if self.on_axis:
                 # Tomographic src to DM projector for on-axis is just an identity matrix
                 self.P_beta_DM = torch.ones([self.N_src, self.nOtf_AO_y, self.nOtf_AO_x, 1, self.N_DM], dtype=torch.complex64, device=self.device) * pdims(self.mask_corrected_AO, 2)
@@ -520,9 +520,9 @@ class TipTorch(torch.nn.Module):
         # Read data and initialize AO system
         self.Update(
             config = AO_config,
-            init_grids = True,
-            init_pupils = True,
-            init_tomography = True
+            grids = True,
+            pupils = True,
+            tomography = True
         )
         
         self.PSDs = {}
@@ -1141,6 +1141,19 @@ class TipTorch(torch.nn.Module):
         self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)
         
         return (PSF_out / self.norm_scale) * F + bg
+
+
+    def SetWavelengths(self, wavelengths):
+        ''' Set new simualted wavelengths in [nm] '''
+        self.config['sources_science']['Wavelength'] = wavelengths.view(1,-1) # [nm]
+        self.Update(grids=True, pupils=True, tomography=True)
+        self.wavelengths = wavelengths # [nm]
+
+
+    def SetImageSize(self, img_size):
+        ''' Set new image size in pixels '''
+        self.config['sensor_science']['FieldOfView'] = img_size
+        self.Update(grids=True, pupils=True, tomography=True)
 
 
     def _to_device_recursive(self, obj, device):

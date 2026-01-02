@@ -467,7 +467,7 @@ with torch.no_grad():
 
 #%%
 config_file['sensor_science']['FieldOfView'] = box_size
-toy.Update(reinit_grids=True, reinit_pupils=True)
+toy.Update(regrids=True, repupils=True)
 
 with torch.no_grad():
     PSF_pred_small = toy(pred_inputs := normalizer.unstack(net(NN_inp)))

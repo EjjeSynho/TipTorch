@@ -5,17 +5,8 @@
 import sys
 sys.path.insert(0, '..')
 
-import pickle
 import torch
-import numpy as np
-import matplotlib.pyplot as plt
-from tools.plotting import plot_radial_PSF_profiles, plot_radial_PSF_profiles_relative, draw_PSF_stack, mask_circle, PupilVLT
 from project_settings import device
-from torchmin import minimize
-from tools.normalizers import TransformSequence, Uniform, LineModel, QuadraticModel
-from managers.input_manager import InputsTransformer
-
-
 from PSF_models.TipTorch import TipTorch
 
 
@@ -47,7 +38,7 @@ writer = SummaryWriter(log_dir='./runs/tiptorch_half_inference_profiling')
 # input_tensor = torch.randn(1, 10)
 
 for _ in range(10):
-    # tiptorch_half.Update(reinit_grids=True, reinit_pupils=True)
+    # tiptorch_half.Update(regrids=True, repupils=True)
     tiptorch_half(x=inputs)
 
 
@@ -62,7 +53,7 @@ with profiler.profile(
     
 ) as prof:
     with torch.no_grad():
-        # tiptorch_half.Update(reinit_grids=True, reinit_pupils=True)
+        # tiptorch_half.Update(regrids=True, repupils=True)
         tiptorch_half(x=inputs)
         
 
@@ -70,3 +61,43 @@ with profiler.profile(
 print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
 # prof.export_chrome_trace("trace.json")
 
+
+#%%
+"""
+from torch.utils.tensorboard import SummaryWriter
+import torch.profiler as profiler
+import torch.nn as nn
+
+n_air = AirRefractiveIndexCalculator(device=torch.device("cuda:0"), dtype=torch.float32)
+wvl = torch.tensor(1.6e-6, device=torch.device("cuda:0"), dtype=torch.float32)
+
+writer = SummaryWriter(log_dir='./runs/tiptorch_half_inference_profiling')
+
+# model = nn.Linear(10, 5)
+# model.eval()  # Set the model to evaluation mode
+# input_tensor = torch.randn(1, 10)
+
+for _ in range(10):
+    # tiptorch_half.Update(regrids=True, repupils=True)
+    n_air(wvl)
+
+
+# Define the profiler
+with profiler.profile(
+    activities=[
+        profiler.ProfilerActivity.CPU,
+        profiler.ProfilerActivity.CUDA],  # Use CUDA if available
+    on_trace_ready=profiler.tensorboard_trace_handler('./runs/tiptorch_half_inference_profiling'),
+    record_shapes=True,
+    with_stack=True
+    
+) as prof:
+    with torch.no_grad():
+        # tiptorch_half.Update(regrids=True, repupils=True)
+        n_air(wvl)
+
+
+# Print profiler summary
+print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+# prof.export_chrome_trace("trace.json")
+"""

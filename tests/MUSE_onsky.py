@@ -72,8 +72,8 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 458 # surprisingly poor blue fitting
 
 # ids = 482 # good one
-# ids = 494 # good one
-ids = 462 # good one
+ids = 494 # good one
+# ids = 462 # good one
 # ids = 475 # good one, mb DM correction radius mismatch
 # ids = 468 # good one
 
@@ -140,7 +140,7 @@ from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
 wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
-# wvl_weights = wvl_weights * 0 + 1
+wvl_weights = wvl_weights * 0 + 1
 
 # mask = torch.tensor(mask_circle(PSF_0.shape[-1], 5)).view(1, 1, *PSF_0.shape[-2:]).to(device)
 # mask_inv = 1.0 - mask

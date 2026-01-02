@@ -34,8 +34,8 @@ class PSFModelNFM:
         device          = device
     ):
         
-        self.LO_N_params = 75
         self.Z_mode_max  = Z_mode_max
+        self.LO_N_params = None
         
         self.LO_NCPAs        = LO_NCPAs
         self.multiple_obs    = multiple_obs
@@ -198,7 +198,6 @@ class PSFModelNFM:
 
 
     def init_model(self, config):
-        # model_config['DM']['DmPitchs'] = torch.tensor([0.245], dtype=torch.float32, device=device)  # [m]
         pupil_angle = config['telescope']['PupilAngle']
         
         if hasattr(pupil_angle, '__len__'):
@@ -228,15 +227,16 @@ class PSFModelNFM:
             device = self.device,
             oversampling = 1
         )
+        self.model.approx_noise_gain = False
         # _ = self.model()
 
 
     def init_NCPAs(self): 
         # LO_basis = PixelmapBasis(model, ignore_pupil=False)
-        Z_basis = ZernikeBasis(self.model, N_modes=self.LO_N_params, ignore_pupil=False)
+        Z_basis = ZernikeBasis(self.model, N_modes=self.Z_mode_max, ignore_pupil=False)
         sausage_basis = MUSEPhaseBump(self.model, ignore_pupil=False)
 
-        # LO NCPAs + phase bump optimized jointly
+        # LO NCPAs + phase bump are optimized jointly
         composite_basis = torch.concat([
             (sausage_basis.OPD_map).unsqueeze(0).flip(-2)*5e6*self.model.pupil.unsqueeze(0),
             Z_basis.basis[2:self.Z_mode_max,...]
@@ -392,13 +392,12 @@ class PSFModelNFM:
 
 
     def SetWavelengths(self, wavelengths):
-        self.model.config['sources_science']['Wavelength'] = wavelengths.view(1,-1) # [nm]
-        self.model.Update(init_grids=True, init_pupils=True, init_tomography=True)
-        self.wavelengths = wavelengths # [nm]
+        self.model.SetWavelengths(wavelengths)
+
 
     def SetImageSize(self, img_size):
-        self.model.config['sensor_science']['FieldOfView'] = img_size
-        self.model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+        self.model.SetImageSize(img_size)
+        
 
     __call__ = forward
 

@@ -290,7 +290,7 @@ def run_model(x_dict, config, idx, λ_ids):
         x_dict['LO_coefs'] = torch.hstack( (phase_bump_dataset[idx].unsqueeze(-1), LO_median.repeat(len(idx),1)) )
 
     # Update internal state of the PSF model for the given batch config. Update just model parameters, not grids
-    PSF_model.model.Update(config=config, init_grids=False, init_pupils=False, init_tomography=True) 
+    PSF_model.model.Update(config=config, grids=False, pupils=False, tomography=True) 
     return PSF_model(x_dict)
 
 #%%

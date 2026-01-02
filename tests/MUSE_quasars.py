@@ -298,12 +298,12 @@ shared_inputs.update(predicted_model_inputs) # update the internal values of the
 with torch.no_grad():
     # Quasi-infinite PSF image to compute how much flux is lost while cropping
     model_config['sensor_science']['FieldOfView'] = 511
-    model.Update(config=model_config, init_grids=True, init_pupils=True, init_tomography=True)
+    model.Update(config=model_config, grids=True, pupils=True, tomography=True)
     PSF_pred_big = model(predicted_model_inputs).clone() # First initial prediction of the "big" PSF
 
     # The actual size of the simulated PSFs
     model_config['sensor_science']['FieldOfView'] = PSF_size
-    model.Update(config=model_config, init_grids=True, init_pupils=True, init_tomography=True)
+    model.Update(config=model_config, grids=True, pupils=True, tomography=True)
     PSF_pred_small = model(predicted_model_inputs)
 
 
@@ -485,7 +485,7 @@ plt.grid()
 plt.show()
 
 #%% Interpolate PSF model parameters over the full wavelengths range assuming they change smooth
-from tools.misc import QuadraticModel
+from tools.curves import QuadraticModel
 
 F_model    = QuadraticModel(λ_sparse)
 Jx_model   = QuadraticModel(λ_sparse)
@@ -643,7 +643,7 @@ with torch.no_grad():
     for batch_id in tqdm(range(len(λ_batches))):
         batch_size = len(λ_batches[batch_id])
         model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
-        model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+        model.Update(grids=True, pupils=True, tomography=True)
 
         empty_img = torch.zeros([batch_size, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
         PSF_batch = []
@@ -676,7 +676,7 @@ with torch.no_grad():
         model_full_split.append( add_ROIs_separately( empty_img*0.0, PSF_batch, srcs_image_data["img_crops"], srcs_image_data["img_slices"] ).cpu().numpy() )
         
 model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
-model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+model.Update(grids=True, pupils=True, tomography=True)
 
 model_full = np.vstack(model_full)
 model_full_split = np.concatenate(model_full_split, axis=1)

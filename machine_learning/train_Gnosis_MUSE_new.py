@@ -179,9 +179,9 @@ def run_model(PSF_model, config, predicted_inputs, fixed_inputs={}):
     # Update model configuration if needed
     PSF_model.model.Update(
         config = config,
-        init_grids = False,
-        init_pupils = True,
-        init_tomography = False
+        grids = False,
+        pupils = True,
+        tomography = False
     )
 
     # Merge predicted and fixed inputs
@@ -453,7 +453,7 @@ with torch.no_grad():
             'Moffat':          False
         }
         
-        PSF_model.model.Update(config, init_grids=False, init_pupils=True, init_tomography=False)
+        PSF_model.model.Update(config, grids=False, pupils=True, tomography=False)
         PSFs_3_val_poly.append(run_model(PSF_model, config, {}, all_inputs).cpu())
 
 

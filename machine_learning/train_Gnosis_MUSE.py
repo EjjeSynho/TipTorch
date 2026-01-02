@@ -204,9 +204,9 @@ def loss_combined(A, B):
 def run_model(model, config, predicted_inputs, fixed_inputs={}):
     model.Update(
         config = config,
-        init_grids = False,
-        init_pupils = True,
-        init_tomography = False
+        grids = False,
+        pupils = True,
+        tomography = False
     )
 
     x_unpacked = predicted_inputs | fixed_inputs # It overrides the values from the destacked dictionary
@@ -548,7 +548,7 @@ with torch.no_grad():
             'Moffat':          False
         }
         
-        tiptorch.Update(config, init_grids=False, init_pupils=True, init_tomography=False)
+        tiptorch.Update(config, grids=False, pupils=True, tomography=False)
         PSFs_3_val_poly.append(run_model(tiptorch, config, {}, all_inputs).cpu())
 
 

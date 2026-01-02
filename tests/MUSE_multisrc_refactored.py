@@ -276,11 +276,11 @@ model_inputs.update(pred_inputs)
 with torch.no_grad():
     config_file['NumberSources'] = 1
     config_file['sensor_science']['FieldOfView'] = 511
-    model.Update(config=config_file, init_grids=True, init_pupils=True, init_tomography=True)
+    model.Update(config=config_file, grids=True, pupils=True, tomography=True)
     PSF_pred_big = model(pred_inputs) # First initial prediction of the "big" PSF
     
     config_file['sensor_science']['FieldOfView'] = PSF_size
-    model.Update(config=config_file, init_grids=True, init_pupils=True, init_tomography=True)
+    model.Update(config=config_file, grids=True, pupils=True, tomography=True)
     PSF_pred_small = model(pred_inputs) # Second initial prediction of the "small" PSF
     torch.cuda.empty_cache()
 
@@ -440,7 +440,7 @@ merged_config = MultipleTargetsInOneObservation(config_file, N_src, device)
 # model_batch.on_axis = False
 
 torch.cuda.empty_cache()
-model.Update(config=merged_config, init_grids=True, init_pupils=True, init_tomography=True)
+model.Update(config=merged_config, grids=True, pupils=True, tomography=True)
 
 #%%
 model_inputs.set_optimizable(['GL_frac', 'r0', 'dn'], True)
@@ -1146,7 +1146,7 @@ PlotSourcesProfiles(cube_sparse, model_fit, sources, radius=16, title='Fitted PS
 
 
 #%% 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-from tools.misc import QuadraticModel
+from tools.curves import QuadraticModel
 
 
 λ_sparse = wavelength_selected.flatten() * 1e9 # [nm]
@@ -1324,7 +1324,7 @@ model_full = []
 for batch_id in tqdm(range(len(λ_batches))):
     batch_size = len(λ_batches[batch_id])
     config_file['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
-    model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+    model.Update(grids=True, pupils=True, tomography=True)
 
     empty_img = torch.zeros([batch_size, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
     PSF_batch = []

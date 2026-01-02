@@ -126,7 +126,7 @@ tiptorch_model = TipTorch(
 # Update oversampling to match P3 model exactly
 match_sampling = (P3_model.freq.k_.min().get() / tiptorch_model.sampling_factor.cpu().numpy().max()) * 1.001
 tiptorch_model.oversampling = match_sampling
-tiptorch_model.Update(init_grids=True, init_pupils=True, init_tomography=True)
+tiptorch_model.Update(grids=True, pupils=True, tomography=True)
 
 wvl_src = tiptorch_model.wvl.item()
 wvl_atm = tiptorch_model.wvl_atm.item()

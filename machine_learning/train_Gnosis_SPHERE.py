@@ -196,7 +196,7 @@ def run_model(model, batch, predicted_inputs, fixed_inputs={}):
     config_manager.Convert(current_configs, framework='pytorch', device=device)
 
     model.config = current_configs
-    model.Update(reinit_grids=False, reinit_pupils=False)
+    model.Update(regrids=False, repupils=False)
 
     x_unpacked = predicted_inputs | fixed_inputs # It overides the values from the destacked dictionary
     if 'basis_coefs' in x_unpacked:
@@ -222,7 +222,7 @@ def func(x_, fixed_inputs):
 x0, fixed_inputs, PSF_0, init_config = get_data(batch_data, fixed_entries)
 
 toy.config = init_config
-toy.Update(reinit_grids=True, reinit_pupils=False)
+toy.Update(regrids=True, repupils=False)
 
 crop_all    = cropper(PSF_0, 91)
 crop_center = cropper(PSF_0, 7)
@@ -397,7 +397,7 @@ for epoch in range(epochs):
 
         x0, fixed_inputs, PSF_0, current_config = get_data(batch_data, fixed_entries)
         toy.config = current_config
-        toy.Update(reinit_grids=True, reinit_pupils=True)
+        toy.Update(regrids=True, repupils=True)
 
         batch_size = len(batch_data['IDs'])
 
@@ -422,7 +422,7 @@ for epoch in range(epochs):
             
             x0, fixed_inputs, PSF_0, current_config = get_data(batch_data, fixed_entries)
             toy.config = current_config
-            toy.Update(reinit_grids=True, reinit_pupils=True)
+            toy.Update(regrids=True, repupils=True)
 
             batch_size = len(batch_data['IDs'])
 
@@ -492,7 +492,7 @@ for epoch in range(epochs):
             x0, fixed_inputs, PSF_0, current_config = get_data(batch_data, fixed_entries)
             # toy = TipTorch(current_config, None, device)
             toy.config = current_config
-            toy.Update(reinit_grids=True, reinit_pupils=True)
+            toy.Update(regrids=True, repupils=True)
             
             batch_size = len(batch_data['IDs'])
 
@@ -523,7 +523,7 @@ for epoch in range(epochs):
                 x0, fixed_inputs, PSF_0, current_config = get_data(batch_data, fixed_entries)
                 # toy = TipTorch(current_config, None, device)
                 toy.config = current_config
-                toy.Update(reinit_grids=True, reinit_pupils=True)
+                toy.Update(regrids=True, repupils=True)
 
                 batch_size = len(batch_data['IDs'])
 
@@ -608,7 +608,7 @@ with torch.no_grad():
             
             x0, fixed_inputs, PSF_0, init_config = get_data(batch_data, fixed_entries)
             toy.config = init_config
-            toy.Update(reinit_grids=True, reinit_pupils=True)
+            toy.Update(regrids=True, repupils=True)
 
             configs.append(deepcopy(init_config))
             pred_inputs_stats.append( deepcopy(transformer.unstack(net(x0))) )
@@ -743,7 +743,7 @@ with torch.no_grad():
     # ------------------------- Validate calibrated -------------------------
     x0, fixed_inputs, PSF_0, init_config = get_data(batch_data, fitted_entries)
     toy.config = init_config
-    toy.Update(reinit_grids=True, reinit_pupils=True)
+    toy.Update(regrids=True, repupils=True)
     
     PSFs_data.append(PSF_0.cpu())
     fitted_dict = get_fixed_inputs(batch_data, fitted_entries)
