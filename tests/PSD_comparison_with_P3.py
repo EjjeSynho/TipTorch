@@ -10,6 +10,8 @@ import cupy as cp
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
+from tools.utils import pdims
+
 sys.path.append('..')
 
 from project_settings import DATA_FOLDER, PROJECT_PATH, DATA_FOLDER
@@ -136,19 +138,9 @@ PSF_1 = tiptorch_model()
 
 
 #%%
-# Correct the mismatch in the noise variance between TipTorch and P3 models
-# tiptorch_model.dn = torch.tensor(\
-#     P3_model.ao.wfs.processing.noiseVar.flatten()[0].item() - \
-#     tiptorch_model.NoiseVariance().flatten()[0].item(),
-#     device=device,
-#     dtype=default_torch_type
-# )
-
 # tiptorch_model.IOR_src_wvl = n_air_P3(tiptorch_model.wvl)
 # tiptorch_model.IOR_wvl_atm = n_air_P3(tiptorch_model.wvl_atm)
 # tiptorch_model.IOR_GS_wvl  = n_air_P3(tiptorch_model.GS_wvl) # GS_wvl may depend on the filter for SCAO or on LGS wavelength
-
-_ = tiptorch_model()
 
 # Restore from half to full size
 def half_to_full_reconstructor(W_half):
@@ -204,7 +196,46 @@ noise_variance_P3 = P3_model.ao.wfs.computeNoiseVarianceAtWavelength(
 
 noise_variance_tiptorch = tiptorch_model.NoiseVariance()[0,0].item() # at atmosphere wavelength by default
 
-print(f"Noise variance - P3: {noise_variance_P3:.4f}, TipTorch: {noise_variance_tiptorch:.4f}, Difference: {noise_variance_P3 - noise_variance_tiptorch:.4f}")
+print(f"Noise var. - P3: {noise_variance_P3:.4f}, TipTorch: {noise_variance_tiptorch:.4f}, Diff.: {noise_variance_P3 - noise_variance_tiptorch:.4f}")
+# print(np.nanmean(P3_model.Cb.get() / half_to_full_reconstructor(tiptorch_model.C_b) - C).real)
+
+
+#%%
+
+PSD_noise_P3 = cp.zeros((P3_model.freq.resAO, P3_model.freq.resAO, P3_model.ao.src.nSrc), dtype=complex)
+# noise level is considered in the covariance matrix Cb
+# and the noise gain is considered as follows (0.6 - 1.0)
+noise_gain = min(0.8, 0.4 + 0.1333 * P3_model.ao.rtc.holoop['delay'])**2
+
+for j in range(P3_model.ao.src.nSrc):
+    PW = cp.matmul(P3_model.PbetaDM[j], P3_model.W)
+    PW_t = cp.conj(PW.transpose(0,1,3,2))
+    tmp  = cp.matmul( PW, cp.matmul(P3_model.Cb, PW_t) )
+    PSD_noise_P3[:,:,j] = P3_model.freq.mskInAO_ * tmp[:, :, 0, 0] * P3_model.freq.pistonFilterAO_ * noise_gain
+
+PSD_noise_P3 = PSD_noise_P3.squeeze().real.get()
+
+#%%
+noise_gain_torch = min(0.8, 0.4 + 0.1333 * tiptorch_model.HOloop_delay.item())**2
+PW_torch = torch.matmul(tiptorch_model.P_beta_DM, tiptorch_model.W)
+PW_t_torch = torch.conj(PW_torch.transpose(-2, -1))
+tmp_torch = torch.matmul(PW_torch, torch.matmul(tiptorch_model.C_b, PW_t_torch))
+
+PSD_noise_tiptorch = pdims(tiptorch_model.mask_corrected_AO * tiptorch_model.piston_filter, 2) * tmp_torch * noise_gain_torch
+PSD_noise_tiptorch = half_to_full_reconstructor(PSD_noise_tiptorch).squeeze().real
+
+
+#%%
+
+key = 'WFS noise'
+
+WFS_P3 = P3_PSDs[key]
+WFS_TipTorch = TipTorch_PSDs[key]
+
+rel_diff = WFS_TipTorch / WFS_P3
+
+med_rel_diff = np.nanmedian(rel_diff)
+
 
 #%%
 def display_map(im, title='', cmap='viridis', show_axis=True, fontsize=12, ax=None, vmin=None, vmax=None, scale='log', colorbar=True):
@@ -292,7 +323,8 @@ def compute_difference_stats(torch_data, P3_data, title='', verbose=True):
         'max':  np.max(np.abs(diff_normalized))
     }
     if verbose:
-        print(f"{title}: Mean: {diff_stats['mean']:.1f}%, Median: {diff_stats['median']:.1f}%, STD: {diff_stats['std']:.1f}%, Max: {diff_stats['max']:.1f}%")
+        # print(f"{title}: Mean: {diff_stats['mean']:.1f}%, Median: {diff_stats['median']:.1f}%, STD: {diff_stats['std']:.1f}%, Max: {diff_stats['max']:.1f}%")
+        print(f"{title}: Median: {diff_stats['median']:.1f}%, Max: {diff_stats['max']:.1f}%")
         
     return diff_stats 
 

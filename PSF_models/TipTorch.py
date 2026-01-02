@@ -505,6 +505,12 @@ class TipTorch(torch.nn.Module):
         # Default inversion method for tomographic reconstruction
         self.inversion_method = 'lstsq'
         
+        # Enable simplified noise gaain computation
+        if self.tomography:
+            self.approx_noise_gain = True
+        else:
+            self.approx_noise_gain = False
+        
         # Piston filters           
         self.piston_filter = None # piston mode filter in the AO-corrected freq. domain
         self.apodizer = None
@@ -595,26 +601,30 @@ class TipTorch(torch.nn.Module):
 
     # TODO: accelerate this function
     def NoiseGain(self, nF = 1000):
-        Ts = 1.0 / self.HOloop_rate  # sampling time
-        delay    = self.HOloop_delay # latency between the measurement and the correction
-        loopGain = self.HOloop_gain
-        
-        f = torch.zeros([self.N_obs, nF], device=self.device)
-        
-        # TODO: this is slow
-        for i in range(self.N_obs):
-            f[i,:] = torch.logspace(-3, torch.log10(0.5/Ts[i]).item(), nF)
+        if self.approx_noise_gain == False:
+            Ts = 1.0 / self.HOloop_rate  # sampling time
+            delay    = self.HOloop_delay # latency between the measurement and the correction
+            loopGain = self.HOloop_gain
+            
+            f = torch.zeros([self.N_obs, nF], device=self.device)
+            
+            # TODO: this is slow
+            for i in range(self.N_obs):
+                f[i,:] = torch.logspace(-3, torch.log10(0.5/Ts[i]).item(), nF)
 
-        # NOTE: faster version: Create end values for logspace for all sources at once
-        # log_end = torch.log10(0.5/Ts.flatten())  # [N_obs]
-        # log_start = torch.full((self.N_obs,), -3, device=self.device)
-        # steps = torch.linspace(0, 1, nF, device=self.device).unsqueeze(0)  # [1, nF]
-        # f = 10 ** (log_start.unsqueeze(1) + (log_end.unsqueeze(1) - log_start.unsqueeze(1)) * steps)
+            # NOTE: faster version: Create end values for logspace for all sources at once
+            # log_end = torch.log10(0.5/Ts.flatten())  # [N_obs]
+            # log_start = torch.full((self.N_obs,), -3, device=self.device)
+            # steps = torch.linspace(0, 1, nF, device=self.device).unsqueeze(0)  # [1, nF]
+            # f = 10 ** (log_start.unsqueeze(1) + (log_end.unsqueeze(1) - log_start.unsqueeze(1)) * steps)
 
-        _, _, _, ntfInt = self.TransferFunctions(f, min_2d(Ts), min_2d(delay), min_2d(loopGain))
-        self.noise_gain = pdims( torch.trapz(ntfInt.abs().pow(2), f, dim=1)*2*Ts, 2 )
+            _, _, _, ntfInt = self.TransferFunctions(f, min_2d(Ts), min_2d(delay), min_2d(loopGain))
+            self.noise_gain = pdims( torch.trapz(ntfInt.abs().pow(2), f, dim=1)*2*Ts, 2 )
+        else:
+            # An average value of the noise transfer function as a function of the delay in frames for an integrator gain of 0.5
+            self.noise_gain = torch.min(self.one_gpu*0.8, 0.4 + 0.1333 * self.HOloop_delay).pow(2)
     
-
+     
     def Controller(self):
         #nTh = 1
         idim = lambda x: x.view(self.N_obs, 1, 1, self.N_L)
@@ -705,8 +715,9 @@ class TipTorch(torch.nn.Module):
             noisePSD = (PW @ self.C_b @ PW_t).squeeze(-1).squeeze(-1)
             
             # Averaging over all GSs if there are several of them assumed to have the same noise variance
-            varNoise = WFS_noise_var.mean(dim=1) if WFS_noise_var.shape[1] > 1 else WFS_noise_var
-            noisePSD = noisePSD * self.noise_gain * pdims(varNoise,2) * self.mask_corrected_AO * self.piston_filter
+            # varNoise = WFS_noise_var.mean(dim=1) if WFS_noise_var.shape[1] > 1 else WFS_noise_var
+            # noisePSD = noisePSD * self.noise_gain * pdims(varNoise,2) * self.mask_corrected_AO * self.piston_filter
+            noisePSD = noisePSD * self.noise_gain * self.mask_corrected_AO * self.piston_filter
             
         return noisePSD
 
