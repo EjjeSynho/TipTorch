@@ -13,7 +13,7 @@ from matplotlib.colors import LogNorm
 from torchmin import minimize
 
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
-# from tools.utils import GradientLoss
+from tools.utils import GradientLoss
 from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarData
 from PSF_models.NFM_wrapper import PSFModelNFM
 from project_settings import device
@@ -47,7 +47,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 359
 # ids = 121
 # ids = 184 # weak wind patterns
-ids = 338 # blurry
+# ids = 338 # blurry
 # ids = 470 # blurry
 # ids = 346 # blurry (very)
 # ids = 206 # blurry, good for red debugging
@@ -68,11 +68,11 @@ ids = 338 # blurry
 
 # ids = 457 # surprisingly poor blue fitting
 # ids = 477 # surprisingly poor blue fitting
-# ids = 467 # surprisingly poor blue fitting, large wind speed
+# ids = 467 # surprisingly poor blue fitting
 # ids = 458 # surprisingly poor blue fitting
 
 # ids = 482 # good one
-# ids = 494 # good one
+ids = 494 # good one
 # ids = 462 # good one
 # ids = 475 # good one, mb DM correction radius mismatch
 # ids = 468 # good one
@@ -110,6 +110,7 @@ N_src = PSF_0.shape[0]
 
 wavelengths = PSF_model.wavelengths
 
+# PSF_model.inputs_manager['LO_coefs'][:,0] = 100
 
 #%%
 cmap = mpl.colormaps.get_cmap('gray')  # viridis is the default colormap for imshow
@@ -139,7 +140,7 @@ from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
 wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
-# wvl_weights = wvl_weights * 0 + 1
+wvl_weights = wvl_weights * 0 + 1
 
 # mask = torch.tensor(mask_circle(PSF_0.shape[-1], 5)).view(1, 1, *PSF_0.shape[-2:]).to(device)
 # mask_inv = 1.0 - mask
@@ -288,8 +289,8 @@ include_general = ['r0', 'dn'] + \
                   (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else []) + \
                   (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else []) + \
                   ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
-                  (['L0'] if fit_outerscale else []) #+ \
-                #   (['wind_speed_single'] if fit_wind_speed else []) + \
+                  (['L0'] if fit_outerscale else []) + \
+                  (['wind_speed_single'] if fit_wind_speed else []) #+ \
                 #   ['GL_h_c']
                 #   ([x+'_x_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
 
@@ -353,22 +354,22 @@ if PSF_model.LO_NCPAs:
 #%%
 import torch.nn.functional as F
 
-N_λ = 2
-size_crop = 69
+N_λ = len(wavelengths) // 8
+W_orig = H_orig = 69
 
-PSF_model.SetWavelengths(wavelengths[[0,-1]])  # in nm
-PSF_model.SetImageSize(size_crop)
+PSF_model.SetWavelengths(wavelengths[::8])  # in nm
+PSF_model.SetImageSize(W_orig)
 
 torch.cuda.empty_cache()
 
 #%%
 center_y, center_x = PSF_0.shape[-2] // 2, PSF_0.shape[-1] // 2
-half_crop = size_crop // 2
+half_crop = H_orig // 2
 ROI = slice( center_y - half_crop, center_y + half_crop+(PSF_0.shape[0] % 2) )
 
 # Downsampling factor to reduce memory usage
 pool_size = 3
-W = H = size_crop // pool_size
+W = H = W_orig // pool_size
 
 PSF_0_pooled = F.max_pool2d(PSF_0[:, ::8, ROI, ROI], kernel_size=pool_size, stride=pool_size)
 
@@ -379,8 +380,8 @@ def run_diff_small(x_):
     """Compute PSF and apply maxpooling to reduce memory footprint."""
     psf = func(x_)
     # Apply 2D maxpooling: (N_src, N_λ, H, W) -> (N_src, N_λ, H//pool, W//pool)
-    PSF_pooled = F.max_pool2d(psf, kernel_size=pool_size, stride=pool_size)
-    return PSF_pooled.reshape(-1)
+    psf_pooled = F.max_pool2d(psf, kernel_size=pool_size, stride=pool_size)
+    return psf_pooled.reshape(-1)
 
 x_grad = x0.clone().detach().requires_grad_(True)
 
@@ -418,7 +419,8 @@ for k, v in J_per_param.items():
     print(f"{k:15s}: {v.shape}")
 
 #%%
-studied_param = 'LO_coefs'
+
+studied_param = 'dn'
 
 final_map = sensitivity_map[studied_param][0,...,0].cpu().detach().numpy()
 final_map -= final_map.mean()
@@ -444,7 +446,7 @@ plt.plot(wavelengths.squeeze().cpu().numpy()*1e9, spectrum_diff / spectrum_data 
 # %%
 from tools.plotting import plot_radial_PSD_profiles
 
-plot_radial_PSD_profiles(PSF_model)
+plot_radial_PSD_profiles(PSF_model.model)
 
 #%%
 if PSF_model.use_splines:
@@ -452,7 +454,7 @@ if PSF_model.use_splines:
     λ_min, λ_max = wavelengths.min().item()*1e9, wavelengths.max().item()*1e9
     x_ctrl = PSF_model.inputs_manager['F_x_ctrl'].squeeze()
     λ_ctrl = x_ctrl * (λ_max - λ_min) + λ_min
-    
+        
     A = PSF_model.evaluate_splines('F', torch.linspace(0, 1, N_HD_bins).to(device)).squeeze(-1)
     C = PSF_model.evaluate_splines('F', x_ctrl).squeeze(-1)
     

@@ -698,7 +698,7 @@ def plot_radial_PSD_profiles(PSF_model, xscale='symlog', yscale='symlog'):
             PSD_norm = (PSF_model.dk*PSF_model.wvl_atm*1e9/2/torch.pi)**2
             PSD = PSF_model.half_PSD_to_full(PSD * PSD_norm) # [nm^2]
 
-            img = PSD[0,0,...].cpu().numpy().real
+            img = PSD[0,0,...].detach().cpu().numpy().real
             xycen = (img.shape[-1]//2, img.shape[-2]//2)  # (x, y) position tuple
             edge_radii = np.arange(img.shape[-1]//2)
             rp = RadialProfile(img, xycen, edge_radii)
@@ -706,7 +706,7 @@ def plot_radial_PSD_profiles(PSF_model, xscale='symlog', yscale='symlog'):
             spatial_freq = rp.radius * PSF_model.dk.cpu().numpy()
             plt.plot(spatial_freq, rp.profile, label=entry, linewidth=1)
 
-    img = PSF_model.PSD[0,0,...].cpu().numpy().real
+    img = PSF_model.PSD[0,0,...].detach().cpu().numpy().real
     xycen = (img.shape[-1]//2, img.shape[-2]//2)  # (x, y) position tuple
     edge_radii = np.arange(img.shape[-1]//2)
     rp = RadialProfile(img, xycen, edge_radii)

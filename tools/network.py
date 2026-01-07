@@ -109,7 +109,7 @@ def pack_reduced_telemetry_bundles() -> None:
         logging.exception("ERROR: Failed to pack reduced telemetry bundles.")
         raise e
 
-pack_reduced_telemetry_bundles()
+# pack_reduced_telemetry_bundles()
 
 #%%
 def download_from_manifest(
