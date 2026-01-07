@@ -81,7 +81,9 @@ class TipTorch(torch.nn.Module):
         self.Cn2_weights = self.config['atmosphere']['Cn2Weights']
         self.Cn2_heights = self.config['atmosphere']['Cn2Heights'] * self.airmass # [m]
         
-        # self.h   = self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height)) # [N_obs x N_layers]
+        # self.h   = self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height))
+        self.h_ = (self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height))) # [N_obs x N_layers]
+        
         self.N_L = self.Cn2_heights.shape[-1]
         
         # N_obs is very important! It must = 1 if all simulated targets share the same observational conditions.
@@ -135,7 +137,7 @@ class TipTorch(torch.nn.Module):
 
         # Initialiaing the main optimizable parameters
         self.r0 = self.rad2arc * 0.976 * self.config['atmosphere']['Wavelength'] / self.config['atmosphere']['Seeing'] # [m]
-        self.L0  = self.config['atmosphere']['L0'].flatten() # [m]
+        self.L0 = self.config['atmosphere']['L0'].flatten() # [m]
         
         self.r0_ = lambda : ( self.r0.abs() * self.airmass**(-3.0/5.0) ).view(self.N_obs)
         
@@ -546,8 +548,7 @@ class TipTorch(torch.nn.Module):
 
     def OptimalDMProjector(self, inv_method='lstsq'):
         h_dm = self.h_DM.view(1, 1, 1, self.N_DM)
-        stretch = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
-        h = (self.Cn2_heights * stretch).view(self.N_obs, 1, 1, 1, self.N_L)
+        h = self.h_.view(self.N_obs, 1, 1, 1, self.N_L)
         
         opt_w = self.DM_opt_weight.view(self.N_obs, 1, 1, self.N_optdir, 1, 1)
 
@@ -686,9 +687,7 @@ class TipTorch(torch.nn.Module):
         else:
             kx = pdims(self.kx_AO, 1)
             ky = pdims(self.ky_AO, 1)
-            # h  = self.h.view(self.N_obs, 1, 1, self.N_L)
-            stretch = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
-            h = (self.Cn2_heights * stretch).view(self.N_obs, 1, 1, self.N_L)
+            h = self.h_.view(self.N_obs, 1, 1, self.N_L)
         
             beta_x = self.src_dirs_x.view(self.N_src, 1, 1, 1)
             beta_y = self.src_dirs_y.view(self.N_src, 1, 1, 1)
@@ -770,10 +769,8 @@ class TipTorch(torch.nn.Module):
 
 
     def DifferentialRefractionPSD(self):
-        # TODO: account for the pupil angle
-        # h = self.h.view(self.N_obs, 1, 1, 1, self.N_L)
-        stretch = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
-        h = (self.Cn2_heights * stretch).view(self.N_obs, 1, 1, 1, self.N_L)
+        # TODO: account for the pupil angle?
+        h = self.h_.view(self.N_obs, 1, 1, 1, self.N_L)
         
         w = self.Cn2_weights.view(self.N_obs, 1, 1, 1, self.N_L)
         k = self.k_AO.view(1, 1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
@@ -887,7 +884,6 @@ class TipTorch(torch.nn.Module):
         sigma_noise_sqr = (self.WFS_excessive_factor * sigma_sqr_shot + sigma_sqr_RON) * (self.WFS_wvl / self.wvl_atm).unsqueeze(-1)**2
         
         return sigma_noise_sqr
-        # return sigma_noise_sqr * 0 + 0.5945844430459982 # TODO: REMOVE IT AFTER TESTING
 
 
     def TomographicReconstructors(self, WFS_noise_var, inv_method='lstsq'):
@@ -896,9 +892,7 @@ class TipTorch(torch.nn.Module):
         then it's possible to compute one tomographic reconstructor for all simulated sources.
         For example, this is the case when all objects are within one FoV and belong to one observation
         '''
-        # h = self.h.view(self.N_obs, 1, 1, 1, self.N_L)
-        stretch = 1.0 / (1.0 - self.Cn2_heights/self.GS_height)
-        h = (self.Cn2_heights * stretch).view(self.N_obs, 1, 1, 1, self.N_L)
+        h = self.h_.view(self.N_obs, 1, 1, 1, self.N_L)
         
         kx = pdims(self.kx_AO, 2)
         ky = pdims(self.ky_AO, 2)
@@ -913,29 +907,20 @@ class TipTorch(torch.nn.Module):
         MP   = torch.einsum('nwhik,nwhkj->nwhij', M, P)  # [N_obs x nOtf_y x nOtf_x x nGS x nL]
         MP_t = torch.conj(MP.permute(0,1,2,4,3))
 
-        fix_dims = lambda x_, N: torch.diag_embed(x_).view(self.N_obs, 1, 1, N, N).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, N, N)
+        expand_dims = lambda x_, N: torch.diag_embed(x_).view(self.N_obs, 1, 1, N, N).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, N, N)
         
         # Note, that size of WFS_noise_var == N_obs
         WFS_noise_variance = WFS_noise_var.to(dtype=MP.dtype) # Convert to complex
         # As previosuly mentioned, if the same tomo reconstructor is used for all targets, then WFS_noise_variance also must be the same for all targets
-        self.C_b = fix_dims( WFS_noise_variance[:self.N_obs], self.N_GS )
+        self.C_b = expand_dims( WFS_noise_variance[:self.N_obs], self.N_GS )
         kernel = self.VonKarmanSpectrum(self.r0_().to(dtype=MP.dtype), self.L0.abs(), self.k2_AO) * self.piston_filter
-        self.C_phi = pdims(kernel, 2) * fix_dims(self.Cn2_weights, self.N_L)
+        self.C_phi = pdims(kernel, 2) * expand_dims(self.Cn2_weights, self.N_L)
 
-        # Inversion happens relative to the last two dimensions of the these tensors
+        # Inversion happens relative to the last two dimensions of these tensors
         if inv_method == 'pinv':
             self.W_tomo = (self.C_phi @ MP_t) @ torch.linalg.pinv(MP @ self.C_phi @ MP_t + self.C_b, rcond=1e-3) #1e-4
 
         elif inv_method == 'lstsq':
-            # if Tikhonov_reg:
-            #     lambda_reg = 1e-6  # Ridge Regression regularization parameter
-            #     A = (MP @ self.C_phi @ MP_t + self.C_b).transpose(-2, -1)
-            #     I_mat = torch.eye(A.size(-1), device=A.device, dtype=A.dtype)
-            #     A_reg = A.transpose(-2, -1) @ A + lambda_reg * I_mat # Regularized A matrix
-            #     B = (self.C_phi @ MP_t).transpose(-2, -1)
-            #     W_tomo = torch.linalg.lstsq(A_reg, A.transpose(-2, -1) @ B).solution.transpose(-2, -1)
-                
-            # else:
             A = (MP @ self.C_phi @ MP_t + self.C_b).transpose(-2, -1)
             B = (self.C_phi @ MP_t).transpose(-2, -1)
             # Solve the least squares problem for W^T, since we deal with W*A = B
@@ -1068,21 +1053,17 @@ class TipTorch(torch.nn.Module):
     
     
     def half_PSD_to_full(self, half_PSD):
-        # n_cols_half = half_PSD.size(-1) 
         return torch.cat([
             half_PSD,
-            # torch.flip(half_PSD[..., :, :n_cols_half-n_cols_half % 2], dims=(-2,-1))
             torch.flip(half_PSD[..., :, :-1], dims=(-2,-1)) # Works only for odd num. of pixels
         ], dim=-1)
     
     
     def _rfft2_to_full(self, matrix_rfft2):
-        # width = matrix_rfft2.size(-1)
         return torch.cat([
-            # torch.flip(matrix_rfft2[..., :, width % 2:].conj(), dims=[-2,-1]),
             torch.flip(matrix_rfft2[..., :, 1:].conj(), dims=[-2,-1]),
             matrix_rfft2
-        ], dim=-1) # Works only for odd num.pixels
+        ], dim=-1) # Works only for odd num. of pixels
     
 
     def OTF2PSF(self, OTF): 
@@ -1092,6 +1073,7 @@ class TipTorch(torch.nn.Module):
         for i in range(self.wvl.shape[-1]):
             transform = transforms.CenterCrop((self.nOtfs[i], self.nOtfs[i]))
             n = 0 if PSF_big.shape[1] == 1 else i # when there is no chromatic OTF
+            
             if OTF.shape[-1] > self.N_pix:
                 PSF_interp = interpolate(
                     transform(PSF_big[:,n,...]).unsqueeze(1),
@@ -1136,6 +1118,7 @@ class TipTorch(torch.nn.Module):
         self.OTF_norm = pdims(self.OTF.abs()[..., self.nOtf//2, self.nOtf//2], 2)
         self.OTF = self.OTF / self.OTF_norm
         
+        
         # Computing final PSF
         PSF_out = self.OTF2PSF(self.OTF)
         self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)
@@ -1144,7 +1127,7 @@ class TipTorch(torch.nn.Module):
 
 
     def SetWavelengths(self, wavelengths):
-        ''' Set new simualted wavelengths in [nm] '''
+        ''' Set new simulated wavelengths in [nm] '''
         self.config['sources_science']['Wavelength'] = wavelengths.view(1,-1) # [nm]
         self.Update(grids=True, pupils=True, tomography=True)
         self.wavelengths = wavelengths # [nm]

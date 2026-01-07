@@ -3,6 +3,8 @@ import sys, os
 
 from project_settings import device, xp, use_cupy, default_torch_type
 from project_settings import WEIGHTS_FOLDER, PROJECT_PATH, TELEMETRY_CACHE, DATA_FOLDER
+
+
 import pickle
 import re
 import os
@@ -25,7 +27,7 @@ from scipy.ndimage import binary_dilation
 from pathlib import Path
 
 from tools.utils import GetROIaroundMax, GetJmag, check_framework
-from tools.network import DownloadFromRemote
+from tools.network import fetch_reduced_telemetry_cache
 from tools.plotting import wavelength_to_rgb
 from managers.config_manager import ConfigManager
 from scipy.ndimage import rotate
@@ -62,12 +64,9 @@ wvl_bins = np.array([
     892.125, 906.375, 920.75 , 935.
 ], dtype='float32')
 
-wvl_bins_old = np.array([
-    478, 511, 544, 577, 606,
-    639, 672, 705, 738, 771,
-    804, 837, 870, 903, 935
-], dtype='float32')
+# wvl_bins_old = np.array([478, 511, 544, 577, 606, 639, 672, 705, 738, 771, 804, 837, 870, 903, 935], dtype='float32')
 
+fetch_reduced_telemetry_cache(verbose=True)
 
 #%%
 find_closest_λ   = lambda λ, λs: check_framework(λs).argmin(check_framework(λs).abs(λs-λ)).astype('int')
@@ -107,50 +106,6 @@ IRLOS_upgrade_date = pd.to_datetime('2021-03-20T00:00:00').tz_localize('UTC')
 # To get ASM data:
 # http://archive.eso.org/cms/eso-data/ambient-conditions/paranal-ambient-query-forms.html
 
-
-def DownloadMUSEcalibData(verbose=False):
-    import logging
-    logger = logging.getLogger(__name__)
-
-    tmp1 = 'https://drive.google.com/file/d/'
-    tmp2 = '/view?usp=drive_link'
-    tmp3 = f'{TELEMETRY_CACHE.absolute().as_posix()}/MUSE/'
-
-    data_to_download = [
-        (
-            "Downloading MUSE NFM calibrator...",
-            f'{tmp1}1NdfkmVYxdXgkJbHIlxDv1XTO-ABj6ox8{tmp2}',
-            f'{WEIGHTS_FOLDER.absolute().as_posix()}/MUSE_calibrator.dict'
-        ),
-        (
-            "Downloading MUSE NFM reduced telemetry data...",
-            f'{tmp1}1KJDiLgX9XeXjvskOhYLLAhlDR0UOH4p_{tmp2}',
-            f'{tmp3}muse_df_fitted_transforms.pickle'
-        ),
-        (None, f'{tmp1}1pc7a8H4v_XzF9IT_LGrvM-OkV7jrw0D5{tmp2}', f'{tmp3}muse_df_norm_imputed.pickle'),
-        (None, f'{tmp1}1BR9WtPVODV8R7oYaZSxn9ox_jfWJr9nF{tmp2}', f'{tmp3}muse_df_norm_transforms.pickle'),
-        (None, f'{tmp1}1iFnB30JEsKKy14282dJ95xuWtHEfXxBN{tmp2}', f'{tmp3}muse_df.pickle'),
-        (None, f'{tmp1}1LMgmTSVBhvGOOUW0PZ1Zim5OPcP8L8NB{tmp2}', f'{tmp3}MUSE_fitted_df.pkl'),
-        (
-            "Downloading related NFM data...",
-            f'{tmp1}1YwiJLlSj_pBlGYhTfpDIBulzpxGZTewG{tmp2}',
-            f'{tmp3}IRLOS_commands.csv'
-        ),
-        (None, f'{tmp1}1tz2RAxUMe_axaBjP9VHL3NqN8oJxlAgE{tmp2}', f'{tmp3}LGS_flux.csv'),
-        (None, f'{tmp1}1zk4m9y82Movp0Ytn2z4_hsnyL8AoW58x{tmp2}', f'{tmp3}LGS_slopes.csv')
-    ]
-    
-    for message, url, output_path in data_to_download:
-        if message:
-            if verbose:
-                logger.info(message)
-            else:
-                logger.debug(message)
-        
-        DownloadFromRemote(share_url=url, output_path=output_path, overwrite=False, verbose=verbose)
-
-
-# DownloadMUSEcalibData(verbose=True)
 
 #%%
 def MatchRawWithCubes(

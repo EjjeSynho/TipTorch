@@ -18,14 +18,13 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 import pandas as pd
-import seaborn as sns
-import astropy.units as u
 from MUSE_STD_dataset_utils import *
 
+# import astropy.units as u
 # from astropy.coordinates import SkyCoord, AltAz
 
 #%%
-# _ = RenameMUSECubes(CUBES_FOLDER, STD_FOLDER / 'NFM_cubes_temp/')
+_ = RenameMUSECubes(CUBES_FOLDER, STD_FOLDER / 'NFM_cubes_temp/')
 
 #%%
 if not os.path.exists(match_path := STD_FOLDER / 'files_matches.csv') or not os.path.exists(STD_FOLDER / 'files_mismatches.csv'):

@@ -5,7 +5,8 @@ import json
 import torch
 from pathlib import Path
 
-from tools.network import DownloadFromRemote
+# from tools.network import DownloadFromGoogleDrive
+import gdown
 import warnings
 import platform
 # warnings.filterwarnings("ignore", category=UserWarning)
@@ -13,19 +14,16 @@ import platform
 PROJECT_PATH = Path(__file__).parent.resolve()
 
 # Adding project folders to the system path so that the modules can be imported
-sys.path.insert(0, str(PROJECT_PATH) )
-sys.path.insert(0, str(PROJECT_PATH / 'tools/') )
-sys.path.insert(0, str(PROJECT_PATH / 'managers/') )
-sys.path.insert(0, str(PROJECT_PATH / 'data_processing/') )
+for p in ['.', 'tools', 'managers', 'data_processing']:
+    sys.path.insert(0, str(PROJECT_PATH / p))
 
-# Download the default project settings if they are not found locally
-if not os.path.exists(path_to_config := Path(PROJECT_PATH) / Path("project_config.json")):
-    DownloadFromRemote(
-        share_url   = 'https://drive.google.com/file/d/1VJbqGtxISYzRlirHfe-dS4Urx3u7wYO2/view?usp=sharing',
-        output_path = os.path.normpath(path_to_config).replace('\\','/'),
-        overwrite   = False,
-        verbose     = False
-    )
+
+# Download the default project config if not found
+path_to_config = os.path.normpath( Path(PROJECT_PATH) / Path("project_config.json") ).replace('\\','/')
+if not os.path.exists(path_to_config):
+    config_url = f'https://drive.google.com/file/d/1VJbqGtxISYzRlirHfe-dS4Urx3u7wYO2/view?usp=sharing'
+    gdown.download(config_url, path_to_config, quiet=False, fuzzy=True) # Download the file
+    
 
 # Load project-wide folders settings
 with open(PROJECT_PATH / Path("project_config.json"), "r") as f:
@@ -42,9 +40,7 @@ if project_settings["project_data_folder"].startswith("./") or project_settings[
 else:
     DATA_FOLDER = Path(project_settings["project_data_folder"]).resolve()
 
-# Load instrument specific folders settings
-# SPHERE_DATA_FOLDER = Path(project_settings["SPHERE_data_folder"])
-
+# Specify folder where all reduced telemetry necessary for model calibration is stored
 TELEMETRY_CACHE = DATA_FOLDER / 'reduced_telemetry/'
 
 default_torch_type = torch.float32

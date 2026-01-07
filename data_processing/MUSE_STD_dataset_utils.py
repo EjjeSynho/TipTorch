@@ -119,7 +119,7 @@ def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
     original_cubes_exposure, new_cubes_exposure = [], []
     original_filename, new_filename = [], []
 
-    print(f'Reding cubes in {folder_cubes_new}')
+    print(f'Reading cubes in {folder_cubes_new}')
     for file in tqdm(os.listdir(folder_cubes_new)):
         if file == 'renamed':
             continue

@@ -393,6 +393,7 @@ class PSFModelNFM:
 
     def SetWavelengths(self, wavelengths):
         self.model.SetWavelengths(wavelengths)
+        self.wavelengths = wavelengths
 
 
     def SetImageSize(self, img_size):
