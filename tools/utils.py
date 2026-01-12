@@ -122,24 +122,6 @@ def check_framework(x):
     return np
 
 
-def pad_lists(input_list, pad_value):
-    # Find the length of the longest list
-    max_len = max(len(x) if isinstance(x, list) else 1 for x in input_list)
-
-    if max_len == 1:
-        return input_list
-
-    # Function to pad a single element (either a number or a list)
-    def pad_element(element):
-        if isinstance(element, list):
-            return element + [pad_value] * (max_len - len(element))
-        else:
-            return [element] + [pad_value] * (max_len - 1)
-
-    # Apply padding to each element in the input list
-    return [pad_element(x) for x in input_list]
-
-
 def cropper(x, win, center=None):
     if center is None:
         return np.s_[...,

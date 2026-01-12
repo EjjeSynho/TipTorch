@@ -4,7 +4,6 @@
 
 import sys
 
-from tests.SPHERE_dynesty import LWE_coefs
 sys.path.insert(0, '..')
 
 import pickle

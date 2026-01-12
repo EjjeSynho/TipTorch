@@ -24,7 +24,7 @@ from MUSE_STD_dataset_utils import *
 # from astropy.coordinates import SkyCoord, AltAz
 
 #%%
-_ = RenameMUSECubes(CUBES_FOLDER, STD_FOLDER / 'NFM_cubes_temp/')
+# _ = RenameMUSECubes(CUBES_FOLDER, STD_FOLDER / 'NFM_cubes_temp/')
 
 #%%
 if not os.path.exists(match_path := STD_FOLDER / 'files_matches.csv') or not os.path.exists(STD_FOLDER / 'files_mismatches.csv'):

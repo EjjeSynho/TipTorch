@@ -29,6 +29,9 @@ with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
 # wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 3), a_min=0, a_max=N_wvl_max-1)
 wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
 
+# wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)[:14]
+
+#%%
 # ids = 96 # strongest wind
 # ids = 394 # strong wind
 # ids = 278 # strong wind
@@ -96,7 +99,7 @@ PSF_model = PSFModelNFM(
     multiple_obs    = True,
     LO_NCPAs        = True,
     chrom_defocus   = False,
-    use_splines     = True,
+    use_splines     = False, #True
     Moffat_absorber = False,
     Z_mode_max      = 9,
     device          = device
@@ -126,7 +129,7 @@ for j in range(N_src):
 
         plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
         plt.axis('off')
-        # plt.show()
+        plt.show()
         
     plt.show()
 
@@ -349,6 +352,36 @@ if PSF_model.LO_NCPAs:
     plt.imshow(OPD_map[id_src,...]*1e9)
     plt.colorbar()
     plt.show()
+
+
+#%%
+print('λ: ', *[f"{x:.0f}" for x in wavelengths.detach().cpu().numpy().flatten()*1e9])
+print('r0:', *[f"{x:.3f}" for x in PSF_model.model.r0.detach().cpu().numpy().flatten()])
+print('L0:', *[f"{x:.3f}" for x in PSF_model.model.L0.detach().cpu().numpy().flatten()])
+print('dn:', *[f"{x:.3f}" for x in PSF_model.model.dn.detach().cpu().numpy().flatten()])
+print('dx:', *[f"{x:.2f}" for x in PSF_model.model.dx.detach().cpu().numpy().flatten()])
+print('dy:', *[f"{x:.2f}" for x in PSF_model.model.dy.detach().cpu().numpy().flatten()])
+print('F: ', *[f"{x:.3f}" for x in PSF_model.model.F.detach().cpu().numpy().flatten()])
+print('LO:', *[f"{x:.2f}" for x in PSF_model.inputs_manager['LO_coefs'].detach().cpu().numpy().flatten()])
+
+
+fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+wvl_plot = wavelengths.squeeze().cpu().numpy()*1e9
+
+ax[0].plot(wvl_plot, PSF_model.model.F.detach().cpu().numpy().flatten())
+ax[0].set_title('Flux factor')
+ax[0].set_xlabel('Wavelength [nm]')
+ax[0].set_xlim(485, 927.81)
+ax[0].set_ylim(0.93, 1.05)
+ax[1].plot(wvl_plot, PSF_model.model.dx.detach().cpu().numpy().flatten(), label='dx')
+ax[1].plot(wvl_plot, PSF_model.model.dy.detach().cpu().numpy().flatten(), label='dy')
+ax[1].legend()
+ax[1].set_title('Position offset')
+ax[1].set_xlabel('Wavelength [nm]')
+ax[1].set_xlim(485, 927.81)
+ax[1].set_ylim(-1.6, 0.2)
+
+plt.show()
 
 
 #%%

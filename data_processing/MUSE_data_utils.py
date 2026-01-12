@@ -1730,7 +1730,6 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
     config_manager = ConfigManager()
     config_dict = config_manager.Load(DATA_FOLDER / 'parameter_files/muse_ltao.ini')
 
-
     # >>>>>>> Compute simplified Cn2 profile
     # Read median Cn2 profile from the json file
     with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'r') as f:

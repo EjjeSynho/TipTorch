@@ -13,13 +13,14 @@ from astropy.stats import sigma_clipped_stats
 from photutils.background import Background2D, MedianBackground
 import warnings
 from skimage.restoration import inpaint
-from skimage.morphology import binary_dilation, disk, binary_erosion, square
+from skimage.morphology import binary_dilation, disk, binary_erosion, footprint_rectangle
+
 
 MAX_NDIT = 50  # Max number of DITs to process if processed separately
 
 # delay = lambda r: (0.0017+81e-6)*r #81 microseconds is the constant SPARTA latency, 17e-4 is the imperical constant
 # frame_delay = lambda r: r/1e3 * 2.3  if (r/1e3*2.3) > 1.0 else 1.0 # delay of 2.3 frames for 1000 Hz loop rate
-frame_delay = lambda r: torch.clamp(r/1e3 * 2.3, min=1.0)
+# frame_delay = lambda r: torch.clamp(r/1e3 * 2.3, min=1.0)
 
 STD_FOLDER  = SPHERE_DATA_FOLDER / 'standart_stars'
 CUBES_CACHE = STD_FOLDER / 'cubes_cache'
@@ -53,7 +54,7 @@ def process_mask(mask):
         for j in range(N_wvl):
             mask_layer = mask[i,j,...].cpu().numpy()
             mask_layer = binary_dilation(
-                binary_erosion(mask_layer, square(3)),
+                binary_erosion(mask_layer, footprint_rectangle((3, 3))),
                 disk(3)
             )
             mask_modified[i,j,...] = mask_layer
@@ -277,21 +278,10 @@ def LoadSTDStarCacheByID(id):
     return data_sample
 
 
-    # with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
-    #     muse_df = pickle.load(handle)
-
-    # file = muse_df.loc[muse_df.index == id]['Filename'].values[0]
-    # full_filename = CUBES_CACHE / f'{id}_{file}.pickle'
-
-    # with open(full_filename, 'rb') as handle:
-    #     data_sample, _ = pickle.load(handle)
-    
-    # data_sample['All data']['Pupil angle'] = muse_df.loc[id]['Pupil angle']
-    # return data_sample
-
-
 
 def plot_sample(id):
+    import matplotlib.pyplot as plt
+    
     samp = LoadSTDStarCacheByID(id)
 
     buf = samp['spectra'].copy()
@@ -314,3 +304,5 @@ def plot_sample(id):
     fig.tight_layout()
     plt.show()
     # plt.savefig(save_folder / f'{id}.png', dpi=300)
+
+# %%

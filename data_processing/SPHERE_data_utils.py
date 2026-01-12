@@ -23,7 +23,6 @@ from tools.utils import GetROIaroundMax, mask_circle
 from scipy.ndimage import center_of_mass
 
 from managers.config_manager import ConfigManager, ParameterParser
-from tools.utils import pad_lists
 
 try:
     from query_eso_archive import query_simbad
@@ -48,14 +47,11 @@ h = 'HIERARCH ESO '
 
 
 #%%
+
 def InitIRDISConfig(data_samples, device=device, convert_config=True):
-    def _IRDIS_onsky_config():
-        '''
-        This function composes the SPHERE config understandable by the TipTorch model. It converts the data from an external source
-        (modifier) and puts it into the config.
-        '''
-        
-        conversion_table = [
+    
+    def _fill_config(sample, config):
+        entries_mapping_table = [
             (['atmosphere','Seeing'],          ['seeing','SPARTA']        ),
             (['atmosphere','WindSpeed'],       ['Wind speed','header']    ),
             (['atmosphere','WindDirection'],   ['Wind direction','header']),
@@ -70,95 +66,61 @@ def InitIRDISConfig(data_samples, device=device, convert_config=True):
             (['sensor_HO','Jitter Y'],         ['WFS','TT jitter Y']      ),
             (['RTC','SensorFrameRate_HO'],     ['WFS','rate']             ),
             (['sensor_science','PixelScale'],  ['Detector', 'psInMas']    ),
-            (['sensor_science','SigmaRON'],    ['Detector', 'ron']        ),
-            (['sources_science','Wavelength'], ['spectra']                )
+            (['sensor_science','SigmaRON'],    ['Detector', 'ron']        )
         ]
+            
+        for entry in entries_mapping_table:
+            config_field, data_field = entry[0], entry[1]
+            
+            if data_field[0] in sample:
+                value = sample[data_field[0]][data_field[1]]
+                config[config_field[0]][config_field[1]] = value.real if isinstance(value, complex) else value
+  
+        config['sources_science']['Wavelength'] = sample['spectra'] # already in [m]
+        config['sources_science']['Zenith'] = config['sources_science']['Zenith'] * 0.0 #TODO: debug it, must be zero only for on-axis
+        config['telescope']['ZenithAngle']  = 90.0 - sample['telescope']['altitude']
         
-        def processor_func(config, modifier):
-            # config['sources_science']['Zenith'] = 90.0 - modifier['telescope']['altitude'] #TODO: debug it, must be zero for on-axis
-            config['sources_science']['Zenith'] = config['sources_science']['Zenith'] * 0.0 #TODO: debug it, must be zero for on-axis
-            config['telescope']['ZenithAngle']  = 90.0 - modifier['telescope']['altitude']
-            
-            def frame_delay(loop_freq):
-                if not isinstance(loop_freq, torch.Tensor):
-                    loop_freq_ = torch.tensor(loop_freq)
-                return torch.clamp(loop_freq_/1e3 * 2.3, min=1.0)
-            
-            config['RTC']['LoopDelaySteps_HO'] = frame_delay(config['RTC']['SensorFrameRate_HO'])
+        config['sources_HO']['Height'] = np.inf
+        
+        frame_delay = lambda loop_freq: np.clip(loop_freq/1e3 * 2.3, a_min=1.0, a_max=None)
+        
+        config['RTC']['LoopDelaySteps_HO'] = frame_delay(config['RTC']['SensorFrameRate_HO'])
 
-            return config
-        
-        return conversion_table, processor_func
-    
-    
-    if isinstance(data_samples, dict):
-        data_samples = [data_samples]
+        _pad_list = lambda x, y: [x[0].item(), y] if hasattr(x, '__len__') else [x, y]
+
+        # Initialize at least 2 layers for the atmosphere
+        config['atmosphere']['Cn2Weights']    = [config['atmosphere']['Cn2Weights'].item(), 0]
+        config['atmosphere']['Cn2Heights']    = [config['atmosphere']['Cn2Heights'].item(), 10000]
+        # Assume the same wind speed and direction at all layers
+        config['atmosphere']['WindDirection'] = [config['atmosphere']['WindDirection'],] * 2
+        config['atmosphere']['WindSpeed']     = [config['atmosphere']['WindSpeed'],] * 2
+
+        return config
+
+
+    if isinstance(data_samples, dict): data_samples = [data_samples]
 
     N_src = len(data_samples)
 
-    framework = 'pytorch' if convert_config else 'numpy'
-
     # Manage config files
     config_manager = ConfigManager()
-    configdict     = ParameterParser(DATA_FOLDER / 'parameter_files/irdis.ini').params
-    merged_config  = config_manager.Merge([config_manager.Modify(configdict, sample, *_IRDIS_onsky_config()) for sample in data_samples])
-
-    # This is to ensure proper dimensionality
-    merged_config['atmosphere']['Cn2Weights']    = pad_lists(merged_config['atmosphere']['Cn2Weights'], 0)
-    merged_config['atmosphere']['Cn2Heights']    = pad_lists(merged_config['atmosphere']['Cn2Heights'], 1e4)
-    merged_config['atmosphere']['WindDirection'] = pad_lists(merged_config['atmosphere']['WindDirection'], 0)
-    merged_config['atmosphere']['WindSpeed']     = pad_lists(merged_config['atmosphere']['WindSpeed'], 0)
-
-    config_manager.Convert(merged_config, framework=framework, device=device)
+    configs = []
     
-    # Set simulated PSF size
-    # merged_config['sensor_science']['FieldOfView'] = PSF_data.shape[-1]
+    for sample in data_samples:
+        base_config = config_manager.Load(DATA_FOLDER / 'parameter_files/irdis.ini')
+        filled_config = _fill_config(sample, base_config)
+        filled_config = config_manager.wrap_scalars_to_lists(filled_config)
+        configs.append(filled_config)
 
-    merged_config['DM']['DmHeights'] = torch.tensor(merged_config['DM']['DmHeights'], device=device)
-    # merged_config['sources_HO']['Wavelength'] = merged_config['sources_HO']['Wavelength']
-    merged_config['sources_HO']['Height'] = torch.tensor([torch.inf], device=device) if convert_config else [np.inf]
-    merged_config['NumberSources'] = N_src
+    merged_config = config_manager.ensure_dimensions(config_manager.Merge(configs), N_src=N_src)
     
+    if convert_config:
+        config_manager.Convert(merged_config, framework='pytorch', device=device)
+    else:
+        config_manager.Convert(merged_config, framework='list') # for later storing in the file
+
     return merged_config
     
-
-
-"""
-def GetFilesList():
-    files_L = []
-    files_R = []
-
-    if os.path.isdir(folder_L) == False:
-        print('Folder does not exist: ', folder_L)
-        # return None, None
-    if os.path.isdir(folder_R) == False:
-        print('Folder does not exist: ', folder_R)
-        # return None, None
-
-    def list_files(path):
-        file_list = []
-        for root, _, files in os.walk(path):
-            for file in files:
-                file_list.append(os.path.join(root, file))
-        return file_list
-
-    files_L = list_files(folder_L)
-    files_L_only = []
-    files_R = []
-
-    # Scanning for matchjng files
-    pure_filename = lambda x: re.search(r'([^\\\/]*)(_left|_right)?\.fits$', str(x)).group(1).replace('_left','').replace('_right','')
-
-    for i,file_L in enumerate(files_L):
-        file_R = file_L.replace('_left', '_right').replace('_LEFT', '_RIGHT')
-        if os.path.isfile(file_R) == False:
-            print('File not found: ', file_R)
-            files_L_only.append(files_L.pop(i))
-        else:
-            files_R.append(file_R)
-
-    return files_L, files_R
-"""
 
 def GetFilesList():
     # Verify folders exist

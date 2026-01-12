@@ -657,15 +657,14 @@ class TipTorch(torch.nn.Module):
         self.hn = self.hn.sum(dim=-1) 
 
 
-    def ReconstructionFilter(self, WFS_noise_var):
+    def ReconstructionFilter(self, WFS_noise_var, MV=0): # TODO: make MV switchable
         Av = torch.sinc(self.WFS_d_sub*self.kx_AO) * torch.sinc(self.WFS_d_sub*self.ky_AO) * torch.exp(1j*torch.pi*self.WFS_d_sub*(self.kx_AO+self.ky_AO))
         self.SxAv = ( 2j*torch.pi*self.kx_AO*self.WFS_d_sub*Av ).view(1, self.nOtf_AO_y, self.nOtf_AO_x) # Same for a given AO regime
         self.SyAv = ( 2j*torch.pi*self.ky_AO*self.WFS_d_sub*Av ).view(1, self.nOtf_AO_y, self.nOtf_AO_x)
-
-        MV = 0 # TODO: make it switchable
-        varNoise = WFS_noise_var.view(self.N_obs, -1).mean(dim=-1) # last dimension is for GSs, 0th dim is reserved for the observations
         
-        W_n = pdims(varNoise / (2*self.kc)**2, 2)
+        noise_variance = WFS_noise_var.view(self.N_obs, -1).mean(dim=-1) # last dimension is for GSs, 0th dim is reserved for the observations
+        
+        W_n = pdims(noise_variance / (2*self.kc)**2, 2)
 
         self.W_atm = self.VonKarmanSpectrum(self.r0_(), self.L0.abs(), self.k2_AO) * self.piston_filter # TODO: at what λ must it be?
 
@@ -673,8 +672,8 @@ class TipTorch(torch.nn.Module):
         self.Rx = torch.conj(self.SxAv) / gPSD
         self.Ry = torch.conj(self.SyAv) / gPSD
         
-        # self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-12 # For numerical stability TODO: is it really needed?
-        # self.Ry[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-12
+        self.Rx[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-12 # For numerical stability TODO: is it really needed?
+        self.Ry[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-12
 
     
     def SpatioTemporalPSD(self):
