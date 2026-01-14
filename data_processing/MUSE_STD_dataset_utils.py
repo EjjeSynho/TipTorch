@@ -1,5 +1,4 @@
 from data_processing.MUSE_data_utils import *
-# from torch.utils.data import Dataset
 
 
 STD_FOLDER     = MUSE_DATA_FOLDER / 'standart_stars/'

@@ -29,7 +29,7 @@ import numpy as np
 from torch.autograd.functional import hessian
 from torchmin import minimize
 
-from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarData, process_mask, STD_FOLDER
+from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarData, erode_mask, STD_FOLDER
 from PSF_models.IRDIS_wrapper import PSFModelIRDIS
 from managers.config_manager import ConfigManager
 from tools.utils import SR, GradientLoss, mask_circle, FWHM_fitter
@@ -145,7 +145,7 @@ def load_and_fit_sample(id):
         del PSF_data
 
         # Process mask like in original
-        PSF_mask = process_mask(PSF_mask)
+        PSF_mask = erode_mask(PSF_mask)
         fit_wind = True
 
         # Handle central hole if present

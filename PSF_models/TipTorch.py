@@ -76,12 +76,9 @@ class TipTorch(torch.nn.Module):
         # Atmospheric parameters
         self.wind_speed  = self.config['atmosphere']['WindSpeed']
         self.wind_dir    = self.config['atmosphere']['WindDirection']
-        # self.Cn2_weights = min_2d(self.config['atmosphere']['Cn2Weights'])
-        # self.Cn2_heights = min_2d(self.config['atmosphere']['Cn2Heights']) * self.airmass # [m]        
         self.Cn2_weights = self.config['atmosphere']['Cn2Weights']
         self.Cn2_heights = self.config['atmosphere']['Cn2Heights'] * self.airmass # [m]
         
-        # self.h   = self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height))
         self.h_ = (self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height))) # [N_obs x N_layers]
         
         self.N_L = self.Cn2_heights.shape[-1]
@@ -139,7 +136,7 @@ class TipTorch(torch.nn.Module):
         self.r0 = self.rad2arc * 0.976 * self.config['atmosphere']['Wavelength'] / self.config['atmosphere']['Seeing'] # [m]
         self.L0 = self.config['atmosphere']['L0'].flatten() # [m]
         
-        self.r0_ = lambda : ( self.r0.abs() * self.airmass**(-3.0/5.0) ).view(self.N_obs)
+        self.r0_ = lambda : self.r0.abs().flatten() * self.airmass.flatten()**(-3.0/5.0)
         
         self.F   = torch.ones (self.N_src, self.N_wvl, device=self.device)
         self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
@@ -705,7 +702,7 @@ class TipTorch(torch.nn.Module):
     def NoisePSD(self, WFS_noise_var):
         if not self.tomography:
             noisePSD = torch.abs(self.Rx**2 + self.Ry**2) / (2*self.kc)**2
-            noisePSD = noisePSD * self.piston_filter * self.noise_gain * WFS_noise_var * self.mask_corrected_AO
+            noisePSD = noisePSD * self.piston_filter * self.noise_gain * WFS_noise_var.view(self.N_obs, 1, 1) * self.mask_corrected_AO
             
         else:
             PW = self.P_beta_DM @ self.W
@@ -730,7 +727,7 @@ class TipTorch(torch.nn.Module):
         Ry1 = (2j*torch.pi*self.WFS_d_sub * self.Ry).unsqueeze(0)
 
         # Compute von Karman spectrum for aliased spatial frequencies
-        W_mn = self.VonKarmanSpectrum(self.r0_().unsqueeze(0), self.L0.abs().unsqueeze(0), self.km**2 + self.kn**2) * self.PR
+        W_mn = self.VonKarmanSpectrum(self.r0_().view(1, self.N_obs), self.L0.abs().view(1, self.N_obs), self.km**2 + self.kn**2) * self.PR
         
         Q = (Rx1*self.km + Ry1*self.kn) * torch.sinc(self.WFS_d_sub*self.km) * torch.sinc(self.WFS_d_sub*self.kn)
         tf = self.h1.unsqueeze(0).unsqueeze(-1) # [N_combs x N_src x nOtf_AO x n_Otf_AO x nL]
@@ -760,8 +757,8 @@ class TipTorch(torch.nn.Module):
 
 
     def ChromatismPSD(self):
-        n2 = self.IOR_GS_wvl.view(self.N_obs, 1, 1, 1)
-        n1 = self.IOR_src_wvl.view(1, self.N_wvl, 1, 1)
+        n2 = self.IOR_GS_wvl # IOR at WFSing wavelength
+        n1 = self.IOR_src_wvl.view(1, self.N_wvl, 1, 1) # IOR at science source wavelength
         
         chromatic_PSD = ((n2-n1)/n2)**2 * self.W_atm.unsqueeze(1)
         return chromatic_PSD
@@ -813,7 +810,7 @@ class TipTorch(torch.nn.Module):
         WFS_wvl  = self.WFS_wvl
         WFS_RON  = self.WFS_RON
         WFS_Nph  = self.WFS_Nph.abs().view(self.N_obs, self.N_GS)
-        r0_WFS   = self.r0_new(self.r0_(), WFS_wvl, self.wvl_atm)
+        r0_WFS   = self.r0_new(self.r0_(), WFS_wvl, self.wvl_atm).view(-1,1)
         WFS_nPix = self.WFS_FOV / self.WFS_n_sub
         WFS_pixelScale = self.WFS_psInMas * self.mas2arc  # [arcsec]
 
@@ -823,25 +820,25 @@ class TipTorch(torch.nn.Module):
             nD = torch.maximum(
                 self.rad2arc * WFS_wvl / self.WFS_d_sub / WFS_pixelScale, 
                 self.one_gpu
-            )   
-            spot_FWHM_turb = 0.98 * self.rad2arc * WFS_wvl / r0_WFS / torch.sqrt(self.one_gpu*2.)  # [arcsec]
+            ).view(-1,1)
+            spot_FWHM_turb = 0.98 * self.rad2arc * WFS_wvl / r0_WFS / torch.sqrt(self.one_gpu*2.0)  # [arcsec]
             
             # nT: spot FWHM in pixels with turbulence and TT removed according to [Thomas et al. 2006]
             nT = torch.maximum(
                 torch.hypot(self.WFS_spot_FWHM.max() * self.mas2arc, spot_FWHM_turb) / WFS_pixelScale,
                 self.one_gpu
-            )
+            ).view(-1,1)
             
             # Center of gravity
             if self.WFS_algorithm == 'cog':
                 sigma_sqr_RON  = (torch.pi**2 / 3) * (WFS_RON / WFS_Nph)**2 * (WFS_nPix**2 / nD).unsqueeze(-1)**2
-                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * (nT / nD).unsqueeze(-1)**2
+                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * (nT / nD)
             
             # Truncated CoG algorithm
             elif self.WFS_algorithm == 'tcog':
                 nPix_eff = torch.ceil(nT**2 * torch.pi / 4)
                 sigma_sqr_RON  = (torch.pi**2 / 3) * (WFS_RON / WFS_Nph)**2 * (nPix_eff / nD).unsqueeze(-1)**2
-                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * (nT / nD).unsqueeze(-1)**2
+                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * (nT / nD)
             
             # Weighted CoG algorithm
             elif self.WFS_algorithm == 'wcog':
@@ -853,7 +850,7 @@ class TipTorch(torch.nn.Module):
                                 (nT_nW_sum**4 / (nD**2 * nW**4))
                         
                 sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * \
-                                 (nT / nD).unsqueeze(-1)**2 * \
+                                 (nT / nD)**2 * \
                                  (nT_nW_sum**4 / ((2 * nT**2 + nW**2)**2 * nW**4))
             
             # Quad Cell algorithm

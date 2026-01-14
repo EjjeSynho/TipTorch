@@ -48,7 +48,7 @@ h = 'HIERARCH ESO '
 
 #%%
 
-def InitIRDISConfig(data_samples, device=device, convert_config=True):
+def InitIRDISConfig(data_sample, device=device, convert_config=True):
     
     def _fill_config(sample, config):
         entries_mapping_table = [
@@ -86,8 +86,6 @@ def InitIRDISConfig(data_samples, device=device, convert_config=True):
         
         config['RTC']['LoopDelaySteps_HO'] = frame_delay(config['RTC']['SensorFrameRate_HO'])
 
-        _pad_list = lambda x, y: [x[0].item(), y] if hasattr(x, '__len__') else [x, y]
-
         # Initialize at least 2 layers for the atmosphere
         config['atmosphere']['Cn2Weights']    = [config['atmosphere']['Cn2Weights'].item(), 0]
         config['atmosphere']['Cn2Heights']    = [config['atmosphere']['Cn2Heights'].item(), 10000]
@@ -97,29 +95,20 @@ def InitIRDISConfig(data_samples, device=device, convert_config=True):
 
         return config
 
-
-    if isinstance(data_samples, dict): data_samples = [data_samples]
-
-    N_src = len(data_samples)
-
     # Manage config files
     config_manager = ConfigManager()
     configs = []
     
-    for sample in data_samples:
-        base_config = config_manager.Load(DATA_FOLDER / 'parameter_files/irdis.ini')
-        filled_config = _fill_config(sample, base_config)
-        filled_config = config_manager.wrap_scalars_to_lists(filled_config)
-        configs.append(filled_config)
+    base_config = config_manager.Load(DATA_FOLDER / 'parameter_files/irdis.ini')
+    config_dict = _fill_config(data_sample, base_config)
+    config_dict = config_manager.wrap_scalars_to_lists(config_dict)
 
-    merged_config = config_manager.ensure_dimensions(config_manager.Merge(configs), N_src=N_src)
-    
     if convert_config:
-        config_manager.Convert(merged_config, framework='pytorch', device=device)
+        config_manager.Convert(config_dict, framework='pytorch', device=device)
     else:
-        config_manager.Convert(merged_config, framework='list') # for later storing in the file
+        config_manager.Convert(config_dict, framework='list') # for later storing in the file
 
-    return merged_config
+    return config_dict
     
 
 def GetFilesList():

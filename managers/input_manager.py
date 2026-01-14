@@ -283,7 +283,35 @@ class InputsManager:
     def __len__(self):
         """Return number of parameters."""
         return len(self.parameters)
-        
+    
+    def get_names(self, optimizable_only: bool = True, flattened: bool = False) -> list:
+        """Get the list of parameter names.
+
+        Args:
+            optimizable_only (bool): Whether to return only optimizable parameter names.
+            flattened (bool): Whether to return flattened parameter names for vector parameters
+                              that map 1-to-1 to elements of flattened stacked tensor.
+        Returns:
+            list: List of parameter names.
+        """
+        if not flattened:
+            if optimizable_only:
+                return [name for name, param in self.parameters.items() if param.optimizable]
+            else:
+                return list(self.parameters.keys())
+        else:
+            param_names = []
+            for key, sl in self.inputs_transformer.slices.items():
+                size = sl.stop - sl.start
+                if size == 1:
+                    param_names.append(key)
+                else:
+                    # For vector parameters, create indexed names
+                    for i in range(size):
+                        param_names.append(f"{key}_{i}")
+            return param_names
+    
+    
     def to_dict(self) -> dict:
         """Explicit method to convert to dictionary."""
         return {name: param.value for name, param in self.parameters.items()}

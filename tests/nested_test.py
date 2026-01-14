@@ -95,6 +95,9 @@ sampler = ultranest.ReactiveNestedSampler(
     loglike,
     transform=transform,
     vectorized=True,
+    ndraw_min=32,
+    ndraw_max=32,      # <-- same as min
+    # draw_multiple=False # <-- don’t adaptively change batch size
 )
 
 result = sampler.run(

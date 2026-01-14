@@ -1,5 +1,4 @@
 #%%
-import sys, os
 from SPHERE_data_utils import SPHERE_DATA_FOLDER, InitIRDISConfig, device
 
 import numpy as np
@@ -46,20 +45,26 @@ def SPHERE_PSF_spiders_mask(crop, thick=9):
     return line_mask[crop, crop]
 
 
-def process_mask(mask):
-    mask_modified = np.zeros_like(mask.cpu().numpy())
+def erode_mask(mask):
+    
+    if   mask.ndim == 2: mask = mask[None, None, ...]
+    elif mask.ndim == 3: mask = mask[None, ...]
+    else:
+        assert mask.ndim == 4, 'Mask must be 2D, 3D or 4D array!'
+    
+    mask_modified = np.zeros_like(mask)
     N_src, N_wvl = mask.shape[0], mask.shape[1]
 
     for i in range(N_src):
         for j in range(N_wvl):
-            mask_layer = mask[i,j,...].cpu().numpy()
+            mask_layer = mask[i,j,...]
             mask_layer = binary_dilation(
                 binary_erosion(mask_layer, footprint_rectangle((3, 3))),
                 disk(3)
             )
             mask_modified[i,j,...] = mask_layer
             
-    return torch.tensor(mask_modified).to(mask.device)
+    return mask_modified
 
 
 def separate_background(img, mask=None):
@@ -84,14 +89,14 @@ def GetJitter(synth_sample, synth_config):
     return Jx, Jy
 
 
-def PSF_mask(img, center=(0,0)):
+def IRDIS_PSF_mask(img, center=(0,0)):
     N_pix          = img.shape[0]
     mask_PSF_inner = 1.0 - mask_circle(N_pix, 30, center=(0,0), centered=True)
     mask_PSF_outer = 1.0 - mask_circle(N_pix, 80, center=(0,0), centered=True)
     mask_noise     = (SPHERE_PSF_spiders_mask(N_pix, thick=12) + mask_PSF_outer) * mask_PSF_inner
     mask_noise     = np.roll(mask_noise, center[0],  axis=0)
     mask_noise     = np.roll(mask_noise, center[1], axis=1)
-    return np.clip(mask_noise, 0, 1)
+    return np.clip(mask_noise, 0, 1).astype(int)
 
 
 def ProcessPSFCubes(data_samples, size, remove_background=True, normalize=True):
@@ -106,7 +111,7 @@ def ProcessPSFCubes(data_samples, size, remove_background=True, normalize=True):
         _, bg_median, std = sigma_clipped_stats(PSF_subtr, sigma=(N_sigma := 2))
         
         # Remove low-SNR pixels
-        mask_valid_pix = np.ones_like(PSF_subtr)  
+        mask_valid_pix = np.ones_like(PSF_subtr)
         mask_valid_pix[np.abs(PSF_subtr) < bg_median + N_sigma * std] = 0.0
         
         # Center-crop to the specified size
@@ -119,7 +124,6 @@ def ProcessPSFCubes(data_samples, size, remove_background=True, normalize=True):
         else:
             norm_factor = 1.0
             
-        # mask_valid_pix[PSF_subtr < 0] = 0.0
         return PSF_subtr, norm_factor, mask_valid_pix.astype(np.int8)
     
     
@@ -138,12 +142,9 @@ def ProcessPSFCubes(data_samples, size, remove_background=True, normalize=True):
     def _compute_from_cube(cube):        
         PSF_mean = cube.mean(axis=0)
         PSF_var  = cube.var (axis=0)
-        
-        # center_mask = mask_circle(PSF_mean.shape[0], 50, center=(0,0), centered=True)
-        # y,x = gaussian_centroid(PSF_mean*center_mask)
-        
+               
         crop     = cropper(PSF_mean, size)
-        mask_PSF = 1-PSF_mask(PSF_mean, center=(0,0)).astype(int) # cover the PSF with a wings
+        mask_PSF = 1-IRDIS_PSF_mask(PSF_mean, center=(0,0)) # cover the PSF with a wings
         
         if remove_background:
             bg_map = separate_background(PSF_mean, mask_PSF)
@@ -167,17 +168,29 @@ def ProcessPSFCubes(data_samples, size, remove_background=True, normalize=True):
         PSF_L_mean, PSF_L_var, PSFs_L, norm_L_mean, norms_L, mask_L_mean, masks_L, bg_map_L = _compute_from_cube(data_sample['PSF L'])
         PSF_R_mean, PSF_R_var, PSFs_R, norm_R_mean, norms_R, mask_R_mean, masks_R, bg_map_R = _compute_from_cube(data_sample['PSF R'])
 
-        data_record = {
+        PSF_current = {
             'norm (cube)':   np.stack([norms_L,     norms_R    ], axis=-1),
             'PSF (cube)':    np.stack([PSFs_L,      PSFs_R     ], axis= 1),
             'PSF (mean)':    np.stack([PSF_L_mean,  PSF_R_mean ], axis= 0)[None, ...],
             'PSF (var)':     np.stack([PSF_L_var,   PSF_R_var  ], axis= 0)[None, ...],
-            'mask (mean)':   np.stack([mask_L_mean, mask_R_mean], axis= 0)[None, ...],
             'mask (cube)':   np.stack([masks_L,     masks_R    ], axis= 1),
             'bg map (mean)': np.stack([bg_map_L,    bg_map_R   ], axis= 0)[None, ...],
             'norm (mean)':   np.array([norm_L_mean, norm_R_mean])[None, ...]
         }
-        PSF_data.append(data_record)
+        
+        PSF_mask = np.stack([mask_L_mean, mask_R_mean], axis=0)[None, ...]
+        PSF_mask = erode_mask(PSF_mask) # filters out noisy regions of PSF
+        # The cube of masks is not processed this way
+        # NOTE: this mask does not affect the normalization
+    
+        # Handle the dark PSF peak artefact present on some PSFs due to overexposure
+        if data_sample['labels']['Central hole'] == True:
+            circ_mask = 1.0 - mask_circle(PSF_mask.shape[-1], 3, centered=True)[None, None, ...]
+            PSF_mask *= circ_mask
+            PSF_current['mask (cube)'] *= circ_mask
+        
+        PSF_current['mask (mean)'] = PSF_mask
+        PSF_data.append(PSF_current)
         
     return PSF_data
 
@@ -209,8 +222,7 @@ def LoadSTDStarData(
             buf = samples['spectra'].copy()
             samples['spectra'] = [buf['central L']*1e-9, buf['central R']*1e-9]
 
-    
-    def _samples_from_DITs(init_sample):
+    def _samples_from_DITs(init_sample): #TODO: re-implement or deprectace
         data_samples1 = []
         N_DITs = init_sample['PSF L'].shape[0]
         
@@ -248,20 +260,22 @@ def LoadSTDStarData(
     # Processing configs
     framework = 'pytorch' if str(device).startswith('cuda') or str(device).startswith('cpu') else 'numpy' #TODO: debug it
 
-    merged_config = InitIRDISConfig(data_samples, device=device, convert_config=True)
-    merged_config['sensor_science']['FieldOfView'] = PSF_data[0]['PSF (mean)'].shape[-1]
+    configs = []
+    for sample in data_samples:
+        config = InitIRDISConfig(sample, device=device, convert_config=False)
+        config['sensor_science']['FieldOfView'] = PSF_data[0]['PSF (mean)'].shape[-1]
+        configs.append(config)
 
     # To save memory, delete duplicating PSF data
     for sample in data_samples:
-        del sample['PSF L']
-        del sample['PSF R']
+        del sample['PSF L'], sample['PSF R']
   
     if framework.lower() == 'pytorch':
         for data_record in PSF_data:
             for key in data_record.keys():
                 data_record[key] = make_tensor(data_record[key])
 
-    return PSF_data, data_samples, merged_config
+    return PSF_data, data_samples, configs
 
 
 def LoadSTDStarCacheByID(id):
@@ -274,6 +288,15 @@ def LoadSTDStarCacheByID(id):
 
     with open(full_filename, 'rb') as handle:
         data_sample = pickle.load(handle)
+        
+    with open(STD_FOLDER / 'PSF_classes.txt', 'r') as f:
+        labels = f.readlines()
+
+    labels_data = {}
+    for label in labels:
+       labels_data[label.strip()] = request_df.loc[request_df.index == id][label.strip()].item()
+        
+    data_sample['labels'] = labels_data
         
     return data_sample
 

@@ -11,9 +11,9 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
-from tools.utils import mask_circle, rad2mas, GradientLoss
-from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarData, process_mask, STD_FOLDER
+from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarData, STD_FOLDER
 from project_settings import device
+from tools.utils import rad2mas, GradientLoss
 from torchmin import minimize
 
 from PSF_models.IRDIS_wrapper import PSFModelIRDIS
@@ -39,7 +39,6 @@ subset_df = subset_df[subset_df['LWE'] == True]
 # sample_id = 2219 # -- interesting LWE-cross
 sample_id = 1778  # -- explicit wings
 
-
 PSF_data, data_sample, model_config = LoadSTDStarData(
     sample_id,
     normalize=True,
@@ -54,16 +53,9 @@ PSF_mask = PSF_data[0]['mask (mean)']
 norms = PSF_data[0]['norm (mean)']
 del PSF_data
 
-# Process mask
-PSF_mask = process_mask(PSF_mask)
 LWE_flag = True
 fit_wind = True
 LO_NCPAs = False
-
-# Handle central hole if present
-if psf_df.loc[sample_id]['Central hole'] == True:
-    circ_mask = 1-mask_circle(PSF_0.shape[-1], 3, centered=True)
-    PSF_mask *= torch.tensor(circ_mask[None, None, ...]).to(device)
 
 #%% Initialize PSF model
 PSF_model = PSFModelIRDIS(
@@ -83,7 +75,11 @@ PSF_1 = func(x0 := PSF_model.inputs_manager.stack())
 
 draw_PSF_stack(PSF_0*PSF_mask, PSF_1*PSF_mask, average=True, min_val=1e-5, crop=80, scale='log')
 
-#%% Create loss functions (like in original SPHERE_onsky.py)
+#%%
+
+print(PSF_model.inputs_manager)
+
+#%% Create loss functions
 img_loss = lambda x: ((func(x) - PSF_0) * PSF_mask).flatten().abs().sum()
 
 LWE_gauss_penalty_weight = 50.0

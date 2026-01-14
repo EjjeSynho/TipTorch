@@ -1,26 +1,23 @@
-# %reload_ext autoreload
-# %autoreload 2
-
 import sys
 sys.path.insert(0, '..')
 
 import torch
-import numpy as np
-from warnings import warn
 import gc
 
 from PSF_models.TipTorch import TipTorch
 from tools.static_phase import LWEBasis, PixelmapBasis, ZernikeBasis
 from managers.input_manager import InputsManager
 from tools.normalizers import Uniform
-from tools.utils import GradientLoss, rad2mas
+from tools.utils import rad2mas
 from project_settings import device
 
+from managers.config_manager import MultipleTargetsInDifferentObservations
 
 class PSFModelIRDIS:
     def __init__(
         self,
-        config,
+        configs,
+        multiple_obs    = True,
         LWE_flag        = True,
         LO_NCPAs        = False,
         fit_wind        = True,
@@ -30,6 +27,7 @@ class PSFModelIRDIS:
         device          = device
     ):
         
+        self.multiple_obs    = multiple_obs # Do we simulate several sources within multiple observations or not
         self.LWE_flag        = LWE_flag
         self.LO_NCPAs        = LO_NCPAs
         self.fit_wind        = fit_wind
@@ -37,9 +35,12 @@ class PSFModelIRDIS:
         self.N_modes         = N_modes
         self.LO_map_size     = LO_map_size
         self.device          = device
+            
+        self.N_src = len(configs)
         
-        self.init_model(config)
-        # Initialize NCPAs (including LWE basis if needed)
+        configs = self.init_configs(configs)
+
+        self.init_model(configs)
         self.init_NCPAs()
         self.init_model_inputs()
         
@@ -165,7 +166,20 @@ class PSFModelIRDIS:
             for entry in transforms_dump:
                 df_transforms_store[entry] = transforms_dump[entry].store()
             pickle.dump(df_transforms_store, handle, protocol=pickle.HIGHEST_PROTOCOL)
-                
+    
+    
+    def init_configs(self, config):
+        if len(config) > 1: # Multiple sources
+            if self.multiple_obs:
+                model_config = MultipleTargetsInDifferentObservations(config, device=self.device)
+            else:
+                raise NotImplementedError("Multiple sources in one observation case is not implemented yet.")
+        else:
+            model_config = MultipleTargetsInDifferentObservations(config, device=self.device)
+
+
+        return model_config
+          
                 
     def init_model_inputs(self):
         self.inputs_manager = InputsManager()
@@ -185,34 +199,46 @@ class PSFModelIRDIS:
 
 
         # Add parameters to InputsManager with their normalizers
-        self.inputs_manager.add('r0',  self.model.r0.clone().cpu(), norm_r0)
-        self.inputs_manager.add('F',   torch.tensor([[1.0,]*2]), norm_F)
-        self.inputs_manager.add('dx',  torch.tensor([[0.0,]*2]), norm_dxy)
-        self.inputs_manager.add('dy',  torch.tensor([[0.0,]*2]), norm_dxy)
-        self.inputs_manager.add('bg',  torch.tensor([[0.0,]*2]), norm_bg)
-        self.inputs_manager.add('dn',  torch.tensor([0.0]),      norm_dn)
-        self.inputs_manager.add('Jx',  torch.tensor([[7.5]]),    norm_J)
-        self.inputs_manager.add('Jy',  torch.tensor([[7.5]]),    norm_J)
-        self.inputs_manager.add('Jxy', torch.tensor([[0]]),      norm_Jxy)
+        # Check if r0 is scalar; if so, expand it. Otherwise, assume it's already correct.
+        r0_val = self.model.r0.clone().cpu()
+        if r0_val.numel() == 1 and self.N_src > 1:
+            r0_val = r0_val.repeat(self.N_src)
+        self.inputs_manager.add('r0',  r0_val, norm_r0)
 
-        if self.fit_wind:
-            self.inputs_manager.add('wind_dir', self.model.wind_dir.clone().cpu(), norm_wind_dir)
-            
-        if self.LWE_flag:
-            self.inputs_manager.add('LWE_coefs', torch.zeros([1,12]), norm_LWE)
+        wind_dir_val = self.model.wind_dir.clone().cpu()
+        if wind_dir_val.numel() == 1 and self.N_src > 1:
+            wind_dir_val = wind_dir_val.repeat(self.N_src)
+        self.inputs_manager.add('wind_dir', wind_dir_val, norm_wind_dir, optimizable=False)
+
+        self.inputs_manager.add('F',   torch.tensor([[1.0,]*2]).repeat(self.N_src, 1), norm_F)
+        self.inputs_manager.add('dx',  torch.tensor([[0.0,]*2]).repeat(self.N_src, 1), norm_dxy)
+        self.inputs_manager.add('dy',  torch.tensor([[0.0,]*2]).repeat(self.N_src, 1), norm_dxy)
+        self.inputs_manager.add('bg',  torch.tensor([[0.0,]*2]).repeat(self.N_src, 1), norm_bg)
+        
+        dn_val = torch.tensor([0.0])
+        if self.N_src > 1:
+            dn_val = dn_val.repeat(self.N_src)
+        self.inputs_manager.add('dn',  dn_val, norm_dn)
+
+        self.inputs_manager.add('Jx',  torch.tensor([[7.5]]).repeat(self.N_src, 1),    norm_J)
+        self.inputs_manager.add('Jy',  torch.tensor([[7.5]]).repeat(self.N_src, 1),    norm_J)
+        self.inputs_manager.add('Jxy', torch.tensor([[0]]).repeat(self.N_src, 1),      norm_Jxy)
+        
+        if self.fit_wind: self.inputs_manager.set_optimizable('wind_dir', True)
+        if self.LWE_flag: self.inputs_manager.add('LWE_coefs', torch.zeros([self.N_src, 12]), norm_LWE, optimizable=True)
 
         if self.LO_NCPAs:
             if self.use_Zernike:
                 if self.N_modes is not None:
-                    self.inputs_manager.add('LO_coefs', torch.zeros([1, self.N_modes]), norm_LO)
-                    self.inputs_manager.set_optimizable('LO_coefs', True)
+                    self.inputs_manager.add('LO_coefs', torch.zeros([self.N_src, self.N_modes]), norm_LO, optimizable=True)
             else:
                 if self.LO_map_size is not None:
-                    self.inputs_manager.add('LO_coefs', torch.zeros([1, self.LO_map_size**2]), norm_LO)
-                    self.inputs_manager.set_optimizable('LO_coefs', True)
-
+                    self.inputs_manager.add('LO_coefs', torch.zeros([self.N_src, self.LO_map_size**2]), norm_LO, optimizable=True)
+                    
         self.inputs_manager.to_float()
         self.inputs_manager.to(self.device)
+        
+        _ = self.inputs_manager.stack()  # Initialize slices and sizes
 
 
     def phase_func(self, x_dict):
@@ -231,7 +257,7 @@ class PSFModelIRDIS:
                 if self.use_Zernike:
                     NCPAs_OPD = self.NCPAs_basis.compute_OPD(x_dict['LO_coefs'])
                 else:
-                    NCPAs_OPD = self.NCPAs_basis.compute_OPD(x_dict['LO_coefs'].view(1, self.LO_map_size, self.LO_map_size))
+                    NCPAs_OPD = self.NCPAs_basis.compute_OPD(x_dict['LO_coefs'].view(self.N_src, self.LO_map_size, self.LO_map_size))
                 OPD += NCPAs_OPD
 
             OPD = OPD.unsqueeze(1) if OPD.ndim == 3 else OPD # (N_src, 1, H, W) or (N_src, N_wvl, H, W)
@@ -296,7 +322,11 @@ class PSFModelIRDIS:
             
             # Compensate for PTT if needed
             from tools.static_phase import BuildPTTBasis, project_WF
+            # PTT Basis shape: [3, H, W]
             PTT_basis = BuildPTTBasis(self.model.pupil.cpu().numpy(), True).to(self.device).float()
+            
+            # LWE_OPD shape is [N_src, H, W]
+            # project_WF expects [N, H, W] and projects onto basis
             PPT_OPD = project_WF(LWE_OPD, PTT_basis, self.model.pupil)
             combined_OPD = LWE_OPD - PPT_OPD
         
@@ -305,7 +335,7 @@ class PSFModelIRDIS:
             if self.use_Zernike:
                 NCPA_OPD = self.NCPAs_basis.compute_OPD(self.inputs_manager['LO_coefs']) * 1e9  # [nm]
             else:
-                NCPA_OPD = self.NCPAs_basis.compute_OPD(self.inputs_manager['LO_coefs'].view(1, self.LO_map_size, self.LO_map_size)) * 1e9  # [nm]
+                NCPA_OPD = self.NCPAs_basis.compute_OPD(self.inputs_manager['LO_coefs'].view(self.N_src, self.LO_map_size, self.LO_map_size)) * 1e9  # [nm]
             
             if combined_OPD is not None:
                 combined_OPD = combined_OPD + NCPA_OPD

@@ -543,12 +543,12 @@ class ConfigManager():
         entries_flatten = [\
             ['atmosphere', 'Seeing'],
             ['atmosphere', 'L0'],
-            ['sources_HO', 'Wavelength'],
             ['sources_science', 'Zenith'],
             ['sources_science', 'Azimuth']
         ]
         
         entries_singleton = [\
+            ['sources_HO', 'Wavelength'],
             ['sensor_HO', 'ClockRate'],
             ['sensor_HO', 'NumberLenslets'],
             ['sensor_HO', 'SizeLenslets']
@@ -649,6 +649,16 @@ def MultipleTargetsInDifferentObservations(configs, device=None):
     config_manager = ConfigManager()
     merged_config  = config_manager.Merge(configs)
 
+    # Check if any configs were provided
+    if not configs:
+        raise ValueError("No configuration files provided for merging.")
+    
+    # Check if any of configss is converted to pytorch. If yes, deconvert all to lists first
+    for config in configs:
+        sample_value = config['atmosphere']['Seeing']
+        if isinstance(sample_value, torch.Tensor):
+            config = config_manager.Convert(config, framework='list') 
+            
     N_src = len(configs)
     
     # Convert to target framework
