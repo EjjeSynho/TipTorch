@@ -17,7 +17,7 @@ from PSF_models.IRDIS_wrapper import PSFModelIRDIS
 
 from project_settings import device
 
-BATCH_SIZE = 52 # Adjust based on GPU memory
+BATCH_SIZE = 128 # Adjust based on GPU memory
 
 # torch.amp.autocast('cuda', dtype=torch.float16 or torch.bfloat16)
 # torch.backends.cuda.matmul.allow_tf32 = True

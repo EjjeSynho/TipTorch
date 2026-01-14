@@ -11,7 +11,7 @@ from ultranest.plot import cornerplot, PredictionBand
 np.random.seed(0)
 torch.manual_seed(0)
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch_dtype = torch.float32  # GPU compute dtype
 
 # -------------------------

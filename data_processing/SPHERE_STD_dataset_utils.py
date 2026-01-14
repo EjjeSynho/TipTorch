@@ -12,7 +12,7 @@ from astropy.stats import sigma_clipped_stats
 from photutils.background import Background2D, MedianBackground
 import warnings
 from skimage.restoration import inpaint
-from skimage.morphology import binary_dilation, disk, binary_erosion, footprint_rectangle
+from skimage.morphology import dilation, disk, erosion, footprint_rectangle
 
 
 MAX_NDIT = 50  # Max number of DITs to process if processed separately
@@ -25,7 +25,7 @@ STD_FOLDER  = SPHERE_DATA_FOLDER / 'standart_stars'
 CUBES_CACHE = STD_FOLDER / 'cubes_cache'
 
 
-#%%
+#%%conda list
 def SPHERE_PSF_spiders_mask(crop, thick=9):
     def draw_line(start_point, end_point, thickness=10):
         from PIL import Image, ImageDraw
@@ -58,8 +58,8 @@ def erode_mask(mask):
     for i in range(N_src):
         for j in range(N_wvl):
             mask_layer = mask[i,j,...]
-            mask_layer = binary_dilation(
-                binary_erosion(mask_layer, footprint_rectangle((3, 3))),
+            mask_layer = dilation(
+                erosion(mask_layer, footprint_rectangle((3, 3))),
                 disk(3)
             )
             mask_modified[i,j,...] = mask_layer

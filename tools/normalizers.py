@@ -204,6 +204,8 @@ class Atanh(DataTransform):
             return np.tanh(2*y)
 
 
+
+
 class Invert(DataTransform):
     def __init__(self, data=None):
         pass
@@ -457,3 +459,23 @@ class QuadraticModel:
             Tensor: Computed y-values.
         """
         return self.quadratic_function(self.x, *params)
+
+
+class Softmax(DataTransform):
+    def fit(self, data):
+        return self
+
+    def forward(self, x):
+        xp = torch if isinstance(x, torch.Tensor) else np
+        if isinstance(x, torch.Tensor):
+            shift_x = x - torch.max(x, dim=-1, keepdim=True)[0]
+            exps = torch.exp(shift_x)
+            return exps / torch.sum(exps, dim=-1, keepdim=True)
+        else:
+            shift_x = x - np.max(x, axis=-1, keepdims=True)
+            exps = np.exp(shift_x)
+            return exps / np.sum(exps, axis=-1, keepdims=True)
+
+    def backward(self, y):
+        xp = torch if isinstance(y, torch.Tensor) else np
+        return xp.log(y)

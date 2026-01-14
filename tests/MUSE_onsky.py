@@ -32,29 +32,27 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)[:14]
 
 #%%
-# ids = 96 # strongest wind
-# ids = 394 # strong wind
-# ids = 278 # strong wind
+ids = 96 # strongest wind (not really, it was a tomo error, likely)
+# ids = 394 # strong wind (not really, it was a tomo error, likely)
+# ids = 278 # strong wind (not really, it was a tomo error, likely)
 # ids = 176 # strong wind
 # ids = 296 # sausage
-# ids = 324
 # ids = 230 # PSF with chromatic displacement
-# ids = 231
+# ids = 324
 # ids = 344 # intense phase bump
 # ids = [344, 179, 451] # intense phase bump
 # ids = 423 # relatively good one
+# ids = 231
 
 # ids = 404 # intense streaks
-# ids = 462
 # ids = 465 # slight sausage
-# ids = 359
-# ids = 121
 # ids = 184 # weak wind patterns
 # ids = 338 # blurry
 # ids = 470 # blurry
 # ids = 346 # blurry (very)
-# ids = 206 # blurry, good for red debugging
 # ids = 179 # blurry
+
+# ids = 121
 # ids = 174
 
 # ids = 428 # good one, no DM mismathc yet
@@ -67,15 +65,17 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 451 # good one, but DM correction mismatch
 # ids = 453 # good one, but DM correction mismatch
 
-# ids = 455 # good one
 
+# ids = 206 # blurry, good for red debugging, strong wind, now it's poor blue fitting, and profile is mostly-near ground
 # ids = 457 # surprisingly poor blue fitting
 # ids = 477 # surprisingly poor blue fitting
 # ids = 467 # surprisingly poor blue fitting
 # ids = 458 # surprisingly poor blue fitting
+# ids = 494 # surprisingly poor blue fitting
 
+# ids = 455 # good one, slight sausage
+# ids = 359 # good one
 # ids = 482 # good one
-ids = 494 # good one
 # ids = 462 # good one
 # ids = 475 # good one, mb DM correction radius mismatch
 # ids = 468 # good one
@@ -99,7 +99,7 @@ PSF_model = PSFModelNFM(
     multiple_obs    = True,
     LO_NCPAs        = True,
     chrom_defocus   = False,
-    use_splines     = False, #True
+    use_splines     = True,
     Moffat_absorber = False,
     Z_mode_max      = 9,
     device          = device
@@ -129,7 +129,7 @@ for j in range(N_src):
 
         plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
         plt.axis('off')
-        plt.show()
+        # plt.show()
         
     plt.show()
 
@@ -143,7 +143,7 @@ from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
 wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
-wvl_weights = wvl_weights * 0 + 1
+# wvl_weights = wvl_weights * 0 + 1
 
 # mask = torch.tensor(mask_circle(PSF_0.shape[-1], 5)).view(1, 1, *PSF_0.shape[-2:]).to(device)
 # mask_inv = 1.0 - mask
@@ -292,8 +292,8 @@ include_general = ['r0', 'dn'] + \
                   (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else []) + \
                   (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else []) + \
                   ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
-                  (['L0'] if fit_outerscale else []) + \
-                  (['wind_speed_single'] if fit_wind_speed else []) #+ \
+                  (['L0'] if fit_outerscale else []) #+ \
+                #   (['wind_speed_single'] if fit_wind_speed else []) #+ \
                 #   ['GL_h_c']
                 #   ([x+'_x_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
 
