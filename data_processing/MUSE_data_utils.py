@@ -1711,6 +1711,29 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     return spectral_cubes, spectral_info, data_cached, model_config
 
 
+def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
+    """ Small utility function to process the AOF Cn2 profile data """
+    # Remove unphysical values
+    Cn2_alt [Cn2_alt > 100] = np.nan
+    Cn2_alt [Cn2_alt < 0]   = np.nan
+    Cn2_frac[Cn2_frac > 1]  = np.nan
+    Cn2_frac[Cn2_frac < 0]  = np.nan
+    Cn2_alt[-1] = np.nan if Cn2_alt[-1] < 1e-12 else Cn2_alt[-1]
+
+    # Replace NaN values with median ones
+    nan_mask_alt = np.isnan(Cn2_alt)
+    Cn2_alt[nan_mask_alt] = median_Cn2_alts[nan_mask_alt]
+
+    # make sure all altitudes are increasing
+    for i in range(1,8):
+        Cn2_alt[i] = np.maximum(Cn2_alt[i], Cn2_alt[i-1])
+
+    nan_mask_frac = np.isnan(Cn2_frac)
+    
+    Cn2_frac[nan_mask_frac] = 0.0
+    return Cn2_alt, Cn2_frac
+
+
 def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_config=True, plotting=True):
     """
     Spcialized routine for loading configs for the cached MUSE NFM data samples.
@@ -1731,104 +1754,54 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
     config_dict = config_manager.Load(DATA_FOLDER / 'parameter_files/muse_ltao.ini')
 
     # >>>>>>> Compute simplified Cn2 profile
-    # Read median Cn2 profile from the json file
+    # Read median Cn2 profile from the json file to serve as a fallback
     with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'r') as f:
-        median_Cn2_profile = json.load(f)
-    
-    median_Cn2_alts  = np.array(median_Cn2_profile['median_Cn2_alts'])
-    median_Cn2_fracs = np.array(median_Cn2_profile['median_Cn2_fracs'])
-    
-    if sample['Raw Cn2 data'] is None:
-        print(f"Warning: No raw Cn2 profile data found in the sample. Using median profile.")
-        Cn2_alt  = median_Cn2_alts
-        Cn2_frac = median_Cn2_fracs
-    else:
+        profile = json.load(f)
+        median_Cn2_alts, median_Cn2_fracs = np.array(profile['median_Cn2_alts']), np.array(profile['median_Cn2_fracs'])
+
+    try:
+        # Attempt to extract the profile from the sample data
+        if sample.get('Raw Cn2 data') is None:
+            raise ValueError("No raw Cn2 data recorded")
+            
         Cn2_alt  = np.array([sample['All data'][f'ALT{i}'].item()          for i in range(1, 9)])
         Cn2_frac = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
 
-    # Check if all NaN, if yes, replace with median profile
-    if np.all(np.isnan(Cn2_alt)) or np.all(np.isnan(Cn2_frac)):
-        print(f"Warning: Cn2 profile data is missing or invalid. Replacing with the median profile.")
-        Cn2_alt  = median_Cn2_alts
-        Cn2_frac = median_Cn2_fracs
+        # Check for invalid data (all NaNs)
+        if np.all(np.isnan(Cn2_alt)) or np.all(np.isnan(Cn2_frac)):
+            raise ValueError("Recorded Cn2 data consists of NaNs")
 
-    # Remove unphysical values
-    Cn2_alt [Cn2_alt > 100] = np.nan
-    Cn2_alt [Cn2_alt < 0]   = np.nan
-    Cn2_frac[Cn2_frac > 1]  = np.nan
-    Cn2_frac[Cn2_frac < 0]  = np.nan
-    Cn2_alt[-1] = np.nan if Cn2_alt[-1] < 1e-12 else Cn2_alt[-1]
+    except (KeyError, ValueError, AttributeError) as e:
+        print(f"Warning: Cn2 profile data is missing or invalid ({e}). Using median profile.")
+        Cn2_alt, Cn2_frac = median_Cn2_alts, median_Cn2_fracs
 
-    # Replace NaN values with median ones
-    nan_mask_alt = np.isnan(Cn2_alt)
-    Cn2_alt[nan_mask_alt] = median_Cn2_alts[nan_mask_alt]
 
-    # make sure all altitudes are increasing
-    for i in range(1,8):
-        Cn2_alt[i] = np.maximum(Cn2_alt[i], Cn2_alt[i-1])
+    from tools.utils import recompute_Cn2_simple, recompute_Cn2_Kmeans
 
-    nan_mask_frac = np.isnan(Cn2_frac)
-    Cn2_frac[nan_mask_frac] = 0.0
-
-    two_layers_only = False
-
-    if two_layers_only:
-        h_GL = 20.0 # [km], this is not the ground layer, but rather an optimal separation height
-
-        Cn2_w_GL = np.interp(h_GL, Cn2_alt, Cn2_frac)
-
-        Cn2_alt_lower = np.concatenate((Cn2_alt[Cn2_alt < h_GL], [h_GL]))
-        Cn2_alt_upper = np.concatenate(([h_GL], Cn2_alt[Cn2_alt >= h_GL]))
-
-        Cn2_frac_lower = np.concatenate((Cn2_frac[Cn2_alt < h_GL], [Cn2_w_GL]))
-        Cn2_frac_upper = np.concatenate(([Cn2_w_GL], Cn2_frac[Cn2_alt >= h_GL]))
-
-        # Compute fraction below GL
-        total_integral    = np.trapezoid(Cn2_frac, Cn2_alt)
-        fraction_below_GL = np.trapezoid(Cn2_frac_lower, Cn2_alt_lower) / total_integral
-        fraction_above_GL = np.trapezoid(Cn2_frac_upper, Cn2_alt_upper) / total_integral
-
-        if fraction_below_GL > 1-1e-6:
-            print("Warning: Cn2 fraction below GL is ~1. Adjusting to avoid numerical issues.")
-            fraction_below_GL = np.float64(0.99)
-            fraction_above_GL = np.float64(0.01)
-
-        config_dict['atmosphere']['Cn2Heights']    = [[0.0, h_GL*1e3]]  # convert to [m]
-        config_dict['atmosphere']['Cn2Weights']    = [[fraction_below_GL.item(), fraction_above_GL.item()]]
-        config_dict['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item(), 0.0]]
-        config_dict['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item(), 0.0]]
-        
-    else:
-        # Normalize Cn2 fractions
-        Cn2_frac /= np.trapezoid(Cn2_frac, Cn2_alt)
-
-        config_dict['atmosphere']['Cn2Heights']    = [(Cn2_alt*1e3).tolist()]  # convert to [m]
-        config_dict['atmosphere']['Cn2Weights']    = [Cn2_frac.tolist()]
-        config_dict['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item()] + [0.0]*(len(Cn2_alt)-1)]
-        config_dict['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item()]   + [0.0]*(len(Cn2_alt)-1)]
+    Cn2_alt, Cn2_frac = process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts)
+    
+    Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_Kmeans(Cn2_alt, Cn2_frac, n_layers=3, enforce_0_GL=False)
+    # Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_simple(Cn2_alt, Cn2_frac, h_bounds=[0, 5, 20, np.inf]) # 3-layer profile
+    # Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_simple(Cn2_alt, Cn2_frac, h_bounds=[0, 20, np.inf]) # 3-layer profile
 
     if plotting:
         plt.plot(Cn2_frac, Cn2_alt, 'o-')
         plt.plot(median_Cn2_fracs, median_Cn2_alts, '--', alpha=0.5, label='Median Cn2 profile')
-        
-        if two_layers_only:
-            plt.scatter(Cn2_w_GL, h_GL, color='red', label='GL Cn2 fraction')
-            plt.axhline(h_GL, color='gray', linestyle='--', label='GL Height')
-            
+        plt.plot(Cn2_frac_binned,  Cn2_alt_binned,  'o--', label='Binned Cn2 profile')
         plt.xlim(-0.01, 1)
         plt.ylim(0, 30)
         plt.xlabel('Cn2 Fraction')
         plt.ylabel('Altitude (km)')
         plt.title(f'AOF Cn2 profile')
         plt.legend()
-        
-        if two_layers_only:
-            print(f"Fraction of Cn2 below GL (h≤{h_GL} km): {fraction_below_GL:.4f}")
-            print(f"Fraction of Cn2 above GL (h>{h_GL} km): {fraction_above_GL:.4f}")
-
+        plt.show()
 
     # >>>>>>> Modify the rest of the config according to the data for the sample
     # Cn2-related data
+    config_dict['atmosphere']['Cn2Heights']    = [(Cn2_alt_binned*1e3).tolist()]  # convert to [m]
+    config_dict['atmosphere']['Cn2Weights']    = [Cn2_frac_binned.tolist()]
+    config_dict['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item()] + [0.0]*(len(Cn2_alt_binned)-1)]
+    config_dict['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item()]   + [0.0]*(len(Cn2_alt_binned)-1)]
 
     
     config_dict['telescope']['TelescopeDiameter'] = 8.0
@@ -1854,7 +1827,7 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
 
     config_dict['sources_LO']['Wavelength'] = (1215 + 1625)/2.0 * 1e-9 # Mean approx. wavelengths of IRLOS between J and H
     config_dict['sources_HO']['Zenith']     = [[10,]*4] # [arcsec], LGSs angular separation from on-axis
-
+    
     config_dict['sensor_science']['PixelScale'] = sample['MUSE header data']['Pixel scale (science)'].item()
     config_dict['sensor_science']['FieldOfView'] = FoV_science
 

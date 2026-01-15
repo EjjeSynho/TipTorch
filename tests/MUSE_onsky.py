@@ -13,7 +13,7 @@ from matplotlib.colors import LogNorm
 from torchmin import minimize
 
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
-from tools.utils import GradientLoss
+# from tools.utils import GradientLoss
 from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarData
 from PSF_models.NFM_wrapper import PSFModelNFM
 from project_settings import device
@@ -32,7 +32,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)[:14]
 
 #%%
-ids = 96 # strongest wind (not really, it was a tomo error, likely)
+# ids = 96 # strongest wind (not really, it was a tomo error, likely)
 # ids = 394 # strong wind (not really, it was a tomo error, likely)
 # ids = 278 # strong wind (not really, it was a tomo error, likely)
 # ids = 176 # strong wind
@@ -47,7 +47,6 @@ ids = 96 # strongest wind (not really, it was a tomo error, likely)
 # ids = 404 # intense streaks
 # ids = 465 # slight sausage
 # ids = 184 # weak wind patterns
-# ids = 338 # blurry
 # ids = 470 # blurry
 # ids = 346 # blurry (very)
 # ids = 179 # blurry
@@ -66,12 +65,13 @@ ids = 96 # strongest wind (not really, it was a tomo error, likely)
 # ids = 453 # good one, but DM correction mismatch
 
 
-# ids = 206 # blurry, good for red debugging, strong wind, now it's poor blue fitting, and profile is mostly-near ground
-# ids = 457 # surprisingly poor blue fitting
-# ids = 477 # surprisingly poor blue fitting
-# ids = 467 # surprisingly poor blue fitting
-# ids = 458 # surprisingly poor blue fitting
-# ids = 494 # surprisingly poor blue fitting
+# ids = 338 # poor blue fitting
+# ids = 206 # poor blue fitting, wind wings (?)
+# ids = 457 # poor blue fitting
+# ids = 477 # poor blue fitting
+# ids = 467 # poor blue fitting
+# ids = 458 # poor blue fitting
+# ids = 494 # poor blue fitting
 
 # ids = 455 # good one, slight sausage
 # ids = 359 # good one
@@ -82,6 +82,8 @@ ids = 96 # strongest wind (not really, it was a tomo error, likely)
 
 # ids = 455 # large tomographic error (?)
 # ids = 456 # large tomographic error
+
+ids = 125
 
 PSF_0, norms, bgs, configs = LoadSTDStarData(
     ids                 = ids,
@@ -112,8 +114,6 @@ N_wvl = PSF_0.shape[1]
 N_src = PSF_0.shape[0]
 
 wavelengths = PSF_model.wavelengths
-
-# PSF_model.inputs_manager['LO_coefs'][:,0] = 100
 
 #%%
 cmap = mpl.colormaps.get_cmap('gray')  # viridis is the default colormap for imshow
@@ -285,22 +285,22 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True)
 
     return result.x, func(result.x), OPD_map
 
-fit_wind_speed = True
-fit_outerscale = True
-
+fit_wind_speed  = True
+fit_outerscale  = True
+fit_Cn2_profile = True
+    
 include_general = ['r0', 'dn'] + \
                   (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else []) + \
-                  (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else []) + \
+                  (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
                   ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
-                  (['L0'] if fit_outerscale else []) #+ \
-                #   (['wind_speed_single'] if fit_wind_speed else []) #+ \
-                #   ['GL_h_c']
-                #   ([x+'_x_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
+                  (['L0'] if fit_outerscale else []) + \
+                  (['wind_speed_single'] if fit_wind_speed else []) + \
+                  (['Cn2_weights'] if fit_Cn2_profile else [])
 
 exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.Moffat_absorber else []
 
-include_LO = (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else [])
-exclude_LO = list(set(include_general + exclude_general) - set(include_LO))
+# include_LO = (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else [])
+# exclude_LO = list(set(include_general + exclude_general) - set(include_LO))
 
 # inc_minus_Moffat = list(set(include_general) - set(['amp', 'alpha', 'beta', 'b']))
 # inc_only_Moffat = ['amp', 'alpha', 'beta', 'b']
@@ -363,7 +363,7 @@ print('dx:', *[f"{x:.2f}" for x in PSF_model.model.dx.detach().cpu().numpy().fla
 print('dy:', *[f"{x:.2f}" for x in PSF_model.model.dy.detach().cpu().numpy().flatten()])
 print('F: ', *[f"{x:.3f}" for x in PSF_model.model.F.detach().cpu().numpy().flatten()])
 print('LO:', *[f"{x:.2f}" for x in PSF_model.inputs_manager['LO_coefs'].detach().cpu().numpy().flatten()])
-
+print('wind_speed_single:', *[f"{x:.2f}" for x in PSF_model.inputs_manager['wind_speed_single'].detach().cpu().numpy().flatten()])
 
 fig, ax = plt.subplots(1, 2, figsize=(10, 4))
 wvl_plot = wavelengths.squeeze().cpu().numpy()*1e9

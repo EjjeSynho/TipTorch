@@ -15,7 +15,8 @@ from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis, MUSE
 from tools.utils import PupilVLT
 from managers.config_manager import MultipleTargetsInDifferentObservations
 from managers.input_manager  import InputsManager
-from tools.normalizers import Uniform, Uniform0_1, Atanh
+from tools.normalizers import Uniform, Uniform0_1, SoftmaxInv
+
 from warnings import warn
 from project_settings import device
 import gc
@@ -50,7 +51,6 @@ class PSFModelNFM:
         self.init_model(config)
         if LO_NCPAs:
             self.init_NCPAs()
-        # self.polychromatic_params = ['F', 'dx', 'dy', 'Jx', 'Jy']
         self.polychromatic_params = ['F', 'dx', 'dy'] + (['chrom_defocus'] if self.chrom_defocus else ['J'])
 
         if self.use_splines:
@@ -267,12 +267,13 @@ class PSFModelNFM:
         norm_beta        = Uniform(a=0,     b=2)
         norm_ratio       = Uniform(a=0,     b=2)
         norm_theta       = Uniform(a=-np.pi/2, b=np.pi/2)
-        norm_wind_speed  = Uniform(a=0, b=10)
+        norm_wind_speed  = Uniform(a=0, b=15)
         # norm_wind_dir    = Uniform(a=0, b=360)
         # norm_sausage_pow = Uniform(a=0, b=1)
         norm_LO          = Uniform(a=-100, b=100)
         # norm_GL_h        = Uniform(a=0.0, b=10000.0)
         # norm_GL_frac     = Atanh()
+        norm_Cn2_profile = SoftmaxInv()
 
         # Add base parameters
         if self.use_splines:
@@ -287,32 +288,23 @@ class PSFModelNFM:
             self.inputs_manager.add('bg', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_bg)
 
         if self.chrom_defocus:
-            self.inputs_manager.add('J', torch.tensor([[25.0]]*N_src), norm_J)
+            self.inputs_manager.add('J', torch.tensor([[25.0]]*N_src), norm_J) # If chromatic defocus is enabled, jitter is monochromatic
         else:
             if self.use_splines:
                 self.inputs_manager.add('J_ctrl', torch.tensor([[25.0,]*self.N_spline_ctrl]*N_src), norm_J)
-                # self.inputs_manager.add('J_x_ctrl', torch.linspace(0, 1, 5, device=self.device).unsqueeze(0))
-                
-                # self.inputs_manager.add('Jx_ctrl', torch.tensor([[10.0,]*self.N_spline_ctrl]*N_src), norm_dxy)
-                # self.inputs_manager.add('Jy_ctrl', torch.tensor([[10.0,]*self.N_spline_ctrl]*N_src), norm_dxy)
             else:
                 self.inputs_manager.add('J', torch.tensor([[25.0]*N_wvl]*N_src), norm_J)
-                # self.inputs_manager.add('Jx', torch.tensor([[25.0]*N_wvl]*N_src),  norm_J)
-                # self.inputs_manager.add('Jy', torch.tensor([[25.0]*N_wvl]*N_src),  norm_J)
-                
+
         self.inputs_manager.add('r0', self.model.r0.clone(), norm_r0)
         self.inputs_manager.add('L0', self.model.L0.clone(), norm_L0)
-        self.inputs_manager.add('wind_speed_single', self.model.wind_speed[:,0].clone().unsqueeze(-1), norm_wind_speed)
         self.inputs_manager.add('Jxy', torch.tensor([[0.0]]*N_src), norm_Jxy, optimizable=False)
         self.inputs_manager.add('dn',  torch.tensor([0.25]*N_src),  norm_dn)
 
-        # GL_frac = self.model.Cn2_weights[:, 0].view(N_src, 1).detach().clone().abs()
-        # self.inputs_manager.add('GL_frac', GL_frac, norm_GL_frac)#, optimizable=False)
+        self.inputs_manager.add('wind_speed_single', self.model.wind_speed[:,0].clone().unsqueeze(-1), norm_wind_speed)
+        # self.inputs_manager.add('wind_speed',  self.model.wind_speed.clone(),  norm_wind_speed,  optimizable=False)
+        self.inputs_manager.add('Cn2_weights', self.model.Cn2_weights.clone(), norm_Cn2_profile, optimizable=False)
         
-        # GL_h = self.model.Cn2_heights[:, -1].view(N_src, 1).detach().clone().abs()
-        # self.inputs_manager.add('GL_h', GL_h, norm_GL_h)#, optimizable=False)
-
-        # Add Moffat parameters if needed
+        # Add Moffat PSD absorber's parameters
         if self.Moffat_absorber:
             self.inputs_manager.add('amp',   torch.tensor([1e-4]*N_src), norm_amp)
             self.inputs_manager.add('b',     torch.tensor([0.0]*N_src), norm_b)
@@ -324,9 +316,10 @@ class PSFModelNFM:
 
         if self.LO_NCPAs:
             if isinstance(self.LO_basis, PixelmapBasis):
-                self.inputs_manager.add('LO_coefs', torch.zeros([self.model.N_src, self.LO_N_params**2]), norm_LO)
-                self.phase_func = lambda x: self.LO_basis(x.view(1, self.LO_N_params, self.LO_N_params))
-                self.OPD_func   = lambda x: x.view(self.model.N_src, self.LO_N_params, self.LO_N_params)
+                # self.inputs_manager.add('LO_coefs', torch.zeros([self.model.N_src, self.LO_N_params**2]), norm_LO)
+                # self.phase_func = lambda x: self.LO_basis(x.view(self.model.N_src, self.LO_N_params, self.LO_N_params))
+                # self.OPD_func   = lambda x: x.view(self.model.N_src, self.LO_N_params, self.LO_N_params)
+                raise NotImplementedError('Pixelmap LO basis is not rroperly tested yet yet.')
 
 
             elif isinstance(self.LO_basis, ZernikeBasis) or isinstance(self.LO_basis, ArbitraryBasis):
@@ -334,19 +327,20 @@ class PSFModelNFM:
                 self.OPD_func = lambda x: self.LO_basis.compute_OPD(x.view(self.model.N_src, self.LO_N_params))
 
                 if self.chrom_defocus:
-                    self.inputs_manager.add('chrom_defocus', torch.tensor([[0.0,]*N_wvl]*self.model.N_src), norm_LO, optimizable=self.chrom_defocus)
-                    defocus_mode_id = 1 # the index of defocus mode
+                    if self.use_splines:
+                        self.inputs_manager.add('chrom_defocus_ctrl', torch.tensor([[0.0,]*self.N_spline_ctrl]*self.model.N_src), norm_LO, optimizable=self.chrom_defocus)
+                    else:
+                        self.inputs_manager.add('chrom_defocus', torch.tensor([[0.0,]*N_wvl]*self.model.N_src), norm_LO, optimizable=self.chrom_defocus)
 
-                    def phase_func(x):
-                        # coefs_chromatic = self.inputs_manager["LO_coefs"].view(self.model.N_src, self.LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1)
-                        # coefs_chromatic[:, :, defocus_mode_id] += self.inputs_manager["chrom_defocus"].view(self.model.N_src, N_wvl) # add chromatic defocus
-                        # return self.LO_basis(coefs_chromatic)
-                        raise NotImplementedError("Chromatic defocus with callable phase function is not implemented yet.")
+                    def phase_func(x, y):
+                        defocus_mode_id = 1 # the index of defocus mode given that 0 is the "phase bump" coefficient
+                        coefs_chromatic = x.view(self.model.N_src, self.LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1) # Add λ dimension
+                        coefs_chromatic[:, :, defocus_mode_id] += y.view(self.model.N_src, N_wvl) # add chromatic defocus
+                        return self.LO_basis(coefs_chromatic)
                     
                     self.phase_func = phase_func
                 else:
-                    # self.phase_func = lambda: self.LO_basis(self.inputs_manager["LO_coefs"].view(self.model.N_src, self.LO_N_params))
-                    self.phase_func = lambda x: self.LO_basis(x.view(self.model.N_src, self.LO_N_params))
+                    self.phase_func = lambda x, y: self.LO_basis(x.view(self.model.N_src, self.LO_N_params))
             else:
                 raise ValueError('Wrong LO type specified.')
         else:
@@ -377,16 +371,14 @@ class PSFModelNFM:
         x_dict['Jx'] = x_dict['J']
         x_dict['Jy'] = x_dict['J']
         
-            # x_dict['wind_dir']   = x_dict['wind_dir_single'].unsqueeze(-1).repeat(1, self.model.N_L)
         if 'wind_speed_single' in x_dict:
-            x_dict['wind_speed'] = x_dict['wind_speed_single'].view(-1, 1).repeat(1, self.model.N_L)
-
-        # x_dict['Cn2_weights'] = torch.hstack([x_dict['GL_frac'].abs(), 1.0 - x_dict['GL_frac'].abs()])
-        # x_dict['Cn2_heights'] = torch.nn.functional.pad(x_dict['GL_h'].abs(), (1, 0), value=0.0)
+            x_dict['wind_speed'] = torch.nn.functional.pad(x_dict['wind_speed_single'].view(-1, 1), (0, self.model.N_L - 1))
 
         x_ = { key: x_dict[key] for key in include_list } if include_list is not None else x_dict
 
-        phase_ = (lambda: self.phase_func(x_dict['LO_coefs'])) if self.LO_NCPAs else None
+        chrom_defocus = x_dict['chrom_defocus'] if self.chrom_defocus else None
+
+        phase_ = (lambda: self.phase_func(x_dict['LO_coefs'], chrom_defocus)) if self.LO_NCPAs else None
 
         return self.model(x_, None, phase_generator=phase_)
 

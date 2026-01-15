@@ -204,8 +204,6 @@ class Atanh(DataTransform):
             return np.tanh(2*y)
 
 
-
-
 class Invert(DataTransform):
     def __init__(self, data=None):
         pass
@@ -237,6 +235,47 @@ class Logify(DataTransform):
             return torch.exp(y)
         else:
             return np.exp(y)
+
+
+class Softmax(DataTransform):
+    def fit(self, data):
+        return self
+
+    def forward(self, x):
+        xp = torch if isinstance(x, torch.Tensor) else np
+        if isinstance(x, torch.Tensor):
+            shift_x = x - torch.amax(x, dim=-1, keepdim=True)
+            exps = torch.exp(shift_x)
+            return exps / torch.sum(exps, dim=-1, keepdim=True)
+        else:
+            shift_x = x - np.amax(x, axis=-1, keepdims=True)
+            exps = np.exp(shift_x)
+            return exps / np.sum(exps, axis=-1, keepdims=True)
+
+    def backward(self, y):
+        xp = torch if isinstance(y, torch.Tensor) else np
+        return xp.log(y) + 2.0  # Adding a constant
+
+
+class SoftmaxInv(DataTransform):
+    def fit(self, data):
+        return self
+
+    def forward(self, y):
+        xp = torch if isinstance(y, torch.Tensor) else np
+        return xp.log(y) + 2.0  # Adding a constant
+
+    def backward(self, x):
+        xp = torch if isinstance(x, torch.Tensor) else np
+        if isinstance(x, torch.Tensor):
+            shift_x = x - torch.amax(x, dim=-1, keepdim=True)
+            exps = torch.exp(shift_x)
+            return exps / torch.sum(exps, dim=-1, keepdim=True)
+        else:
+            shift_x = x - np.amax(x, axis=-1, keepdims=True)
+            exps = np.exp(shift_x)
+            return exps / np.sum(exps, axis=-1, keepdims=True)
+
         
 class TransformSequence:
     def __init__(self, transforms: Union[DataTransform, list, None] = None):
@@ -288,6 +327,10 @@ def LoadTransforms(state):
         elif transform[0] == 'Gauss':      transforms.append(Gauss(mu=transform[1]['mu'], std=transform[1]['std']))
         elif transform[0] == 'Invert':     transforms.append(Invert())
         elif transform[0] == 'Logify':     transforms.append(Logify())
+        elif transform[0] == 'Atanh':      transforms.append(Atanh())
+        elif transform[0] == 'Softmax':    transforms.append(Softmax())
+        elif transform[0] == 'SoftmaxInv': transforms.append(SoftmaxInv())
+        elif transform[0] == 'Identity':   transforms.append(Identity())
         else:
             raise ValueError(f"Unknown transform \"{transform[0]}\"!") 
     return TransformSequence(transforms)
@@ -321,161 +364,3 @@ def CreateTransformSequenceFromFile(filename):
      
     return df_transforms
 
-
-class LineModel:
-    """
-    A PyTorch-compatible line model for non-linear optimization.
-
-    The model function is defined as:
-        f(x; k, y_intercept) = k * x + y_intercept
-    """
-
-    def __init__(self, x: torch.Tensor):
-        """
-        Initialize the LineModel.
-
-        Parameters:
-            x (torch.Tensor): Tensor of x-values.
-        """
-        self.x = x
-
-    @staticmethod
-    def line_function(x, k, y_intercept):
-        """
-        Compute the line function.
-
-        Parameters:
-            x (Tensor or numpy.ndarray): Input x-values.
-            k (float): Slope.
-            y_intercept (float): Y-intercept.
-
-        Returns:
-            Tensor or numpy.ndarray: Computed y-values.
-        """
-        return k * x + y_intercept
-
-    def fit(self, y: torch.Tensor):
-        """
-        Fit the line model to target y-values using non-linear least squares.
-
-        This method converts the input tensors to numpy arrays and then
-        uses SciPy's curve_fit to estimate the parameters [k, y_intercept].
-
-        Parameters:
-            y (torch.Tensor): Tensor of target y-values.
-
-        Returns:
-            array: Optimal parameters [k, y_intercept].
-        """
-        # Convert tensors to 1D numpy arrays for curve_fit.
-        x_np = self.x.flatten().cpu().numpy()
-        y_np = y.flatten().cpu().numpy()
-
-        # Define the fitting function.
-        def fit_func(x, k, y_intercept):
-            return self.line_function(x, k, y_intercept)
-
-        popt, _ = curve_fit(fit_func, x_np, y_np, p0=[1e-6, 1e-6])
-        return popt
-
-    def __call__(self, params):
-        """
-        Evaluate the model using the provided parameters.
-
-        Parameters:
-            params (tuple): Parameters (k, y_intercept).
-
-        Returns:
-            Tensor: Computed y-values.
-        """
-        return self.line_function(self.x, *params)
-
-
-class QuadraticModel:
-    """
-    A PyTorch-compatible quadratic model for non-linear optimization.
-
-    The model function is defined as:
-        f(x; a, b, c) = a * x^2 + b * x + c
-    """
-
-    def __init__(self, x: torch.Tensor):
-        """
-        Initialize the QuadraticModel.
-
-        Parameters:
-            x (torch.Tensor): Tensor of x-values.
-        """
-        self.x = x
-
-    @staticmethod
-    def quadratic_function(x, a, b, c):
-        """
-        Compute the quadratic function.
-
-        Parameters:
-            x (Tensor or numpy.ndarray): Input x-values.
-            a (float): Quadratic coefficient.
-            b (float): Linear coefficient.
-            c (float): Constant term.
-
-        Returns:
-            Tensor or numpy.ndarray: Computed y-values.
-        """
-        return a * x ** 2 + b * x + c
-
-    def fit(self, y: torch.Tensor, p0=[1e-6, 1e-6, 1e-6]):
-        """
-        Fit the quadratic model to target y-values using non-linear least squares.
-
-        This method converts the input tensors to numpy arrays and then
-        uses SciPy's curve_fit to estimate the parameters [a, b, c].
-
-        Parameters:
-            y (torch.Tensor): Tensor of target y-values.
-
-        Returns:
-            array: Optimal parameters [a, b, c].
-        """
-        # Convert tensors to 1D numpy arrays for curve_fit.
-        x_np = self.x.flatten().cpu().numpy()
-        y_np = y.flatten().cpu().numpy()
-
-        # Define the fitting function.
-        def fit_func(x, a, b, c):
-            return self.quadratic_function(x, a, b, c)
-
-        popt, _ = curve_fit(fit_func, x_np, y_np, p0=p0)
-        return popt
-
-    def __call__(self, params):
-        """
-        Evaluate the model using the provided parameters.
-
-        Parameters:
-            params (tuple): Parameters (a, b, c).
-
-        Returns:
-            Tensor: Computed y-values.
-        """
-        return self.quadratic_function(self.x, *params)
-
-
-class Softmax(DataTransform):
-    def fit(self, data):
-        return self
-
-    def forward(self, x):
-        xp = torch if isinstance(x, torch.Tensor) else np
-        if isinstance(x, torch.Tensor):
-            shift_x = x - torch.max(x, dim=-1, keepdim=True)[0]
-            exps = torch.exp(shift_x)
-            return exps / torch.sum(exps, dim=-1, keepdim=True)
-        else:
-            shift_x = x - np.max(x, axis=-1, keepdims=True)
-            exps = np.exp(shift_x)
-            return exps / np.sum(exps, axis=-1, keepdims=True)
-
-    def backward(self, y):
-        xp = torch if isinstance(y, torch.Tensor) else np
-        return xp.log(y)

@@ -664,6 +664,69 @@ def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pix
         return mask_spiders
     
 
+def recompute_Cn2_Kmeans(Cn2_alts, Cn2_weights, n_layers=5, enforce_0_GL=False):
+    """" Re-compute simplified Cn2 profile using weighted K-means clustering. """
+    
+    from sklearn.cluster import KMeans
+
+    Cn2_alts = np.asarray(Cn2_alts, float)
+    Cn2_weights = np.asarray(Cn2_weights, float)
+    
+    x =  Cn2_alts
+
+    # Weighted KMeans
+    kmeans = KMeans(n_clusters=n_layers, random_state=42, n_init=10)
+    kmeans.fit(x.reshape(-1, 1), sample_weight=Cn2_weights)
+    labels = kmeans.labels_
+    
+    # Recompute centers and weights in the original space (h)
+    H = np.zeros(n_layers)
+    W = np.zeros(n_layers)
+    
+    for k in range(n_layers):
+        mask = labels == k
+        W[k] = Cn2_weights[mask].sum()
+        if W[k] > 0:
+            H[k] = np.average(Cn2_alts[mask], weights=Cn2_weights[mask])
+        else:
+            H[k] = np.nan
+
+    # sort by height
+    order = np.argsort(H)
+    H, W = H[order], W[order]
+    
+    W /= (W.sum() + 1e-12) # normalize weights
+    
+    if enforce_0_GL:
+        if len(H) > 0: H[0] = 0 # Enforce ground layer at 0 m
+    
+    return H, W
+
+
+def recompute_Cn2_simple(Cn2_alts, Cn2_weights, h_bounds, enforce_0_GL=False):
+    Cn2_alts = np.asarray(Cn2_alts, float)
+    Cn2_weights = np.asarray(Cn2_weights, float)
+    
+    H, W = [], []
+        
+    for i in range(len(h_bounds)-1):
+        mask = (Cn2_alts >= h_bounds[i]) & (Cn2_alts < h_bounds[i+1])
+        W.append( Cn2_weights[mask].sum() )
+        if W[-1] > 0:
+            H.append( np.average(Cn2_alts[mask], weights=Cn2_weights[mask]) )
+        else:
+            H.append( np.nan)
+    
+    W = np.array(W)
+    W /= (W.sum() + 1e-12) # normalize weights
+    H = np.array(H)
+    
+    if enforce_0_GL:
+        if len(H) > 0: H[0] = 0 # Enforce ground layer at 0 m
+        
+    return H, W
+
+
 class GradientLoss(nn.Module):
     """
     A gradient-based loss that enforces smoothness by penalizing differences
