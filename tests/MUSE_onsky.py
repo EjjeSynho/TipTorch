@@ -39,7 +39,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 324
 # ids = 344 # intense phase bump
 # ids = [344, 179, 451] # intense phase bump
-ids = 423 # relatively good one
+# ids = 423 # relatively good one
 # ids = 231
 
 # ids = 404 # intense streaks
@@ -50,7 +50,7 @@ ids = 423 # relatively good one
 # ids = 179 # blurry
 
 # ids = 121
-# ids = 174 # strong wind
+# ids = 174 # fail converge wth Cn2, strong wind
 
 # ids = 428 # good one, no DM mismathc yet
 # ids = 434 # good one, no DM mismathc yet
@@ -64,7 +64,7 @@ ids = 423 # relatively good one
 
 
 # ids = 338 # poor blue fitting
-# ids = 206 # poor blue fitting, wind wings (?)
+ids = 206 # poor blue fitting, wind wings (?)
 # ids = 457 # poor blue fitting
 # ids = 477 # poor blue fitting
 # ids = 467 # poor blue fitting
@@ -138,8 +138,8 @@ for j in range(N_src):
 #%%
 from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
-# wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
-wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+# wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
 wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
 # wvl_weights = wvl_weights * 0 + 1
@@ -160,7 +160,7 @@ loss_MSE   = torch.nn.MSELoss(reduction='mean')
 
 
 def loss_fn(x_, w_MSE, w_MAE):    
-    diff = (func(x_)-PSF_0) #* wvl_weights
+    diff = (func(x_)-PSF_0) * wvl_weights
     w = 2e4
     MSE_loss = diff.pow(2).mean() * w * w_MSE
     MAE_loss = diff.abs().mean()  * w * w_MAE
@@ -222,6 +222,7 @@ def loss_fn_Huber(x_):
 
 
 loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6)
+# loss_fn1 = lambda x_: loss_fn(x_, w_MSE=600.0, w_MAE=2.0)
 # loss_fn2 = lambda x_: loss_fn(x_, w_MSE=1.0,   w_MAE=2.0)
 # grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
