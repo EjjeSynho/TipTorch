@@ -1730,7 +1730,18 @@ def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
 
     nan_mask_frac = np.isnan(Cn2_frac)
     
-    Cn2_frac[nan_mask_frac] = 0.0
+    # Filter out Cn2 weights below 5 km that are too low
+    for i in range(1, 8):
+        if Cn2_alt[i] < 5.0 and np.abs(Cn2_frac[i]) < 1e-2:
+            nan_mask_frac[i] = True
+            
+    # Cn2_frac[nan_mask_frac] = 0.0
+    # Filter out layers with NaN Cn2 weights
+    Cn2_frac = Cn2_frac[~nan_mask_frac]
+    Cn2_alt  = Cn2_alt [~nan_mask_frac]
+    
+    Cn2_frac = Cn2_frac / Cn2_frac.sum() # Renormalize
+    
     return Cn2_alt, Cn2_frac
 
 
@@ -1776,14 +1787,14 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
         Cn2_alt, Cn2_frac = median_Cn2_alts, median_Cn2_fracs
 
 
-    from tools.utils import recompute_Cn2_simple, recompute_Cn2_Kmeans
+    from tools.utils import recompute_Cn2_Kmeans #, recompute_Cn2_simple
 
     Cn2_alt, Cn2_frac = process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts)
     
-    Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_Kmeans(Cn2_alt, Cn2_frac, n_layers=3, enforce_0_GL=False)
+    Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_Kmeans(Cn2_alt, Cn2_frac, n_layers=3, enforce_0_GL=True, min_separation=3.0)
+    # Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_Kmeans(Cn2_alt, Cn2_frac, n_layers=3, enforce_0_GL=False)
     # Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_simple(Cn2_alt, Cn2_frac, h_bounds=[0, 5, 20, np.inf]) # 3-layer profile
-    # Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_simple(Cn2_alt, Cn2_frac, h_bounds=[0, 20, np.inf]) # 3-layer profile
-
+    
     if plotting:
         plt.plot(Cn2_frac, Cn2_alt, 'o-')
         plt.plot(median_Cn2_fracs, median_Cn2_alts, '--', alpha=0.5, label='Median Cn2 profile')
@@ -1803,7 +1814,6 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
     config_dict['atmosphere']['WindSpeed']     = [[sample['MUSE header data']['Wind speed (header)'].item()] + [0.0]*(len(Cn2_alt_binned)-1)]
     config_dict['atmosphere']['WindDirection'] = [[sample['MUSE header data']['Wind dir (header)'].item()]   + [0.0]*(len(Cn2_alt_binned)-1)]
 
-    
     config_dict['telescope']['TelescopeDiameter'] = 8.0
     config_dict['telescope']['ZenithAngle'] = [90.0 - sample['MUSE header data']['Tel. altitude'].item()]
     config_dict['telescope']['Azimuth']     = [sample['MUSE header data']['Tel. azimuth'].item()]

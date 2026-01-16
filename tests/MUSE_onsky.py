@@ -9,11 +9,10 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-from matplotlib.colors import LogNorm
-from torchmin import minimize
 
+from torchmin import minimize
+from matplotlib.colors import LogNorm
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
-# from tools.utils import GradientLoss
 from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarData
 from PSF_models.NFM_wrapper import PSFModelNFM
 from project_settings import device
@@ -28,7 +27,6 @@ with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
 # wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 5), a_min=0, a_max=N_wvl_max-1)
 # wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 3), a_min=0, a_max=N_wvl_max-1)
 wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
-
 # wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)[:14]
 
 #%%
@@ -41,7 +39,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 324
 # ids = 344 # intense phase bump
 # ids = [344, 179, 451] # intense phase bump
-# ids = 423 # relatively good one
+ids = 423 # relatively good one
 # ids = 231
 
 # ids = 404 # intense streaks
@@ -52,7 +50,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 179 # blurry
 
 # ids = 121
-# ids = 174
+# ids = 174 # strong wind
 
 # ids = 428 # good one, no DM mismathc yet
 # ids = 434 # good one, no DM mismathc yet
@@ -83,7 +81,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 455 # large tomographic error (?)
 # ids = 456 # large tomographic error
 
-ids = 125
+# ids = 125
 
 PSF_0, norms, bgs, configs = LoadSTDStarData(
     ids                 = ids,
@@ -94,6 +92,7 @@ PSF_0, norms, bgs, configs = LoadSTDStarData(
     ensure_odd_pixels   = True,
     device              = device
 )
+
 
 #%%
 PSF_model = PSFModelNFM(
@@ -251,9 +250,14 @@ loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6)
 
 
 #%%
-def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True):
+def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True, force_BFGS=False):
     if not include_list:
         raise ValueError('include_list is empty')
+    
+    if type(include_list) is str: include_list = [include_list]
+    if type(exclude_list) is str: exclude_list = [exclude_list]    
+    if type(include_list) is set: include_list = list(include_list)
+    if type(exclude_list) is set: exclude_list = list(exclude_list)
         
     PSF_model.inputs_manager.set_optimizable(include_list, True)
     PSF_model.inputs_manager.set_optimizable(exclude_list, False)
@@ -267,10 +271,12 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True)
     )
 
     # Try L-BFGS first
-    result = lim_lambda('l-bfgs', 1e-4)
+    result = lim_lambda('l-bfgs' if not force_BFGS else 'bfgs', 1e-4)
+    
+    acceptable_loss = 1.0
     
     # Retry with BFGS if convergence issues detected
-    if result['nit'] < max_iter * 0.3 or result['fun'] > 1: # If converged earlier than 30% of the iterations or final loss is too high
+    if result['nit'] < max_iter * 0.3 and result['fun'] > acceptable_loss: # If converged earlier than 30% of the iterations and final loss is too high
         if verbose:
             reason = "stopped too early" if result['nit'] < max_iter * 0.3 else "final loss is high"
             print(f"Warning: minimization {reason}. Perhaps, convergence wasn't reached? Trying BFGS...")
@@ -280,38 +286,48 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True)
 
     OPD_map = PSF_model.OPD_func(PSF_model.inputs_manager['LO_coefs']).detach().cpu().numpy() if PSF_model.LO_NCPAs else None
         
-    if verbose:
-        print('-'*50)
+    if verbose: print('-'*50)
 
-    return result.x, func(result.x), OPD_map
+    success = result['fun'] < acceptable_loss
+    
+    if not success:
+        print("Warning: Minimization did not converge.")
+
+    return result.x, func(result.x), OPD_map, success
+
 
 fit_wind_speed  = True
+fit_wind_dir    = False
 fit_outerscale  = True
 fit_Cn2_profile = True
-    
+
 include_general = ['r0', 'dn'] + \
-                  (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else []) + \
                   (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
                   ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
                   (['L0'] if fit_outerscale else []) + \
                   (['wind_speed_single'] if fit_wind_speed else []) + \
-                  (['Cn2_weights'] if fit_Cn2_profile else [])
+                  (['wind_dir_single'] if fit_wind_dir else []) + \
+                  (['Cn2_weights'] if fit_Cn2_profile else []) + \
+                  (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else [])
 
 exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.Moffat_absorber else []
 
-# include_LO = (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else [])
-# exclude_LO = list(set(include_general + exclude_general) - set(include_LO))
-
-# inc_minus_Moffat = list(set(include_general) - set(['amp', 'alpha', 'beta', 'b']))
-# inc_only_Moffat = ['amp', 'alpha', 'beta', 'b']
+include_general, exclude_general = set(include_general), set(exclude_general)
 
 #%%
-x0, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 150)
-# x0, PSF_1, OPD_map = minimize_params(loss_fn_Huber, include_general, exclude_general, 150)
+x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, include_general, exclude_general, 200)
 
-# if fit_LO:
-#     x1, PSF_1, OPD_map = minimize_params(loss_fn2, include_LO, exclude_LO, 50)
-#     x2, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 50)
+if not success:
+    print("Retrying minimization without Cn2 profile fitting...")
+    PSF_model.reset_parameters()
+    
+    include_updated = include_general - set(['Cn2_weights', 'L0', 'wind_speed_single', 'wind_dir_single'])
+    x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, include_updated, exclude_general, 300, force_BFGS=True)
+    
+    # exclude_Cn2 = include_general - set(['Cn2_weights', 'L0', 'wind_speed_single', 'wind_dir_single'])
+    # x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, ['Cn2_weights', 'L0'], exclude_Cn2, 300, force_BFGS=True)
+    
+# print(f"Minimization success: {success}, final loss: {loss_fn1(x0):.4f}")
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles
@@ -320,6 +336,7 @@ id_src = 0
 
 vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
 vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
+# wvl_select = np.s_[0, N_wvl//2, -1]
 wvl_select = np.s_[0, N_wvl//2, -1]
 
 draw_PSF_stack(

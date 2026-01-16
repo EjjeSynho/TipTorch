@@ -664,7 +664,7 @@ def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pix
         return mask_spiders
     
 
-def recompute_Cn2_Kmeans(Cn2_alts, Cn2_weights, n_layers=5, enforce_0_GL=False):
+def recompute_Cn2_Kmeans(Cn2_alts, Cn2_weights, n_layers=5, enforce_0_GL=False, min_separation=None):
     """" Re-compute simplified Cn2 profile using weighted K-means clustering. """
     
     from sklearn.cluster import KMeans
@@ -700,6 +700,14 @@ def recompute_Cn2_Kmeans(Cn2_alts, Cn2_weights, n_layers=5, enforce_0_GL=False):
     if enforce_0_GL:
         if len(H) > 0: H[0] = 0 # Enforce ground layer at 0 m
     
+    # Check if resulting layers are separated enough (useful for numerical stability)
+    if min_separation is not None:
+        for i in range(1, len(H)-1):
+            if d1 := np.abs(H[i] - H[i-1]) < min_separation:
+                H[i] += min_separation - d1
+            if d2 := np.abs(H[i+1] - H[i]) < min_separation:
+                H[i] -= min_separation - d2
+            
     return H, W
 
 

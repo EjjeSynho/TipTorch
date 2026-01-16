@@ -248,7 +248,7 @@ class PSFModelNFM:
         
     def init_model_inputs(self):
         self.inputs_manager = InputsManager()
-        
+                
         N_wvl = len(self.wavelengths)
         N_src = self.model.N_src
         
@@ -301,7 +301,7 @@ class PSFModelNFM:
         self.inputs_manager.add('dn',  torch.tensor([0.25]*N_src),  norm_dn)
 
         self.inputs_manager.add('wind_speed_single', self.model.wind_speed[:,0].clone().unsqueeze(-1), norm_wind_speed)
-        # self.inputs_manager.add('wind_speed',  self.model.wind_speed.clone(),  norm_wind_speed,  optimizable=False)
+        self.inputs_manager.add('wind_dir_single', self.model.wind_dir[:,0].clone().unsqueeze(-1), norm_wind_speed)
         self.inputs_manager.add('Cn2_weights', self.model.Cn2_weights.clone(), norm_Cn2_profile, optimizable=False)
         
         # Add Moffat PSD absorber's parameters
@@ -351,7 +351,13 @@ class PSFModelNFM:
         self.inputs_manager.to_float()
         
         _ = self.inputs_manager.stack()
+        self.backup_manager = self.inputs_manager.copy()
 
+
+    def reset_parameters(self):
+        ''' Reset model input parameters to their initial values'''
+        self.inputs_manager = self.backup_manager.copy()
+    
 
     def evaluate_splines(self, y_points, x_grid):
         spline = NaturalCubicSpline(natural_cubic_spline_coeffs(t=self.x_ctrl, x=y_points.T))
@@ -373,6 +379,9 @@ class PSFModelNFM:
         
         if 'wind_speed_single' in x_dict:
             x_dict['wind_speed'] = torch.nn.functional.pad(x_dict['wind_speed_single'].view(-1, 1), (0, self.model.N_L - 1))
+            
+        if 'wind_dir_single' in x_dict:
+            x_dict['wind_dir'] = torch.nn.functional.pad(x_dict['wind_dir_single'].view(-1, 1), (0, self.model.N_L - 1))
 
         x_ = { key: x_dict[key] for key in include_list } if include_list is not None else x_dict
 

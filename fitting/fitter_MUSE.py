@@ -124,8 +124,8 @@ def load_and_fit_sample(id):
         multiple_obs    = True,
         LO_NCPAs        = True,
         chrom_defocus   = False,
-        use_splines     = False,
-        Moffat_absorber = True,
+        use_splines     = True,
+        Moffat_absorber = False,
         Z_mode_max      = 9,
         device          = device
     )
@@ -138,7 +138,7 @@ def load_and_fit_sample(id):
     wavelengths = PSF_model.wavelengths
 
     # Loss functions setup
-    wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+    wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
     wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
     # loss_Huber = torch.nn.HuberLoss(reduction='mean', delta=0.05)
@@ -199,13 +199,18 @@ def load_and_fit_sample(id):
 
     #     return huber_loss + LO_loss + MSE_loss
 
-    loss_fn1 = lambda x_: loss_fn(x_, w_MSE=800.0, w_MAE=1.6)
+    loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6)
     # loss_fn2 = lambda x_: loss_fn(x_, w_MSE=1.0,   w_MAE=2.0)
 
     # Minimization function
-    def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True):
+    def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True, force_BFGS=False):
         if not include_list:
             raise ValueError('include_list is empty')
+        
+        if type(include_list) is str: include_list = [include_list]
+        if type(exclude_list) is str: exclude_list = [exclude_list]    
+        if type(include_list) is set: include_list = list(include_list)
+        if type(exclude_list) is set: exclude_list = list(exclude_list)
             
         PSF_model.inputs_manager.set_optimizable(include_list, True)
         PSF_model.inputs_manager.set_optimizable(exclude_list, False)
@@ -219,10 +224,12 @@ def load_and_fit_sample(id):
         )
 
         # Try L-BFGS first
-        result = lim_lambda('l-bfgs', 1e-4)
+        result = lim_lambda('l-bfgs' if not force_BFGS else 'bfgs', 1e-4)
+        
+        acceptable_loss = 1.0
         
         # Retry with BFGS if convergence issues detected
-        if result['nit'] < max_iter * 0.3 or result['fun'] > 1:
+        if result['nit'] < max_iter * 0.3 and result['fun'] > acceptable_loss: # If converged earlier than 30% of the iterations and final loss is too high
             if verbose:
                 reason = "stopped too early" if result['nit'] < max_iter * 0.3 else "final loss is high"
                 print(f"Warning: minimization {reason}. Perhaps, convergence wasn't reached? Trying BFGS...")
@@ -232,30 +239,43 @@ def load_and_fit_sample(id):
 
         OPD_map = PSF_model.OPD_func(PSF_model.inputs_manager['LO_coefs']).detach().cpu().numpy() if PSF_model.LO_NCPAs else None
             
-        if verbose:
-            print('-'*50)
+        if verbose: print('-'*50)
 
-        return result.x, func(result.x), OPD_map
+        success = result['fun'] < acceptable_loss
+        
+        if not success:
+            print("Warning: Minimization did not converge.")
+
+        return result.x, func(result.x), OPD_map, success
 
     # Define what to fit
-    fit_wind_speed = True
-    fit_outerscale = True
+    fit_wind_speed  = True
+    fit_wind_dir    = False
+    fit_outerscale  = True
+    fit_Cn2_profile = True
 
     include_general = ['r0', 'dn'] + \
-                        (['amp', 'alpha', 'beta', 'b'] if PSF_model.Moffat_absorber else []) + \
-                        (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
-                        (['chrom_defocus'] if PSF_model.chrom_defocus else []) + \
-                        ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
-                        (['L0'] if fit_outerscale else []) + \
-                        (['wind_speed_single'] if fit_wind_speed else [])
+                      (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
+                      ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
+                      (['L0'] if fit_outerscale else []) + \
+                      (['wind_speed_single'] if fit_wind_speed else []) + \
+                      (['wind_dir_single'] if fit_wind_dir else []) + \
+                      (['Cn2_weights'] if fit_Cn2_profile else []) + \
+                      (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else [])
 
-    exclude_general = ['ratio', 'theta'] if PSF_model.Moffat_absorber else []
+    exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.Moffat_absorber else []
 
-    include_LO = (['LO_coefs'] if PSF_model.LO_NCPAs else []) + (['chrom_defocus'] if PSF_model.chrom_defocus else [])
-    exclude_LO = list(set(include_general + exclude_general) - set(include_LO))
+    include_general, exclude_general = set(include_general), set(exclude_general)
 
     # Perform fitting
-    x0, PSF_1, OPD_map = minimize_params(loss_fn1, include_general, exclude_general, 150, verbose=False)
+    x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, include_general, exclude_general, 200, verbose=False)
+
+    if not success:
+        print("Retrying minimization without Cn2 profile fitting...")
+        PSF_model.reset_parameters()
+        
+        include_updated = include_general - set(['Cn2_weights', 'L0', 'wind_speed_single', 'wind_dir_single'])
+        x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, include_updated, exclude_general, 300, verbose=False, force_BFGS=True)
 
     loss_val = loss_fn1(x0).item()
 
