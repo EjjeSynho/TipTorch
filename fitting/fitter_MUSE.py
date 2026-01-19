@@ -45,21 +45,33 @@ default_device = device
 
 start_id, end_id = -1, -1
 
-if len(sys.argv) > 1:
-    param1 = sys.argv[1]
-else:
-    device = default_device
+# Flexible argument parsing
+input_args = sys.argv[1:]
+device_specified = False
+
+for arg in input_args:
+    if arg.startswith("cuda") or arg.startswith("cpu"):
+        device = torch.device(arg)
+        print(f"Using device: {arg}")
+        device_specified = True
+    elif arg.lstrip('-').isdigit(): # Simple check for integer IDs
+        if start_id == -1:
+            start_id = int(arg)
+        elif end_id == -1:
+            end_id = int(arg)
+    else:
+        # Assume it is a path
+        MUSE_FITTING_FOLDER = Path(arg)
+        print(f"Output folder set to: {MUSE_FITTING_FOLDER}")
+
+if not device_specified:
     print("No device specified, using default device.")
 
-if len(sys.argv) > 1 and (param1.startswith("cuda:") or param1.startswith("cpu")):
-    device = torch.device(device_choice:=param1)
-    print(f"Using device: {device_choice}")
-else:
-    device = default_device
-    print("No device specified, using default device.")
-
-if len(sys.argv) > 2:
-    start_id, end_id = int(sys.argv[2]), int(sys.argv[3])
+if not MUSE_FITTING_FOLDER.exists():
+    try:
+        MUSE_FITTING_FOLDER.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        print(f"Warning: Could not create directory {MUSE_FITTING_FOLDER}: {e}")
 
 # Example: python fitter_MUSE.py cpu 50 150
 
@@ -138,8 +150,8 @@ def load_and_fit_sample(id):
     wavelengths = PSF_model.wavelengths
 
     # Loss functions setup
-    # wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
-    wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+    wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
+    # wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
     wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
     # loss_Huber = torch.nn.HuberLoss(reduction='mean', delta=0.05)
@@ -149,7 +161,7 @@ def load_and_fit_sample(id):
 
 
     def loss_fn(x_, w_MSE, w_MAE):    
-        diff = (func(x_)-PSF_0) #* wvl_weights # NOTE: wvl_weights removed for now
+        diff = (func(x_)-PSF_0) * wvl_weights # NOTE: wvl_weights removed for now
         w = 2e4
         MSE_loss = diff.pow(2).mean() * w * w_MSE
         MAE_loss = diff.abs().mean()  * w * w_MAE
