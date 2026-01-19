@@ -36,7 +36,8 @@ else:
 
 #%%
 # fitted_samples_folder = STD_FOLDER / 'fitted_no_Moffat/'
-fitted_samples_folder = STD_FOLDER / 'fitted_with_Moffat_13wvl/'
+# fitted_samples_folder = STD_FOLDER / 'fitted_with_Moffat_13wvl/'
+fitted_samples_folder = STD_FOLDER / 'fitted/'
 
 files = os.listdir(fitted_samples_folder)
 
@@ -46,7 +47,9 @@ with open(fitted_samples_folder / files[0], 'rb') as handle:
         print(x)
 
 df_relevant_entries = [
-    'bg', 'F', 'dx', 'dy', 'r0', 'dn', 'J', 'LO_coefs', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta', 'wind_speed_single',
+    'bg', 'F', 'dx', 'dy', 'r0', 'dn', 'J', 'LO_coefs',
+    'amp', 'b', 'alpha', 'beta', 'ratio', 'theta',
+    'wind_speed_single', 'Cn2_weights',
     'SR data', 'SR fit', 'FWHM fit', 'FWHM data',
 ]
 
@@ -144,11 +147,11 @@ F_df  = make_polychrome_dataset(fitted_dict_raw['F'])
 
 LO_df = make_LO_dataset(fitted_dict_raw['LO_coefs'])
 
-FWHM_fit_data  = make_polychrome_dataset(fitted_dict_raw['FWHM fit'])
-FWHM_data_data = make_polychrome_dataset(fitted_dict_raw['FWHM data'])
-
 SR_fit_df  = make_polychrome_dataset(fitted_dict_raw['SR fit'])
 SR_data_df = make_polychrome_dataset(fitted_dict_raw['SR data'])
+
+FWHM_fit_data  = make_polychrome_dataset(fitted_dict_raw['FWHM fit'])
+FWHM_data_data = make_polychrome_dataset(fitted_dict_raw['FWHM data'])
 
 FWHM_fit_x  = FWHM_fit_data.applymap(lambda x: x[0])
 FWHM_fit_y  = FWHM_fit_data.applymap(lambda x: x[1])
@@ -216,20 +219,20 @@ FWHM_err_df = (FWHM_fit_df - FWHM_data_df).abs() / FWHM_data_df * 100
 
 wvl_normed = np.linspace(381, 750, len(wavelength))
 
+bins = np.linspace(0, 40, 21) # Define constant bins
+
 # Plot as overlapping histograms iterating by wavelength
 plt.figure(figsize=(10, 6))
 for i, wvl in enumerate(wavelength[::2]):  # Skip every second wavelength
-    data = SR_err_df[wvl].dropna()
-    sns.histplot(data, bins=15, alpha=0.2, label=f'{wvl} nm',  color=wavelength_to_rgb(wvl_normed[i*2]),  element="step", fill=True, linewidth=2)
+    data = SR_err_df[wvl].dropna().clip(upper=40)
+    sns.histplot(data, bins=bins+i*0.05, alpha=0.1, label=f'{wvl} nm', color=wavelength_to_rgb(wvl_normed[i*2]),  element="step", fill=True, linewidth=2)
 
-plt.xlim(-5, 100)
-plt.ylim(0, 250)
+plt.xlim(0, 40)
 plt.xlabel('SR relative error (%)')
 plt.ylabel('Number of samples')
 plt.title('Strehl Ratio Relative Error Distribution')
 plt.legend()
-plt.show()
-
+plt.xticks(np.arange(0, 45, 5), [str(x) if x < 40 else '>40' for x in np.arange(0, 45, 5)])
 plt.show()
 
 #%%
