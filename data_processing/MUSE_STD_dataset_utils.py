@@ -72,7 +72,7 @@ def LoadSTDStarData(
         else:
             norms = np.ones(PSF_data.shape[0])[:,None,None]
 
-        config_dict = InitNFMConfig(sample, PSF_data, wvl_ids, convert_config=False)
+        config_dict = InitNFMConfig(sample, PSF_data, wvl_ids, convert_config=False, plotting=False)
 
         if derotate_PSF:
             config_dict['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated

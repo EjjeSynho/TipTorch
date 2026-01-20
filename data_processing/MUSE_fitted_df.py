@@ -35,9 +35,13 @@ else:
 
 
 #%%
-# fitted_samples_folder = STD_FOLDER / 'fitted_no_Moffat/'
-# fitted_samples_folder = STD_FOLDER / 'fitted_with_Moffat_13wvl/'
-fitted_samples_folder = STD_FOLDER / 'fitted/'
+# experiment = 'fitted_no_Moffat'
+# experiment = 'fitted_with_Moffat_13wvl'
+experiment = 'fitted_λw_0,5_1,0'
+# experiment = 'fitted_λw_1,0_0,5' -> seems to be better
+
+fitted_samples_folder = STD_FOLDER / experiment
+
 
 files = os.listdir(fitted_samples_folder)
 
@@ -145,6 +149,7 @@ dy_df = make_polychrome_dataset(fitted_dict_raw['dy'])
 bg_df = make_polychrome_dataset(fitted_dict_raw['bg'])
 F_df  = make_polychrome_dataset(fitted_dict_raw['F'])
 
+#%%
 LO_df = make_LO_dataset(fitted_dict_raw['LO_coefs'])
 
 SR_fit_df  = make_polychrome_dataset(fitted_dict_raw['SR fit'])
@@ -228,9 +233,10 @@ for i, wvl in enumerate(wavelength[::2]):  # Skip every second wavelength
     sns.histplot(data, bins=bins+i*0.05, alpha=0.1, label=f'{wvl} nm', color=wavelength_to_rgb(wvl_normed[i*2]),  element="step", fill=True, linewidth=2)
 
 plt.xlim(0, 40)
+plt.ylim(0, 250)
 plt.xlabel('SR relative error (%)')
 plt.ylabel('Number of samples')
-plt.title('Strehl Ratio Relative Error Distribution')
+plt.title(f'Strehl Ratio Relative Error Distribution ({experiment})')
 plt.legend()
 plt.xticks(np.arange(0, 45, 5), [str(x) if x < 40 else '>40' for x in np.arange(0, 45, 5)])
 plt.show()
