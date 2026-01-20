@@ -150,8 +150,8 @@ def load_and_fit_sample(id):
     wavelengths = PSF_model.wavelengths
 
     # Loss functions setup
-    wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
-    # wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+    # wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
+    wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
     wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
     # loss_Huber = torch.nn.HuberLoss(reduction='mean', delta=0.05)

@@ -35,10 +35,8 @@ else:
 
 
 #%%
-# experiment = 'fitted_no_Moffat'
-# experiment = 'fitted_with_Moffat_13wvl'
-experiment = 'fitted_λw_0,5_1,0'
-# experiment = 'fitted_λw_1,0_0,5' -> seems to be better
+# experiment = 'fitted_λw_0,5_1,0'
+experiment = 'fitted_λw_1,0_0,5' #-> seems to be better
 
 fitted_samples_folder = STD_FOLDER / experiment
 
@@ -242,7 +240,17 @@ plt.xticks(np.arange(0, 45, 5), [str(x) if x < 40 else '>40' for x in np.arange(
 plt.show()
 
 #%%
+# Plot averaged SR error
+plt.figure(figsize=(10, 6))
+data = SR_err_df.mean(axis=1).dropna().clip(upper=40)
+sns.histplot(data, bins=bins, alpha=0.5, element="step", fill=True, linewidth=2)
+plt.xlabel('Mean SR relative error (%)')
+plt.ylabel('Number of samples')
+plt.title(f'Mean Strehl Ratio Relative Error Distribution ({experiment})')
+plt.xticks(np.arange(0, 45, 5), [str(x) if x < 40 else '>40' for x in np.arange(0, 45, 5)])
+plt.show()
 
+#%%
 # Id of a max SR error sample
 id_max_SR_err = SR_err_df.mean(axis=1).idxmax()
 print(f"ID of max SR error sample: {id_max_SR_err}")
