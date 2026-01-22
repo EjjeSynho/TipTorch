@@ -93,7 +93,6 @@ PSF_0, norms, bgs, configs = LoadSTDStarData(
     device              = device
 )
 
-
 #%%
 PSF_model = PSFModelNFM(
     configs,
@@ -101,7 +100,7 @@ PSF_model = PSFModelNFM(
     LO_NCPAs        = True,
     chrom_defocus   = False,
     use_splines     = True,
-    Moffat_absorber = False,
+    Moffat_absorber = False, 
     Z_mode_max      = 9,
     device          = device
 )

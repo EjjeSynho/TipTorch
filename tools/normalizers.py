@@ -19,8 +19,8 @@ class DataTransform:
     def forward(self, x):
         raise NotImplementedError("Subclasses must implement the 'forward' method.")
     
-    def backward(self, y):
-        raise NotImplementedError("Subclasses must implement the 'backward' method.")
+    def inverse(self, y):
+        raise NotImplementedError("Subclasses must implement the 'inverse' method.")
     
     def __call__(self, x):
         return self.forward(x)
@@ -41,7 +41,7 @@ class Identity(DataTransform):
     def forward(self, x):
         return x
 
-    def backward(self, y):
+    def inverse(self, y):
         return y
 
 
@@ -71,7 +71,7 @@ class YeoJohnson(DataTransform):
             y[neg] = -xp.log(-x[neg] + 1)
         return y
     
-    def backward(self, y):
+    def inverse(self, y):
         if self.lmbda is None:
             raise ValueError("Lambda is not initialized. Call 'fit' with valid data first.")
         xp = torch if isinstance(y, torch.Tensor) else np
@@ -100,7 +100,7 @@ class BoxCox(DataTransform):
         xp = torch if isinstance(x, torch.Tensor) else np
         return xp.log(x) if abs(self.lmbda) < 1e-6 else (xp.abs(x)**self.lmbda - 1) / self.lmbda
     
-    def backward(self, y):
+    def inverse(self, y):
         xp = torch if isinstance(y, torch.Tensor) else np
         return xp.exp(y) if abs(self.lmbda) < 1e-6 else (self.lmbda * xp.abs(y) + 1) ** (1 / self.lmbda)
 
@@ -123,7 +123,7 @@ class Gaussify(DataTransform):
     def forward(self, x):
         return self.ppf(self.cdf(x))
     
-    def backward(self, y):
+    def inverse(self, y):
         return self.cdf(self.ppf(y))
 
 
@@ -143,7 +143,7 @@ class Uniform(DataTransform):
     def forward(self, x):
         return self.uniform_scaler(x, self.a, self.b)
     
-    def backward(self, y):
+    def inverse(self, y):
         return self.inv_uniform_scaler(y, self.a, self.b)
 
 
@@ -163,7 +163,7 @@ class Uniform0_1(DataTransform):
     def forward(self, x):
         return self.uniform_scaler(x, self.a, self.b)
     
-    def backward(self, y):
+    def inverse(self, y):
         return self.inv_uniform_scaler(y, self.a, self.b)
 
 
@@ -180,7 +180,7 @@ class Gauss(DataTransform):
     def forward(self, x):
         return (x - self.mu) / self.std
     
-    def backward(self, y):
+    def inverse(self, y):
         return y * self.std + self.mu
 
 
@@ -197,7 +197,7 @@ class Atanh(DataTransform):
         else:
             return np.arctanh(x) / 2.0
 
-    def backward(self, y):
+    def inverse(self, y):
         if isinstance(y, torch.Tensor):
             return torch.tanh(2*y)
         else:
@@ -214,7 +214,7 @@ class Invert(DataTransform):
     def forward(self, x):
         return 1 - x
     
-    def backward(self, y):
+    def inverse(self, y):
         return 1 - y
 
 class Logify(DataTransform):
@@ -230,7 +230,7 @@ class Logify(DataTransform):
         else:
             return np.log(x)
     
-    def backward(self, y):
+    def inverse(self, y):
         if isinstance(y, torch.Tensor):
             return torch.exp(y)
         else:
@@ -252,7 +252,7 @@ class Softmax(DataTransform):
             exps = np.exp(shift_x)
             return exps / np.sum(exps, axis=-1, keepdims=True)
 
-    def backward(self, y):
+    def inverse(self, y):
         xp = torch if isinstance(y, torch.Tensor) else np
         return xp.log(y) + 2.0  # Adding a constant
 
@@ -265,7 +265,7 @@ class SoftmaxInv(DataTransform):
         xp = torch if isinstance(y, torch.Tensor) else np
         return xp.log(y) + 2.0  # Adding a constant
 
-    def backward(self, x):
+    def inverse(self, x):
         xp = torch if isinstance(x, torch.Tensor) else np
         if isinstance(x, torch.Tensor):
             shift_x = x - torch.amax(x, dim=-1, keepdim=True)
@@ -299,9 +299,9 @@ class TransformSequence:
     def __call__(self, x):
         return self.forward(x)
 
-    def backward(self, y):
+    def inverse(self, y):
         for transform in reversed(self.transforms):
-            y = transform.backward(y)
+            y = transform.inverse(y)
         return y
     
     def store(self):
@@ -349,7 +349,7 @@ def CreateTransformSequence(entry, df, transforms_list, verbose=True):
     test = sequence.forward(data_init)
     
     if verbose:
-        recover = sequence.backward(test)
+        recover = sequence.inverse(test)
         diff = np.abs(data_init-recover).sum()
         print('Error:', diff, '\n')
     

@@ -55,9 +55,8 @@ class PSFModelNFM:
 
         if self.use_splines:
             self.N_spline_ctrl = 5
-            # TODO: must be scaling of spline values, too
-            self.norm_wvl = Uniform0_1(a=self.wavelengths.min().item(), b=self.wavelengths.max().item())
-            self.x_ctrl = torch.linspace(0, 1, self.N_spline_ctrl, device=self.device)
+            self.norm_wvl = Uniform0_1(a=475.e-9, b=935.e-9) # MUSE NFM wavelength range
+            self.λ_ctrl   = torch.linspace(0, 1, self.N_spline_ctrl, device=self.device)
 
         self.init_model_inputs()
         
@@ -109,8 +108,8 @@ class PSFModelNFM:
             del self.inputs_manager
         
         # Clean up other tensors
-        if hasattr(self, 'x_ctrl'):
-            del self.x_ctrl
+        if hasattr(self, 'λ_ctrl'):
+            del self.λ_ctrl
         
         if hasattr(self, 'norm_wvl'):
             del self.norm_wvl
@@ -162,8 +161,8 @@ class PSFModelNFM:
             new_instance.inputs_manager = self.inputs_manager.copy()
         
         # Copy spline control points if using splines
-        if self.use_splines and hasattr(self, 'x_ctrl'):
-            new_instance.x_ctrl = self.x_ctrl.clone()
+        if self.use_splines and hasattr(self, 'λ_ctrl'):
+            new_instance.λ_ctrl = self.λ_ctrl.clone()
             if hasattr(self, 'norm_wvl'):
                 new_instance.norm_wvl = copy.deepcopy(self.norm_wvl)
         
@@ -248,17 +247,19 @@ class PSFModelNFM:
         
     def init_model_inputs(self):
         self.inputs_manager = InputsManager()
-                
+
         N_wvl = len(self.wavelengths)
         N_src = self.model.N_src
         
-        # Initialize normalizers/transforms
+        # Initialize normalizing transforms
+        # The values are chosen in such a way so that on average, normalized parameters values
+        # are distributed as Gauss(mu=0, std=1) 
         norm_F           = Uniform(a=0.0,   b=1.0)
         norm_bg          = Uniform(a=-5e-6, b=5e-6)
-        norm_r0          = Uniform(a=0,     b=1)
-        norm_L0          = Uniform(a=0,     b=10)
+        norm_r0          = Uniform(a=0.08,  b=0.15)
+        norm_L0          = Uniform(a=6,     b=34)
         norm_dxy         = Uniform(a=-1,    b=1)
-        norm_J           = Uniform(a=0,     b=50)
+        norm_J           = Uniform(a=14,    b=26)
         norm_Jxy         = Uniform(a=-180,  b=180)
         norm_dn          = Uniform(a=0,     b=5)
         norm_amp         = Uniform(a=0,     b=10)
@@ -267,12 +268,10 @@ class PSFModelNFM:
         norm_beta        = Uniform(a=0,     b=2)
         norm_ratio       = Uniform(a=0,     b=2)
         norm_theta       = Uniform(a=-np.pi/2, b=np.pi/2)
-        norm_wind_speed  = Uniform(a=0, b=15)
+        norm_wind_speed  = Uniform(a=0, b=20)
         # norm_wind_dir    = Uniform(a=0, b=360)
-        # norm_sausage_pow = Uniform(a=0, b=1)
-        norm_LO          = Uniform(a=-100, b=100)
+        norm_LO          = Uniform(a=-20, b=50)
         # norm_GL_h        = Uniform(a=0.0, b=10000.0)
-        # norm_GL_frac     = Atanh()
         norm_Cn2_profile = SoftmaxInv()
 
         # Add base parameters
@@ -319,7 +318,7 @@ class PSFModelNFM:
                 # self.inputs_manager.add('LO_coefs', torch.zeros([self.model.N_src, self.LO_N_params**2]), norm_LO)
                 # self.phase_func = lambda x: self.LO_basis(x.view(self.model.N_src, self.LO_N_params, self.LO_N_params))
                 # self.OPD_func   = lambda x: x.view(self.model.N_src, self.LO_N_params, self.LO_N_params)
-                raise NotImplementedError('Pixelmap LO basis is not rroperly tested yet yet.')
+                raise NotImplementedError('Pixelmap LO basis is not properly tested yet yet.')
 
 
             elif isinstance(self.LO_basis, ZernikeBasis) or isinstance(self.LO_basis, ArbitraryBasis):
@@ -334,7 +333,7 @@ class PSFModelNFM:
 
                     def phase_func(x, y):
                         defocus_mode_id = 1 # the index of defocus mode given that 0 is the "phase bump" coefficient
-                        coefs_chromatic = x.view(self.model.N_src, self.LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1) # Add λ dimension
+                        coefs_chromatic = x.view(self.model.N_src, self.LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1) # Add a λ dimension
                         coefs_chromatic[:, :, defocus_mode_id] += y.view(self.model.N_src, N_wvl) # add chromatic defocus
                         return self.LO_basis(coefs_chromatic)
                     
@@ -359,9 +358,9 @@ class PSFModelNFM:
         self.inputs_manager = self.backup_manager.copy()
     
 
-    def evaluate_splines(self, y_points, x_grid):
-        spline = NaturalCubicSpline(natural_cubic_spline_coeffs(t=self.x_ctrl, x=y_points.T))
-        return spline.evaluate(x_grid).T
+    def evaluate_splines(self, y_points, λ_grid):
+        spline = NaturalCubicSpline(natural_cubic_spline_coeffs(t=self.λ_ctrl, x=y_points.T))
+        return spline.evaluate(λ_grid).T
 
 
     def forward(self, x_dict=None, include_list=None):

@@ -567,9 +567,9 @@ gbr_LWE = LWE_predictor_dict['LWE coefs predictor']
 
 def predict_LWE(IDs):
     X_inp = df_norm.loc[IDs][entries].to_numpy()
-    LWE_WFE_pred = df_transforms_fitted['LWE coefs'].backward(gbr_LWE.predict(X_inp))
+    LWE_WFE_pred = df_transforms_fitted['LWE coefs'].inverse(gbr_LWE.predict(X_inp))
     LWE_coefs_pred_pca = mor.predict(X_inp)
-    LWE_coefs_pred = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(LWE_coefs_pred_pca))
+    LWE_coefs_pred = df_transforms_fitted['LWE coefs'].inverse(pca.inverse_transform(LWE_coefs_pred_pca))
     
     LWE_coefs_pred /= np.linalg.norm(LWE_coefs_pred, ord=2, axis=1)[:, np.newaxis]
     LWE_coefs_pred *= LWE_WFE_pred[:, np.newaxis]
@@ -931,7 +931,7 @@ def save_PSF_img_calib(id, wvl_render, save=True):
     pupil[pupil < 0.5] = np.nan
 
     coefs_fitted = fitted_df_norm.loc[batches_ids[id], 'LWE coefs']
-    coefs_fitted = df_transforms_fitted['LWE coefs'].backward(coefs_fitted)
+    coefs_fitted = df_transforms_fitted['LWE coefs'].inverse(coefs_fitted)
     coefs_fitted = torch.tensor(coefs_fitted, device=device).float().unsqueeze(0)
 
     coefs_pred = predict_LWE([batches_ids[id]])

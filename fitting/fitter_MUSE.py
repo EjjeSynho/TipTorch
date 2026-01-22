@@ -161,7 +161,7 @@ def load_and_fit_sample(id):
 
 
     def loss_fn(x_, w_MSE, w_MAE):    
-        diff = (func(x_)-PSF_0) * wvl_weights # NOTE: wvl_weights removed for now
+        diff = (func(x_)-PSF_0) #* wvl_weights
         w = 2e4
         MSE_loss = diff.pow(2).mean() * w * w_MSE
         MAE_loss = diff.abs().mean()  * w * w_MAE

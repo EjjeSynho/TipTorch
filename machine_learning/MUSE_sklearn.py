@@ -159,8 +159,8 @@ param_to_plot = 'F R'
 id = selected_entries_Y.index(param_to_plot)
 
 test_df = pd.DataFrame({
-    param_to_plot+' predicted':   df_transforms_fitted[param_to_plot].backward(y_pred[:,id].flatten()),
-    param_to_plot+' from fitted': df_transforms_fitted[param_to_plot].backward(y_test[:,id].flatten()),
+    param_to_plot+' predicted':   df_transforms_fitted[param_to_plot].inverse(y_pred[:,id].flatten()),
+    param_to_plot+' from fitted': df_transforms_fitted[param_to_plot].inverse(y_test[:,id].flatten()),
 })
 corr_plot(test_df, param_to_plot+' predicted', param_to_plot+' from fitted')
 
@@ -183,8 +183,8 @@ y_pred = gbr_LWE.predict(X_test)
 
 #%%
 test_df = pd.DataFrame({
-    'LWE predicted':   df_transforms_fitted['LWE coefs'].backward(y_pred),
-    'LWE from fitted': df_transforms_fitted['LWE coefs'].backward(y_test),
+    'LWE predicted':   df_transforms_fitted['LWE coefs'].inverse(y_pred),
+    'LWE from fitted': df_transforms_fitted['LWE coefs'].inverse(y_test),
 })
 corr_plot(test_df, 'LWE predicted', 'LWE from fitted', lims=[0, 200])
 
@@ -228,9 +228,9 @@ mor = MultiOutputRegressor(gbr, n_jobs=-1)
 mor.fit(X_train, y_train_pca)
 y_pred_pca = mor.predict(X_test)
 
-y_pred  = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_pred_pca))
-y_test  = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_test_pca))
-y_train = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(y_train_pca))
+y_pred  = df_transforms_fitted['LWE coefs'].inverse(pca.inverse_transform(y_pred_pca))
+y_test  = df_transforms_fitted['LWE coefs'].inverse(pca.inverse_transform(y_test_pca))
+y_train = df_transforms_fitted['LWE coefs'].inverse(pca.inverse_transform(y_train_pca))
 
 #%%
 from joblib import dump, load
@@ -247,13 +247,13 @@ dump(store_dict, '../data/LWE.predictor')
 
 # def run_predictor(IDs):
 #     X_inp = df_norm.loc[IDs][selected_entries_X].to_numpy()
-#     LWE_WFE_pred = df_transforms_fitted['LWE coefs'].backward(gbr_LWE.predict(X_inp))
+#     LWE_WFE_pred = df_transforms_fitted['LWE coefs'].inverse(gbr_LWE.predict(X_inp))
 #     LWE_coefs_pred_pca = mor.predict(X_inp)
-#     LWE_coefs_pred = df_transforms_fitted['LWE coefs'].backward(pca.inverse_transform(LWE_coefs_pred_pca))
+#     LWE_coefs_pred = df_transforms_fitted['LWE coefs'].inverse(pca.inverse_transform(LWE_coefs_pred_pca))
 #     return LWE_coefs_pred
 
 #%%
-WFE_pred_pow = df_transforms_fitted['LWE coefs'].backward(gbr_LWE.predict(X_test))
+WFE_pred_pow = df_transforms_fitted['LWE coefs'].inverse(gbr_LWE.predict(X_test))
 
 WFE_pred = np.linalg.norm(y_pred, ord=2, axis=1)
 
@@ -283,8 +283,8 @@ MDIs, MDI_stds, PIs, PI_stds = [], [], [], []
 
 for i in tqdm(range(0, 11)):
     test_df = pd.DataFrame({
-        names[i]+' predicted [nm RMS]': df_transforms_fitted['LWE coefs'].backward(y_pred[:,i]),
-        names[i]+' from data [nm RMS]': df_transforms_fitted['LWE coefs'].backward(y_test[:,i]),
+        names[i]+' predicted [nm RMS]': df_transforms_fitted['LWE coefs'].inverse(y_pred[:,i]),
+        names[i]+' from data [nm RMS]': df_transforms_fitted['LWE coefs'].inverse(y_test[:,i]),
     })
     corr_plot(test_df, names[i]+' predicted [nm RMS]', names[i]+' from data [nm RMS]', title=names[i])
     # plt.savefig(f'C:/Users/akuznets/Desktop/presa_buf/LWE/LWE_coefs_corr_plots/LWE_coefs_{i}.png')

@@ -74,7 +74,7 @@ class InputsTransformer:
         """
         decomposed = {}
         for key, sl in self.slices.items():
-            val = self.transforms[key].backward(x_stacked[:, sl])
+            val = self.transforms[key].inverse(x_stacked[:, sl])
             decomposed[key] = val.squeeze(-1) if sl.stop-sl.start<2 else val
             # expects that the 0th dimension is allocated to sources. Meaning that the tensor is of shape (n_sources, n_features)
 

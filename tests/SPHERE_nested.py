@@ -100,7 +100,7 @@ def transform(cube):
     # 1. Model Parameters (Indices 0 to N-1)
     # Map [0, 1] -> [-1, 1] (Uniform Prior in Physical Space via linear transform)
     # This assumes the InputsManager transforms are Uniform(a,b) -> [-1,1]
-    output[:, :-1] = to_manager_space.backward(cube[:, :-1])
+    output[:, :-1] = to_manager_space.inverse(cube[:, :-1])
     
     # 2. Noise Parameter (Index -1)
     # Prior: Uniform in log_sigma between -8 and 0 (sigma ~3e-4 to 1.0)

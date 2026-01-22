@@ -4,9 +4,7 @@ import sys, os
 from project_settings import device, xp, use_cupy, default_torch_type
 from project_settings import WEIGHTS_FOLDER, PROJECT_PATH, TELEMETRY_CACHE, DATA_FOLDER
 
-
 import pickle
-import re
 import os
 import datetime
 import requests
@@ -2272,7 +2270,7 @@ def normalize_df(df, df_transforms, backward=False):
         if entry in df_transforms:
             series = df[entry].replace([np.inf, -np.inf], np.nan)
             if backward:
-                transformed_values = df_transforms[entry].backward(series.dropna().values)
+                transformed_values = df_transforms[entry].inverse(series.dropna().values)
             else:
                 transformed_values = df_transforms[entry].forward(series.dropna().values)
                     
@@ -2356,4 +2354,3 @@ def impute_df(df):
     return imputer, df_out
 
 
-# %%
