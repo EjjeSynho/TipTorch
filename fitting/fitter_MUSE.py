@@ -115,7 +115,7 @@ def to_store(x):
         return x
 
 
-wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
+wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1)
 
 #%%
 def load_and_fit_sample(id):

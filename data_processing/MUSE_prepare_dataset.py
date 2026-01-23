@@ -38,7 +38,7 @@ muse_df_norm = muse_df_norm.loc[valid_ids]
 muse_df = muse_df.loc[valid_ids]
 
 #%%
-wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
+wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1)
 wvls = wvl_bins[wvl_ids]
 
 F_fitted_df  = fitted_df['F_df'].loc[valid_ids]

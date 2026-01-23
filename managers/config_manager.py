@@ -653,7 +653,7 @@ def MultipleTargetsInDifferentObservations(configs, device=None):
     if not configs:
         raise ValueError("No configuration files provided for merging.")
     
-    # Check if any of configss is converted to pytorch. If yes, deconvert all to lists first
+    # Check if any of configs is converted to pytorch. If yes, deconvert all to lists first
     for config in configs:
         sample_value = config['atmosphere']['Seeing']
         if isinstance(sample_value, torch.Tensor):

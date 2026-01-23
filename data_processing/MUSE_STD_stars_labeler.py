@@ -12,6 +12,7 @@ from MUSE_data_utils import MUSE_DATA_FOLDER
 
 STD_FOLDER = MUSE_DATA_FOLDER / 'standart_stars/'
 
+#%%
 # from MUSE_STD_dataset_utils import update_label_IDs
 # update_label_IDs()
 

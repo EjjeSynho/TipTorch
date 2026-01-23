@@ -117,8 +117,11 @@ def check_framework(x):
     """Return the array library (numpy or cupy) that matches the input array."""
     if isinstance(x, np.ndarray):
         return np
-    if use_cupy and hasattr(x, 'device'):
+    # Check for CuPy array by class name (safer if cupy not installed locally)
+    # Also avoids false positives with other objects having a .device attribute (like torch tensors or new numpy arrays)
+    if 'cupy' in str(type(x)).lower() and hasattr(x, 'device'):
         return xp
+        
     return np
 
 

@@ -227,7 +227,7 @@ else:
 
 fitted_df = pickle.load(open(STD_FOLDER / 'muse_fitted_df.pkl', 'rb'))
 
-wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
+wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1)
 wvl_ids_shift = np.clip(wvl_ids + 1, a_min=0, a_max=N_wvl_max-1)[:-2]
 
 dx_df = fitted_df['dx_df'].sort_index().to_numpy().astype(np.float32)

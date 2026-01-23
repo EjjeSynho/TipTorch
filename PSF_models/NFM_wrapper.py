@@ -44,11 +44,12 @@ class PSFModelNFM:
         self.Moffat_absorber = Moffat_absorber
         self.use_splines     = use_splines
         self.chrom_defocus   = chrom_defocus and LO_NCPAs
+        self.__config_raw    = config # Input config file
         
-        config = self.init_configs(config)
-        self.wavelengths = config['sources_science']['Wavelength'].squeeze()
+        _config = self.init_configs(self.__config_raw) # Processed and converted config
+        self.wavelengths = _config['sources_science']['Wavelength'].squeeze()
         
-        self.init_model(config)
+        self.init_model(_config)
         if LO_NCPAs:
             self.init_NCPAs()
         self.polychromatic_params = ['F', 'dx', 'dy'] + (['chrom_defocus'] if self.chrom_defocus else ['J'])
@@ -125,7 +126,7 @@ class PSFModelNFM:
             torch.mps.empty_cache()
             torch.mps.synchronize()
     
-    '''
+ 
     def copy(self):
         """
         Create a deep copy of the PSFModelNFM instance, including the internal TipTorch model.
@@ -139,19 +140,24 @@ class PSFModelNFM:
         
         # Create a new instance with the same configuration
         new_instance = PSFModelNFM(
-            config=self.model.config,
-            multiple_obs=self.multiple_obs,
-            LO_NCPAs=self.LO_NCPAs,
-            chrom_defocus=self.chrom_defocus,
-            use_splines=self.use_splines,
-            Moffat_absorber=self.Moffat_absorber,
-            Z_mode_max=self.Z_mode_max,
-            device=self.device
+            config          = copy.deepcopy(self.__config_raw),
+            multiple_obs    = self.multiple_obs,
+            LO_NCPAs        = self.LO_NCPAs,
+            chrom_defocus   = self.chrom_defocus,
+            use_splines     = self.use_splines,
+            Moffat_absorber = self.Moffat_absorber,
+            Z_mode_max      = self.Z_mode_max,
+            device          = self.device
         )
         
         # Deep copy the TipTorch model state
         if hasattr(self.model, 'state_dict'):
             new_instance.model.load_state_dict(copy.deepcopy(self.model.state_dict()))
+        
+        new_instance.model.is_float   = self.model.is_float
+        new_instance.model.dtype      = self.model.dtype
+        new_instance.model.tomography = self.model.tomography
+        new_instance.model.approx_noise_gain = self.model.approx_noise_gain
         
         # Copy wavelengths (already handled by config, but ensure reference is correct)
         new_instance.wavelengths = self.wavelengths.clone()
@@ -159,6 +165,10 @@ class PSFModelNFM:
         # Deep copy the inputs manager using its built-in copy method
         if hasattr(self, 'inputs_manager'):
             new_instance.inputs_manager = self.inputs_manager.copy()
+
+        # Deep copy the backup manager
+        if hasattr(self, 'backup_manager'):
+            new_instance.backup_manager = self.backup_manager.copy()
         
         # Copy spline control points if using splines
         if self.use_splines and hasattr(self, 'λ_ctrl'):
@@ -176,12 +186,12 @@ class PSFModelNFM:
                 new_instance.LO_basis.OPD_map = self.LO_basis.OPD_map.clone()
         
         return new_instance
-    '''
+
 
     def __del__(self):
         """Destructor to ensure GPU memory is freed"""
         self.cleanup()
-        
+
 
     def init_configs(self, config):
         if len(config) > 1: # Multiple sources
@@ -226,7 +236,7 @@ class PSFModelNFM:
             device = self.device,
             oversampling = 1
         )
-        self.model.approx_noise_gain = False
+        # self.model.approx_noise_gain = False
         # _ = self.model()
 
 
@@ -254,12 +264,15 @@ class PSFModelNFM:
         # Initialize normalizing transforms
         # The values are chosen in such a way so that on average, normalized parameters values
         # are distributed as Gauss(mu=0, std=1) 
+        
         norm_F           = Uniform(a=0.0,   b=1.0)
         norm_bg          = Uniform(a=-5e-6, b=5e-6)
         norm_r0          = Uniform(a=0.08,  b=0.15)
         norm_L0          = Uniform(a=6,     b=34)
         norm_dxy         = Uniform(a=-1,    b=1)
-        norm_J           = Uniform(a=14,    b=26)
+        # norm_J           = Uniform(a=14,    b=26)
+        # norm_J           = Uniform(a=0,     b=50)
+        norm_J           = Uniform(a=0,     b=30)
         norm_Jxy         = Uniform(a=-180,  b=180)
         norm_dn          = Uniform(a=0,     b=5)
         norm_amp         = Uniform(a=0,     b=10)
@@ -273,7 +286,7 @@ class PSFModelNFM:
         norm_LO          = Uniform(a=-20, b=50)
         # norm_GL_h        = Uniform(a=0.0, b=10000.0)
         norm_Cn2_profile = SoftmaxInv()
-
+        
         # Add base parameters
         if self.use_splines:
             self.inputs_manager.add('F_ctrl',  torch.tensor([[1.0,]*self.N_spline_ctrl]*N_src),  norm_F)

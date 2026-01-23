@@ -1,6 +1,6 @@
 #%%
 try:
-    ipy = get_ipython()        # NameError if not running under IPython
+    ipy = get_ipython() # NameError if not running under IPython
     if ipy:
         ipy.run_line_magic('reload_ext', 'autoreload')
         ipy.run_line_magic('autoreload', '2')
@@ -8,7 +8,6 @@ except NameError:
     pass
 
 import sys
-
 sys.path.insert(0, '..')
 
 import pickle
@@ -70,7 +69,7 @@ else:
 #%% ================================ Cache MUSE NFM STD stars cubes ================================
 bad_ids = []
 
-rewrite = False
+rewrite = True
 
 ids_process = range(0, len(files_matches))
 
@@ -107,6 +106,7 @@ for file_id in tqdm(ids_process):
 
 print(f'Bad ids: {bad_ids}')
 
+# Bad ids: [500, 502, 503, 504, 505, 506, 507, 508, 509, 510, 535]
 
 #%% ================================ Render the STD stars dataset ================================
 for file in tqdm(os.listdir(CUBES_CACHE)):
@@ -202,11 +202,11 @@ else:
         muse_df = pickle.load(handle)
 
 
+AOF_Cn2_profiles_stats(muse_df, store=True) # Update median AOF Cn2 profile
+
 #%% ================================= MUSE NFM STD stars dataset cleaning, imputation and scaling ==================================
 from sklearn.experimental import enable_iterative_imputer
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler
-from sklearn.impute import IterativeImputer
+from sklearn.impute import SimpleImputer, IterativeImputer
 from sklearn.preprocessing import StandardScaler
 
 from data_analysis_utils import plot_correlation_heatmap, calculate_VIF, analyze_NaN_distribution
@@ -215,7 +215,7 @@ from data_analysis_utils import analyze_outliers, plot_data_filling, VIF_contrib
 from MUSE_data_utils import filter_values, prune_columns
 verbose = True
 
-# Exclude all mostly missing/highly-correlated/repeating values from the dataset
+# Manually exclude all mostly missing/highly-correlated/repeating values from the dataset
 muse_df_pruned = prune_columns(filter_values(muse_df.copy()))
 
 median_imputer = SimpleImputer(strategy='median')
@@ -238,7 +238,7 @@ del muse_df_pruned_buf_
 
 #%%
 if verbose:
-    _ = plt.hist(muse_df_pruned_scaled[numeric_cols].values.flatten(), bins = 100)
+    _ = plt.hist(muse_df_pruned_scaled[numeric_cols].values.flatten(), bins=100)
     plt.title('Distribution of standartized features')
     plt.show()
     
@@ -257,7 +257,7 @@ iterative_imputer = IterativeImputer(max_iter=200, random_state=3, verbose=(2 if
 # iterative_imputer = IterativeImputer(
 #     estimator = ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=16),
 #     # estimator = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=16),
-#     random_state = 42, 
+#     random_state = 42,
 #     max_iter = 30,
 #     verbose = (2 if verbose else 0))
 
@@ -271,7 +271,7 @@ imputing_ouliers = analyze_outliers(
     nan_mask=nan_mask,
     verbose=verbose
 )
-# Impute outliers with median values
+#%% Impute outliers with median values
 median_imputer = SimpleImputer(strategy='median')
 muse_df_pruned_scaled_imputed[imputing_ouliers] = np.nan
 muse_df_pruned_scaled_imputed = median_imputer.fit_transform(muse_df_pruned_scaled_imputed)

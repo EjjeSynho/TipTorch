@@ -457,7 +457,7 @@ class TipTorch(torch.nn.Module):
         self.is_float = False
         self.dtype = dtype
                
-        # TODO: automatic regime selection
+        # TODO: automatic AO correction type selection
         self.AO_type = AO_type
         self.tomography = True if self.AO_type in ['LTAO', 'MCAO', 'GLAO'] else False
 
@@ -504,7 +504,7 @@ class TipTorch(torch.nn.Module):
         # Default inversion method for tomographic reconstruction
         self.inversion_method = 'lstsq'
         
-        # Enable simplified noise gaain computation
+        # Enable simplified noise gain computation
         if self.tomography:
             self.approx_noise_gain = True
         else:
@@ -519,9 +519,9 @@ class TipTorch(torch.nn.Module):
         # Read data and initialize AO system
         self.Update(
             config = AO_config,
-            grids = True,
+            grids  = True,
             pupils = True,
-            tomography = True
+            tomography = self.tomography
         )
         
         self.PSDs = {}
@@ -599,7 +599,7 @@ class TipTorch(torch.nn.Module):
 
     # TODO: accelerate this function
     def NoiseGain(self, nF = 1000):
-        if self.approx_noise_gain == False:
+        if not self.approx_noise_gain:
             Ts = 1.0 / self.HOloop_rate  # sampling time
             delay    = self.HOloop_delay # latency between the measurement and the correction
             loopGain = self.HOloop_gain

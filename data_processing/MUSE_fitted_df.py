@@ -14,7 +14,7 @@ from tools.normalizers import Uniform0_1
 from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, CUBES_CACHE
 from data_processing.MUSE_data_utils import wvl_bins
 
-wvl_ids = np.clip(np.arange(0, (N_wvl_max:=30)+1, 2), a_min=0, a_max=N_wvl_max-1)
+wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1)
 wavelength = np.round(wvl_bins[wvl_ids]).astype(int)
 norm_wvl = Uniform0_1(a=475.e-9, b=935.e-9) # MUSE NFM wavelength range
 

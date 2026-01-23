@@ -113,23 +113,26 @@ def LoadSTDStarData(
     return PSFs, norms, bgs, configs 
 
 
-def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
+def RenameMUSECubes(cubes_main_folder, folder_cubes_rename):
+    files_to_rename = [file for file in os.listdir(folder_cubes_rename) if file != 'renamed']
+    if len(files_to_rename) == 0:
+        print(f'No files in: {folder_cubes_rename}')
+        return
+    
     '''Renames MUSE reduced cubes .fits files according to their exposure date and time'''
     original_cubes_exposure, new_cubes_exposure = [], []
     original_filename, new_filename = [], []
 
-    print(f'Reading cubes in {folder_cubes_new}')
-    for file in tqdm(os.listdir(folder_cubes_new)):
-        if file == 'renamed':
-            continue
+    print(f'Reading cubes in {folder_cubes_rename}')
+    for file in tqdm(files_to_rename):
         
-        with fits.open(os.path.join(folder_cubes_new, file)) as hdul_cube:
+        with fits.open(os.path.join(folder_cubes_rename, file)) as hdul_cube:
             new_cubes_exposure.append(hdul_cube[0].header['DATE-OBS'])
             new_filename.append(file)
 
-    print(f'Reading cubes in {folder_cubes_old}')
-    for file in tqdm(os.listdir(folder_cubes_old)):
-        with fits.open(os.path.join(folder_cubes_old, file)) as hdul_cube:
+    print(f'Reading cubes in {cubes_main_folder}')
+    for file in tqdm(os.listdir(cubes_main_folder)):
+        with fits.open(os.path.join(cubes_main_folder, file)) as hdul_cube:
             original_cubes_exposure.append(hdul_cube[0].header['DATE-OBS'])
             original_filename.append(file)
 
@@ -139,25 +142,25 @@ def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
     if len(intersection) > 0:
         for exposure in intersection:
             file = new_filename[new_cubes_exposure.index(exposure)]
-            file_2_rm = os.path.normpath(os.path.join(folder_cubes_new, file))
+            file_2_rm = os.path.normpath(os.path.join(folder_cubes_rename, file))
             print(f'Removed duplicate: {file_2_rm}')
             os.remove(file_2_rm)
 
     # Rename files according to the their exposure timestamps (just for convenience)
-    renamed_dir = os.path.join(folder_cubes_new, 'renamed')
+    renamed_dir = os.path.join(folder_cubes_rename, 'renamed')
     if not os.path.exists(renamed_dir):
         os.makedirs(renamed_dir)
 
-    for file in tqdm(os.listdir(folder_cubes_new)):
+    for file in tqdm(os.listdir(folder_cubes_rename)):
         # Skip the 'renamed' directory
         if file == 'renamed':
             continue
 
-        with fits.open(os.path.join(folder_cubes_new, file)) as hdul_cube:
+        with fits.open(os.path.join(folder_cubes_rename, file)) as hdul_cube:
             exposure = hdul_cube[0].header['DATE-OBS']
 
         new_name = 'M.MUSE.' + exposure.replace(':', '-') + '.fits'
-        file_2_rm = os.path.normpath(os.path.join(folder_cubes_new, file))
+        file_2_rm = os.path.normpath(os.path.join(folder_cubes_rename, file))
         file_2_mv = os.path.normpath(os.path.join(renamed_dir, new_name))
 
         # Check if destination file already exists
@@ -173,11 +176,13 @@ def RenameMUSECubes(folder_cubes_old, folder_cubes_new):
 def RenderDataSample(data_dict, file_name):
     from matplotlib.colors import LogNorm
 
-    white = 1 + np.abs(data_dict['images']['white'])
+    # img = 1 + np.abs(data_dict['images']['white'])
+    img = 1 + np.abs(data_dict['images']['cube'][-5:,...].mean(axis=0))
+    
     if data_dict['images']['IRLOS cube'] is not None:
         IRLOS_img = np.abs(data_dict['images']['IRLOS cube'].mean(axis=-1))
     else:
-        IRLOS_img = np.zeros_like(white)
+        IRLOS_img = np.zeros_like(img)
 
     title = os.path.basename(file_name).replace('.pickle', '')
     _, ax = plt.subplots(1,2, figsize=(14, 7.5))
@@ -186,9 +191,9 @@ def RenderDataSample(data_dict, file_name):
     ax[1].set_title('IRLOS (2x2)')
 
     # Compute smart log norm limits using percentiles
-    vmin = np.percentile(white[white > 0], 20) if np.any(white > 0) else 1
-    vmax = np.percentile(white[white > 0], 99.975) if np.any(white > 0) else white.max()
-    ax[0].imshow(white, cmap='gray', norm=LogNorm(vmin=vmin, vmax=vmax))
+    vmin = np.percentile(img[img > 0], 20) if np.any(img > 0) else 1
+    vmax = np.percentile(img[img > 0], 99.975) if np.any(img > 0) else img.max()
+    ax[0].imshow(img, cmap='gray', norm=LogNorm(vmin=vmin, vmax=vmax))
     ax[1].imshow(IRLOS_img, cmap='hot')
     ax[0].set_axis_off()
     ax[1].set_axis_off()
