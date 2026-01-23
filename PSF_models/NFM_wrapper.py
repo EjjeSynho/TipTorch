@@ -49,6 +49,14 @@ class PSFModelNFM:
         _config = self.init_configs(self.__config_raw) # Processed and converted config
         self.wavelengths = _config['sources_science']['Wavelength'].squeeze()
         
+        # Spectrum of MUSE NFM
+        self.λ_min = 475.e-9
+        self.λ_max = 935.e-9
+        self.Δλ = 0.125e-9
+        self.num_λ_slices = 3681
+        self.λ_full = np.arange(self.num_λ_slices) * self.Δλ + self.λ_min
+        
+        # Initialize TipTorch model
         self.init_model(_config)
         if LO_NCPAs:
             self.init_NCPAs()
@@ -56,8 +64,9 @@ class PSFModelNFM:
 
         if self.use_splines:
             self.N_spline_ctrl = 5
-            self.norm_wvl = Uniform0_1(a=475.e-9, b=935.e-9) # MUSE NFM wavelength range
-            self.λ_ctrl   = torch.linspace(0, 1, self.N_spline_ctrl, device=self.device)
+            self.norm_wvl = Uniform0_1(a=self.λ_min, b=self.λ_max) # MUSE NFM wavelength range
+            self.λ_ctrl   = torch.linspace(0, 1, self.N_spline_ctrl, device=self.device) # normalized to [0...1]
+            self.λ_ctrl_denorm = self.norm_wvl.inverse(self.λ_ctrl) # [nm]
 
         self.init_model_inputs()
         
@@ -404,6 +413,38 @@ class PSFModelNFM:
         return self.model(x_, None, phase_generator=phase_)
 
 
+    def forward_full_spectrum(self, x_dict=None, include_list=None, src_ids=None):
+        raise NotImplementedError("This function is not fully tested yet.")
+        return
+    
+        if not self.use_splines:
+            raise ValueError("Full spectrum evaluation is only available when using the spline representation of the polychromatic parameters.")
+        
+        # Split λ array into batches
+        max_λ_batch_size = 100
+        λ_batches = [self.λ_full[i:i + max_λ_batch_size] for i in range(0, len(self.λ_full), max_λ_batch_size)]
+
+        _initial_wvl = self.wavelengths.clone()
+
+        with torch.no_grad():
+            PSFs_all_sources = torch.zeros((self.model.N_src, self.num_λ_slices, self.model.N_pix, self.model.N_pix), device='cpu') # Force CPU to avoid memory overuse
+            
+            for i, λ_batch in enumerate(λ_batches):
+                current_batch_size = len(λ_batch)
+                λ_ids = slice(i*current_batch_size, (i+1)*current_batch_size)
+                # Update simulated wavelengths
+                self.SetWavelengths( torch.tensor(λ_batch, device=self.device) )
+                # Need to simulate per-source due to memory limitations when simulating large wavelengths batches
+                for src_id in src_ids if src_ids is not None else range(self.model.N_src):
+                    # Evaluate PSF for the current λ batch
+                    PSF_batch = self.forward(x_dict, include_list, src_ids=[src_id]) #TODO (!): implement src_id in forward()
+                    PSFs_all_sources[src_id, λ_ids, ...] = PSF_batch # Keep only the current source
+
+        self.SetWavelengths(_initial_wvl)
+        
+        return PSFs_all_sources
+    
+
     def SetWavelengths(self, wavelengths):
         self.model.SetWavelengths(wavelengths)
         self.wavelengths = wavelengths
@@ -411,7 +452,33 @@ class PSFModelNFM:
 
     def SetImageSize(self, img_size):
         self.model.SetImageSize(img_size)
+    
+    
+    def EvaluateFluxCropFactor(self):
+        ''' Computes how much flux is cropped by the finite PSF image size in comparison to a quasi-infinite PSF'''
+        quasi_inf_PSF_size = 511
         
+        with torch.no_grad():
+            if self.use_splines:
+                wvl_current = self.wavelengths.clone()
+                self.SetWavelengths(self.λ_ctrl_denorm)
+
+            # The actual size of the simulated PSFs
+            current_PSF_size = self.model.N_pix
+            PSF_small = self.forward()
+            # Quasi-infinite PSF image to compute how much flux is lost while cropping
+            self.SetImageSize(quasi_inf_PSF_size)
+            PSF_big = self.forward()
+            self.SetImageSize(current_PSF_size)
+            
+            if self.use_splines:
+                self.SetWavelengths(wvl_current)
+                
+        flux_correction = (PSF_big.amax(dim=(-2,-1)) / PSF_small.amax(dim=(-2,-1)))
+
+        self.inputs_manager.add('flux_crop_ctrl', flux_correction, optimizable=False)
+        return self.evaluate_splines(self.inputs_manager['flux_crop_ctrl'], self.norm_wvl(self.wavelengths))            
+
 
     __call__ = forward
 

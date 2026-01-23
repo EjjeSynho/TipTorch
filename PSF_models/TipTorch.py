@@ -511,10 +511,9 @@ class TipTorch(torch.nn.Module):
             self.approx_noise_gain = False
         
         # Piston filters           
-        self.piston_filter = None # piston mode filter in the AO-corrected freq. domain
+        self.piston_filter = None # piston mode filter in the AO-corrected freqs domain
         self.apodizer = None
-        # self.apodizer = self.make_tensor(1.0) # default apodizer
-        self.PR = None # piston mode filter in alised freqs domain
+        self.PR = None # piston mode filter in aliased freqs domain
  
         # Read data and initialize AO system
         self.Update(
