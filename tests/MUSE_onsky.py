@@ -5,6 +5,7 @@
 import sys
 sys.path.insert(0, '..')
 
+from matplotlib.pylab import rad2deg
 import torch
 import pickle
 import numpy as np
@@ -17,6 +18,51 @@ from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chroma
 from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarData
 from PSF_models.NFM_wrapper import PSFModelNFM
 from project_settings import device
+
+#%%
+with open('F:/ESO/Data/MUSE/omega_cluster/cached/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle', 'rb') as handle:
+    data = pickle.load(handle)
+
+rad2arc = 3600 * 180 / np.pi
+
+seeing = data['All data']['Seeing (header)'].item()  # [arcsec] at 500 nm
+λ_atm = 500e-9
+r0 = rad2arc*0.976*λ_atm / seeing # [m]
+
+
+
+w = np.array( [data['All data']['CN2_FRAC_ALT{}'.format(i)].item() for i in range(1,9)] )
+h = np.array( [data['All data']['ALT{}'.format(i)].item() for i in range(1,9)] )
+h_mean = np.sum(w * h) / np.sum(w) * 1000
+r0 = data['All data']['r0Tot'].item()
+
+
+zenith = np.deg2rad(90.0 - data['All data']['Tel. altitude'].item())
+aniso = (0.314 * r0 * np.cos(zenith) / h_mean) * rad2arc
+
+print(f"Mean turbulence height: {h_mean:.1f} m, Anisoplanatic angle: {aniso:.2f} arcsec")
+
+#%%
+
+rad2arc = 3600 * 180 / np.pi
+
+w    = np.array([data['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
+h_km = np.array([data['All data'][f'ALT{i}'].item() for i in range(1, 9)])
+h_m  = 1000.0 * h_km
+
+# Effective height for anisoplanatism (h^(5/3) moment)
+h_eff = (np.sum(w * (h_m ** (5/3))) / np.sum(w)) ** (3/5)
+
+r0 = data['All data']['r0Tot'].item()  # make sure: meters, referenced at zenith
+
+zeta = np.deg2rad(90.0 - data['All data']['Tel. altitude'].item())  # zenith angle
+theta0_rad = 0.314 * r0 / h_eff
+theta0_rad *= np.cos(zeta)# ** (8/5)
+
+theta0_arcsec = theta0_rad * rad2arc
+print(f"h_eff={h_eff:.1f} [m], θ₀={theta0_arcsec:.2f} [asec]")
+
+
 
 #%%
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
@@ -45,7 +91,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 465 # slight sausage
 # ids = 184 # weak wind patterns
 # ids = 470 # blurry
-# ids = 346 # blurry (very)
+ids = 346 # blurry (very)
 # ids = 179 # blurry
 
 # ids = 121
@@ -54,30 +100,33 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 428 # good one, no DM mismathc yet
 # ids = 434 # good one, no DM mismathc yet
 
-# ids = 446 # does not converge with L-BFGS
 
 # ids = 440 # good one, but DM correction mismatch
 # ids = 449 # good one, but DM correction mismatch
+# ids = 446 # good one, but DM correction mismatch
 # ids = 451 # good one, but DM correction mismatch
 # ids = 453 # good one, but DM correction mismatch
 
-
 # ids = 338 # poor blue fitting
-ids = 206 # poor blue fitting, wind wings (?)
 # ids = 457 # poor blue fitting
 # ids = 477 # poor blue fitting
 # ids = 467 # poor blue fitting
 # ids = 458 # poor blue fitting
 # ids = 494 # poor blue fitting
 
-# ids = 455 # good one, slight sausage
-# ids = 359 # good one
 # ids = 482 # good one
-# ids = 462 # good one
 # ids = 475 # good one, mb DM correction radius mismatch
 # ids = 468 # good one
+# ids = 462 # good one
+# ids = 455 # good one, slight sausage
+# ids = 359 # good one
 
-# ids = 455 # large tomographic error (?)
+
+# ids = [206, 359, 462, 468, 475]
+
+# ids = 206
+# ids = 96
+
 # ids = 456 # large tomographic error
 
 # ids = 125
@@ -104,7 +153,7 @@ PSF_model = PSFModelNFM(
     device          = device
 )
 
-func = lambda x_: PSF_model( PSF_model.inputs_manager.unstack(x_) )
+func = lambda x_: PSF_model( PSF_model.inputs_manager.unstack(x_, include_all=False, update=True) )
 PSF_1 = func(x0 := PSF_model.inputs_manager.stack() )
 
 N_wvl = PSF_0.shape[1]
@@ -136,8 +185,8 @@ for j in range(N_src):
 #%%
 from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
-# wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
+# wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
 wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 
 # wvl_weights = wvl_weights * 0 + 1
@@ -156,9 +205,8 @@ loss_Huber = torch.nn.HuberLoss(reduction='mean', delta=0.05)
 loss_MAE   = torch.nn.L1Loss(reduction='mean')
 loss_MSE   = torch.nn.MSELoss(reduction='mean')
 
-
 def loss_fn(x_, w_MSE, w_MAE):    
-    diff = (func(x_)-PSF_0) * wvl_weights
+    diff = (func(x_)-PSF_0) #* wvl_weights
     w = 2e4
     MSE_loss = diff.pow(2).mean() * w * w_MSE
     MAE_loss = diff.abs().mean()  * w * w_MAE
@@ -331,43 +379,47 @@ if not success:
 #%%
 from tools.plotting import plot_radial_PSF_profiles
 
-id_src = 0
+ids_ = ids if isinstance(ids, list) else [ids]
 
-vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
-vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
-# wvl_select = np.s_[0, N_wvl//2, -1]
-wvl_select = np.s_[0, N_wvl//2, -1]
+for id_src, dataset_index in enumerate(ids_):
+    
+    if PSF_model.model.N_src > 1:
+        print("Plotting results for dataset index:", dataset_index)
+    
+    vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
+    vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
+    wvl_select = np.s_[0, N_wvl//2, -1]
 
-draw_PSF_stack(
-    PSF_0.cpu().numpy()[id_src, wvl_select, ...],
-    PSF_1.cpu().numpy()[id_src, wvl_select, ...],
-    average=True,
-    min_val=vmin,
-    max_val=vmax,
-    crop=100
-)
-
-PSF_disp = lambda x, w: (x[id_src,w,...]).cpu().numpy()
-
-fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
-for i, lmbd in enumerate(wvl_select):
-    plot_radial_PSF_profiles(
-        PSF_disp(PSF_0, lmbd),
-        PSF_disp(PSF_1, lmbd),
-        'Data',
-        'TipTorch',
-        cutoff=40,
-        y_min=3e-2,
-        linthresh=1e-2,
-        return_profiles=True,
-        ax=ax[i]        
+    draw_PSF_stack(
+        PSF_0.cpu().numpy()[id_src, wvl_select, ...],
+        PSF_1.cpu().numpy()[id_src, wvl_select, ...],
+        average = True,
+        min_val = vmin,
+        max_val = vmax,
+        crop = 100
     )
-plt.show()
 
-if PSF_model.LO_NCPAs:
-    plt.imshow(OPD_map[id_src,...]*1e9)
-    plt.colorbar()
+    PSF_disp = lambda x, w: (x[id_src,w,...]).cpu().numpy()
+
+    fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
+    for i, lmbd in enumerate(wvl_select):
+        plot_radial_PSF_profiles(
+            PSF_disp(PSF_0, lmbd),
+            PSF_disp(PSF_1, lmbd),
+            'Data',
+            'TipTorch',
+            cutoff = 40,
+            y_min = 3e-2,
+            linthresh = 1e-2,
+            return_profiles = True,
+            ax = ax[i]        
+        )
     plt.show()
+
+    if PSF_model.LO_NCPAs:
+        plt.imshow(OPD_map[id_src,...]*1e9)
+        plt.colorbar()
+        plt.show()
 
 #%%
 print('λ: ', *[f"{x:.0f}" for x in wavelengths.detach().cpu().numpy().flatten()*1e9])
@@ -598,26 +650,26 @@ plt.xlim(0, 25)
 
 
 # %%
-# TODO: curently improperly normalized
 # Compute error budget over PSDs with proper integration
 error_budget = {}
-dk = PSF_model.dk
+dk = PSF_model.model.dk
 dk_squared = dk**2  # Area element in frequency space
 
-for entry in PSF_model.PSD_include:
-    PSD = PSF_model.PSDs[entry]
+for entry in PSF_model.model.PSD_include:
+    PSD = PSF_model.model.PSDs[entry]
 
     if len(PSD.shape) > 1:            
-        PSD_norm = (PSF_model.dk*PSF_model.wvl_atm*1e9/2/torch.pi)**2
-        PSD = PSF_model.half_PSD_to_full(PSD * PSD_norm).real # [nm^2]
+        PSD_norm = (PSF_model.model.wvl_atm*1e9/2/torch.pi)**2
+        PSD = PSF_model.model.half_PSD_to_full(PSD * PSD_norm).real # [nm^2]
         
         # Proper integration: multiply by dk^2 for area element
         error_budget[entry] = (PSD * dk_squared).sum().item()
         
         print(f"{entry:15s}: {np.sqrt(error_budget[entry]):.2f} nm RMS")
         
-total_PSD = PSF_model.PSD.real
-error_budget['Total PSD'] = (total_PSD * dk_squared).sum().item()
+total_PSD = PSF_model.model.PSD.real
+error_budget['Total PSD'] = total_PSD.sum().item()
+
 print(f"{'Total PSD':15s}: {np.sqrt(error_budget['Total PSD']):.2f} nm RMS")
 
 

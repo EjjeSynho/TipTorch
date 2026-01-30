@@ -131,8 +131,8 @@ for key in singular_entries:
 #%%
 spline_entries = [entry for entry in df_relevant_entries if entry.endswith('_ctrl')]
 
-N_spline_ctrl = fitted_dict_raw['J_ctrl'][0].shape[-1] # number of spline points
-λ_ctrl = np.linspace(0, 1, N_spline_ctrl)
+N_wvl_ctrl = fitted_dict_raw['J_ctrl'][0].shape[-1] # number of spline points
+λ_ctrl = np.linspace(0, 1, N_wvl_ctrl)
 
 
 def evaluate_splines(y_points, λ_grid):

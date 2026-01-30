@@ -63,7 +63,7 @@ class TipTorch(torch.nn.Module):
         self.zenith_angle = torch.deg2rad(min_2d(self.config['telescope']['ZenithAngle'])) # [N_obs, 1]
         self.airmass      = 1.0 / torch.cos(self.zenith_angle) # [N_obs, 1]
 
-        # Guidestars parameters
+        # Guide stars parameters
         self.GS_wvl      = self.config['sources_HO']['Wavelength'] #[m]
         self.GS_height   = min_2d(self.config['sources_HO']['Height']) * self.airmass #[m]
         self.GS_angles   = self.config['sources_HO']['Zenith'] / self.rad2arc # defined in [arcsec] from on-axis
@@ -103,7 +103,7 @@ class TipTorch(torch.nn.Module):
 
         self.DM_opt_dir_x  = torch.tan(self.DM_opt_angle) * torch.cos(self.DM_opt_azimuth) # [N_obs x N_optdir]
         self.DM_opt_dir_y  = torch.tan(self.DM_opt_angle) * torch.sin(self.DM_opt_azimuth) # [N_obs x N_optdir]
-        self.DM_opt_weight = self.config['DM']['OptimizationWeight'].view(self.N_obs, -1) # [N_obs, N_optdir]
+        self.DM_opt_weight = self.config['DM']['OptimizationWeight'].view(self.N_obs, -1)  # [N_obs, N_optdir]
         self.N_optdir = self.DM_opt_weight.shape[-1]
 
         # HO WFS(s) parameters
@@ -144,15 +144,15 @@ class TipTorch(torch.nn.Module):
         self.dy  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
         self.Jx  = torch.ones (self.N_src, device=self.device)
         self.Jy  = torch.ones (self.N_src, device=self.device)
-        self.Jxy = torch.ones (self.N_src, device=self.device)*0.1
+        self.Jxy = torch.zeros(self.N_src, device=self.device)
         
         if self.PSD_include['Moffat']:
-            self.amp   = torch.ones (self.N_src, device=self.device)*0.01 # Phase PSD Moffat amplitude [rad²]
-            self.b     = torch.zeros (self.N_src, device=self.device)     # Phase PSD background [rad² m²]
-            self.alpha = torch.ones (self.N_src, device=self.device)*0.1  # Phase PSD Moffat alpha [1/m]
-            self.beta  = torch.ones (self.N_src, device=self.device)*2    # Phase PSD Moffat beta power law
-            self.ratio = torch.ones (self.N_src, device=self.device)      # Phase PSD Moffat ellipticity
-            self.theta = torch.zeros(self.N_src, device=self.device)      # Phase PSD Moffat angle
+            self.amp   = torch.ones (self.N_src, device=self.device)*0.01 # Moffat amplitude [rad²]
+            self.b     = torch.zeros (self.N_src, device=self.device)     # background [rad²/m²]
+            self.alpha = torch.ones (self.N_src, device=self.device)*0.1  # Moffat alpha [1/m]
+            self.beta  = torch.ones (self.N_src, device=self.device)*2    # Moffat beta power law
+            self.ratio = torch.ones (self.N_src, device=self.device)      # Moffat ellipticity
+            self.theta = torch.zeros(self.N_src, device=self.device)      # Moffat angle
 
         # if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
         self.dn  = torch.zeros(self.N_obs, device=self.device)
@@ -616,10 +616,10 @@ class TipTorch(torch.nn.Module):
             # f = 10 ** (log_start.unsqueeze(1) + (log_end.unsqueeze(1) - log_start.unsqueeze(1)) * steps)
 
             _, _, _, ntfInt = self.TransferFunctions(f, min_2d(Ts), min_2d(delay), min_2d(loopGain))
-            self.noise_gain = pdims( torch.trapz(ntfInt.abs().pow(2), f, dim=1)*2*Ts, 2 )
+            self.noise_gain = torch.trapz(ntfInt.abs().pow(2), f, dim=1).view(self.N_obs, 1, 1) * 2*Ts
         else:
             # An average value of the noise transfer function as a function of the delay in frames for an integrator gain of 0.5
-            self.noise_gain = torch.min(self.one_gpu*0.8, 0.4 + 0.1333 * self.HOloop_delay).pow(2)
+            self.noise_gain = torch.min(self.one_gpu*0.8, 0.4 + 0.1333 * self.HOloop_delay).pow(2).view(self.N_obs, 1, 1)
     
      
     def Controller(self):
@@ -677,7 +677,7 @@ class TipTorch(torch.nn.Module):
             #TODO: fix it. "A" should be initialized differently? Wait, what does it mean even? Leave it like this.
             A = torch.ones([self.W_atm.shape[0], self.nOtf_AO_y, self.nOtf_AO_x], device=self.device)
             Ff = self.Rx*self.SxAv + self.Ry*self.SyAv
-            psd_ST = (1 + Ff.abs()**2 * self.h2 - 2*torch.real(Ff*self.h1*A)) * self.W_atm * self.mask_corrected_AO
+            PSD_ST = (1 + Ff.abs()**2 * self.h2 - 2*torch.real(Ff*self.h1*A)) * self.W_atm * self.mask_corrected_AO
             
         else:
             kx = pdims(self.kx_AO, 1)
@@ -693,9 +693,9 @@ class TipTorch(torch.nn.Module):
             self.P_beta_L = torch.exp( 2j*torch.pi * (h*(beta_x*kx + beta_y*ky) - delta_T*self.freq_t) ).unsqueeze(-2)
             proj = self.P_beta_L - self.P_beta_DM @ self.W_alpha
             proj_t = torch.conj(torch.permute(proj, (0,1,2,4,3)))
-            psd_ST = torch.squeeze(torch.squeeze(torch.abs((proj @ self.C_phi @ proj_t)))) * self.piston_filter * self.mask_corrected_AO
+            PSD_ST = torch.squeeze(torch.squeeze(torch.abs((proj @ self.C_phi @ proj_t)))) * self.piston_filter * self.mask_corrected_AO
 
-        return psd_ST
+        return PSD_ST
 
 
     def NoisePSD(self, WFS_noise_var):
@@ -756,10 +756,10 @@ class TipTorch(torch.nn.Module):
 
 
     def ChromatismPSD(self):
-        n2 = self.IOR_GS_wvl # IOR at WFSing wavelength
-        n1 = self.IOR_src_wvl.view(1, self.N_wvl, 1, 1) # IOR at science source wavelength
+        N2 = self.IOR_GS_wvl - 1.0 # air refractivity at WFSing wavelength (N ≡ n-1)
+        N1 = self.IOR_src_wvl.view(1, self.N_wvl, 1, 1) - 1.0 # air refractivity at science source wavelength
         
-        chromatic_PSD = ((n2-n1)/n2)**2 * self.W_atm.unsqueeze(1)
+        chromatic_PSD = (1.0 - N1/N2)**2 * self.W_atm.unsqueeze(1)
         return chromatic_PSD
 
 
@@ -769,10 +769,9 @@ class TipTorch(torch.nn.Module):
         
         w = self.Cn2_weights.view(self.N_obs, 1, 1, 1, self.N_L)
         k = self.k_AO.view(1, 1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
-        # [N_src x 1 x nOtf_AO_y x nOtf_AO_x]
-        cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - pdims(self.src_azimuth, 2)).unsqueeze(1)
-        # [N_src x N_wvl]
-        tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle))
+
+        cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - pdims(self.src_azimuth, 2)).unsqueeze(1) # [N_src x 1 x nOtf_AO_y x nOtf_AO_x]
+        tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle)) # [N_src x N_wvl]
         
         return self.W_atm.unsqueeze(1) * ( 2*w*(1-torch.cos(2*torch.pi*h*k * pdims(tan_theta,3) * pdims(cos_ang,1))) ).sum(dim=-1) * self.mask_corrected_AO
     

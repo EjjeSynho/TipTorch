@@ -25,10 +25,9 @@ from tools.utils import mask_circle, rad2mas
 from managers.config_manager import MultipleTargetsInOneObservation
 from tools.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
-from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
-
 from data_processing.MUSE_data_utils import *
-from managers.multisrc_manager import select_sources
+
+from tools.multisources import select_sources
 
 predict_Moffat = True
 predict_phase_bump = True
@@ -73,7 +72,7 @@ sources.rename(
 sources[['x_peak', 'y_peak']] = sources[['x_peak', 'y_peak']] * 1000 / 25 + field_center # [asec] -> [pix]
 
 #%%
-from managers.multisrc_manager import add_ROIs, ExtractSources
+from tools.multisources import add_ROIs, ExtractSources
 
 PSF_size = 111  # Define the maximum size of each extracted PSF
 
@@ -418,7 +417,7 @@ model_sparse = add_ROIs(
 # plt.scatter(wavelength_selected.squeeze().cpu().numpy()*1e9, src_spectra_sparse[i_src].cpu().numpy())
 
 #%
-from managers.multisrc_manager import VisualizeSources, PlotSourcesProfiles
+from tools.multisources import VisualizeSources, PlotSourcesProfiles
 
 # ROI_plot = np.s_[..., 125:225, 125:225]
 ROI_plot = np.s_[..., 125:225, 125:225]

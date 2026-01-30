@@ -486,7 +486,7 @@ class InputsManagersUnion:
             manager = self.input_managers[key]
             original_shape = self.shapes[key]
 
-            # Extract the flat vector for this manager and reshape to original dimensions
+            # Extract the flat vector related to the current manager and reshape to original dimensions
             manager_vector = vector[..., sl]
             if len(original_shape) > 1:
                 manager_vector = manager_vector.reshape(original_shape)
@@ -495,8 +495,8 @@ class InputsManagersUnion:
             if unstacked is not None:
                 result.update(unstacked)
                 
-        # If not all managers were included in slices due to aabsence of optimizable parameters in them, add their
-        # contents into the resulting dictionary
+        # If not all managers were included in slices due to absence of optimizable parameters in them,
+        # add their contents into the resulting dictionary anyway
         if include_all and (len(self.slices) != len(self.input_managers)):
             for key, manager in self.input_managers.items():
                 if key not in self.slices:

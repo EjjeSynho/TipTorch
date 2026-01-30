@@ -224,7 +224,7 @@ spectral_cubes, spectral_info, TELEMETRY_CACHE, model_config = LoadCachedDataMUS
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
 
 #%%
-from managers.multisrc_manager import DetectSources
+from tools.multisources import DetectSources
 
 # Compute coordinates of sources in the field in arcsec relative to the center of pointing
 sources = DetectSources(cube_sparse, threshold=50000, display=True, draw_win_size=21)

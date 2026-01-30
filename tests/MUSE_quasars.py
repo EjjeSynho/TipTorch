@@ -129,7 +129,7 @@ flux_λ_norm = torch.tensor(Δλ_full / Δλ_binned, device=device, dtype=torch.
 cube_sparse *= flux_λ_norm[:, None, None]
 
 #%%
-from managers.multisrc_manager import add_ROIs, DetectSources, ExtractSources
+from tools.multisources import add_ROIs, DetectSources, ExtractSources
 
 PSF_size = 111  # Define the size of each extracted PSF
 
@@ -358,7 +358,7 @@ PSFs_fitted = torch.stack(PSFs_fitted, dim=0)
 
 
 #%% Initial guess, will be inaccurate
-from managers.multisrc_manager import VisualizeSources, PlotSourcesProfiles
+from tools.multisources import VisualizeSources, PlotSourcesProfiles
 
 model_sparse = add_ROIs(
     torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device), # blanck baase image
@@ -622,7 +622,7 @@ x_curve_fit_dict = curve_inputs.unstack(x2[x_size_model:x_size_curve+x_size_mode
 flux_corrections = individual_inputs['F_norm']
 
 #%% Predict PSFs over the full wavelengths range
-from managers.multisrc_manager import add_ROIs_separately
+from tools.multisources import add_ROIs_separately
 
 print('Extending the prediction over the whole wavelengths range...')
 torch.cuda.empty_cache()

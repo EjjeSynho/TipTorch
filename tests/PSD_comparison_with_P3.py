@@ -201,7 +201,6 @@ print(f"Noise var. - P3: {noise_variance_P3:.4f}, TipTorch: {noise_variance_tipt
 
 
 #%%
-
 PSD_noise_P3 = cp.zeros((P3_model.freq.resAO, P3_model.freq.resAO, P3_model.ao.src.nSrc), dtype=complex)
 # noise level is considered in the covariance matrix Cb
 # and the noise gain is considered as follows (0.6 - 1.0)
@@ -348,7 +347,7 @@ for key in TipTorch_PSDs.keys():
 from photutils.profiles import RadialProfile
 
 # choice = ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'diff. refract', 'chromatism']
-choice = ['fitting', 'WFS noise']
+choice = ['fitting', 'WFS noise', 'chromatism']
 
 def plot_PSD_radial_profile(img, title, linestyle='-', color=None):
     xycen = (img.shape[-1]//2, img.shape[-2]//2)
