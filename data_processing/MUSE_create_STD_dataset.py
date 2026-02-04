@@ -202,17 +202,15 @@ else:
         muse_df = pickle.load(handle)
 
 
-AOF_Cn2_profiles_stats(muse_df, store=True) # Update median AOF Cn2 profile
+_ = AOF_Cn2_profiles_stats(muse_df, store=True) # Update median AOF Cn2 profile
 
 #%% ================================= MUSE NFM STD stars dataset cleaning, imputation and scaling ==================================
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import SimpleImputer, IterativeImputer
 from sklearn.preprocessing import StandardScaler
-
-from data_analysis_utils import plot_correlation_heatmap, calculate_VIF, analyze_NaN_distribution
-from data_analysis_utils import analyze_outliers, plot_data_filling, VIF_contributors, filter_by_correlation
-
+from data_analysis_utils import *
 from MUSE_data_utils import filter_dataframe, reduce_dataframe
+
 verbose = True
 
 # Manually exclude all mostly missing/highly-correlated/repeating values from the dataset

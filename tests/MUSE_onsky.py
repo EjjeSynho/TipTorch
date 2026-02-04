@@ -46,7 +46,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 465 # slight sausage
 # ids = 184 # weak wind patterns
 # ids = 470 # blurry
-ids = 346 # blurry (very)
+# ids = 346 # blurry (very)
 # ids = 179 # blurry
 
 # ids = 121
@@ -72,18 +72,15 @@ ids = 346 # blurry (very)
 # ids = 482 # good one
 # ids = 475 # good one, mb DM correction radius mismatch
 # ids = 468 # good one
-# ids = 462 # good one
+ids = 462 # good one
 # ids = 455 # good one, slight sausage
 # ids = 359 # good one
 
 
 # ids = [206, 359, 462, 468, 475]
-
 # ids = 206
 # ids = 96
-
 # ids = 456 # large tomographic error
-
 # ids = 125
 
 PSF_0, norms, bgs, configs = LoadSTDStarData(
@@ -125,8 +122,6 @@ for j in range(N_src):
         im = PSF_0[j,i,...].cpu().numpy()
         vmin = np.percentile(im[im > 0], 10) if np.any(im > 0) else 1
         vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
-        # vmin = np.percentile(im[im > 0], 97) if np.any(im > 0) else 1
-        # vmax = np.percentile(im[im > 0], 99.95) if np.any(im > 0) else im.max()
 
         plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
         plt.axis('off')
@@ -139,117 +134,75 @@ for j in range(N_src):
 
 #%%
 from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
+from tools.utils import RadialProfileLossSimple
 
-# wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
-wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
-wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
+blurry_PSF_flag = muse_df.loc[ids]['Bad quality'].item()
 
-# wvl_weights = wvl_weights * 0 + 1
+if N_src > 1:
+    suppress_bump_flag = False
+    suppress_LO_flag   = False
+    fit_wind_dir       = False
+    fit_wind_speed     = True
+    fit_outerscale     = True
+    fit_Cn2_profile    = True
+        
+else:
+    # Don't fit in case of too blurry PSFs
+    suppress_bump_flag = blurry_PSF_flag | (not muse_df.loc[ids]['Non-point'].item())
+    suppress_LO_flag   = blurry_PSF_flag
+    fit_wind_dir       = False
+    fit_wind_speed     = (not blurry_PSF_flag)
+    fit_outerscale     = (not blurry_PSF_flag)
+    fit_Cn2_profile    = (not blurry_PSF_flag)
+        
+λ_weighting = False
+
+if λ_weighting:
+    # wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+    wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
+    wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
+else:
+    wvl_weights = 1.0
 
 # mask = torch.tensor(mask_circle(PSF_0.shape[-1], 5)).view(1, 1, *PSF_0.shape[-2:]).to(device)
 # mask_inv = 1.0 - mask
 
-# loss_radial_fn = RadialProfileLossSimple(
-#     n_bins=64,
-#     loss="fvu",      # or "mse"
-#     bin_weight="r",  # "uniform" or "counts" also available
-#     log_profile=False
-# )
+loss_radial_fn = RadialProfileLossSimple(
+    n_bins=64,
+    loss="mse",
+    bin_weight="r",
+    log_profile=False
+)
+loss_MAE = torch.nn.L1Loss(reduction='mean')
+loss_MSE = torch.nn.MSELoss(reduction='mean')
 
-loss_Huber = torch.nn.HuberLoss(reduction='mean', delta=0.05)
-loss_MAE   = torch.nn.L1Loss(reduction='mean')
-loss_MSE   = torch.nn.MSELoss(reduction='mean')
-
-def loss_fn(x_, w_MSE, w_MAE):    
-    diff = (func(x_)-PSF_0) #* wvl_weights
+def loss_fn(x_, w_MSE, w_MAE, w_bump, w_LO):
+    PSF_ = func(x_)
+    diff = (PSF_-PSF_0) * wvl_weights
     w = 2e4
     MSE_loss = diff.pow(2).mean() * w * w_MSE
     MAE_loss = diff.abs().mean()  * w * w_MAE
-    LO_loss  = loss_LO_fn() if PSF_model.LO_NCPAs else 0.0
+    LO_loss  = loss_LO_fn(w_bump, w_LO) if PSF_model.LO_NCPAs else 0.0
+    # radial_loss = loss_radial_fn(PSF_, PSF_0) * 1e11
 
-    return MSE_loss + MAE_loss + LO_loss + Moffat_loss_fn()
+    return MSE_loss + MAE_loss + LO_loss#+ radial_loss
 
-suppress_sausage = False
-suppress_LO = False
+suppress_bump = 1e3 if suppress_bump_flag else 1
+suppress_LO   = 1e3 if suppress_LO_flag   else 1
 
-suppress_sausage = 1e3 if suppress_sausage else 1
-suppress_LO = 1e3 if suppress_LO else 1
-
-def loss_LO_fn():
+def loss_LO_fn(w_bump, w_LO):
     if isinstance(PSF_model.LO_basis, PixelmapBasis):
-        # LO_loss = grad_loss_fn(PSF_model.OPD_func.unsqueeze(1)) * 5e-5
-        raise NotImplementedError("Gradient loss for PixelmapBasis is not implemented yet.")
+        raise NotImplementedError("Gradient loss for PixelmapBasis is not implemented.")
         
     elif isinstance(PSF_model.LO_basis, ZernikeBasis) or isinstance(PSF_model.LO_basis, ArbitraryBasis):
-        LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * 1e-7 * suppress_LO
+        LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * suppress_LO
         # Constraint to enforce first element of LO_coefs to be positive
-        first_coef_penalty = torch.clamp(-PSF_model.inputs_manager['LO_coefs'][:, 0], min=0).pow(2).mean() * 5e-5 * suppress_sausage
+        first_coef_penalty = torch.clamp(-PSF_model.inputs_manager['LO_coefs'][:, 0], min=0).pow(2).mean() * w_bump * suppress_bump
         LO_loss += first_coef_penalty
         
     return LO_loss
 
-
-def Moffat_loss_fn():
-    if PSF_model.Moffat_absorber is False:
-        return 0.0
-    
-    amp = PSF_model.inputs_manager['amp']
-    # alpha = PSF_model.inputs_manager['alpha']
-    # beta = PSF_model.inputs_manager['beta']
-    # b = PSF_model.inputs_manager['b']
-    
-    # Enforce positive amplitude
-    amp_penalty = amp.pow(2).mean() * 2.5e-2
-    
-    # Enforce beta > 1.5
-    # beta_penalty = torch.clamp(1.5 - beta, min=0).pow(2).mean() * 1e-3
-    
-    # # Enforce alpha > 0
-    # alpha_penalty = torch.clamp(-alpha, min=0).pow(2).mean() * 1e-3
-    
-    # # Enforce b > 0
-    # b_penalty = torch.clamp(-b, min=0).pow(2).mean() * 1e-3
-    
-    return amp_penalty #+ beta_penalty + alpha_penalty + b_penalty
-
-
-def loss_fn_Huber(x_):
-    PSF_1 = func(x_)
-    huber_loss = loss_Huber(PSF_1*wvl_weights*5e5, PSF_0*wvl_weights*5e5)
-    MSE_loss = loss_MSE(PSF_1*wvl_weights, PSF_0*wvl_weights) * 2e4 * 800.0
-    LO_loss = loss_LO_fn() if PSF_model.LO_NCPAs else 0.0
-
-    return huber_loss + LO_loss #+ MSE_loss
-
-
-loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6)
-# loss_fn1 = lambda x_: loss_fn(x_, w_MSE=600.0, w_MAE=2.0)
-# loss_fn2 = lambda x_: loss_fn(x_, w_MSE=1.0,   w_MAE=2.0)
-# grad_loss_fn = GradientLoss(p=1, reduction='mean')
-
-
-#%
-# def loss_radial(x_):
-#     PSF_1 = func(x_)
-#     diff = (PSF_1-PSF_0) * wvl_weights
-#     mse_loss = (diff * 4000).pow(2).mean()
-#     mae_loss = (diff * 32000).abs().mean()
-#     if fit_LO:
-#         if isinstance(LO_basis, PixelmapBasis):
-#             LO_loss = grad_loss_fn(PSF_model.OPD_func.unsqueeze(1)) * 5e-5
-#         elif isinstance(LO_basis, ZernikeBasis) or isinstance(LO_basis, ArbitraryBasis):
-#             LO_loss = inputs_manager['LO_coefs'].abs().sum()**2 * 1e-7
-#             # Constraint to enforce first element of LO_coefs to be positiv
-#             first_coef_penalty = torch.clamp(-inputs_manager['LO_coefs'][0, 0], min=0).pow(2) * 5e-5
-#             LO_loss += first_coef_penalty
-#         else:
-#             raise ValueError('Wrong LO type specified.')
-#     else:
-#         LO_loss = 0.0
-
-#     loss_rad = loss_radial_fn(PSF_1, PSF_0) * 5000
-#     return mse_loss + mae_loss + LO_loss + loss_rad
-
+loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6, w_bump=5e-5, w_LO=1e-7)
 
 #%%
 def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True, force_BFGS=False):
@@ -260,7 +213,7 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True,
     if type(exclude_list) is str: exclude_list = [exclude_list]    
     if type(include_list) is set: include_list = list(include_list)
     if type(exclude_list) is set: exclude_list = list(exclude_list)
-        
+    
     PSF_model.inputs_manager.set_optimizable(include_list, True)
     PSF_model.inputs_manager.set_optimizable(exclude_list, False)
 
@@ -297,11 +250,6 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True,
 
     return result.x, func(result.x), OPD_map, success
 
-
-fit_wind_speed  = True
-fit_wind_dir    = False
-fit_outerscale  = True
-fit_Cn2_profile = True
 
 include_general = ['r0', 'dn'] + \
                   (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \

@@ -1970,6 +1970,20 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def compute_mass_turb_statistics(df: pd.DataFrame) -> pd.DataFrame:
+    turb_df = df[[f'MASS_TURB{i}' for i in range(0,7)]].copy()
+    turb_df['ground_layer'] = turb_df['MASS_TURB0']
+    turb_df['upper_layers'] = turb_df[[f'MASS_TURB{i}' for i in range(1,7)]].sum(axis=1, skipna=True)
+    
+    turb_df['MASS_TURB total'] = turb_df['ground_layer'] + turb_df['upper_layers']
+    turb_df['MASS_TURB ratio'] = turb_df['ground_layer'] / turb_df['MASS_TURB total']
+    
+    df['MASS_TURB total'] = turb_df['MASS_TURB total'].copy()
+    df.loc[df['MASS_TURB total'] < 1e-16, 'MASS_TURB total'] = np.nan
+    df['MASS_TURB ratio'] = turb_df['MASS_TURB ratio'].copy()
+    return df
+
+
 def compute_fraction_below_layer(df: pd.DataFrame, h_GL: float = 2000) -> pd.DataFrame:
     GL_fracs = []
 
@@ -2011,15 +2025,17 @@ def recompute_simplified_Cn2(df: pd.DataFrame, n_layers: int) -> pd.DataFrame:
         
         # Check for invalid data (all NaNs)
         if np.all(np.isnan(Cn2_alt_sample)) or np.all(np.isnan(Cn2_frac_sample)):
-            Cn2_alt_sample, Cn2_frac_sample = median_Cn2_alts, median_Cn2_fracs
-            
-        Cn2_alt_sample, Cn2_frac_sample = process_AOF_Cn2_profile(Cn2_alt_sample, Cn2_frac_sample, median_Cn2_alts)    
-        Cn2_alt_binned_sample, Cn2_frac_binned_sample = recompute_Cn2_Kmeans(Cn2_alt_sample, Cn2_frac_sample, n_layers=n_layers, enforce_0_GL=True, min_separation=3.0)
+            # Cn2_alt_sample, Cn2_frac_sample = median_Cn2_alts, median_Cn2_fracs
+            Cn2_alt_binned_sample  = np.full(n_layers, np.nan)
+            Cn2_frac_binned_sample = np.full(n_layers, np.nan)
+        else:
+            Cn2_alt_sample, Cn2_frac_sample = process_AOF_Cn2_profile(Cn2_alt_sample, Cn2_frac_sample, median_Cn2_alts)    
+            Cn2_alt_binned_sample, Cn2_frac_binned_sample = recompute_Cn2_Kmeans(Cn2_alt_sample, Cn2_frac_sample, n_layers=n_layers, enforce_0_GL=True, min_separation=3.0)
         
         Cn2_alts_binned.append(Cn2_alt_binned_sample)
         Cn2_fracs_binned.append(Cn2_frac_binned_sample)
         
-    Cn2_alts_binned = np.array(Cn2_alts_binned)
+    Cn2_alts_binned  = np.array(Cn2_alts_binned)
     Cn2_fracs_binned = np.array(Cn2_fracs_binned)
     
     for k in range(1, n_layers): # GL is always zero, and it's weight can be computed as 1 - sum(other weights)
@@ -2038,7 +2054,7 @@ def compute_anisoplanatic_angle(df: pd.DataFrame) -> pd.DataFrame:
 
     # Effective height for anisoplanatism (h^(5/3) moment)
     h_eff = (np.nansum(w * (h_m ** (5/3)), axis=1) / np.nansum(w, axis=1)) ** (3/5)
-    df['h_eff'] = h_eff
+    # df['h_eff'] = h_eff
 
     r0 = df['r0Tot']  # make sure: meters, referenced at zenith
 
@@ -2047,6 +2063,10 @@ def compute_anisoplanatic_angle(df: pd.DataFrame) -> pd.DataFrame:
     theta0_rad *= np.cos(zeta)# ** (8/5)
 
     df['theta0'] = theta0_rad * rad2arc
+
+    # Filter out unphysical values
+    df.loc[df['theta0'] < 0.1, 'theta0']  = np.nan
+    df.loc[df['theta0'] > 10.0, 'theta0'] = np.nan
 
     return df
 
@@ -2067,15 +2087,7 @@ def reduce_dataframe(df):
     df_['LGS photons, [photons/m^2/s]'] = \
         df_[[f'LGS{i} photons, [photons/m^2/s]' for i in range(1,5)]].median(axis=1, skipna=True)
     
-    # df['LGS_R0']         = df[['LGS1_R0', 'LGS2_R0', 'LGS3_R0', 'LGS4_R0']].mean(axis=1, skipna=True)
-    # df['LGS_SEEING']     = df[['LGS1_SEEING', 'LGS2_SEEING', 'LGS3_SEEING', 'LGS4_SEEING']].mean(axis=1, skipna=True)
-    # df['LGS_STREHL']     = df[['LGS1_SEEING', 'LGS2_SEEING', 'LGS3_SEEING', 'LGS4_SEEING']].mean(axis=1, skipna=True)
-    # df['LGS_TURVAR_RES'] = df[['LGS1_TURVAR_RES', 'LGS2_TURVAR_RES', 'LGS3_TURVAR_RES', 'LGS4_TURVAR_RES']].mean(axis=1, skipna=True)
-    # df['LGS_TURVAR_TOT'] = df[['LGS1_TURVAR_TOT', 'LGS2_TURVAR_TOT', 'LGS3_TURVAR_TOT', 'LGS4_TURVAR_TOT']].mean(axis=1, skipna=True)
-    # df['LGS_TUR_ALT']    = df[['LGS1_TUR_ALT', 'LGS2_TUR_ALT', 'LGS3_TUR_ALT', 'LGS4_TUR_ALT']].mean(axis=1, skipna=True)
-    # df['LGS_TUR_GND']    = df[['LGS1_TUR_GND', 'LGS2_TUR_GND', 'LGS3_TUR_GND', 'LGS4_TUR_GND']].mean(axis=1, skipna=True)
-    # df['LGS_FWHM_GAIN']  = df[['LGS1_FWHM_GAIN', 'LGS2_FWHM_GAIN', 'LGS3_FWHM_GAIN', 'LGS4_FWHM_GAIN']].mean(axis=1, skipna=True)
-    
+
     for i in range(1, 5):
         df_[f'AOS.LGS{i}.SLOPERMS'] = (df_[f'AOS.LGS{i}.SLOPERMSX']**2 + df_[f'AOS.LGS{i}.SLOPERMSY']**2)**0.5
         df_[f'LGS{i}_SLOPERMS']     = (df_[f'LGS{i}_SLOPERMSX']**2 + df_[f'LGS{i}_SLOPERMSY']**2)**0.5
@@ -2083,24 +2095,14 @@ def reduce_dataframe(df):
     df_['AOS.LGS.SLOPERMS'] = df_[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].median(axis=1, skipna=True)
     df_['LGS_SLOPERMS']     = df_[[f'LGS{i}_SLOPERMS' for i in range(1, 5)]].median(axis=1, skipna=True)
     
-    # df['MASS_TURB']        = df[[f'MASS_TURB{i}' for i in range(0, 7)]].sum(axis=1, skipna=True)
-    turb_df = df_[[f'MASS_TURB{i}' for i in range(0,7)]].copy()
-    turb_df['ground_layer'] = turb_df['MASS_TURB0']
-    turb_df['upper_layers'] = turb_df[[f'MASS_TURB{i}' for i in range(1,7)]].sum(axis=1, skipna=True)
-    turb_df['MASS_TURB total'] = turb_df['ground_layer'] + turb_df['upper_layers']
-    turb_df['MASS_TURB ratio'] = turb_df['ground_layer'] / turb_df['MASS_TURB total']
-    df_['MASS_TURB total'] = turb_df['MASS_TURB total'].copy()
-    df_.loc[df_['MASS_TURB total'] < 1e-16, 'MASS_TURB total'] = np.nan
-    df_['MASS_TURB ratio'] = turb_df['MASS_TURB ratio'].copy()
-    
     df_['Pupil angle'] = df_['Pupil angle'].map(lambda x: x % 360)
-    df_[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].median(axis=1)
-
-
+    
+    # Compute turbulence statistics
+    df_ = compute_mass_turb_statistics(df_)
     # Compute Cn² fractions below a specified altitude in [m]
     df_ = compute_fraction_below_layer(df_, h_GL=2000)
     # Compute simplified Cn2 profile
-    df_ = recompute_simplified_Cn2(n_layers=3)
+    df_ = recompute_simplified_Cn2(df_, n_layers=3)
     # Compute anisoplanatic angle
     df_ = compute_anisoplanatic_angle(df_)
 

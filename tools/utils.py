@@ -887,26 +887,36 @@ class RadialProfileLossSimple(nn.Module):
         device, dtype = pred.device, pred.dtype
 
         # precompute soft radial weights
-        W_hwB, centers, _ = self._precompute(H, W, device, dtype)  # (H,W,B),(B,)
-        # expand to broadcast over batch/wavelengths
-        W_full = W_hwB.view(1, 1, H, W, self.n_bins)               # (1,1,H,W,B)
+        # W_hwB shape: (H, W, B), centers shape: (B,)
+        W_hwB, centers, _ = self._precompute(H, W, device, dtype)  
+        
+        # ---------------------------------------------------------
+        # OPTIMIZATION: Combine spatial dims for Matrix Multiplication
+        # ---------------------------------------------------------
+        # Flatten weights: (H*W, B)
+        W_flat = W_hwB.reshape(-1, self.n_bins)
+        
+        # Denominator per bin (sum of weights in each ring)
+        # Shape: (1, 1, B) broadcastable
+        den = W_flat.sum(dim=0).view(1, 1, self.n_bins).clamp_min(self.eps)
 
-        # choose image domain (linear or log)
-        X = torch.log(pred + self.eps) if self.log_profile else pred
-        Y = torch.log(target + self.eps) if self.log_profile else target
+        # Flatten images: (N*WVL, H*W)
+        X_flat = (torch.log(pred + self.eps) if self.log_profile else pred).reshape(-1, H*W)
+        Y_flat = (torch.log(target + self.eps) if self.log_profile else target).reshape(-1, H*W)
 
-        # radial profiles via weighted average over pixels
-        num_pred = (X.unsqueeze(-1) * W_full).sum(dim=(-3, -2))    # (N,WVL,B)
-        num_targ = (Y.unsqueeze(-1) * W_full).sum(dim=(-3, -2))    # (N,WVL,B)
-        den = W_full.sum(dim=(-3, -2)).clamp_min(self.eps)         # (1,1,B) -> broadcasts
+        # Matrix Mul: (N*WVL, H*W) @ (H*W, B) -> (N*WVL, B)
+        num_pred = torch.matmul(X_flat, W_flat).view(N, WVL, self.n_bins)
+        num_targ = torch.matmul(Y_flat, W_flat).view(N, WVL, self.n_bins)
+
         prof_pred = num_pred / den
         prof_targ = num_targ / den
+        # ---------------------------------------------------------
 
         # per-bin weights
         if self.bin_weight == "uniform":
             w = torch.ones_like(prof_pred)
         elif self.bin_weight == "counts":
-            w = den.expand_as(prof_pred)                           # proportional to pixel counts
+            w = den.expand_as(prof_pred)
         else:  # 'r' — emphasize wings
             w = centers.view(1, 1, -1).expand_as(prof_pred)
 
@@ -916,9 +926,16 @@ class RadialProfileLossSimple(nn.Module):
         if self.loss == "mse":
             diff = prof_pred - prof_targ
             loss = (w * diff.pow(2)).mean()
-        else:  # 'fvu' across bins, then average over batch & wavelength
+        else:  # 'fvu'
             y = prof_targ
-            ybar = y.mean(dim=-1, keepdim=True)
+            
+            # Statistical Consistency: Use Weighted Mean for ybar
+            # ybar = (y * w).mean(dim=-1, keepdim=True) # Since w.mean() is 1, this works
+            # Or strictly: sum(y*w)/sum(w)
+            
+            w_sum = w.sum(dim=-1, keepdim=True).clamp_min(self.eps)
+            ybar = (y * w).sum(dim=-1, keepdim=True) / w_sum
+            
             sse = (w * (prof_pred - y).pow(2)).sum(dim=-1)                 # (N,WVL)
             ssy = (w * (y - ybar).pow(2)).sum(dim=-1).clamp_min(self.eps)  # (N,WVL)
             fvu = sse / ssy

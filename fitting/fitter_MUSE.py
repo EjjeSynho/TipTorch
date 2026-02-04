@@ -149,23 +149,24 @@ def load_and_fit_sample(id):
     N_src = PSF_0.shape[0]
     wavelengths = PSF_model.wavelengths
 
-    # Loss functions setup
-    # wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
-    wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
-    wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
+    # Retrieve flags from dataframe
+    blurry_PSF_flag = psf_df.loc[id]['Bad quality'].item()
+    non_point_flag  = psf_df.loc[id]['Non-point'].item()
 
-    # loss_Huber = torch.nn.HuberLoss(reduction='mean', delta=0.05)
-    # loss_MAE   = torch.nn.L1Loss(reduction='mean')
-    # loss_MSE   = torch.nn.MSELoss(reduction='mean')
+    suppress_bump_flag = blurry_PSF_flag | (not non_point_flag)
+    suppress_LO_flag   = blurry_PSF_flag
+
+    suppress_bump = 1e3 if suppress_bump_flag else 1
+    suppress_LO   = 1e3 if suppress_LO_flag   else 1
+
     grad_loss_fn = GradientLoss(p=1, reduction='mean')
 
-
-    def loss_fn(x_, w_MSE, w_MAE):    
+    def loss_fn(x_, w_MSE, w_MAE, w_bump, w_LO):    
         diff = (func(x_)-PSF_0) #* wvl_weights
         w = 2e4
         MSE_loss = diff.pow(2).mean() * w * w_MSE
         MAE_loss = diff.abs().mean()  * w * w_MAE
-        LO_loss  = loss_LO_fn() if PSF_model.LO_NCPAs else 0.0
+        LO_loss  = loss_LO_fn(w_bump, w_LO) if PSF_model.LO_NCPAs else 0.0
         Moffat_loss = Moffat_loss_fn() if PSF_model.Moffat_absorber else 0.0
 
         return MSE_loss + MAE_loss + LO_loss + Moffat_loss
@@ -192,28 +193,20 @@ def load_and_fit_sample(id):
         return amp_penalty #+ b_penalty + beta_penalty + alpha_penalty
 
 
-    def loss_LO_fn():
+    def loss_LO_fn(w_bump, w_LO):
         if isinstance(PSF_model.LO_basis, PixelmapBasis):
             LO_loss = grad_loss_fn(PSF_model.OPD_func.unsqueeze(1)) * 5e-5
             
         elif isinstance(PSF_model.LO_basis, ZernikeBasis) or isinstance(PSF_model.LO_basis, ArbitraryBasis):
-            LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * 1e-7
+            LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * suppress_LO
             # Constraint to enforce first element of LO_coefs to be positive
-            first_coef_penalty = torch.clamp(-PSF_model.inputs_manager['LO_coefs'][:, 0], min=0).pow(2).mean() * 5e-5
+            first_coef_penalty = torch.clamp(-PSF_model.inputs_manager['LO_coefs'][:, 0], min=0).pow(2).mean() * w_bump * suppress_bump
             LO_loss += first_coef_penalty
         
         return LO_loss
 
-    # def loss_fn_Huber(x_):
-    #     PSF_1 = func(x_)
-    #     huber_loss = loss_Huber(PSF_1*wvl_weights*5e5, PSF_0*wvl_weights*5e5)
-    #     MSE_loss = loss_MSE(PSF_1*wvl_weights, PSF_0*wvl_weights) * 2e4 * 800.0
-    #     LO_loss = loss_LO_fn() if PSF_model.LO_NCPAs else 0.0
 
-    #     return huber_loss + LO_loss + MSE_loss
-
-    loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6)
-    # loss_fn2 = lambda x_: loss_fn(x_, w_MSE=1.0,   w_MAE=2.0)
+    loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6, w_bump=5e-5, w_LO=1e-7)
 
     # Minimization function
     def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True, force_BFGS=False):
