@@ -212,11 +212,11 @@ from sklearn.preprocessing import StandardScaler
 from data_analysis_utils import plot_correlation_heatmap, calculate_VIF, analyze_NaN_distribution
 from data_analysis_utils import analyze_outliers, plot_data_filling, VIF_contributors, filter_by_correlation
 
-from MUSE_data_utils import filter_values, prune_columns
+from MUSE_data_utils import filter_dataframe, reduce_dataframe
 verbose = True
 
 # Manually exclude all mostly missing/highly-correlated/repeating values from the dataset
-muse_df_pruned = prune_columns(filter_values(muse_df.copy()))
+muse_df_pruned = reduce_dataframe(filter_dataframe(muse_df.copy()))
 
 median_imputer = SimpleImputer(strategy='median')
 telemetry_scaler = StandardScaler()

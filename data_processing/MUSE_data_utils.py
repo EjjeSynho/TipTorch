@@ -22,7 +22,7 @@ from photutils.background import Background2D, MedianBackground
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 from pathlib import Path
-from tools.utils import GetROIaroundMax, GetJmag, check_framework, recompute_Cn2_Kmeans
+from tools.utils import GetROIaroundMax, GetJmag, check_framework, recompute_Cn2_Kmeans, rad2arc
 from tools.network import fetch_reduced_telemetry_cache
 from tools.plotting import wavelength_to_rgb
 from managers.config_manager import ConfigManager
@@ -52,14 +52,6 @@ except Exception as e:
 
 
 # Wavelength bins used to bin MUSE NFM multispectral cubes
-# wvl_bins = np.array([
-#     478.   , 492.125, 506.25 , 520.375, 534.625, 548.75 , 562.875, 
-#     577.   , 606.   , 620.25 , 634.625, 648.875, 663.25 , 677.5  ,
-#     691.875, 706.125, 720.375, 734.75 , 749.   , 763.375, 777.625,
-#     792.   , 806.25 , 820.625, 834.875, 849.125, 863.5  , 877.75 ,
-#     892.125, 906.375, 920.75 , 935.
-# ], dtype='float32')
-
 wvl_bins = np.array([
     478.   , 492.125, 506.25 , 520.375, 534.625, 548.75 , 562.875,
     577.   , 606.   , 619.75 , 633.375, 647.125, 660.875, 674.5  ,
@@ -67,8 +59,6 @@ wvl_bins = np.array([
     784.25 , 797.875, 811.625, 825.375, 839.   , 852.75 , 866.5  ,
     880.125, 893.875, 907.625, 921.25 , 935.
 ], dtype='float32')
-
-# wvl_bins_old = np.array([478, 511, 544, 577, 606, 639, 672, 705, 738, 771, 804, 837, 870, 903, 935], dtype='float32')
 
 fetch_reduced_telemetry_cache(verbose=True)
 
@@ -1903,7 +1893,7 @@ def RotatePSF(PSF_data, angle):
 
 
 # %%
-def filter_values(df: pd.DataFrame) -> pd.DataFrame:
+def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
      
     df.loc[df['SLODAR_FRACGL_300'] < 1e-12, 'SLODAR_FRACGL_300'] = np.nan
     df.loc[df['SLODAR_FRACGL_500'] < 1e-12, 'SLODAR_FRACGL_500'] = np.nan
@@ -1979,9 +1969,90 @@ def filter_values(df: pd.DataFrame) -> pd.DataFrame:
 
     return df
 
-# Dataset cleaning
-def prune_columns(df):
+
+def compute_fraction_below_layer(df: pd.DataFrame, h_GL: float = 2000) -> pd.DataFrame:
+    GL_fracs = []
+
+    for j in range(len(df)):
+        Cn2_weights = np.array([df.iloc[j][f'CN2_FRAC_ALT{i}'] for i in range(1, 9)])
+
+        if not np.isnan(Cn2_weights).all():
+            altitudes = np.array([df.iloc[j][f'ALT{i}'] for i in range(1, 9)]) * 1000 # Convert altitudes to meters
+            Cn2_weights_GL = Cn2_weights[altitudes < h_GL] # Select values below threshold
+            GL_frac = np.nansum(Cn2_weights_GL)
+            
+            if GL_frac > 1.0+1e-10 or GL_frac < 0.0:  # Sanity check
+                GL_frac = np.nan
+
+            GL_fracs.append(GL_frac)
+        else:
+            GL_fracs.append(np.nan)
+
+    df = df.copy()
+    df[f'Cn2 fraction below {h_GL}m'] = GL_fracs
+    return df
+
+
+def recompute_simplified_Cn2(df: pd.DataFrame, n_layers: int) -> pd.DataFrame:
+    # Load the pre-computed median Cn2 profile from the json file to serve as a fallback
+    with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'r') as f:
+        profile = json.load(f)
+        median_Cn2_alts, median_Cn2_fracs = np.array(profile['median_Cn2_alts']), np.array(profile['median_Cn2_fracs'])
+
+    # Retrieve Cn2 profile for each sample
+    Cn2_alts  = df[[f'ALT{i}' for i in range(1, 9)]].values
+    Cn2_fracs = df[[f'CN2_FRAC_ALT{i}' for i in range(1, 9)]].values
     
+    Cn2_alts_binned, Cn2_fracs_binned = [], []
+    
+    for i in range(len(df)):
+        Cn2_alt_sample  = Cn2_alts[i]
+        Cn2_frac_sample = Cn2_fracs[i]
+        
+        # Check for invalid data (all NaNs)
+        if np.all(np.isnan(Cn2_alt_sample)) or np.all(np.isnan(Cn2_frac_sample)):
+            Cn2_alt_sample, Cn2_frac_sample = median_Cn2_alts, median_Cn2_fracs
+            
+        Cn2_alt_sample, Cn2_frac_sample = process_AOF_Cn2_profile(Cn2_alt_sample, Cn2_frac_sample, median_Cn2_alts)    
+        Cn2_alt_binned_sample, Cn2_frac_binned_sample = recompute_Cn2_Kmeans(Cn2_alt_sample, Cn2_frac_sample, n_layers=n_layers, enforce_0_GL=True, min_separation=3.0)
+        
+        Cn2_alts_binned.append(Cn2_alt_binned_sample)
+        Cn2_fracs_binned.append(Cn2_frac_binned_sample)
+        
+    Cn2_alts_binned = np.array(Cn2_alts_binned)
+    Cn2_fracs_binned = np.array(Cn2_fracs_binned)
+    
+    for k in range(1, n_layers): # GL is always zero, and it's weight can be computed as 1 - sum(other weights)
+        df[f'Cn2_alt_binned_{k+1}']  = Cn2_alts_binned[:, k]
+        df[f'Cn2_frac_binned_{k+1}'] = Cn2_fracs_binned[:, k]
+    
+    return df
+
+
+def compute_anisoplanatic_angle(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    w     = df[[f'CN2_FRAC_ALT{i}' for i in range(1, 9)]].values
+    h_km  = df[[f'ALT{i}' for i in range(1, 9)]].values
+    h_m   = 1000.0 * h_km
+
+    # Effective height for anisoplanatism (h^(5/3) moment)
+    h_eff = (np.nansum(w * (h_m ** (5/3)), axis=1) / np.nansum(w, axis=1)) ** (3/5)
+    df['h_eff'] = h_eff
+
+    r0 = df['r0Tot']  # make sure: meters, referenced at zenith
+
+    zeta = np.deg2rad(90.0 - df['Tel. altitude'])  # zenith angle
+    theta0_rad = 0.314 * r0 / h_eff
+    theta0_rad *= np.cos(zeta)# ** (8/5)
+
+    df['theta0'] = theta0_rad * rad2arc
+
+    return df
+
+
+# Dataset cleaning
+def reduce_dataframe(df):
     df_ = df.copy()
     
     df_['LGS_R0']         = df_[[f'LGS{i}_R0'         for i in range(1,5)]].median(axis=1, skipna=True)
@@ -2026,83 +2097,12 @@ def prune_columns(df):
     df_[[f'AOS.LGS{i}.SLOPERMS' for i in range(1, 5)]].median(axis=1)
 
 
-    def compute_fraction_below_layer(df: pd.DataFrame, h_GL: float = 2000) -> pd.DataFrame:
-        """
-        Compute Cn2 fraction below a given altitude (ground layer).
-
-        Parameters
-        ----------
-        df : pandas.DataFrame
-            Input dataframe with CN2_FRAC_ALT{i} and ALT{i} columns (i = 1..8).
-        h_GL : float, optional
-            Ground layer altitude threshold in meters. Default = 2000.
-
-        Returns
-        -------
-        df : pandas.DataFrame
-            Copy of input dataframe with a new column: 'Cn2 fraction below {h_GL}m'.
-        """
-        GL_fracs = []
-
-        for j in range(len(df)):
-            Cn2_weights = np.array([df.iloc[j][f'CN2_FRAC_ALT{i}'] for i in range(1, 9)])
-
-            if not np.isnan(Cn2_weights).all():
-                altitudes = np.array([df.iloc[j][f'ALT{i}'] for i in range(1, 9)]) * 1000 # Convert altitudes to meters
-                Cn2_weights_GL = Cn2_weights[altitudes < h_GL] # Select values below threshold
-                GL_frac = np.nansum(Cn2_weights_GL)
-                
-                if GL_frac > 1.0+1e-10 or GL_frac < 0.0:  # Sanity check
-                    GL_frac = np.nan
-
-                GL_fracs.append(GL_frac)
-            else:
-                GL_fracs.append(np.nan)
-
-        df = df.copy()
-        df[f'Cn2 fraction below {h_GL}m'] = GL_fracs
-        return df
-
-
-    def recompute_simplified_Cn2(n_layers):
-        # Load the pre-computed median Cn2 profile from the json file to serve as a fallback
-        with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'r') as f:
-            profile = json.load(f)
-            median_Cn2_alts, median_Cn2_fracs = np.array(profile['median_Cn2_alts']), np.array(profile['median_Cn2_fracs'])
-
-        # Retrieve Cn2 profile for each sample
-        Cn2_alts  = df_[[f'ALT{i}' for i in range(1, 9)]].values
-        Cn2_fracs = df_[[f'CN2_FRAC_ALT{i}' for i in range(1, 9)]].values
-        
-        Cn2_alts_binned, Cn2_fracs_binned = [], []
-        
-        for i in range(len(df_)):
-            Cn2_alt_sample  = Cn2_alts[i]
-            Cn2_frac_sample = Cn2_fracs[i]
-            
-            # Check for invalid data (all NaNs)
-            if np.all(np.isnan(Cn2_alt_sample)) or np.all(np.isnan(Cn2_frac_sample)):
-                Cn2_alt_sample, Cn2_frac_sample = median_Cn2_alts, median_Cn2_fracs
-                
-            Cn2_alt_sample, Cn2_frac_sample = process_AOF_Cn2_profile(Cn2_alt_sample, Cn2_frac_sample, median_Cn2_alts)    
-            Cn2_alt_binned_sample, Cn2_frac_binned_sample = recompute_Cn2_Kmeans(Cn2_alt_sample, Cn2_frac_sample, n_layers=n_layers, enforce_0_GL=True, min_separation=3.0)
-            
-            Cn2_alts_binned.append(Cn2_alt_binned_sample)
-            Cn2_fracs_binned.append(Cn2_frac_binned_sample)
-            
-        Cn2_alts_binned = np.array(Cn2_alts_binned)
-        Cn2_fracs_binned = np.array(Cn2_fracs_binned)
-        
-        for k in range(1, n_layers): # GL is always zero, and it's weight can be computed as 1 - sum(other weights)
-            df_[f'Cn2_alt_binned_{k+1}']  = Cn2_alts_binned[:, k]
-            df_[f'Cn2_frac_binned_{k+1}'] = Cn2_fracs_binned[:, k]
-        
-        return df_
-
     # Compute Cn² fractions below a specified altitude in [m]
     df_ = compute_fraction_below_layer(df_, h_GL=2000)
     # Compute simplified Cn2 profile
     df_ = recompute_simplified_Cn2(n_layers=3)
+    # Compute anisoplanatic angle
+    df_ = compute_anisoplanatic_angle(df_)
 
     entries_to_drop = [
         # These features are just collapsed to a median one instead of FETURE1, FEATURE2...

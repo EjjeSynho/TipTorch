@@ -261,8 +261,8 @@ def GetReducedTelemetryInputs(cached_data):
     df['ID'] = 0
     df.loc[0, 'Pupil angle'] = 0.0
 
-    df_pruned  = filter_values(df.copy())
-    df_reduced = prune_columns(df_pruned.copy())
+    df_pruned  = filter_dataframe(df.copy())
+    df_reduced = reduce_dataframe(df_pruned.copy())
     df_transforms = CreateTransformSequenceFromFile(PROJECT_PATH / 'data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle')
     df_norm = normalize_df(df_reduced, df_transforms)
     df_norm = df_norm.fillna(0)

@@ -5,7 +5,6 @@
 import sys
 sys.path.insert(0, '..')
 
-from matplotlib.pylab import rad2deg
 import torch
 import pickle
 import numpy as np
@@ -18,50 +17,6 @@ from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chroma
 from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarData
 from PSF_models.NFM_wrapper import PSFModelNFM
 from project_settings import device
-
-#%%
-with open('F:/ESO/Data/MUSE/omega_cluster/cached/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle', 'rb') as handle:
-    data = pickle.load(handle)
-
-rad2arc = 3600 * 180 / np.pi
-
-seeing = data['All data']['Seeing (header)'].item()  # [arcsec] at 500 nm
-λ_atm = 500e-9
-r0 = rad2arc*0.976*λ_atm / seeing # [m]
-
-
-
-w = np.array( [data['All data']['CN2_FRAC_ALT{}'.format(i)].item() for i in range(1,9)] )
-h = np.array( [data['All data']['ALT{}'.format(i)].item() for i in range(1,9)] )
-h_mean = np.sum(w * h) / np.sum(w) * 1000
-r0 = data['All data']['r0Tot'].item()
-
-
-zenith = np.deg2rad(90.0 - data['All data']['Tel. altitude'].item())
-aniso = (0.314 * r0 * np.cos(zenith) / h_mean) * rad2arc
-
-print(f"Mean turbulence height: {h_mean:.1f} m, Anisoplanatic angle: {aniso:.2f} arcsec")
-
-#%%
-
-rad2arc = 3600 * 180 / np.pi
-
-w    = np.array([data['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
-h_km = np.array([data['All data'][f'ALT{i}'].item() for i in range(1, 9)])
-h_m  = 1000.0 * h_km
-
-# Effective height for anisoplanatism (h^(5/3) moment)
-h_eff = (np.sum(w * (h_m ** (5/3))) / np.sum(w)) ** (3/5)
-
-r0 = data['All data']['r0Tot'].item()  # make sure: meters, referenced at zenith
-
-zeta = np.deg2rad(90.0 - data['All data']['Tel. altitude'].item())  # zenith angle
-theta0_rad = 0.314 * r0 / h_eff
-theta0_rad *= np.cos(zeta)# ** (8/5)
-
-theta0_arcsec = theta0_rad * rad2arc
-print(f"h_eff={h_eff:.1f} [m], θ₀={theta0_arcsec:.2f} [asec]")
-
 
 
 #%%
@@ -650,27 +605,8 @@ plt.xlim(0, 25)
 
 
 # %%
-# Compute error budget over PSDs with proper integration
-error_budget = {}
-dk = PSF_model.model.dk
-dk_squared = dk**2  # Area element in frequency space
 
-for entry in PSF_model.model.PSD_include:
-    PSD = PSF_model.model.PSDs[entry]
-
-    if len(PSD.shape) > 1:            
-        PSD_norm = (PSF_model.model.wvl_atm*1e9/2/torch.pi)**2
-        PSD = PSF_model.model.half_PSD_to_full(PSD * PSD_norm).real # [nm^2]
-        
-        # Proper integration: multiply by dk^2 for area element
-        error_budget[entry] = (PSD * dk_squared).sum().item()
-        
-        print(f"{entry:15s}: {np.sqrt(error_budget[entry]):.2f} nm RMS")
-        
-total_PSD = PSF_model.model.PSD.real
-error_budget['Total PSD'] = total_PSD.sum().item()
-
-print(f"{'Total PSD':15s}: {np.sqrt(error_budget['Total PSD']):.2f} nm RMS")
+_ = PSF_model.model.ErrorBudget(True)
 
 
 # %%
