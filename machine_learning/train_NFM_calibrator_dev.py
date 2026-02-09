@@ -7,6 +7,8 @@ try:
 except NameError:
     pass
 
+from ast import Tuple
+from re import DEBUG
 import sys
 sys.path.insert(0, '..')
 
@@ -35,6 +37,8 @@ pre_init_astrometry = True
 optimize_astrometry = False
 predict_LOs = True
 
+DEBUG = True # TODO: make it an argument
+
 # Set up logging
 log_dir = Path('../data/logs')
 log_dir.mkdir(parents=True, exist_ok=True)
@@ -42,7 +46,7 @@ log_filename = log_dir / f'training_NFM_{datetime.now().strftime("%Y%m%d_%H%M%S"
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG if DEBUG else logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
     handlers=[
         logging.FileHandler(log_filename),
@@ -64,23 +68,25 @@ parser.add_argument('--continue-training', action='store_true', help='Whether to
 
 # Handle both command line and iPython environments
 try:
-    args = parser.parse_args()
+    args = parser.parse_args()   #TODO: implement continue training
 except SystemExit:
-    # In iPython/Jupyter, parse_args() fails, so use default values
-    args = argparse.Namespace(continue_training=False)
+    args = argparse.Namespace(continue_training=False)  # In iPython/Jupyter, parse_args() fails, so use default values
 
-# from data_processing.MUSE_STD_dataset_utils import *
 
-N_wvl_total = 30
-batch_size = 16
+batch_size  = 16 # TODO: make it an argument
 
 #%%
 class NFMDataset(Dataset):
-    def __init__(self):
-        self.PSF_cubes  = np.load(DATASET_CACHE / 'muse_STD_stars_PSFs.npy',      mmap_mode="r")
-        self.telemetry  = np.load(DATASET_CACHE / 'muse_STD_stars_telemetry.npy', mmap_mode="r")
-        self.configs = torch.load(DATASET_CACHE / 'muse_STD_stars_configs.pt')
-
+    def __init__(self, data):
+        # data = torch.load(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
+        self.PSF_cubes   = data['PSF_cubes']
+        self.telemetry   = data['telemetry']
+        self.sample_ids  = data['sample_ids']
+        self.configs     = data['model_configs']
+        self.fitted_vals = data['fitted_param_values']
+                
+        self.features = list(data['telemetry'][0].keys())
+        
         for i, config in enumerate(self.configs):
             if isinstance(config, list):
                 self.configs[i] = self.configs[i][0]  # Unwrap single-item lists
@@ -90,55 +96,55 @@ class NFMDataset(Dataset):
     def __len__(self): return self.N
 
     def __getitem__(self, idx):
-        # Make writable copies of memory-mapped arrays
-        cube = self.PSF_cubes[idx].copy()  # Force copy to make it writable
-        vec  = self.telemetry[idx].copy()  # Force copy to make it writable
+        ''' This function accesses one sample from the dataset and converts it to tensors. '''
         conf = self.configs[idx]
-        
-        # Create tensors from writable arrays
-        cube_tensor = torch.from_numpy(cube.astype(np.float32))  # Ensure float32 and writable
-        vec_tensor  = torch.from_numpy(vec.astype(np.float32))    # Ensure float32 and writable
+        PSFs_tensor = torch.from_numpy(self.PSF_cubes[idx].astype(np.float32)).permute(2,0,1)
+        telemetry_tensor = torch.from_numpy(np.array(list(self.telemetry[idx].values())).astype(np.float32))
+        fitted_dict = {key: torch.tensor(value, dtype=torch.float32) for key, value in self.fitted_vals[idx].items()}
     
-        return cube_tensor.permute(2,0,1), vec_tensor, conf, idx  # (C, H, W), (vector,), config, index
+        return PSFs_tensor, telemetry_tensor, fitted_dict, conf, idx  # [C, H, W], [N_features], ...
 
 
 def collate_batch(batch, device):
-    PSF_cubes, telemetry_vecs, configs, idxs = zip(*batch)
+    ''' This function prepares batches to be model-ready. '''
+    PSF_cubes, telemetry_vecs, fitted_vals, configs, idxs = zip(*batch)
         
-    PSF_cubes = torch.stack(PSF_cubes, 0).to(device=device, non_blocking=True)
     telemetry_vecs = torch.stack(telemetry_vecs, 0).to(device=device, non_blocking=True)
+    PSF_cubes = torch.stack(PSF_cubes, 0).to(device=device, non_blocking=True)
     idxs = torch.tensor(idxs, dtype=torch.long, device=device)
 
-    batch_config = MultipleTargetsInDifferentObservations(list(configs), device=device)
-    batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
-    batch_config['telescope']['PupilAngle'] = 0.0
+    fitted_vals = {
+        key: torch.stack([fv[key] for fv in fitted_vals], 0).to(device=device, non_blocking=True)
+        for key in fitted_vals[0].keys()
+    }
     
-    return PSF_cubes, telemetry_vecs, batch_config, idxs
+    batch_config = MultipleTargetsInDifferentObservations(configs, device=device)
+    batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
+    batch_config['telescope']['PupilAngle'] = 0.0 #TODO: make this changable with flag?
+    
+    return PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs
 
 
 #%%
-NFM_dataset = NFMDataset()
+data = torch.load(DATASET_CACHE / 'muse_STD_stars_dataset.pt', weights_only=False)
 
-print(f"Total dataset size: {len(NFM_dataset)}")
-logger.info(f"Total dataset size: {len(NFM_dataset)}")
+#%%
+dataset = NFMDataset(data)
+N_features = len(dataset.features)
+N_wvl_total = dataset.C # The number of spectral channels from the PSF data
 
-random_idxs = np.random.randint(0, len(NFM_dataset), size=batch_size)
-cubes, vecs, configs, idxs = [], [], [], []
-for random_idx in random_idxs:
-    cube, vec, config, idx = NFM_dataset[random_idx]
-    cubes.append(cube)
-    vecs.append(vec)
-    configs.append(config)
-    idxs.append(idx)
+print(f"Number of samples in the dataset: {len(dataset)}")
 
-cubes = torch.stack(cubes, 0).to(device=device, non_blocking=True)
-vecs  = torch.stack(vecs,  0).to(device=device, non_blocking=True)
-idxs  = torch.tensor(idxs, dtype=torch.long, device=device)
+#%%
+random_idxs = np.random.randint(0, len(dataset), size=batch_size)
 
-N_features = vecs.shape[-1]
+#%%
+test_batch = tuple([dataset[random_idx] for random_idx in random_idxs])
 
-#%% =============================================================================
-# Example model class placeholder (replace with your actual model)
+PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs = collate_batch(test_batch, device=device)
+
+#%% ==============================================================================
+# Initialize the PSF model
 # ==============================================================================
 from PSF_models.NFM_wrapper import PSFModelNFM
 
@@ -151,7 +157,7 @@ if 'PSF_model' in locals():
 
 with torch.no_grad():
     PSF_model = PSFModelNFM(
-        configs,
+        batch_config,
         multiple_obs    = True,
         LO_NCPAs        = True,
         chrom_defocus   = False,
@@ -188,26 +194,17 @@ torch.cuda.empty_cache()
 # %%
 λ_full = PSF_model.wavelengths.clone().cpu() # [nm]
 
-# λ_id_sets = [
-#     [0, 5, 10, 15, 20, 25, 29],
-#     [1, 6, 11, 16, 21, 26, 29],
-#     [2, 7, 12, 17, 22, 27, 29],
-#     [0, 3,  8, 13, 18, 23, 28],
-#     [0, 4,  9, 14, 19, 24, 28]
-# ]
+def generate_wavelength_sets(step, max_val):
+    sets = []
+    thresh = step // 2
+    for offset in range(step):
+        indices = list(range(offset, max_val + 1, step))
+        if indices[0] > thresh: indices.insert(0, 0)
+        if (max_val - indices[-1]) > thresh: indices.append(max_val)
+        sets.append(indices)
+    return sets
 
-# λ_id_sets = [
-#     [0, 3, 6,  9, 12, 15, 18, 21, 24, 27, 29],  
-#     [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 29],
-#     [0, 2, 5,  8, 11, 14, 17, 20, 23, 26, 29],
-# ]
-
-λ_id_sets = [
-    [0, 4,  8, 12, 16, 20, 24, 28],
-    [1, 5,  9, 13, 17, 21, 25, 29],
-    [2, 6, 10, 14, 18, 22, 26, 29],
-    [0, 3,  7, 11, 15, 19, 23, 27]
-]
+λ_id_sets = generate_wavelength_sets(4, N_wvl_total-1)
 
 λ_sets = [λ_full[list_id] for list_id in λ_id_sets]
 
@@ -227,7 +224,7 @@ else:
 
 fitted_df = pickle.load(open(STD_FOLDER / 'muse_fitted_df.pkl', 'rb'))
 
-wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1)
+wvl_ids = np.clip(np.arange(0, (N_wvl_max:=N_wvl_total-1)+1, 2), a_min=0, a_max=N_wvl_max-1)
 wvl_ids_shift = np.clip(wvl_ids + 1, a_min=0, a_max=N_wvl_max-1)[:-2]
 
 dx_df = fitted_df['dx_df'].sort_index().to_numpy().astype(np.float32)
@@ -253,8 +250,8 @@ if optimize_astrometry:
         dy.requires_grad_(True)
     else:
         # Initialize astrometry with zeros
-        dx = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
-        dy = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
+        dx = torch.zeros((len(dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
+        dy = torch.zeros((len(dataset), N_wvl_total), device=device, dtype=torch.float32, requires_grad=True)
 else:
     if pre_init_astrometry:
         # Use pre-fitted astrometry values (fixed, no gradients)
@@ -262,8 +259,8 @@ else:
         dy = torch.from_numpy(dy_full_arr).to(device=device, dtype=torch.float32)
     else:
         # No astrometry optimization, use zeros (fixed)
-        dx = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32)
-        dy = torch.zeros((len(NFM_dataset), N_wvl_total), device=device, dtype=torch.float32)
+        dx = torch.zeros((len(dataset), N_wvl_total), device=device, dtype=torch.float32)
+        dy = torch.zeros((len(dataset), N_wvl_total), device=device, dtype=torch.float32)
 
 
 if not predict_LOs:
@@ -381,10 +378,10 @@ class TinyCalibratorNet(nn.Module):
 import torch.optim as optim
 
 # Data loaders
-train_idx, test_idx = train_test_split(np.arange(len(NFM_dataset)), test_size=0.20, random_state=42)
+train_idx, test_idx = train_test_split(np.arange(len(dataset)), test_size=0.20, random_state=42)
 
-train_dataset = Subset(NFM_dataset, train_idx)
-val_dataset   = Subset(NFM_dataset, test_idx)
+train_dataset = Subset(dataset, train_idx)
+val_dataset   = Subset(dataset, test_idx)
 
 train_loader = DataLoader(
     dataset=train_dataset,

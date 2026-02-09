@@ -138,24 +138,27 @@ from tools.utils import RadialProfileLossSimple
 
 blurry_PSF_flag = muse_df.loc[ids]['Bad quality'].item()
 
+fit_wind_dir    = False
+fit_wind_speed  = False
+fit_outerscale  = False
+fit_Cn2_profile = True
+    
 if N_src > 1:
     suppress_bump_flag = False
     suppress_LO_flag   = False
-    fit_wind_dir       = False
-    fit_wind_speed     = True
-    fit_outerscale     = True
-    fit_Cn2_profile    = True
         
 else:
-    # Don't fit in case of too blurry PSFs
+    # Supress fiting of these entries in the case of very blurry PSFs, as it may overfit
     suppress_bump_flag = blurry_PSF_flag | (not muse_df.loc[ids]['Non-point'].item())
     suppress_LO_flag   = blurry_PSF_flag
-    fit_wind_dir       = False
     fit_wind_speed     = (not blurry_PSF_flag)
     fit_outerscale     = (not blurry_PSF_flag)
     fit_Cn2_profile    = (not blurry_PSF_flag)
-        
-λ_weighting = False
+
+
+λ_weighting = False # no weighting of PSFs at different wavelengths, as it may bias the fit towards the redder wavelengths with higher SNR
+
+MAP_regularization = False # Enforce priors on parameters to mitigate degeneracies and unphysical values
 
 if λ_weighting:
     # wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
@@ -167,42 +170,88 @@ else:
 # mask = torch.tensor(mask_circle(PSF_0.shape[-1], 5)).view(1, 1, *PSF_0.shape[-2:]).to(device)
 # mask_inv = 1.0 - mask
 
-loss_radial_fn = RadialProfileLossSimple(
-    n_bins=64,
-    loss="mse",
-    bin_weight="r",
-    log_profile=False
-)
-loss_MAE = torch.nn.L1Loss(reduction='mean')
-loss_MSE = torch.nn.MSELoss(reduction='mean')
+# loss_radial_fn = RadialProfileLossSimple(
+#     n_bins=64,
+#     loss="mse",
+#     bin_weight="r",
+#     log_profile=False
+# )
+# loss_MAE = torch.nn.L1Loss(reduction='mean')
+# loss_MSE = torch.nn.MSELoss(reduction='mean')
+    
+    
+def loss_PSF(PSF_data, PSF_model, w_MSE, w_MAE):
+    diff = (PSF_model-PSF_data) * wvl_weights
+    w = 2e4 # Empirical weight to balance the loss magnitude with the regularization terms
+    MSE_loss = diff.pow(2).mean() * w_MSE
+    MAE_loss = diff.abs().mean()  * w_MAE
 
-def loss_fn(x_, w_MSE, w_MAE, w_bump, w_LO):
-    PSF_ = func(x_)
-    diff = (PSF_-PSF_0) * wvl_weights
-    w = 2e4
-    MSE_loss = diff.pow(2).mean() * w * w_MSE
-    MAE_loss = diff.abs().mean()  * w * w_MAE
-    LO_loss  = loss_LO_fn(w_bump, w_LO) if PSF_model.LO_NCPAs else 0.0
-    # radial_loss = loss_radial_fn(PSF_, PSF_0) * 1e11
+    return w * (MSE_loss + MAE_loss)
 
-    return MSE_loss + MAE_loss + LO_loss#+ radial_loss
 
-suppress_bump = 1e3 if suppress_bump_flag else 1
-suppress_LO   = 1e3 if suppress_LO_flag   else 1
+# LO fitting weights        
+w_suppress_bump = 1e3 if suppress_bump_flag else 1
+w_suppress_LO   = 1e3 if suppress_LO_flag   else 1
 
-def loss_LO_fn(w_bump, w_LO):
+force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
+
+def loss_LO(w_bump, w_LO):
     if isinstance(PSF_model.LO_basis, PixelmapBasis):
         raise NotImplementedError("Gradient loss for PixelmapBasis is not implemented.")
         
     elif isinstance(PSF_model.LO_basis, ZernikeBasis) or isinstance(PSF_model.LO_basis, ArbitraryBasis):
-        LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * suppress_LO
+        LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * w_suppress_LO
         # Constraint to enforce first element of LO_coefs to be positive
-        first_coef_penalty = torch.clamp(-PSF_model.inputs_manager['LO_coefs'][:, 0], min=0).pow(2).mean() * w_bump * suppress_bump
-        LO_loss += first_coef_penalty
+        phase_bump_positive = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 0]) * w_bump * w_suppress_bump
+        # Force defocus to be positive to mitigate sign ambiguity
+        first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_bump * w_suppress_bump #NOTE: won't work with the chromatic defocus
+        
+        LO_loss += phase_bump_positive + first_defocus_penalty
         
     return LO_loss
 
-loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6, w_bump=5e-5, w_LO=1e-7)
+
+# Priors initialization
+
+prior_mean = { param: PSF_model.inputs_manager[param].detach().clone() for param in ['r0', 'L0', 'wind_speed_single'] }
+
+# Pre-defined STDs
+prior_STD = {
+    'r0':   0.2,
+    'L0':   25,
+    'wind_speed_single': 5.0
+}
+
+def compute_MAP_err(param: str):
+    diff = PSF_model.inputs_manager[param] - prior_mean[param]
+    loss_values = diff / prior_STD[param]
+    return loss_values.pow(2).mean()
+    
+
+def loss_MAP():
+    # Enforce priors on parameters
+    loss  = compute_MAP_err('r0')
+    loss += compute_MAP_err('L0') if fit_outerscale else 0.0
+    loss += compute_MAP_err('wind_speed_single') if fit_wind_speed else 0.0
+    
+    # Also, force L0, r0, and wind speed to be positive to avoid unphysical values
+    loss += force_positive(PSF_model.inputs_manager['r0'])
+    if fit_outerscale:
+        loss += force_positive(PSF_model.inputs_manager['L0'])
+    if fit_wind_speed:
+        loss += force_positive(PSF_model.inputs_manager['wind_speed_single'])
+    
+    w = 0.025 # Empirical weight to balance the loss magnitude with the PSF loss
+    return loss * w
+
+
+def loss_fn(x_):
+    PSF_ = func(x_)
+    PSF_loss = loss_PSF(PSF_0, PSF_, w_MSE=900.0, w_MAE=1.6)
+    LO_loss  = loss_LO(w_bump=5e-5, w_LO=1e-7) if PSF_model.LO_NCPAs else 0.0
+    MAP_loss = loss_MAP() if MAP_regularization else 0.0
+    return PSF_loss + LO_loss + MAP_loss
+
 
 #%%
 def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True, force_BFGS=False):
@@ -228,10 +277,10 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True,
     # Try L-BFGS first
     result = lim_lambda('l-bfgs' if not force_BFGS else 'bfgs', 1e-4)
     
-    acceptable_loss = 1.0
+    loss_thresh = 1.0
     
     # Retry with BFGS if convergence issues detected
-    if result['nit'] < max_iter * 0.3 and result['fun'] > acceptable_loss: # If converged earlier than 30% of the iterations and final loss is too high
+    if result['nit'] < max_iter * 0.3 and result['fun'] > loss_thresh: # If converged earlier than 30% of the iterations and final loss is too high
         if verbose:
             reason = "stopped too early" if result['nit'] < max_iter * 0.3 else "final loss is high"
             print(f"Warning: minimization {reason}. Perhaps, convergence wasn't reached? Trying BFGS...")
@@ -243,7 +292,7 @@ def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True,
         
     if verbose: print('-'*50)
 
-    success = result['fun'] < acceptable_loss
+    success = result['fun'] < loss_thresh
     
     if not success:
         print("Warning: Minimization did not converge.")
@@ -265,19 +314,19 @@ exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.Moffat_absorber else [
 include_general, exclude_general = set(include_general), set(exclude_general)
 
 #%%
-x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, include_general, exclude_general, 200)
+x0, PSF_1, OPD_map, success = minimize_params(loss_fn, include_general, exclude_general, 200)
 
 if not success:
     print("Retrying minimization without Cn2 profile fitting...")
     PSF_model.reset_parameters()
     
     include_updated = include_general - set(['Cn2_weights', 'L0', 'wind_speed_single', 'wind_dir_single'])
-    x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, include_updated, exclude_general, 300, force_BFGS=True)
+    x0, PSF_1, OPD_map, success = minimize_params(loss_fn, include_updated, exclude_general, 300, force_BFGS=True)
     
     # exclude_Cn2 = include_general - set(['Cn2_weights', 'L0', 'wind_speed_single', 'wind_dir_single'])
-    # x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, ['Cn2_weights', 'L0'], exclude_Cn2, 300, force_BFGS=True)
+    # x0, PSF_1, OPD_map, success = minimize_params(loss_fn, ['Cn2_weights', 'L0'], exclude_Cn2, 300, force_BFGS=True)
     
-# print(f"Minimization success: {success}, final loss: {loss_fn1(x0):.4f}")
+# print(f"Minimization success: {success}, final loss: {loss_fn(x0):.4f}")
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles
@@ -324,34 +373,34 @@ for id_src, dataset_index in enumerate(ids_):
         plt.colorbar()
         plt.show()
 
-#%%
-print('λ: ', *[f"{x:.0f}" for x in wavelengths.detach().cpu().numpy().flatten()*1e9])
-print('r0:', *[f"{x:.3f}" for x in PSF_model.model.r0.detach().cpu().numpy().flatten()])
-print('L0:', *[f"{x:.3f}" for x in PSF_model.model.L0.detach().cpu().numpy().flatten()])
-print('dn:', *[f"{x:.3f}" for x in PSF_model.model.dn.detach().cpu().numpy().flatten()])
-print('dx:', *[f"{x:.2f}" for x in PSF_model.model.dx.detach().cpu().numpy().flatten()])
-print('dy:', *[f"{x:.2f}" for x in PSF_model.model.dy.detach().cpu().numpy().flatten()])
-print('F: ', *[f"{x:.3f}" for x in PSF_model.model.F.detach().cpu().numpy().flatten()])
-print('LO:', *[f"{x:.2f}" for x in PSF_model.inputs_manager['LO_coefs'].detach().cpu().numpy().flatten()])
-print('wind_speed_single:', *[f"{x:.2f}" for x in PSF_model.inputs_manager['wind_speed_single'].detach().cpu().numpy().flatten()])
+#%
+# print('λ: ', *[f"{x:.0f}" for x in wavelengths.detach().cpu().numpy().flatten()*1e9])
+# print('r0:', *[f"{x:.3f}" for x in PSF_model.model.r0.detach().cpu().numpy().flatten()])
+# print('L0:', *[f"{x:.3f}" for x in PSF_model.model.L0.detach().cpu().numpy().flatten()])
+# print('dn:', *[f"{x:.3f}" for x in PSF_model.model.dn.detach().cpu().numpy().flatten()])
+# print('dx:', *[f"{x:.2f}" for x in PSF_model.model.dx.detach().cpu().numpy().flatten()])
+# print('dy:', *[f"{x:.2f}" for x in PSF_model.model.dy.detach().cpu().numpy().flatten()])
+# print('F: ', *[f"{x:.3f}" for x in PSF_model.model.F.detach().cpu().numpy().flatten()])
+# print('LO:', *[f"{x:.2f}" for x in PSF_model.inputs_manager['LO_coefs'].detach().cpu().numpy().flatten()])
+# print('wind_speed_single:', *[f"{x:.2f}" for x in PSF_model.inputs_manager['wind_speed_single'].detach().cpu().numpy().flatten()])
 
-fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-wvl_plot = wavelengths.squeeze().cpu().numpy()*1e9
+# fig, ax = plt.subplots(1, 2, figsize=(10, 4))
+# wvl_plot = wavelengths.squeeze().cpu().numpy()*1e9
 
-ax[0].plot(wvl_plot, PSF_model.model.F.detach().cpu().numpy().flatten())
-ax[0].set_title('Flux factor')
-ax[0].set_xlabel('Wavelength [nm]')
-ax[0].set_xlim(485, 927.81)
-ax[0].set_ylim(0.93, 1.05)
-ax[1].plot(wvl_plot, PSF_model.model.dx.detach().cpu().numpy().flatten(), label='dx')
-ax[1].plot(wvl_plot, PSF_model.model.dy.detach().cpu().numpy().flatten(), label='dy')
-ax[1].legend()
-ax[1].set_title('Position offset')
-ax[1].set_xlabel('Wavelength [nm]')
-ax[1].set_xlim(485, 927.81)
-ax[1].set_ylim(-1.6, 0.2)
+# ax[0].plot(wvl_plot, PSF_model.model.F.detach().cpu().numpy().flatten())
+# ax[0].set_title('Flux factor')
+# ax[0].set_xlabel('Wavelength [nm]')
+# ax[0].set_xlim(485, 927.81)
+# ax[0].set_ylim(0.93, 1.05)
+# ax[1].plot(wvl_plot, PSF_model.model.dx.detach().cpu().numpy().flatten(), label='dx')
+# ax[1].plot(wvl_plot, PSF_model.model.dy.detach().cpu().numpy().flatten(), label='dy')
+# ax[1].legend()
+# ax[1].set_title('Position offset')
+# ax[1].set_xlabel('Wavelength [nm]')
+# ax[1].set_xlim(485, 927.81)
+# ax[1].set_ylim(-1.6, 0.2)
 
-plt.show()
+# plt.show()
 
 
 #%%

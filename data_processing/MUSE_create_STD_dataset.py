@@ -8,6 +8,7 @@ except NameError:
     pass
 
 import sys
+
 sys.path.insert(0, '..')
 
 import pickle
@@ -21,6 +22,16 @@ from MUSE_STD_dataset_utils import *
 
 # import astropy.units as u
 # from astropy.coordinates import SkyCoord, AltAz
+
+#%%
+# Check the existence of all necessary folders and create them if they don't exist
+# std_stars_folders = [CUBES_FOLDER, RAW_FOLDER, STD_FOLDER, CUBES_CACHE, TELEMETRY_CACHE, STD_FOLDER / 'NFM_cubes_temp/']
+# for folder in std_stars_folders:
+#     if not os.path.exists(folder):
+#         os.makedirs(folder)
+#         print(f'Created folder: {folder}')
+#     else:
+#         print(f'Folder already exists: {folder}')
 
 #%%
 _ = RenameMUSECubes(CUBES_FOLDER, STD_FOLDER / 'NFM_cubes_temp/')
@@ -106,7 +117,6 @@ for file_id in tqdm(ids_process):
 
 print(f'Bad ids: {bad_ids}')
 
-# Bad ids: [500, 502, 503, 504, 505, 506, 507, 508, 509, 510, 535]
 
 #%% ================================ Render the STD stars dataset ================================
 for file in tqdm(os.listdir(CUBES_CACHE)):
@@ -300,13 +310,13 @@ if verbose:
 
 #%%
 # Pack all data into a single dictionary and store it
-muse_data_package = {
+reduced_telemetry = {
     'telemetry normalized imputed df': muse_df_pruned_scaled_imputed,
     'telemetry imputed df': muse_df_pruned_imputed
 }
 
 with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'wb') as handle:
-    pickle.dump(muse_data_package, handle, protocol=pickle.HIGHEST_PROTOCOL)
+    pickle.dump(reduced_telemetry, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 # Save imputer and scaler as separate pickle files
 with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'wb') as handle:
@@ -322,16 +332,23 @@ with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
 
 with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
-    muse_data_package = pickle.load(handle)
+    reduced_telemetry = pickle.load(handle)['telemetry normalized imputed df']
+    
+with open(STD_FOLDER / 'muse_fitted_df.pickle', 'rb') as handle:
+    muse_fitted_df = pickle.load(handle)['fitted_values']
 
 DATASET_CACHE = STD_FOLDER / 'dataset_cache'
-PSF_cubes, configs, telemetry_records, bad_ids = [], [], [], []
-
+PSF_cubes, configs, telemetry_records, fitted_values, good_ids, bad_ids = [], [], [], [], [], []
 
 muse_df = muse_df[muse_df['Corrupted']   == False]
 muse_df = muse_df[muse_df['Bad quality'] == False]
+
+# Make sure that muse_df and muse_fitted_df contain the same samples in the same order
+muse_df = muse_df.loc[muse_fitted_df.index.values]
 good_samples = muse_df.index.values
 
+
+#%%
 for id in tqdm(good_samples):
     try:
         PSF_data, _, _, model_config = LoadSTDStarData(
@@ -342,10 +359,11 @@ for id in tqdm(good_samples):
             ensure_odd_pixels = True,
             device = torch.device('cpu')
         )
-        telemetry_record = muse_data_package['telemetry normalized imputed df'].loc[id].to_numpy()
+        telemetry_records.append(reduced_telemetry.loc[id].to_dict())
+        fitted_values.append(muse_fitted_df.loc[id].to_dict())
+        good_ids.append(id)
         PSF_cubes.append(np.moveaxis(PSF_data.squeeze(0).numpy(), 0, -1)) # 1 x N_wvl x H x W  -->  H x W x N_wvl
         configs.append(model_config)
-        telemetry_records.append(telemetry_record)
 
     except Exception as e:
         print(f'Error with id {id}: {e}')
@@ -357,13 +375,18 @@ if len(bad_ids) > 0:
     for bad_id in bad_ids:
         print(bad_id)
 
+good_ids = np.array(good_ids) # N_samples
 PSF_cubes = np.stack(PSF_cubes, axis=0) # N_samples x H x W x N_wvl
 telemetry_records = np.stack(telemetry_records, axis=0) # N_samples x N_features
 
 # Store dataset caches
-np.save(DATASET_CACHE / 'muse_STD_stars_telemetry.npy', telemetry_records)
-np.save(DATASET_CACHE / 'muse_STD_stars_PSFs.npy', PSF_cubes)
-torch.save(configs, DATASET_CACHE / 'muse_STD_stars_configs.pt')
+torch.save({
+    'PSF_cubes': PSF_cubes,
+    'telemetry': telemetry_records,
+    'sample_ids': good_ids,
+    'model_configs': configs,
+    'fitted_param_values': fitted_values,
+}, DATASET_CACHE / 'muse_STD_stars_dataset.pt')
 
 #%%
 '''

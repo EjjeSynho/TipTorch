@@ -1860,7 +1860,6 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_co
     # config_file['DM']['DmPitchs'] = [config_file['DM']['DmPitchs'][0]*1.25]
     config_dict['DM']['DmPitchs'][0] = 0.22
         
-    
     # >>>>>>> Finalize the config file
     config_dict = config_manager.wrap_scalars_to_lists(config_dict)
     config_dict = config_manager.ensure_dimensions(config_dict, N_src=1) # Config for a single given source

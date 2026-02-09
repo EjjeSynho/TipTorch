@@ -153,13 +153,60 @@ def load_and_fit_sample(id):
     blurry_PSF_flag = psf_df.loc[id]['Bad quality'].item()
     non_point_flag  = psf_df.loc[id]['Non-point'].item()
 
-    suppress_bump_flag = blurry_PSF_flag | (not non_point_flag)
-    suppress_LO_flag   = blurry_PSF_flag
+    fit_wind_dir    = False
+    fit_wind_speed  = False
+    fit_outerscale  = False
+    fit_Cn2_profile = True
+
+    if N_src > 1:
+        suppress_bump_flag = False
+        suppress_LO_flag   = False
+        fit_wind_speed     = True
+        fit_outerscale     = True
+    else:
+        suppress_bump_flag = blurry_PSF_flag | (not non_point_flag)
+        suppress_LO_flag   = blurry_PSF_flag
+        fit_wind_speed     = (not blurry_PSF_flag)
+        fit_outerscale     = (not blurry_PSF_flag)
+        fit_Cn2_profile    = (not blurry_PSF_flag)
 
     suppress_bump = 1e3 if suppress_bump_flag else 1
     suppress_LO   = 1e3 if suppress_LO_flag   else 1
 
     grad_loss_fn = GradientLoss(p=1, reduction='mean')
+    
+    force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
+
+    # Priors initialization
+    prior_mean = { param: PSF_model.inputs_manager[param].detach().clone() for param in ['r0', 'L0', 'wind_speed_single'] }
+
+    # Pre-defined STDs
+    prior_STD = {
+        'r0':   0.2,
+        'L0':   25,
+        'wind_speed_single': 5.0
+    }
+
+    def compute_MAP_err(param: str):
+        diff = PSF_model.inputs_manager[param] - prior_mean[param]
+        loss_values = diff / prior_STD[param]
+        return loss_values.pow(2).mean()
+
+    def loss_MAP():
+        # Enforce priors on parameters
+        loss  = compute_MAP_err('r0')
+        loss += compute_MAP_err('L0') if fit_outerscale else 0.0
+        loss += compute_MAP_err('wind_speed_single') if fit_wind_speed else 0.0
+        
+        # Also, force L0, r0, and wind speed to be positive to avoid unphysical values
+        loss += force_positive(PSF_model.inputs_manager['r0'])
+        if fit_outerscale:
+            loss += force_positive(PSF_model.inputs_manager['L0'])
+        if fit_wind_speed:
+            loss += force_positive(PSF_model.inputs_manager['wind_speed_single'])
+        
+        w = 0.025 # Empirical weight to balance the loss magnitude with the PSF loss
+        return loss * w
 
     def loss_fn(x_, w_MSE, w_MAE, w_bump, w_LO):    
         diff = (func(x_)-PSF_0) #* wvl_weights
@@ -168,8 +215,9 @@ def load_and_fit_sample(id):
         MAE_loss = diff.abs().mean()  * w * w_MAE
         LO_loss  = loss_LO_fn(w_bump, w_LO) if PSF_model.LO_NCPAs else 0.0
         Moffat_loss = Moffat_loss_fn() if PSF_model.Moffat_absorber else 0.0
+        MAP_loss    = loss_MAP()
 
-        return MSE_loss + MAE_loss + LO_loss + Moffat_loss
+        return MSE_loss + MAE_loss + LO_loss + Moffat_loss + MAP_loss
 
 
     def Moffat_loss_fn():
@@ -200,8 +248,11 @@ def load_and_fit_sample(id):
         elif isinstance(PSF_model.LO_basis, ZernikeBasis) or isinstance(PSF_model.LO_basis, ArbitraryBasis):
             LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * suppress_LO
             # Constraint to enforce first element of LO_coefs to be positive
-            first_coef_penalty = torch.clamp(-PSF_model.inputs_manager['LO_coefs'][:, 0], min=0).pow(2).mean() * w_bump * suppress_bump
-            LO_loss += first_coef_penalty
+            phase_bump_positive   = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 0]) * w_bump * suppress_bump
+            # Force defocus to be positive to mitigate sign ambiguity
+            first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_bump * suppress_bump
+            
+            LO_loss += phase_bump_positive + first_defocus_penalty
         
         return LO_loss
 
@@ -253,12 +304,6 @@ def load_and_fit_sample(id):
             print("Warning: Minimization did not converge.")
 
         return result.x, func(result.x), OPD_map, success
-
-    # Define what to fit
-    fit_wind_speed  = True
-    fit_wind_dir    = False
-    fit_outerscale  = True
-    fit_Cn2_profile = True
 
     include_general = ['r0', 'dn'] + \
                       (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \

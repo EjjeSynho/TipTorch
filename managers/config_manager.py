@@ -1,3 +1,4 @@
+from ast import Dict, Tuple
 import sys
 sys.path.insert(0, '..')
 
@@ -78,6 +79,7 @@ SINGLETON_VALUES = [
 SCALAR_VALUES = [
     ['sensor_HO', 'FieldOfView'],
     ['sensor_HO', 'PixelScale'],
+    ['sensor_LO', 'PixelScale'],
     ['sensor_science', 'PixelScale'],
     ['sensor_science', 'FieldOfView'],
     ['telescope', 'PupilAngle'],
@@ -179,8 +181,13 @@ class ConfigManager():
 
     def Merge(self, configs):
         """Merges config files for multiple targets into one config dictionary"""
-        if not isinstance(configs, list):
-            return configs
+        
+        if type(configs) is tuple: # if it's a tuple, convert to list first
+            configs = list(configs)
+        
+        elif type(configs) is dict:
+            return configs # if it's already a single config, just return it
+        
         new_config = deepcopy(configs[0]) # creating a buffer configuration
 
         def get_all_entries(d):
@@ -474,15 +481,18 @@ class ConfigManager():
         def walk(node, path):
             if not isinstance(node, dict):
                 return
-
             for key, value in node.items():
                 new_path = (*path, key)
 
                 if isinstance(value, dict):
                     walk(value, new_path)
+                elif new_path in exception_set:
+                    if isinstance(value, list) and len(value) == 1:
+                        node[key] = value[0]
+                    elif isinstance(value, np.ndarray) and value.size == 1:
+                        node[key] = value.item()
                 elif isinstance(value, (int, float)) and not isinstance(value, bool):
-                    if new_path not in exception_set:
-                        node[key] = [value]
+                    node[key] = [value]
 
         # Start the recursive walk, skipping 'NumberSources' at top level
         for key, value in config.items():
@@ -496,6 +506,7 @@ class ConfigManager():
 
     def ensure_dims(self, x, N, flatten=False):
         """ Ensures a selected tensor has correct dimensions. """
+                
         if type(x) is np.ndarray:  # NumPy array
             x = np.atleast_1d(x).squeeze()
             result = np.atleast_2d(x).reshape(N, -1)
@@ -646,6 +657,7 @@ def MultipleTargetsInDifferentObservations(configs, device=None):
     A wrapper unction that merges multiple config files into one for multiple targets observed in different conditions.
     Useful when training calibrator NN on multiple targets.
     '''
+       
     config_manager = ConfigManager()
     merged_config  = config_manager.Merge(configs)
 

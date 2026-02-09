@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Any, Optional, Union
 from tabulate import tabulate
 from copy import deepcopy
-from collections import OrderedDict
 import torch
 import pickle
 import numpy as np
@@ -19,10 +18,10 @@ class InputsTransformer:
     packing data to input into a NN. It also allow to standartize/normalize/transform model inputs. The class also
     provides methods for saving and loading the transformer.
     """
-    def __init__(self, transforms: Union[OrderedDict, dict] = OrderedDict()):
+    def __init__(self, transforms: dict = {}):
         # Store the transforms provided as a dictionary
-        self.transforms = OrderedDict(transforms) if type(transforms) is dict else transforms
-        self.slices = OrderedDict()
+        self.transforms = transforms
+        self.slices = {}
 
     def __len__(self):
         return len(self.transforms)
@@ -36,7 +35,7 @@ class InputsTransformer:
         NOTE: As consequence, the order of the arguments is important.
         NOTE: The 0th dimension is allocated to sources. Meaning that the tensor is of shape (n_sources, n_features)
         """
-        self.slices = OrderedDict()
+        self.slices = {}
         self._packed_size = None
         tensors = []
         current_index = 0
@@ -134,7 +133,7 @@ class InputsTransformer:
             transform_data = save_data
             save_data = {'transforms': transform_data, 'slices': {}}
 
-        transforms = OrderedDict()
+        transforms = {}
         for key, params in save_data['transforms'].items():
             if isinstance(params, dict) and 'type' in params and params['type'] == 'TransformSequence':
                 # Handle TransformSequence
@@ -175,7 +174,7 @@ class InputsManager:
     are not. It also allows for easy displaying of stored model inputs.
     """
     def __init__(self):
-        self.parameters = OrderedDict()
+        self.parameters = {}
         self.inputs_transformer = InputsTransformer()
 
     def add(self,
@@ -232,7 +231,7 @@ class InputsManager:
         if set(optimizable_names) != set(self.inputs_transformer.slices.keys()):
             self.stack()
     
-    def update(self, other: Union[dict, OrderedDict], selected_ids: Any = None):
+    def update(self, other: dict, selected_ids: Any = None):
         """Update the parameters with a new dictionary of values."""
         for name, value in other.items():
             if name in self.parameters:
@@ -420,8 +419,8 @@ class InputsManagersUnion:
         else:
             self.input_managers = input_managers
 
-        self.slices = OrderedDict()
-        self.shapes = OrderedDict()  # Store original shapes
+        self.slices = {}
+        self.shapes = {}  # Store original shapes
         self._stacked_size = None
         
     
@@ -432,8 +431,8 @@ class InputsManagersUnion:
         Returns:
             torch.Tensor: Combined tensor of all InputsManager stacked values.
         """
-        self.slices = OrderedDict()
-        self.shapes = OrderedDict()  # Reset shapes
+        self.slices = {}
+        self.shapes = {}  # Reset shapes
         
         vectors = []
         current_idx = 0
@@ -628,7 +627,7 @@ class InputsManagersUnion:
             if name in manager.parameters:
                 manager.delete(name)
           
-    def update(self, other: Union[dict, OrderedDict], selected_ids: Any = None):
+    def update(self, other: dict, selected_ids: Any = None):
         """Update the parameters with a new dictionary of values."""
         for manager in self.input_managers.values():
             for name, value in other.items():

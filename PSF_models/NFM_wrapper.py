@@ -4,6 +4,7 @@
 from logging import warning
 import sys
 
+from astropy import conf
 from zmq import has
 sys.path.insert(0, '..')
 
@@ -185,6 +186,9 @@ class PSFModelNFM:
 
 
     def _init_configs(self, config):
+        if type(config) is dict and 'NumberSources' in config:
+            return config # Already pre-processed config, no need to merge or convert
+        
         if len(config) > 1: # Multiple sources
             if self.multiple_obs:
                 model_config = MultipleTargetsInDifferentObservations(config, device=self.device)
@@ -192,7 +196,6 @@ class PSFModelNFM:
                 raise NotImplementedError("Multiple sources in one observation case is not implemented yet.")
         else:
             model_config = MultipleTargetsInDifferentObservations(config, device=self.device)
-
 
         return model_config
 
