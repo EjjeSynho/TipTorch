@@ -59,9 +59,9 @@ df_relevant_entries = [
     'F', 'J', 'dx', 'dy', 'bg', 'chrom_defocus',
     'bg_ctrl', 'F_ctrl', 'dx_ctrl', 'dy_ctrl', 'J_ctrl', 'chrom_defocus_ctrl',
     'LO_coefs',
+    'Cn2_weights',
     'r0', 'dn', 'wind_speed_single', 'L0',
     'amp', 'b', 'alpha', 'beta', 'ratio', 'theta',
-    'Cn2_weights',
     'SR data', 'SR fit', 'FWHM fit', 'FWHM data',
     'input_vec'
 ]
@@ -126,9 +126,8 @@ singular_entries = list( set([
 ]).intersection( df_relevant_entries) )
 
 for key in singular_entries:
-    singular_dict[key] = np.squeeze(np.array(fitted_dict_raw[key])).tolist()
-    
-#%%
+    singular_dict[key] = np.squeeze(np.array(fitted_dict_raw[key])).tolist()    
+
 spline_entries = [entry for entry in df_relevant_entries if entry.endswith('_ctrl')]
 
 N_wvl_ctrl = fitted_dict_raw['J_ctrl'][0].shape[-1] # number of spline points
@@ -136,6 +135,7 @@ N_wvl_ctrl = fitted_dict_raw['J_ctrl'][0].shape[-1] # number of spline points
 
 wavelengths_nodes = norm_wvl.inverse(λ_ctrl)*1e9 # wavelengths at the spline control points in [nm]
 
+#%%
 def evaluate_splines(y_points, λ_grid):
     spline = NaturalCubicSpline(natural_cubic_spline_coeffs(t=λ_ctrl, x=y_points.T))
     return spline.evaluate(λ_grid).T
@@ -211,7 +211,7 @@ def make_Cn2_weights_dataset(data):
     return df
 
 
-#%%
+#%
 singular_df = make_singulars_dataset(singular_dict)
 
 J_df  = make_polychrome_dataset_spline(fitted_dict_raw, 'J')
@@ -247,6 +247,39 @@ if 'alpha' in singular_df.columns:
 
 singular_df['r0'] = singular_df['r0'].apply(lambda x: np.abs(x))
 singular_df[singular_df['r0'] > 1] = np.nan
+
+#%%
+# Preparing values for storage
+def collapse_dataframe_to_lists(df, name):
+    """Convert DataFrame rows to numpy arrays and set column name."""
+    collapsed = df.apply(lambda row: row.tolist(), axis=1)
+    collapsed.name = name
+    return collapsed
+
+to_collapse = [
+    (F_df,  'F'),
+    (J_df,  'J'),
+    (dx_df, 'dx'),
+    (dy_df, 'dy'),
+    (LO_df, 'LO_coefs'),
+    (bg_df, 'bg'),
+    (Cn2_w_df, 'Cn2_weights')
+]
+fitted_values_df = pd.concat([collapse_dataframe_to_lists(df, name) for df, name in to_collapse] + [singular_df], axis=1)
+
+
+# Store dataframes
+with open(STD_FOLDER / 'muse_fitted_df.pickle', 'wb') as handle:
+    pickle.dump(
+        {
+            'fitted_values': fitted_values_df,
+            'FWHM_fit_df':   FWHM_fit_df,
+            'FWHM_data_df':  FWHM_data_df,
+            'SR_fit_df':     SR_fit_df,
+            'SR_data_df':    SR_data_df,
+        },
+        handle
+    )
 
 #%%
 # Plot histograms for every J wavelengths
@@ -391,37 +424,6 @@ plt.show()
 #         mismatched_ids = [ids[i] for i, arr in enumerate(fitted_dict_raw['FWHM fit']) if len(arr) == length]
 #         print(f"  IDs: {mismatched_ids}")
 
-#%%
-# Preparing values for storage
-def collapse_dataframe_to_lists(df, name):
-    """Convert DataFrame rows to numpy arrays and set column name."""
-    collapsed = df.apply(lambda row: row.tolist(), axis=1)
-    collapsed.name = name
-    return collapsed
-
-to_collapse = [
-    (J_df,  'J'),
-    (dx_df, 'dx'),
-    (dy_df, 'dy'),
-    (LO_df, 'LO_coefs'),
-    (bg_df, 'bg'),
-    (Cn2_w_df, 'Cn2_weights')
-]
-fitted_values_df = pd.concat([collapse_dataframe_to_lists(df, name) for df, name in to_collapse] + [singular_df], axis=1)
-
-#%%
-# Store dataframes
-with open(STD_FOLDER / 'muse_fitted_df.pickle', 'wb') as handle:
-    pickle.dump(
-        {
-            'fitted_values': fitted_values_df,
-            'FWHM_fit_df':   FWHM_fit_df,
-            'FWHM_data_df':  FWHM_data_df,
-            'SR_fit_df':     SR_fit_df,
-            'SR_data_df':    SR_data_df,
-        },
-        handle
-    )
 
 #%%
 from tools.plotting import wavelength_to_rgb

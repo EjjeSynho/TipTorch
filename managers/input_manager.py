@@ -161,6 +161,7 @@ class InputsTransformer:
 
         return instance
 
+
 @dataclass
 class InputParameter:
     value: Any
@@ -268,8 +269,9 @@ class InputsManager:
         args_dict = self.inputs_transformer.unstack(x)
         
         if update:     
-            for name, value in args_dict.items():
-                self.parameters[name].value = value
+            self.update(args_dict)
+            # for name, value in args_dict.items():
+            #     self.parameters[name].value = value
             
         # return all parameters, not just optimizable ones
         if include_all:

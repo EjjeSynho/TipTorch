@@ -250,7 +250,7 @@ def load_and_fit_sample(id):
             # Constraint to enforce first element of LO_coefs to be positive
             phase_bump_positive   = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 0]) * w_bump * suppress_bump
             # Force defocus to be positive to mitigate sign ambiguity
-            first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_bump * suppress_bump
+            first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_LO * suppress_LO
             
             LO_loss += phase_bump_positive + first_defocus_penalty
         

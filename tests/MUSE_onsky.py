@@ -200,11 +200,12 @@ def loss_LO(w_bump, w_LO):
         raise NotImplementedError("Gradient loss for PixelmapBasis is not implemented.")
         
     elif isinstance(PSF_model.LO_basis, ZernikeBasis) or isinstance(PSF_model.LO_basis, ArbitraryBasis):
+        # L2 regularization on all LO coefficients
         LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * w_suppress_LO
         # Constraint to enforce first element of LO_coefs to be positive
         phase_bump_positive = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 0]) * w_bump * w_suppress_bump
         # Force defocus to be positive to mitigate sign ambiguity
-        first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_bump * w_suppress_bump #NOTE: won't work with the chromatic defocus
+        first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_LO * w_suppress_LO #NOTE: won't work with the chromatic defocus
         
         LO_loss += phase_bump_positive + first_defocus_penalty
         

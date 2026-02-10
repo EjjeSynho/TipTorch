@@ -68,9 +68,9 @@ class PSFModelNFM:
 
         if self.use_splines:
             self.N_wvl_ctrl = 5
-            self.norm_wvl = Uniform0_1(a=self.λ_min, b=self.λ_max) # MUSE NFM wavelength range
+            self.norm_wvl = Uniform0_1(a=self.λ_min, b=self.λ_max) # MUSE NFM wavelength range, [nm]
             self.λ_ctrl   = torch.linspace(0, 1, self.N_wvl_ctrl, device=self.device) # normalized to [0...1]
-            self.λ_ctrl_denorm = self.norm_wvl.inverse(self.λ_ctrl) # [nm]
+            self.λ_ctrl_denorm = self.norm_wvl.inverse(self.λ_ctrl) # de-normalized back to the wavl range, [nm]
 
         self._init_model_inputs()
         
@@ -115,14 +115,14 @@ class PSFModelNFM:
         if self.device.type == 'mps':
             torch.mps.empty_cache()
             torch.mps.synchronize()
-    
+            
     
     def __del__(self):
         """Class destructor to ensure the GPU memory is freed"""
         try:
             self.cleanup()
         except Exception:
-            pass  # Avoid errors during interpreter shutdown
+            pass # Avoid errors during interpreter shutdown
     
  
     def copy(self):
@@ -255,10 +255,10 @@ class PSFModelNFM:
             self.inputs_manager = InputsManager()
             
             def add_input(name, values, norm=Identity(), optimizable=True, is_shared=False):
-                self.inputs_manager.add(name, values, norm, optimizable=optimizable)
-            
+                # is_shared flag is ignored in this configuration since all inputs are per-source
+                self.inputs_manager.add(name, values, norm, optimizable=optimizable)   
         else:
-            # Meanwhile, this configuration assumes that some inputs are shared between different
+            # Meanwhile, this configuration assumes that most of the inputs are shared between different
             # sources since they are all observed simultaneosuly
             self.inputs_manager = InputsManagersUnion({
                 'shared':  InputsManager(),
@@ -344,7 +344,6 @@ class PSFModelNFM:
         if self.Moffat_absorber:
             add_input('amp',   torch.tensor([1e-4]*N_obs), norm_amp, is_shared=True)
             add_input('b',     torch.tensor([0.0]*N_obs), norm_b, is_shared=True)
-            # add_input('alpha', torch.tensor([4.5]*N_obs), norm_alpha, is_shared=True)
             add_input('alpha', torch.tensor([2.0]*N_obs), norm_alpha, is_shared=True)
             add_input('beta',  torch.tensor([2.5]*N_obs), norm_beta, is_shared=True)
             add_input('ratio', torch.tensor([1.0]*N_obs), norm_ratio, is_shared=True)
@@ -357,8 +356,8 @@ class PSFModelNFM:
                 # self.OPD_func   = lambda x: x.view(self.model.N_obs, self.LO_N_params, self.LO_N_params)
                 raise NotImplementedError('Pixelmap LO basis is not properly tested yet yet.')
 
-
             elif isinstance(self.LO_basis, ZernikeBasis) or isinstance(self.LO_basis, ArbitraryBasis):
+                # The phase generation function is defined differently based on the different settings
                 add_input('LO_coefs', torch.zeros([self.model.N_obs, self.LO_N_params]), norm_LO, is_shared=True)
                 self.OPD_func = lambda x: self.LO_basis.compute_OPD(x.view(self.model.N_obs, self.LO_N_params))
 
@@ -380,7 +379,7 @@ class PSFModelNFM:
             else:
                 raise ValueError('Wrong LO type specified.')
         else:
-            self.phase_func = None
+            self.phase_func = None # No LO NCPAs simualted, so no need to generate phase maps
 
         self.inputs_manager.to(self.device)
         self.inputs_manager.to_float()
@@ -439,11 +438,13 @@ class PSFModelNFM:
 
         phase_ = (lambda: self.phase_func(x_dict['LO_coefs'], chrom_defocus)) if self.LO_NCPAs else None
 
+        self.inputs_manager.update(x_dict)
+
         return self.model(x_, None, phase_generator=phase_)
 
 
     def forward_full_spectrum(self, x_dict=None, src_ids=None, include_list=None):
-        raise NotImplementedError("This function is not fully tested yet.")
+        raise NotImplementedError("This function is not fully implemented yet.")
         return
     
         if not self.use_splines:
@@ -475,11 +476,18 @@ class PSFModelNFM:
     
 
     def SetWavelengths(self, wavelengths):
+        # Compare values with some tolerance to avoid unnecessary updates
+        if self.wavelengths.shape == wavelengths.shape and torch.allclose(wavelengths.flatten(), self.wavelengths.flatten(), atol=1e-12):
+            return
+        
         self.model.SetWavelengths(wavelengths)
         self.wavelengths = wavelengths
 
 
     def SetImageSize(self, img_size):
+        # Compare values to avoid unnecessary updates
+        if self.model.N_pix == img_size:
+            return
         self.model.SetImageSize(img_size)
     
     
