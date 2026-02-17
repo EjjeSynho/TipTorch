@@ -1,25 +1,24 @@
 #%%
 # The data taken from: https://zenodo.org/records/11104046
+import sys
+sys.path.append('..')
 
 import os
 import glob
 import pickle
-from attr import s
 import pandas as pd
-from scipy.interpolate import interp1d
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import colors
 from astropy.io import fits
 from astropy.wcs import WCS
-from astropy.table import Table, QTable
+from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
 import astropy.units as u
 from astropy.nddata import Cutout2D
 
-from project_settings import MUSE_DATA_FOLDER
-from tools.utils import Photometry
+from data_processing.MUSE_data_utils import MUSE_DATA_FOLDER
 
 cube_path   = MUSE_DATA_FOLDER / "omega_cluster/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 data_folder = MUSE_DATA_FOLDER / 'omega_cluster/OmegaCentaury_data/'
@@ -68,6 +67,7 @@ with fits.open(cube_path) as hdul:
 #    (assume df_astro has columns 'RA','DEC' in degrees)
 coords = SkyCoord(ra  = df_astro['RA' ].values*u.deg,
                   dec = df_astro['DEC'].values*u.deg)
+
 #%%
 # 4) Fast search of everything within the MUSE NFM FoV radius
 radius = (7*np.sqrt(2)/2) * u.arcsec * 2
