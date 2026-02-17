@@ -217,9 +217,8 @@ def fetch_reduced_telemetry_cache(verbose=False) -> None:
     """
     Download and unpack all reduced telemetry data bundles as per the manifest.
     """
-    # Check if reduced telemetry folder exists. If not, create it
+    # Check if reduced telemetry folder exists and contains files. If so, skip download
     if TELEMETRY_CACHE.exists() and any(TELEMETRY_CACHE.iterdir()):
-        # Do nothing, files are present
         return
     
     try:

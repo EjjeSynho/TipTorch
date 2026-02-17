@@ -17,6 +17,7 @@ import numpy as np
 import torch
 import pickle
 import matplotlib.pyplot as plt
+from copy import deepcopy
 
 from torch.utils.data import DataLoader, Subset, random_split
 from sklearn.model_selection import train_test_split, KFold
@@ -31,7 +32,7 @@ MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 STD_FOLDER = MUSE_DATA_FOLDER / 'standart_stars/'
 DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 DEBUG = True # TODO: make it an argument
-BATCH_SIZE = 6 # TODO: make it an argument
+BATCH_SIZE = 16 # TODO: make it an argument
 
 pre_init_astrometry = True
 optimize_astrometry = False
@@ -52,6 +53,11 @@ logging.basicConfig(
         logging.StreamHandler()  # Also log to console
     ]
 )
+
+# Silence noisy libraries
+logging.getLogger('matplotlib').setLevel(logging.WARNING)
+logging.getLogger('PIL').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 
 logger.info("="*60)
@@ -59,22 +65,25 @@ logger.info("NFM Calibrator Training Script")
 logger.info("="*60)
 logger.info(f"Log file: {log_filename}")
 
-
 # Add argument inputs
 parser = argparse.ArgumentParser(description="Train NFM Calibrator")
-# parser.add_argument('--weights', type=str, default=str(WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth'), help='Path to the best calibrator weights checkpoint')
+# parser.add_argument('--weights', type=str, default=str(WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth'), help='Path to the best calibrator weights checkpoint')
 parser.add_argument('--continue-training', action='store_true', help='Whether to continue training from a checkpoint')
 
 # Handle both command line and iPython environments
 try:
     args = parser.parse_args()   #TODO: implement continue training
 except SystemExit:
-    args = argparse.Namespace(continue_training=False)  # In iPython/Jupyter, parse_args() fails, so use default values
+    # In iPython/Jupyter, parse_args() fails, so use default values
+    args = argparse.Namespace(
+        continue_training = True
+    )
 
 #%%
 class NFMDataset(Dataset):
-    def __init__(self, data):
-        # data = torch.load(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
+    def __init__(self, data_path):
+        data = torch.load(data_path, weights_only=False)
+        
         self.PSF_cubes   = data['PSF_cubes']
         self.telemetry   = data['telemetry']
         self.sample_ids  = data['sample_ids']
@@ -94,8 +103,7 @@ class NFMDataset(Dataset):
                     if legacy_key in self.fitted_vals[i] and control_key not in self.fitted_vals[i]:
                         self.fitted_vals[i][control_key] = self.fitted_vals[i][legacy_key]
                         del self.fitted_vals[i][legacy_key]
-            
-            
+         
         self.N, self.H, self.W, self.C = self.PSF_cubes.shape
 
     def __len__(self): return self.N
@@ -131,10 +139,7 @@ def collate_batch(batch, device):
 
 
 #%%
-data = torch.load(DATASET_CACHE / 'muse_STD_stars_dataset.pt', weights_only=False)
-
-#%%
-dataset = NFMDataset(data)
+dataset = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
 N_features = len(dataset.features)
 N_wvl_total = dataset.C # The number of spectral channels from the PSF data
 
@@ -142,6 +147,9 @@ N_wvl_total = dataset.C # The number of spectral channels from the PSF data
 train_idx, test_idx = train_test_split(np.arange(len(dataset)), test_size=0.20, random_state=42)
 
 H, W = dataset.H, dataset.W
+dx, dy = None, None
+
+logger.info(f"Dataset loaded.")
 
 #%%
 train_dataset = Subset(dataset, train_idx)
@@ -167,10 +175,11 @@ val_loader = DataLoader(
     drop_last=False
 )
 
-print(f"Number of samples in the dataset: {len(dataset)}")
-print(f"Number of training samples: {len(train_dataset)}")
-print(f"Number of validation samples: {len(val_dataset)}")
-print(f"PSF cubes are ({dataset.C}, {H}, {W})")
+logger.info(f"Number of samples in the dataset: {len(dataset)}")
+logger.info(f"Number of training samples: {len(train_dataset)}")
+logger.info(f"Number of validation samples: {len(val_dataset)}")
+logger.info(f"PSF cubes are ({dataset.C}, {H}, {W})")
+logger.info(f"Batch size: {BATCH_SIZE}")
 
 #%%
 random_idxs = np.random.randint(0, len(dataset), size=BATCH_SIZE)
@@ -227,8 +236,6 @@ print(PSF_model.inputs_manager)
 # Note that the inputs manager for the calibrator is different from the default one,
 # as some parameters are removed (GL weight can be computed) and some are set externally (phase bump)
 #%%
-from copy import deepcopy
-
 calibrator_outputs_transformer = deepcopy(PSF_model.inputs_manager.get_transformer()) # The calibrator predicts the same parameters as the default model, but some of them are removed or set externally before running the model
 
 # Get the dict of input tensors from the default model, to change their dimensions
@@ -247,17 +254,13 @@ if 'Cn2_weights' in buf_x_dict:
 
 _ = calibrator_outputs_transformer.stack(buf_x_dict) # Update stacking dimensions
 
-# b = calibrator_outputs_transformer.unstack(a) # Check that unstacking works correctly and gives the same dict back (except for the removed parameters)
-
 N_outputs = calibrator_outputs_transformer.get_stacked_size()
-print(f"\n>>>>>>>>>>>> Calibrator inputs: {N_features}, outputs: {N_outputs}")
 
 del buf_x_dict
 
 # Make sure the space from the removed inputs is freed up in GPU memory
 gc.collect()
 torch.cuda.empty_cache()
-
 
 #%%
 # Keep it shallow - 1-2 hidden layers max
@@ -355,129 +358,190 @@ calibrator = SmallCalibratorNet(
     dropout_rate=0.3
 ).to(device)
 
+default_lr = 1e-2
+
+print(f"\n>>>>>>>>>>>> Calibrator inputs: {N_features}, outputs: {N_outputs}")
+
+def save_checkpoint(calibrator, dx, dy, optimizer, epoch, train_loss, val_loss, path='checkpoint.pth'):
+    """ Save a training checkpoint. """
+    checkpoint_data = {
+        'epoch': epoch,
+        'calibrator_state_dict': calibrator.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+        'train_loss': train_loss,
+        'val_loss': val_loss,
+        'optimize_astrometry': optimize_astrometry,
+        'pre_init_astrometry': pre_init_astrometry,
+    }
+    
+    if optimize_astrometry:
+        checkpoint_data['dx'] = dx.detach().clone()
+        checkpoint_data['dy'] = dy.detach().clone()
+    
+    torch.save(checkpoint_data, path)
+    logger.debug(f"Checkpoint saved to {path}")
+
+
+def load_checkpoint(calibrator, optimizer, path):
+    """ Load a training checkpoint and restore model state."""
+    global dx, dy
+    if os.path.exists(path):
+        checkpoint = torch.load(path, map_location=device)
+        calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
+        
+        # Load astrometry parameters if they were saved
+        if optimize_astrometry and 'dx' in checkpoint and 'dy' in checkpoint:
+            dx = checkpoint['dx'].to(device)
+            dy = checkpoint['dy'].to(device)
+            logger.info("✅ Astrometry parameters (dx/dy) loaded from checkpoint")
+            
+        elif dx is None or dy is None:
+            initialize_astrometry() # If dx/dy are not defined, initialize them (either from fitted values or with zeros)
+            
+        if optimizer is not None:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            logger.info("✅ Optimizer state loaded from checkpoint")
+            
+        logger.info(f"🔄 Checkpoint loaded from {path} (epoch {checkpoint['epoch']})")
+        return checkpoint['epoch'], checkpoint['train_loss'], checkpoint['val_loss']
+    else:
+        logger.error(f"❌ Checkpoint file not found at {path}. No weights initialized.")
+        return None, None, None
 
 #%%
 # Pre training the calibrator with fitted parameters (optional, can help convergence if the fitted values are close to optimal)
 # At this point, PSF model is no invloved yet, so it is a much easier task than predicting PSF cubes.
 # It may help the model to converge faster when we start training with the full PSF model in the loop.
 
-default_lr = 1e-2
+if not args.continue_training:
+    optimizer = optim.AdamW(calibrator.parameters(), lr=default_lr, weight_decay=5e-4)
+    scheduler_pretrain = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-4)
 
-optimizer = optim.AdamW(calibrator.parameters(), lr=default_lr, weight_decay=5e-4)
+    num_epochs_pretrain = 100
 
-scheduler_pretrain = optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-4
-)
+    def calibrator_friendly_fit_dict(x_dict_fitted):
+        ''' This function modifies the input dict to be more suitable for the calibrator NN, by removing parameters that are not predicted. '''
+        x_dict_fitted = {key: x_dict_fitted[key] for key in output_features if key in x_dict_fitted} # Keep only the parameters that are predicted by the NN
+        if 'LO_coefs' in x_dict_fitted:
+            x_dict_fitted['LO_coefs'] = x_dict_fitted['LO_coefs'][:, 1:]
+        # And Cn2_weights are already stored without the first weight in the fitting dataset
+        return x_dict_fitted
 
-num_epochs_pretrain = 100
+    # We can also use a simpler loss function for this pre-training, such as MSE between the predicted parameters and the fitted values
+    loss_pretrain = nn.MSELoss()
 
-def calibrator_friendly_fit_dict(x_dict_fitted):
-    ''' This function modifies the input dict to be more suitable for the calibrator NN, by removing parameters that are not predicted. '''
-    x_dict_fitted = {key: x_dict_fitted[key] for key in output_features if key in x_dict_fitted} # Keep only the parameters that are predicted by the NN
-    if 'LO_coefs' in x_dict_fitted:
-        x_dict_fitted['LO_coefs'] = x_dict_fitted['LO_coefs'][:, 1:]
-    # And Cn2_weights are already stored without the first weight in the fitting dataset
-    return x_dict_fitted
-
-# We can also use a simpler loss function for this pre-training, such as MSE between the predicted parameters and the fitted values
-loss_pretrain = nn.MSELoss()
-
-calibrator.train()
-
-best_pretrain_loss = float('inf')
-best_calibrator_state = None
-
-for epoch in range(num_epochs_pretrain):
     calibrator.train()
-    epoch_loss = 0.0
-    
-    for batch_idx, batch in enumerate(train_loader):
-        _, telemetry_vecs, fitted_vals, _, _ = batch
-    
-        optimizer.zero_grad()
-        
-        y_data = calibrator_outputs_transformer.stack( calibrator_friendly_fit_dict(fitted_vals) )
-        y_pred = calibrator(telemetry_vecs)
-        
-        loss = loss_pretrain(y_pred, y_data)
-        loss.backward()
 
-        optimizer.step()
-        
-        epoch_loss += loss.item()
-        
-    avg_loss = epoch_loss / len(train_loader)
+    best_pretrain_loss = float('inf')
+    best_calibrator_state = None
 
-    # Validation
-    calibrator.eval()
-    epoch_val_loss = 0.0
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(val_loader):
+
+    for epoch in range(num_epochs_pretrain):
+        calibrator.train()
+        epoch_loss = 0.0
+        
+        for batch_idx, batch in enumerate(train_loader):
             _, telemetry_vecs, fitted_vals, _, _ = batch
+        
+            optimizer.zero_grad()
             
             y_data = calibrator_outputs_transformer.stack( calibrator_friendly_fit_dict(fitted_vals) )
             y_pred = calibrator(telemetry_vecs)
             
-            val_loss = loss_pretrain(y_pred, y_data)
-            epoch_val_loss += val_loss.item()
+            loss = loss_pretrain(y_pred, y_data)
+            loss.backward()
+
+            optimizer.step()
             
-    avg_val_loss = epoch_val_loss / len(val_loader)
-    
-    scheduler_pretrain.step(avg_val_loss)
+            epoch_loss += loss.item()
+            
+        avg_loss = epoch_loss / len(train_loader)
 
-    if avg_val_loss < best_pretrain_loss:
-        best_pretrain_loss = avg_val_loss
-        best_calibrator_state = deepcopy(calibrator.state_dict())
+        # Validation
+        calibrator.eval()
+        epoch_val_loss = 0.0
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(val_loader):
+                _, telemetry_vecs, fitted_vals, _, _ = batch
+                
+                y_data = calibrator_outputs_transformer.stack( calibrator_friendly_fit_dict(fitted_vals) )
+                y_pred = calibrator(telemetry_vecs)
+                
+                val_loss = loss_pretrain(y_pred, y_data)
+                epoch_val_loss += val_loss.item()
+                
+        avg_val_loss = epoch_val_loss / len(val_loader)
+        
+        scheduler_pretrain.step(avg_val_loss)
 
-    if (epoch + 1) % 10 == 0:
-        logger.info(f"Pre-train Epoch {epoch+1}: train_loss = {avg_loss:.6f}, val_loss = {avg_val_loss:.6f}")
+        if avg_val_loss < best_pretrain_loss:
+            best_pretrain_loss = avg_val_loss
+            best_calibrator_state = deepcopy(calibrator.state_dict())
 
-if best_calibrator_state is not None:
-    calibrator.load_state_dict(best_calibrator_state)
-    logger.info(f"Restored best pre-training weights (val_loss: {best_pretrain_loss:.6f})")
+        if (epoch + 1) % 10 == 0:
+            logger.info(f"Pre-train Epoch {epoch+1}: train_loss = {avg_loss:.6f}, val_loss = {avg_val_loss:.6f}")
 
-gc.collect()
-torch.cuda.empty_cache()
-torch.cuda.synchronize()
+    if best_calibrator_state is not None:
+        calibrator.load_state_dict(best_calibrator_state)
+        logger.info(f"Restored best pre-training weights (val_loss: {best_pretrain_loss:.6f})")
 
-# Store best pretrain calibrator state in the file
-pretrain_weights_path = WEIGHTS_FOLDER / 'NFM_calibrator_pretrain_weights.pth'
-torch.save(best_calibrator_state, pretrain_weights_path)
-logger.info(f"Saved best pre-training weights to {pretrain_weights_path}")
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
 
-#%%
-# Load best pre-training weights if continue_training flag is set
-# if args.continue_training and pretrain_weights_path.exists(): #TODO: implement continue training
-pretrain_weights_path = WEIGHTS_FOLDER / 'NFM_calibrator_pretrain_weights.pth'
-best_pretrain_state = torch.load(pretrain_weights_path, map_location=device)
-calibrator.load_state_dict(best_pretrain_state)
-logger.info(f"✓ Loaded pre-training weights from {pretrain_weights_path}")
-
-#%%
-# Init astrometric shifts dataset with fitted values if available, otherwise with zeros.
-# If zeros are used, we set optimize_astrometry=True to allow the model to learn them from the data
-if pre_init_astrometry:
-    logger.info("✓ Using pre-fitted astrometry values for initialization")
-    dx_data = np.array([d['dx_ctrl'] for d in dataset.fitted_vals], dtype=np.float32)
-    dy_data = np.array([d['dy_ctrl'] for d in dataset.fitted_vals], dtype=np.float32)
+    # Store best pretrain calibrator state in the file
+    pretrain_weights_path = WEIGHTS_FOLDER / 'NFM_calibrator/pretrain_weights.pth'
+    torch.save(best_calibrator_state, pretrain_weights_path)
+    logger.info(f"Saved best pre-training weights to {pretrain_weights_path}")
 else:
-    logger.info("✗ Initializing astrometry with zeros and forcing optimization")
-    optimize_astrometry = True
-    dx_data = np.zeros((len(dataset), len(dataset.fitted_vals[0]['dx_ctrl'])), dtype=np.float32)
-    dy_data = np.zeros((len(dataset), len(dataset.fitted_vals[0]['dy_ctrl'])), dtype=np.float32)
+    # Load best pre-training weights if continue_training flag is set
+    pretrain_weights_path = WEIGHTS_FOLDER / 'NFM_calibrator/pretrain_weights.pth'
+    if pretrain_weights_path.exists():
+        best_pretrain_state = torch.load(pretrain_weights_path, map_location=device)
+        calibrator.load_state_dict(best_pretrain_state)
+        logger.info(f"🔄 Loaded pre-training weights from {pretrain_weights_path}")
+    else:
+        logger.warning(f"❌ Pre-training weights not found at {pretrain_weights_path}. Continuing with current weights.")
 
-dx = torch.tensor(dx_data, device=device, dtype=torch.float32, requires_grad=optimize_astrometry)
-dy = torch.tensor(dy_data, device=device, dtype=torch.float32, requires_grad=optimize_astrometry)
+#%%
+fill_from_fitted = lambda key: np.array([d[key] for d in dataset.fitted_vals], dtype=np.float32) if key in dataset.fitted_vals[0] else None
 
+def initialize_astrometry():
+    global optimize_astrometry
+    global dx, dy
+    # Init astrometric shifts dataset with fitted values if available, otherwise with zeros.
+    if pre_init_astrometry:
+        logger.info("✅ Using pre-fitted astrometry values for initialization")
+        dx_data = fill_from_fitted('dx_ctrl')
+        dy_data = fill_from_fitted('dy_ctrl')
+    else:
+        logger.info("ℹ️ Initializing astrometry with zeros and forcing optimization")
+        # If zeros are used, we set optimize_astrometry=True to allow the model to learn them from the data
+        optimize_astrometry = True
+        dx_data = np.zeros((len(dataset), len(dataset.fitted_vals[0]['dx_ctrl'])), dtype=np.float32)
+        dy_data = np.zeros((len(dataset), len(dataset.fitted_vals[0]['dy_ctrl'])), dtype=np.float32)
+    
+    dx = torch.tensor(dx_data, device=device, dtype=torch.float32, requires_grad=optimize_astrometry)
+    dy = torch.tensor(dy_data, device=device, dtype=torch.float32, requires_grad=optimize_astrometry)
+
+
+if args.continue_training:
+    checkpoint_path = WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth'
+    if checkpoint_path.exists():
+        load_checkpoint(calibrator, None, WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth')                      
+    else:
+        logger.info(f"ℹ️ Training model from the pre-trained weights (if available) or from scratch.")
+        initialize_astrometry()
+        
 # Initialize NCPAs with fitted values if available, otherwise with median values from the fitting dataset (same for all samples).
-LO_dataset = np.array([d['LO_coefs'] for d in dataset.fitted_vals], dtype=np.float32)
+LO_dataset = fill_from_fitted('LO_coefs')
 phase_bump = torch.tensor(LO_dataset[:, 0], device=device, dtype=torch.float32)  # Extract phase bump values separately
 LO_dataset = LO_dataset[:, 1:] # Remove phase bump from the dataset, leaving only Zernike coefficients
 
 if predict_LO_NCPAs:
-    logger.info(f"✓ Prediction of modes Z3-Z{PSF_model.Z_mode_max} is enabled")
+    logger.info(f"ℹ️ Prediction of modes Z3-Z{PSF_model.Z_mode_max} is enabled")
 else:
-    logger.info("✗ Initializing NCPAs with median values from fitting (same for all samples)")
+    logger.info(f"ℹ️ Initializing NCPAs with median values from fitting (same for all samples)")
     NCPAs_median = torch.tensor(np.median(LO_dataset, axis=0)[None,...], device=device, dtype=torch.float32)
 
 # %%
@@ -495,7 +559,7 @@ def generate_wavelength_sets(step, max_val):
         sets.append(indices)
     return sets
 
-λ_step = 5
+λ_step = 2
 
 λ_id_sets = generate_wavelength_sets(λ_step, N_wvl_total-1)
 λ_sets = [λ_full[list_id] for list_id in λ_id_sets]
@@ -504,13 +568,6 @@ print(f"Total wavelengths: {N_wvl_total}, generated {len(λ_id_sets)} sets with 
 
 #%%
 # Now, we put the model in the loop and train it end-to-end to predict PSF cubes, using the full loss function that compares predicted and true PSFs.
-
-# x_dict_NN = calibrator_outputs_transformer.unstack(calibrator(telemetry_vecs))
-# idx = idxs
-# config = batch_config
-# λ_ids = λ_id_sets[0]
-
-# with torch.no_grad():
 
 def run_model(x_dict_NN, config, idx, λ_ids):
     ''' This function runs the PSF model to predict the batch of PSFs based on the dictionary of parameters predicted by the NN and the batch configuration. '''
@@ -523,11 +580,11 @@ def run_model(x_dict_NN, config, idx, λ_ids):
     x_dict['dx_ctrl'] = dx[idx]
     x_dict['dy_ctrl'] = dy[idx]
 
-    # Add phase bump
+    # Append phase bump
     x_dict['LO_coefs'] = torch.hstack( (phase_bump[idx].unsqueeze(-1), x_dict['LO_coefs']) ) if predict_LO_NCPAs \
                     else torch.hstack( (phase_bump[idx].unsqueeze(-1), NCPAs_median.repeat(len(idx),1))
     )
-    # Add Cn2 ground layer weight
+    # Append Cn2 ground layer weight
     if predict_Cn2_profile:
         GL_fraction = 1.0 - x_dict['Cn2_weights'].sum(dim=-1, keepdim=True)
         x_dict['Cn2_weights'] = torch.hstack( (GL_fraction, x_dict['Cn2_weights']) )
@@ -578,7 +635,8 @@ def loss_LO(coefs_vec, w_bump, w_LO):
 
 
 def loss_fn(PSF_data, PSF_model, x_dict_pred):
-    PSF_loss = loss_PSF(PSF_data, PSF_model, w_MSE=900.0, w_MAE=1.6)
+    # PSF_loss = loss_PSF(PSF_data, PSF_model, w_MSE=900.0, w_MAE=1.6) Used to be 900
+    PSF_loss = loss_PSF(PSF_data, PSF_model, w_MSE=1200.0, w_MAE=1.6)
     LO_loss  = loss_LO(x_dict_pred['LO_coefs'], w_bump=5e-5, w_LO=1e-7) if predict_LO_NCPAs else 0.0
     return PSF_loss + LO_loss
 
@@ -614,18 +672,14 @@ def validate(loader=None, return_cubes=True, verbose=False):
     
     PSFs_pred_cube = None
     PSFs_data_cube = None
-    validation_ids = None
+    validation_ids = []
     NN_predictions = None
 
     if return_cubes:
-        # Determine the total number of samples in the source dataset to allocate the full cube
-        # This handles both Subset and regular Dataset (assuming indices are consistent with the source)
-        full_dataset = loader.dataset.dataset if isinstance(loader.dataset, torch.utils.data.Subset) else loader.dataset
-        N_samples = len(full_dataset)
-            
+        N_samples = len(dataset)
+
         PSFs_pred_cube = torch.zeros((N_samples, N_wvl_total, H, W), dtype=torch.float32, device='cpu')
         PSFs_data_cube = torch.zeros((N_samples, N_wvl_total, H, W), dtype=torch.float32, device='cpu')
-        validation_ids = torch.zeros((N_samples,), dtype=torch.long, device='cpu')
         NN_predictions = torch.zeros((N_samples, N_outputs), dtype=torch.float32, device='cpu')
 
         if verbose: logger.info(f"Validation dataset size: {N_samples} (full), batches: {len(loader)}")
@@ -640,7 +694,7 @@ def validate(loader=None, return_cubes=True, verbose=False):
             idxs_cpu = idxs.cpu()
 
             if return_cubes:
-                validation_ids[idxs_cpu] = idxs_cpu
+                validation_ids.extend(idxs_cpu.tolist())
             
             # Get calibrator predictions (same for all wavelength sets since prediction is λ-agnostic)
             x_pred = calibrator(telemetry_inputs)
@@ -672,14 +726,16 @@ def validate(loader=None, return_cubes=True, verbose=False):
                 if verbose: logger.info(f"  >> λ set {current_λ_set_id + 1}/{len(λ_sets)}")
 
     if verbose and return_cubes:
-        logger.info(f"\nPSFs_pred cube shape: {PSFs_pred_cube.shape}")
-        logger.info(f"PSFs_data cube shape: {PSFs_data_cube.shape}")
-        logger.info(f"Validation IDs shape: {validation_ids.shape}")
         logger.info(f"PSF pred range: [{PSFs_pred_cube.min():.4e}, {PSFs_pred_cube.max():.4e}]")
         logger.info(f"PSF data range: [{PSFs_data_cube.min():.4e}, {PSFs_data_cube.max():.4e}]")
-        logger.info(f"Validation IDs range: [{validation_ids.min()}, {validation_ids.max()}]")
 
     if return_cubes:
+        # Select only those samples that are actually in the validation set (in case of Subset with non-contiguous indices)
+        validation_ids = torch.tensor(validation_ids, dtype=torch.long)
+        PSFs_pred_cube = PSFs_pred_cube[validation_ids]
+        PSFs_data_cube = PSFs_data_cube[validation_ids]
+        NN_predictions = NN_predictions[validation_ids]
+        
         return PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, total_loss / total_simulated_batches if total_simulated_batches > 0 else 0.0
     else:
         return total_loss / total_simulated_batches if total_simulated_batches > 0 else 0.0
@@ -688,24 +744,11 @@ def validate(loader=None, return_cubes=True, verbose=False):
 # Validate after calibrator pre-training, before the main training loop, to check that everything is working and to have a baseline for comparison
 PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, val_loss_total = validate(loader=val_loader, verbose=True, return_cubes=True)
 
+gc.collect()
+torch.cuda.empty_cache()
+torch.cuda.synchronize()
+
 #%%
-#TODO: enable 'continue_training'
-# if args.continue_training:
-#     checkpoint_path = WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth'
-#     try:
-#         checkpoint = torch.load(checkpoint_path, map_location=device)
-#         calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
-#         dx = checkpoint['dx'].to(device)
-#         dy = checkpoint['dy'].to(device)
-
-#         dx.requires_grad_(True)
-#         dy.requires_grad_(True)
-
-#         logger.info(f"Loaded checkpoint from {checkpoint_path}")
-#     except Exception as e:
-#         logger.warning(f"Failed to load checkpoint from {checkpoint_path}: {e}. Starting training from scratch.")
-
-
 # Optimizer with weight decay (L2 regularization)
 if optimize_astrometry:
     optimizer = optim.AdamW([
@@ -724,88 +767,44 @@ scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     mode     = 'min',
     factor   = 0.2,
     patience = 3,
-    verbose  = True,
     min_lr   = 1e-6
 )
 
 logger.info(f"Scheduler: ReduceLROnPlateau with patience={3}, factor={0.7}, min_lr={1e-5}")
 
 
-# L1 regularization of NN parameters
+# L1 regularization of NN parameters TODO: use it
 def l1_regularization(model, lambda_l1=1e-4):
     l1_norm = sum(p.abs().sum() for p in model.parameters())
     return lambda_l1 * l1_norm
 
-# %%
+
 # Helper function to check for NaN values
-def check_for_nan(loss, model, epoch, batch_idx, phase="train"):
+def check_for_nan(loss, model, epoch, batch_idx):
     """
     Check if loss or model parameters contain NaN values.
     Returns True if NaN detected, False otherwise.
     """
     if torch.isnan(loss) or torch.isinf(loss):
-        logger.error(f"❌ NaN/Inf detected in {phase} loss at epoch {epoch}, batch {batch_idx}: {loss.item()}")
+        logger.error(f"❌ NaN/Inf detected at epoch {epoch}, batch {batch_idx}: {loss.item()}")
         return True
     
     for name, param in model.named_parameters():
         if torch.isnan(param).any() or torch.isinf(param).any():
-            logger.error(f"❌ NaN/Inf detected in {phase} parameter '{name}' at epoch {epoch}, batch {batch_idx}")
+            logger.error(f"❌ NaN/Inf detected in parameter '{name}' at epoch {epoch}, batch {batch_idx}")
             return True
     
     return False
 
 
-def save_checkpoint(calibrator, dx, dy, optimizer, epoch, train_loss, val_loss, path='checkpoint.pth'):
-    """ Save a training checkpoint. """
-    checkpoint_data = {
-        'epoch': epoch,
-        'calibrator_state_dict': calibrator.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'train_loss': train_loss,
-        'val_loss': val_loss,
-        'optimize_astrometry': optimize_astrometry,
-        'pre_init_astrometry': pre_init_astrometry,
-    }
-    
-    if optimize_astrometry:
-        checkpoint_data['dx'] = dx.detach().clone()
-        checkpoint_data['dy'] = dy.detach().clone()
-    
-    torch.save(checkpoint_data, path)
-    logger.debug(f"Checkpoint saved to {path}")
-
-
-def load_checkpoint(calibrator, dx, dy, optimizer, path='checkpoint.pth'):
-    """ Load a training checkpoint and restore model state."""
-    checkpoint = torch.load(path)
-    calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
-    
-    # Load astrometry parameters if they were saved
-    if optimize_astrometry and 'dx' in checkpoint and 'dy' in checkpoint:
-        dx.data = checkpoint['dx']
-        dy.data = checkpoint['dy']
-        logger.info("✓ Astrometry parameters (dx/dy) loaded from checkpoint")
-    elif optimize_astrometry:
-        logger.warning("⚠ Astrometry optimization enabled but no dx/dy found in checkpoint")
-    else:
-        logger.info("✗ Astrometry optimization disabled, skipping dx/dy loading")
-    
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    logger.warning(f"🔄 Checkpoint loaded from {path} (epoch {checkpoint['epoch']})")
-    return checkpoint['epoch'], checkpoint['train_loss'], checkpoint['val_loss']
-
-
 # Complete training loop with validation
-def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, val_dx_dy_lr=1e-3, 
-                          nan_recovery=True, max_nan_recoveries=3):
+def train(num_epochs=50, patience=10, nan_recovery=True, max_nan_recoveries=3):
     """
     Training loop with validation where dx/dy are optimized during validation.
     
     Args:
         num_epochs: Maximum number of training epochs
         patience: Early stopping patience
-        val_dx_dy_opt_steps: Number of optimization steps for dx/dy during validation
-        val_dx_dy_lr: Learning rate for dx/dy optimization during validation
         nan_recovery: If True, recover from NaN by loading last good checkpoint
         max_nan_recoveries: Maximum number of times to recover from NaN before giving up
     """
@@ -813,6 +812,8 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
     train_losses, val_losses = [], []
     nan_recovery_count = 0
     patience_counter   = 0
+    
+    lr_decay = 0.7  # Factor to reduce learning rate on NaN recovery
     
     # Initialize loss tracking for detailed logging
     loss_stats = {
@@ -827,7 +828,6 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
     }
     
     logger.info(f"Starting training for {num_epochs} epochs")
-    logger.info(f"Patience: {patience}, Val dx/dy opt steps: {val_dx_dy_opt_steps}")
     logger.info(f"NaN recovery: {'enabled' if nan_recovery else 'disabled'}, max recoveries: {max_nan_recoveries}")
 
     for epoch in range(num_epochs):
@@ -841,8 +841,8 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
             PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=device))
             λ_id_set = λ_id_sets[current_λ_set_id]
             
-            for batch_idx, batch in enumerate(train_loader):
-                PSF_data, telemetry_inputs, batch_config, idxs = batch
+            for batch_idx, batch in enumerate(train_loader):        
+                PSF_data, telemetry_inputs, _, batch_config, idxs = batch
                 
                 optimizer.zero_grad()
                 
@@ -852,44 +852,40 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
                 PSF_pred = run_model(x_dict_pred, batch_config, idxs, λ_id_set)
                 loss = loss_fn(PSF_pred, PSF_data[:, λ_id_set, ...], x_dict_pred)
 
-                # ========== NaN DETECTION ==========
-                if check_for_nan(loss, calibrator, epoch, batch_idx, phase="train"):
+                # ========== NaN detection ==========
+                if check_for_nan(loss, calibrator, epoch, batch_idx):
                     nan_detected_this_epoch = True
                     
                     if nan_recovery and nan_recovery_count < max_nan_recoveries:
                         nan_recovery_count += 1
                         loss_stats['nan_recoveries'] = nan_recovery_count
-                        
                         logger.error(f"🚨 NaN detected! Recovery attempt {nan_recovery_count}/{max_nan_recoveries}")
-                        print(f"\n🚨 NaN detected! Attempting recovery {nan_recovery_count}/{max_nan_recoveries}...")
                         
-                        # Load last good checkpoint
                         try:
-                            load_checkpoint(calibrator, dx, dy, optimizer, WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth')
-                            
+                            # Load last good checkpoint
+                            load_checkpoint(calibrator, optimizer, WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth')
                             # Reduce learning rate
                             for param_group in optimizer.param_groups:
                                 old_lr = param_group['lr']
-                                param_group['lr'] = old_lr * 0.7
+                                param_group['lr'] = old_lr * lr_decay
                                 logger.warning(f"Reduced LR: {old_lr:.2e} -> {param_group['lr']:.2e}")
 
-                            print(f"✓ Recovered from checkpoint, LR reduced by 25%")
+                            logger.info(f"✅ Recovered from checkpoint, LR reduced by {(1.-lr_decay) * 100:.0f}%")
                             logger.info("Model recovered from checkpoint, continuing training...")
                             break  # Skip rest of this epoch, start fresh
                             
                         except FileNotFoundError:
                             logger.error("❌ No checkpoint found! Cannot recover from NaN.")
-                            print("❌ No checkpoint available for recovery!")
                             raise ValueError("NaN detected but no checkpoint to recover from")
                     else:
                         logger.error(f"❌ Max NaN recoveries ({max_nan_recoveries}) reached or recovery disabled. Stopping training.")
-                        print(f"\n❌ Training stopped due to NaN (recovery limit reached)")
                         raise ValueError(f"Training failed due to NaN after {nan_recovery_count} recovery attempts")
                 
                 loss.backward()
                 
                 # Gradient clipping (helps prevent NaN)
                 torch.nn.utils.clip_grad_norm_(calibrator.parameters(), max_norm=1.0)
+                
                 if optimize_astrometry:
                     torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=10.0)  # Clip dx/dy too
                 
@@ -905,11 +901,8 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
                 # Running loss info during wavelength iteration
                 current_lr = optimizer.param_groups[0]['lr']
 
-                print(f"\rλ set {current_λ_set_id + 1}/{len(λ_sets)} complete, batch {batch_idx + 1}/{len(train_loader)} | "
-                      f"Running loss: {loss.item():.6f} | LR: {current_lr:.2e}", end='', flush=True)
-
                 logger.debug(f"Epoch {epoch}, λ set {current_λ_set_id + 1}/{len(λ_sets)}, "
-                           f"batch {batch_idx + 1}/{len(train_loader)}: train_loss = {loss.item():.6f}")
+                             f"batch {batch_idx + 1}/{len(train_loader)}: train_loss = {loss.item():.6f}, LR = {current_lr:.2e}")
             
             # If NaN was detected, break out of wavelength loop too
             if nan_detected_this_epoch:
@@ -939,7 +932,7 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
             if nan_recovery and nan_recovery_count < max_nan_recoveries:
                 nan_recovery_count += 1
                 logger.warning(f"Attempting recovery from validation NaN...")
-                load_checkpoint(calibrator, dx, dy, optimizer, WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth')
+                load_checkpoint(calibrator, optimizer, WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth')
                 continue
             else:
                 raise ValueError("NaN in validation loss")
@@ -956,7 +949,7 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
         
         if old_lr != new_lr:
             logger.warning(f"Learning rate reduced: {old_lr:.2e} -> {new_lr:.2e}")
-            print(f"⚠ Learning rate reduced: {old_lr:.2e} -> {new_lr:.2e}")
+            print(f"⚠️️️ Learning rate reduced: {old_lr:.2e} -> {new_lr:.2e}")
         
         current_lr = optimizer.param_groups[0]['lr']
         loss_stats['learning_rates'].append(current_lr)
@@ -970,16 +963,16 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
             
             # Save best model
             save_checkpoint(calibrator, dx, dy, optimizer, epoch, avg_train_loss, val_loss, 
-                            WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth')
-            logger.info(f"✓ Saved best model at epoch {epoch} with val_loss = {val_loss:.6f}")
-            print(f"✓ Saved best model at epoch {epoch}")
+                            WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth')
+            logger.info(f"✅ Saved best model at epoch {epoch} with val_loss = {val_loss:.6f}")
+            print(f"✅ Saved best model at epoch {epoch}")
         else:
             patience_counter += 1
         
         # Save periodic checkpoint every 5 epochs (for extra safety)
         if epoch % 5 == 0:
             save_checkpoint(calibrator, dx, dy, optimizer, epoch, avg_train_loss, val_loss, 
-                            WEIGHTS_FOLDER/f'NFM_calibrator_new/checkpoint_epoch_{epoch}.pth')
+                            WEIGHTS_FOLDER/f'NFM_calibrator/checkpoint_epoch_{epoch}.pth')
             logger.info(f"Periodic checkpoint saved at epoch {epoch}")
         
         # Print progress
@@ -995,7 +988,7 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
         # Early stopping check
         if patience_counter >= patience:
             logger.warning(f"Early stopping triggered at epoch {epoch}")
-            print(f"\n⚠ Early stopping at epoch {epoch}")
+            print(f"\n ⚠️️️ Early stopping at epoch {epoch}")
             break
     
     # Save loss statistics to file
@@ -1014,13 +1007,13 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
     
     # Log NaN recovery statistics
     if nan_recovery_count > 0:
-        logger.warning(f"⚠ Training recovered from NaN {nan_recovery_count} time(s)")
-        print(f"\n⚠ Note: Training recovered from NaN {nan_recovery_count} time(s)")
+        logger.warning(f"⚠️️️ Training recovered from NaN {nan_recovery_count} time(s)")
+        print(f"\n ⚠️️ Note: Training recovered from NaN {nan_recovery_count} time(s)")
     
     # Load best model
     logger.info("Loading best model...")
     print("\nLoading best model...")
-    checkpoint = torch.load(WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth')
+    checkpoint = torch.load(WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth')
     calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
 
     if optimize_astrometry and 'dx' in checkpoint and 'dy' in checkpoint:
@@ -1033,103 +1026,98 @@ def train_with_validation(num_epochs=50, patience=10, val_dx_dy_opt_steps=20, va
     return calibrator, train_losses, val_losses
 
 
-# %%
-def main():
-    logger.info("="*60)
-    logger.info("Starting Training with Validation")
-    logger.info("="*60)
-
-    # Train the model with NaN recovery enabled
-    calibrator, train_losses, val_losses = train_with_validation(
-        num_epochs=500,
-        patience=20,
-        val_dx_dy_opt_steps=3,
-        val_dx_dy_lr=1e-4,
-        nan_recovery=True,
-        max_nan_recoveries=10
-    )
-
-    print("\n" + "="*60)
-    print("Training Complete!")
-    print("="*60)
-
-    logger.info("="*60)
-    logger.info("Training Complete!")
-    logger.info("="*60)
-    logger.info(f"Final train loss: {train_losses[-1]:.6f}")
-    logger.info(f"Final val loss: {val_losses[-1]:.6f}")
-    logger.info(f"Best val loss: {min(val_losses):.6f}")
-
-    # Plot losses (optional)
-    try:
-        plt.figure(figsize=(10, 5))
-        plt.plot(train_losses, label='Train Loss')
-        plt.plot(val_losses, label='Val Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.legend()
-        plt.title('Training and Validation Losses')
-        plt.grid(True)
-        plt.show()
-    except:
-        pass
-
-
-if __name__ == "__main__":
-    main()
+#%%
+# Okay, imagine, I finished the training and now I want to train a separate small corrective model, that would compare the predicted and simulated PSF and predict the chromatic multiplicative coefficient that would achieve the best match between the data and predicted PSFs peaks. To implement this, we need first:
+# - the procedure to compute the exact Strehl ratio for every data and simulated PSF (sperad over )
 
 # %%
+# def main():
+logger.info("="*60)
+logger.info("Starting Training with Validation")
+logger.info("="*60)
+
+# Train the model with NaN recovery enabled
+calibrator, train_losses, val_losses = train(
+    num_epochs=500,
+    patience=20,
+    nan_recovery=True,
+    max_nan_recoveries=10
+)
+
+print("\n" + "="*60)
+print("Training Complete!")
+print("="*60)
+
+logger.info("="*60)
+logger.info("Training Complete!")
+logger.info("="*60)
+logger.info(f"Final train loss: {train_losses[-1]:.6f}")
+logger.info(f"Final val loss: {val_losses[-1]:.6f}")
+logger.info(f"Best val loss: {min(val_losses):.6f}")
+
+# Plot losses (optional)
+try:
+    plt.figure(figsize=(10, 5))
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Val Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    plt.title('Training and Validation Losses')
+    plt.grid(True)
+    plt.show()
+except:
+    pass
+
+
+# %%
+# if __name__ == "__main__":
+#     main()
+
 # Load best model
 logger.info("Loading best model...")
 print("\nLoading best model...")
-checkpoint = torch.load(WEIGHTS_FOLDER / 'NFM_calibrator_new/best_calibrator_checkpoint.pth')
-calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
 
-if optimize_astrometry and 'dx' in checkpoint and 'dy' in checkpoint:
-    dx.data = checkpoint['dx']
-    dy.data = checkpoint['dy']
-
-logger.info(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {checkpoint['epoch']}")
-print(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {checkpoint['epoch']}")
-
+epoch, train_loss, val_loss = load_checkpoint(calibrator, optimizer, WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth')
+logger.info(f"Best validation loss: {val_loss:.6f} at epoch {epoch}")
 
 # Validate and collect all PSF predictions and data
-PSFs_pred, PSFs_data, validation_ids, NN_predictions, final_val_loss = validate()
+PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, final_val_loss = validate()
 
 print(f"\n{'='*60}")
 print(f"Validation Results:")
 print(f"{'='*60}")
 print(f"Final validation loss (fixed dx/dy): {final_val_loss:.6f}")
-print(f"PSF predictions shape: {PSFs_pred.shape}")
-print(f"PSF data shape: {PSFs_data.shape}")
+print(f"PSF predictions shape: {PSFs_pred_cube.shape}")
+print(f"PSF data shape: {PSFs_data_cube.shape}")
 print(f"Validation sample IDs shape: {validation_ids.shape}")
 print(f"Validation IDs range: [{validation_ids.min()}, {validation_ids.max()}]")
 print(f"{'='*60}\n")
 
 logger.info(f"Final validation loss (fixed dx/dy): {final_val_loss:.6f}")
-logger.info(f"PSF predictions collected: {PSFs_pred.shape}")
-logger.info(f"PSF data collected: {PSFs_data.shape}")
+logger.info(f"PSF predictions collected: {PSFs_pred_cube.shape}")
+logger.info(f"PSF data collected: {PSFs_data_cube.shape}")
 logger.info(f"Validation sample IDs collected: {validation_ids.shape}")
 
 # Optionally save the cubes for later analysis
-# torch.save(PSFs_pred, WEIGHTS_FOLDER / 'NFM_calibrator_new/validation_PSFs_predicted.pt')
-# torch.save(PSFs_data, WEIGHTS_FOLDER / 'NFM_calibrator_new/validation_PSFs_data.pt')
-# torch.save(validation_ids, WEIGHTS_FOLDER / 'NFM_calibrator_new/validation_sample_ids.pt')
-# torch.save(PSFs_data, WEIGHTS_FOLDER / 'NFM_calibrator_new/validation_PSFs_data.pt')
+# torch.save(PSF_pred_cube, WEIGHTS_FOLDER / 'NFM_calibrator/validation_PSFs_predicted.pt')
+# torch.save(PSF_data_cube, WEIGHTS_FOLDER / 'NFM_calibrator/validation_PSFs_data.pt')
+# torch.save(validation_ids, WEIGHTS_FOLDER / 'NFM_calibrator/validation_sample_ids.pt')
+# torch.save(PSF_data_cube, WEIGHTS_FOLDER / 'NFM_calibrator/validation_PSFs_data.pt')
 
-PSFs_pred = PSFs_pred.cpu()
-PSFs_data = PSFs_data.cpu()
+PSFs_pred_cube = PSFs_pred_cube.cpu()
+PSFs_data_cube = PSFs_data_cube.cpu()
 validation_ids = validation_ids.cpu()
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 
-id_src = np.random.randint(0, PSFs_data.shape[0])
+id_src = np.random.randint(0, PSFs_data_cube.shape[0])
 print(f"Randomly selected validation sample ID: {id_src}")
 print(f"Corresponding original dataset index: {validation_ids[id_src].item()}")
 
-PSF_0 = PSFs_data[id_src]
-PSF_1 = PSFs_pred[id_src]
+PSF_0 = PSFs_data_cube[id_src]
+PSF_1 = PSFs_pred_cube[id_src]
 
 # NN_pred = NN_predictions[id_src].cpu().unsqueeze(0).numpy()
 # x_pred = inputs_transformer.unstack(NN_pred)
@@ -1137,6 +1125,7 @@ PSF_1 = PSFs_pred[id_src]
 vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
 vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
 wvl_select = np.s_[0, N_wvl_total//2, -1]
+PSF_disp = lambda x, w: (x[w,...]).cpu().numpy()
 
 draw_PSF_stack(
     PSF_0.numpy()[wvl_select, ...],
@@ -1146,9 +1135,6 @@ draw_PSF_stack(
     max_val=vmax,
     crop=100
 )
-
-#%%
-PSF_disp = lambda x, w: (x[w,...]).cpu().numpy()
 
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
@@ -1166,28 +1152,35 @@ for i, lmbd in enumerate(wvl_select):
 plt.show()
 
 #%%
-wvl_select = np.s_[0, N_wvl_total//2, -1]
-
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
     plot_radial_PSF_profiles(
-        PSFs_data[:, lmbd, ...].cpu().numpy(),
-        PSFs_pred[:, lmbd, ...].cpu().numpy(),
+        PSFs_data_cube[:, lmbd, ...].cpu().numpy(),
+        PSFs_pred_cube[:, lmbd, ...].cpu().numpy(),
         'Data',
         'TipTorch',
         cutoff=40,
-        ax=ax[i]
+        ax=ax[i],
+        title=f"Wavelength {λ_full[lmbd].item():.2f} m"
         #, centers=center)
     )
+plt.title('Radial PSF Profiles at Selected Wavelengths')
 plt.show()
 
 #%%
 fig = plt.figure(figsize=(10, 6))
 plt.title('Polychromatic PSF')
 PSF_avg = lambda x: np.mean(x.cpu().numpy(), axis=1)
-plot_radial_PSF_profiles( PSF_avg(PSFs_data), PSF_avg(PSFs_pred), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
+plot_radial_PSF_profiles(
+    PSF_avg(PSFs_data_cube),
+    PSF_avg(PSFs_pred_cube),
+    'Data',
+    'TipTorch',
+    title='Spectrally averaged PSF',
+    cutoff=40,
+    ax=fig.add_subplot(111)
+)
 plt.show()
-
 
 #%% ============================================================================================================================================================================================
 # Dummy optimization routine for debugging loss function and optimization behavior
@@ -1383,11 +1376,11 @@ results = debug_dummy_optimization(num_iters=1000)
 
 #%%
 with torch.no_grad():
-    PSFs_data = results['PSF_cubes'].cpu()
-    PSFs_pred = results['PSF_pred'].cpu()
+    PSFs_data_cube = results['PSF_cubes'].cpu()
+    PSFs_pred_cube = results['PSF_pred'].cpu()
 
     x_pred = results['final_x_pred']
-    N_wvl_temp = PSFs_data.shape[1]
+    N_wvl_temp = PSFs_data_cube.shape[1]
 
     dummy_vec = results['dummy_vec'].cpu()
     x_test = calibrator_outputs_transformer.unstack(dummy_vec)
@@ -1396,10 +1389,10 @@ with torch.no_grad():
 #%%
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 
-id_src = np.random.randint(0, PSFs_data.shape[0])
+id_src = np.random.randint(0, PSFs_data_cube.shape[0])
 
-PSF_0 = PSFs_data[id_src]
-PSF_1 = PSFs_pred[id_src]
+PSF_0 = PSFs_data_cube[id_src]
+PSF_1 = PSFs_pred_cube[id_src]
 
 vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
 vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
@@ -1427,8 +1420,8 @@ _,_,_,idx = list(val_loader)[0]
 fig, ax = plt.subplots(1, 3, figsize=(10, 3))
 for ax_idx, (i, j) in enumerate(zip([0, 16, 28], [0, 4, 7])):
     p_0, p_1, p_err, centers = plot_radial_PSF_profiles(
-        PSFs_data[:,i,...].cpu().numpy(),
-        PSFs_pred[:,j,...].cpu().numpy(),
+        PSFs_data_cube[:,i,...].cpu().numpy(),
+        PSFs_pred_cube[:,j,...].cpu().numpy(),
         'Data',
         'TipTorch',
         cutoff=40,

@@ -1,5 +1,6 @@
 #%%
 import sys, os
+sys.path.insert(0, '..')
 
 from project_settings import device, xp, use_cupy, default_torch_type, PROJECT_PATH, TELEMETRY_CACHE, DATA_FOLDER
 
