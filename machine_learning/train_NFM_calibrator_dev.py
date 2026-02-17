@@ -1025,10 +1025,6 @@ def train(num_epochs=50, patience=10, nan_recovery=True, max_nan_recoveries=3):
     return calibrator, train_losses, val_losses
 
 
-#%%
-# Okay, imagine, I finished the training and now I want to train a separate small corrective model, that would compare the predicted and simulated PSF and predict the chromatic multiplicative coefficient that would achieve the best match between the data and predicted PSFs peaks. To implement this, we need first:
-# - the procedure to compute the exact Strehl ratio for every data and simulated PSF (sperad over )
-
 # %%
 # def main():
 logger.info("="*60)
@@ -1076,15 +1072,178 @@ except:
 
 #%%
 tuned_params = ['F_ctrl', 'dn']
-tuned_slices = [calibrator_outputs_transformer.slices[param] for param in tuned_params]
 
-# Make a index mask from slices
-tuned_idx_mask = torch.zeros(N_outputs, dtype=torch.bool)
-for slc in tuned_slices:
-    tuned_idx_mask[slc] = True
-
-
+def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num_epochs=50, lr=1e-3):
+    """
+    Fine-tune specific parameters of the calibrator while keeping others close to the reference model.
+    
+    Args:
+        calibrator: The model to tune
+        train_loader: Training data loader
+        val_loader: Validation data loader
+        tuned_params: List of parameter names to tune
+        num_epochs: Number of tuning epochs
+        lr: Learning rate
+    """
+    logger.info("="*60)
+    logger.info(f"Starting Tuning for parameters: {tuned_params}")
+    logger.info("="*60)
+    
+    if tuned_params is None:
+        ValueError("tuned_params list must be specified for tuning")
+    
+    # Create reference model (frozen)
+    calibrator_ref = deepcopy(calibrator)
+    calibrator_ref.eval()
+    for param in calibrator_ref.parameters():
+        param.requires_grad = False
+    
+    # Create mask for tuned parameters
+    tuned_slices = [calibrator_outputs_transformer.slices[param] for param in tuned_params]
+    tuned_idx_mask = torch.zeros(N_outputs, dtype=torch.bool, device=device)
+    for slc in tuned_slices:
+        tuned_idx_mask[slc] = True
+    tuned_idx_mask = tuned_idx_mask.unsqueeze(0)  # [1, N_outputs] for broadcasting
+    
+    # Optimizer for tuning
+    optimizer_tune = optim.AdamW(calibrator.parameters(), lr=lr, weight_decay=5e-4) # Tune all weights, but loss will constrain outputs
+    scheduler_tune = optim.lr_scheduler.ReduceLROnPlateau(optimizer_tune, mode='min', factor=0.5, patience=5)
+    
+    best_loss = float('inf')
+    best_state = None
+    
+    for epoch in range(num_epochs):
+        calibrator.train()
+        epoch_loss = 0.0
+        
+        for batch_idx, batch in enumerate(train_loader):
+            PSF_data, telemetry_inputs, _, batch_config, idxs = batch
             
+            optimizer_tune.zero_grad()
+            
+            # Get predictions from both models
+            x_pred_tuned = calibrator(telemetry_inputs)
+            with torch.no_grad():
+                x_pred_ref = calibrator_ref(telemetry_inputs)
+            
+            # Soft-fix strategy: 
+            # 1. Use tuned predictions for tuned parameters
+            # 2. Use reference predictions for fixed parameters (hard constraint in forward pass)
+            # This allows the NN to update its weights to optimize tuned params, while trying to maintain 
+            # the fixed params (via the fact that weights are shared).
+            # Note: Since weights are shared, changing them to improve tuned_params WILL change fixed_params outputs.
+            # To strictly enforce fixed values, we must replace them in the output used for PSF generation.
+            
+            x_pred_combined = torch.where(tuned_idx_mask, x_pred_tuned, x_pred_ref)
+            
+            # Loss computation
+            # x_dict_pred = calibrator_outputs_transformer.unstack(x_pred_combined)
+            
+            # Anchor loss
+            # We negate the mask to get fixed parameters
+            # Since tuned_idx_mask is [1, N_outputs], let's strip the first dim for indexing or broadcast properly
+            mask_fixed = ~tuned_idx_mask.squeeze(0) # [N_outputs]
+            
+            # Use masking on columns (dim 1)
+            # anchor_loss = (x_pred_tuned[:, mask_fixed] - x_pred_ref[:, mask_fixed]).pow(2).mean() * 100.0
+            
+            if mask_fixed.any():
+                anchor_loss = (x_pred_tuned[:, mask_fixed] - x_pred_ref[:, mask_fixed]).pow(2).mean() * 100.0
+                anchor_loss.backward() # Compute gradients for anchor loss AND FREE GRAPH
+            else:
+                 anchor_loss = torch.tensor(0.0, device=device)
+
+            # Free memory from initial pass
+            del x_pred_tuned, x_pred_ref, x_pred_combined
+            
+            running_batch_loss = 0.0
+
+            # Iterate over wavelength sets & backprop immediately to free memory
+            for i, λ_id_set in enumerate(λ_id_sets): 
+                 # Re-run the NN forward pass to create a fresh graph for this iteration
+                 # This avoids retain_graph=True across iterations, allowing TipTorch buffers to be freed
+                 # The NN is small so this is cheap.
+                 
+                 x_pred_tuned_loop = calibrator(telemetry_inputs)
+                 
+                 with torch.no_grad():
+                     x_pred_ref_loop = calibrator_ref(telemetry_inputs)
+                 
+                 x_pred_combined_loop = torch.where(tuned_idx_mask, x_pred_tuned_loop, x_pred_ref_loop)
+                 x_dict_pred_loop = calibrator_outputs_transformer.unstack(x_pred_combined_loop)
+                 
+                 PSF_model.SetWavelengths(λ_full[λ_id_set].to(device))
+                 PSF_pred = run_model(x_dict_pred_loop, batch_config, idxs, λ_id_set)
+                 
+                 loss = loss_fn(PSF_pred, PSF_data[:, λ_id_set, ...], x_dict_pred_loop)
+                 loss_item = loss.item() # Save item before backward
+
+                 # Backward without retaining graph!
+                 loss.backward() 
+                 
+                 running_batch_loss += loss_item
+                 
+                 current_lr = optimizer_tune.param_groups[0]['lr']
+                 logger.debug(f"Tune Epoch {epoch}, λ set {i + 1}/{len(λ_sets)}, "
+                              f"batch {batch_idx + 1}/{len(train_loader)}: batch_loss = {loss_item:.6f}, LR = {current_lr:.2e}")
+
+                 # Explicitly delete large tensors to help GC
+                 del PSF_pred, loss, x_pred_tuned_loop, x_pred_combined_loop, x_dict_pred_loop
+            
+            optimizer_tune.step()
+            
+            epoch_loss += running_batch_loss + anchor_loss.item()
+            
+            current_lr = optimizer_tune.param_groups[0]['lr']
+            logger.debug(f"Tune Epoch {epoch:3d}/{num_epochs} | "
+                         f"Batch {batch_idx + 1:3d}/{len(train_loader)} | "
+                         f"Total Batch Loss: {running_batch_loss:.6f} | "
+                         f"Anchor Loss: {anchor_loss.item():.6f}")
+            
+        avg_loss = epoch_loss / len(train_loader)
+        
+        # Validation
+        calibrator.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+             for batch in val_loader:
+                PSF_data, telemetry_inputs, _, batch_config, idxs = batch
+                
+                x_pred_tuned = calibrator(telemetry_inputs)
+                x_pred_ref = calibrator_ref(telemetry_inputs)
+                x_pred_combined = torch.where(tuned_idx_mask, x_pred_tuned, x_pred_ref)
+                x_dict_pred = calibrator_outputs_transformer.unstack(x_pred_combined)
+                
+                batch_val_loss = 0
+                for λ_id_set in λ_id_sets:
+                     PSF_model.SetWavelengths(λ_full[λ_id_set].to(device))
+                     PSF_pred = run_model(x_dict_pred, batch_config, idxs, λ_id_set)
+                     batch_val_loss += loss_fn(PSF_pred, PSF_data[:, λ_id_set, ...], x_dict_pred)
+                
+                val_loss += batch_val_loss.item()
+                
+        avg_val_loss = val_loss / len(val_loader)
+        scheduler_tune.step(avg_val_loss)
+        
+        logger.info(f"Tune Epoch {epoch+1}: train_loss={avg_loss:.6f}, val_loss={avg_val_loss:.6f}")
+        
+        if avg_val_loss < best_loss:
+            best_loss = avg_val_loss
+            best_state = deepcopy(calibrator.state_dict())
+            
+    if best_state is not None:
+        calibrator.load_state_dict(best_state)
+        logger.info(f"Tuning complete. Best val loss: {best_loss:.6f}")
+
+
+#%%
+gc.collect()
+torch.cuda.empty_cache()
+
+#%%
+tune_calibrator(calibrator, train_loader, val_loader, tuned_params=['F_ctrl'])
+
+
 # %%
 # if __name__ == "__main__":
 #     main()
