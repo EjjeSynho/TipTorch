@@ -5,7 +5,7 @@
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from project_settings import MUSE_DATA_FOLDER, device
+from project_settings import device
 
 import torch
 import torch.nn as nn
@@ -35,7 +35,7 @@ predict_phase_bump = True
 #%%
 raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.fits.fz"
 cube_path  = MUSE_DATA_FOLDER / "omega_cluster/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
-cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
+cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
 spectral_cubes, spectral_info, TELEMETRY_CACHE, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]

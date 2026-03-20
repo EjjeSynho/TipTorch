@@ -1,4 +1,7 @@
 #%%
+%reload_ext autoreload
+%autoreload 2
+
 # The data taken from: https://zenodo.org/records/11104046
 import sys
 sys.path.append('..')
@@ -71,7 +74,7 @@ coords = SkyCoord(ra  = df_astro['RA' ].values*u.deg,
 #%%
 # 4) Fast search of everything within the MUSE NFM FoV radius
 radius = (7*np.sqrt(2)/2) * u.arcsec * 2
-#    search_around_sky builds an internal k-d tree and is O(n log n)
+# Search_around_sky builds an internal k-d tree and is O(n log n)
 # idx_center, idx_sources, sep2d, _ = coords.search_around_sky(center_coord, radius)
 
 sep = coords.separation(center_coord) # array of Angle objects
@@ -218,7 +221,7 @@ from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 from project_settings import device
 
 raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.fits.fz"
-cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
+cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
 spectral_cubes, spectral_info, TELEMETRY_CACHE, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]

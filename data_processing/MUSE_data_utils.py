@@ -1638,7 +1638,6 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
             path_cube = cube_path,
             crop = False,
             estimate_IRLOS_phase = False,
-            derotate = False,
             impaint_bad_pixels = False,
             extract_spectrum = False,
             plot_spectrum = False,
