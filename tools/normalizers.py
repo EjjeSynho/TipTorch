@@ -276,7 +276,24 @@ class SoftmaxInv(DataTransform):
             exps = np.exp(shift_x)
             return exps / np.sum(exps, axis=-1, keepdims=True)
 
-        
+
+class SafeLog10(DataTransform):
+    def __init__(self, data=None):
+        self.minValue = 1e-6
+        if data is not None:
+            self.fit(data)
+
+    def fit(self, data):
+        return self
+
+    def forward(self, x):
+        xp = torch if isinstance(x, torch.Tensor) else np
+        return xp.log10(x + self.minValue)
+
+    def inverse(self, y):
+        return 10 ** y - self.minValue
+
+   
 class TransformSequence:
     def __init__(self, transforms: Union[DataTransform, list, None] = None):
         if transforms is None:
@@ -336,6 +353,28 @@ def LoadTransforms(state):
     return TransformSequence(transforms)
 
 
+def LoadTransforms_legacy(state):
+    transforms = []
+    for transform in state: # [name, {param_1: val, param_2: val, ...}, ...]
+        if type(transform) is str:
+            transform = [transform]
+        if   transform[0] == 'YeoJohnson': transforms.append(YeoJohnson(lmbda=transform[1][0]))
+        elif transform[0] == 'BoxCox':     transforms.append(BoxCox(lmbda=transform[1][0]))
+        elif transform[0] == 'Gaussify':   transforms.append(Gaussify())
+        elif transform[0] == 'Uniform':    transforms.append(Uniform(a=transform[1][0], b=transform[1][1]))
+        elif transform[0] == 'Uniform0_1': transforms.append(Uniform0_1(a=transform[1][0], b=transform[1][1]))
+        elif transform[0] == 'Gauss':      transforms.append(Gauss(mu=transform[1][0], std=transform[1][1]))
+        elif transform[0] == 'Invert':     transforms.append(Invert())
+        elif transform[0] == 'Logify':     transforms.append(Logify())
+        elif transform[0] == 'Atanh':      transforms.append(Atanh())
+        elif transform[0] == 'Softmax':    transforms.append(Softmax())
+        elif transform[0] == 'SoftmaxInv': transforms.append(SoftmaxInv())
+        elif transform[0] == 'Identity':   transforms.append(Identity())
+        else:
+            raise ValueError(f"Unknown transform \"{transform[0]}\"!") 
+    return TransformSequence(transforms)
+
+
 def CreateTransformSequence(entry, df, transforms_list, verbose=True):
     data      = df[entry].replace([np.inf, -np.inf], np.nan).dropna().values.astype(np.float64)
     data_init = df[entry].replace([np.inf, -np.inf], np.nan).dropna().values.astype(np.float64)
@@ -361,6 +400,15 @@ def CreateTransformSequenceFromFile(filename):
         df_transforms_stored = pickle.load(handle)
         
     df_transforms = {entry: LoadTransforms(df_transforms_stored[entry]) for entry in df_transforms_stored}
+     
+    return df_transforms
+
+
+def CreateTransformSequenceFromFile_legacy(filename):
+    with open(filename, 'rb') as handle:
+        df_transforms_stored = pickle.load(handle)
+        
+    df_transforms = {entry: LoadTransforms_legacy(df_transforms_stored[entry]) for entry in df_transforms_stored}
      
     return df_transforms
 

@@ -1,18 +1,20 @@
 #%%
 import sys
+
+from astropy.units import d
 sys.path.insert(0, '..')
 
-import numpy as np
+import warnings
 import torch
-from torch import fft, nn
-from torch.nn.functional import interpolate
+import numpy as np
 import scipy.special as spc
-from astropy.io import fits
 import torchvision.transforms as transforms
+from torch import fft, nn
+from torch.nn.functional import interpolate, grid_sample
+from astropy.io import fits
 from tools.utils import pdims, min_2d, to_little_endian
 from tools.air_refraction import AirRefractiveIndexCalculator
 from pathlib import Path
-import warnings
 
 
 class TipTorch(torch.nn.Module): 
@@ -402,8 +404,8 @@ class TipTorch(torch.nn.Module):
         self.InitValues()
 
         if self.is_float: self.to_float()
-        if grids:    self.InitGrids()
-        if pupils:   self.InitPupils()
+        if grids:  self.InitGrids()
+        if pupils: self.InitPupils()
         
         # If the number of sources have changed, reinitialize the tomography projector
         if (self.tomography and tomography) or (self.tomography and grids):
@@ -415,6 +417,7 @@ class TipTorch(torch.nn.Module):
             else:
                 self.OptimalDMProjector(inv_method=self.inversion_method)
                 self.DMProjector()
+
 
     def _initialize_PSDs_settings(self, PSD_include):
         # The full list of all PSD components supported by the model
@@ -499,7 +502,7 @@ class TipTorch(torch.nn.Module):
         
         if    self.norm_regime == 'sum': self.normalizer = torch.sum
         elif  self.norm_regime == 'max': self.normalizer = torch.amax
-        else: self.normalizer = lambda x, dim, keepdim: x # no normalization
+        else: self.normalizer = lambda x, dim, keepdim: self.norm_scale # no normalization
         
         # Default inversion method for tomographic reconstruction
         self.inversion_method = 'lstsq'
@@ -862,8 +865,8 @@ class TipTorch(torch.nn.Module):
                 sigma_sqr_shot = k * torch.pi**2 / WFS_Nph
             
             # Limit unreasonably high variances
-            sigma_sqr_RON  = torch.clamp(sigma_sqr_RON,  max=3.0)
-            sigma_sqr_shot = torch.clamp(sigma_sqr_shot, max=3.0)
+            sigma_sqr_RON  = torch.clamp(sigma_sqr_RON,  max=6.0)
+            sigma_sqr_shot = torch.clamp(sigma_sqr_shot, max=6.0)
             
             # TODO: maybe use soft clamp for better differentiability?
             # sigma_sqr_RON  = 3.0 * torch.tanh(sigma_sqr_RON / 3.0)
@@ -1060,7 +1063,7 @@ class TipTorch(torch.nn.Module):
         ], dim=-1) # Works only for odd num. of pixels
     
 
-    def OTF2PSF(self, OTF): 
+    def OTF2PSF_legacy(self, OTF): 
         PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF, dim=(-2,-1))), dim=(-2,-1)).abs()
         
         PSF = []
@@ -1079,6 +1082,115 @@ class TipTorch(torch.nn.Module):
             else: #TODO: check flux attenuation when cropping
                 PSF_cropped = transform(PSF_big[:,n,...]).unsqueeze(1)
                 PSF.append( PSF_cropped )
+
+        return torch.hstack(PSF)
+    
+    
+    def complex_grid_sample(self, x, grid, mode='bicubic'):
+        """
+        x    : [B, 1, H, W] complex, centered
+        grid : [B, Hout, Wout, 2] in normalized source coordinates
+            last dim = (x, y)
+        """
+        xr = grid_sample(x.real, grid, mode=mode, padding_mode='zeros', align_corners=True)
+        xi = grid_sample(x.imag, grid, mode=mode, padding_mode='zeros', align_corners=True)
+        return torch.complex(xr, xi)
+
+
+    def detector_OTF_grid(self, N):
+        """
+        Centered detector OTF coordinates consistent with fftshift/ifftshift.
+        Returned coordinates are normalized so that they live roughly in [-1, 1).
+        """
+        u = 2.0 * torch.fft.fftshift(torch.fft.fftfreq(N, d=1.0, device=self.device, dtype=self.dtype))
+        V_det, U_det = torch.meshgrid(u, u, indexing='ij')
+        return U_det, V_det
+
+
+    def pixel_MTF_detector_grid(self, U_det, V_det):
+        """
+        Square-pixel detector MTF on the detector OTF grid.
+        torch.sinc(x) = sin(pi x)/(pi x)
+        """
+        mtf = torch.sinc(0.5 * U_det) * torch.sinc(0.5 * V_det)
+        return mtf.unsqueeze(0).unsqueeze(0)  # [1,1,N,N]
+
+
+    def zoom_OTF_complex(self, OTF, scale, out_size, mode='bicubic'):
+        """
+        OTF     : [N_src, 1, H, W] complex, centered, sampled on the source normalized grid
+                used in this codebase (self.U/self.V ~ linspace(-1,1,self.nOtf))
+        scale   : >1 compresses PSF in image space
+        out_size: detector-grid size
+
+        Returns : [N_src, 1, out_size, out_size] complex, centered
+        """
+
+        # Detector OTF coordinates on the OUTPUT Fourier grid
+        U_det, V_det = self.detector_OTF_grid(out_size)
+
+        # Image compression by scale s <=> OTF(u,v) evaluated at (u/s, v/s)
+        # Since the source OTF grid is normalized to [-1,1] in this codebase,
+        # these are directly the grid_sample coordinates when align_corners=True.
+        grid = torch.stack((U_det/scale, V_det/scale), dim=-1)  # [N, N, 2]
+        grid = grid.unsqueeze(0).expand(self.N_src, -1, -1, -1) # [N_src, N, N, 2]
+
+        return self.complex_grid_sample(OTF, grid, mode=mode)
+
+
+    def OTF2PSF(self, OTF):
+        """
+        OTF: [B, Nwvl or 1, H, W] complex, centered
+        Returns detector-sampled PSFs [B, Nwvl, N_pix, N_pix]
+        """
+        out = []
+        eps = torch.finfo(OTF.real.dtype).eps
+
+        for i in range(self.wvl.shape[-1]):
+            n = 0 if OTF.shape[1] == 1 else i
+
+            # effective image-plane compression factor for this wavelength
+            s = float(self.nOtfs[i]) / float(self.N_pix)
+
+            OTF_i = OTF[:, n:n+1, :, :]  # [B,1,H,W], centered
+
+            # 1) resample OTF onto the detector Fourier grid
+            OTF_det = self.zoom_OTF_complex(OTF_i, scale=s, out_size=self.N_pix, mode='bicubic')
+
+            # 2) apply square-pixel MTF on THAT detector grid
+            U_det, V_det = self.detector_OTF_grid(self.N_pix)
+            pix_mtf = self.pixel_MTF_detector_grid(U_det, V_det)
+            OTF_det = OTF_det * pix_mtf
+
+            # 3) preserve DC exactly (helps keep total flux stable after interpolation)
+            dc_src  = OTF_i[..., OTF_i.shape[-2] // 2, OTF_i.shape[-1] // 2].real
+            dc_det  = OTF_det[..., self.N_pix // 2, self.N_pix // 2].real.clamp_min(eps)
+            OTF_det = OTF_det * (dc_src / dc_det).unsqueeze(-1).unsqueeze(-1)
+
+            # 4) detector-sampled PSF
+            PSF_i = torch.fft.fftshift( torch.fft.ifft2( torch.fft.ifftshift(OTF_det, dim=(-2, -1)), dim=(-2, -1) ), dim=(-2, -1) ).real
+
+            # numerical cleanup
+            PSF_i = PSF_i.clamp_min(0.0)
+
+            out.append(PSF_i)
+
+        return torch.cat(out, dim=1)
+
+
+    def OTF2PSF_no_interp(self, OTF):
+        ''' Debug version of OTF2PSF that only center-crops without interpolation '''
+        PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF, dim=(-2,-1))), dim=(-2,-1)).abs()
+        
+        PSF = []
+        for i in range(self.wvl.shape[-1]):
+            transform = transforms.CenterCrop((self.nOtfs[i], self.nOtfs[i]))
+            n = 0 if PSF_big.shape[1] == 1 else i # when there is no chromatic OTF
+            
+            PSF_cropped = transforms.CenterCrop((self.N_pix, self.N_pix))(
+                transform(PSF_big[:,n,...])
+            ).unsqueeze(1)
+            PSF.append(PSF_cropped)
 
         return torch.hstack(PSF)
 
@@ -1112,9 +1224,9 @@ class TipTorch(torch.nn.Module):
         self.OTF_norm = pdims(self.OTF.abs()[..., self.nOtf//2, self.nOtf//2], 2)
         self.OTF = self.OTF / self.OTF_norm
         
-        
         # Computing final PSF
-        PSF_out = self.OTF2PSF(self.OTF)
+        # PSF_out = self.OTF2PSF(self.OTF)
+        PSF_out = self.OTF2PSF_legacy(self.OTF)
         self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)
         
         return (PSF_out / self.norm_scale) * F + bg

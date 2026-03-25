@@ -608,12 +608,16 @@ def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pix
 
     # Rotation function
     def rotate(x, y, angle):
+        if angle == 0: return x, y
         rad_angle = np.deg2rad(angle)
         x_rot = x * np.cos(rad_angle) - y * np.sin(rad_angle)
         y_rot = x * np.sin(rad_angle) + y * np.cos(rad_angle)
         return x_rot, y_rot
 
-    # Rotate coordinates
+    if hasattr(rotation_angle, 'item'):
+        rotation_angle = rotation_angle.item()
+    
+    # Rotate pupil coordinates
     x_rot, y_rot = rotate(x, y, rotation_angle)
 
     # Function to create spider petals

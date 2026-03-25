@@ -197,8 +197,6 @@ noise_variance_P3 = P3_model.ao.wfs.computeNoiseVarianceAtWavelength(
 noise_variance_tiptorch = tiptorch_model.NoiseVariance()[0,0].item() # at atmosphere wavelength by default
 
 print(f"Noise var. - P3: {noise_variance_P3:.4f}, TipTorch: {noise_variance_tiptorch:.4f}, Diff.: {noise_variance_P3 - noise_variance_tiptorch:.4f}")
-# print(np.nanmean(P3_model.Cb.get() / half_to_full_reconstructor(tiptorch_model.C_b) - C).real)
-
 
 #%%
 PSD_noise_P3 = cp.zeros((P3_model.freq.resAO, P3_model.freq.resAO, P3_model.ao.src.nSrc), dtype=complex)
@@ -216,25 +214,12 @@ PSD_noise_P3 = PSD_noise_P3.squeeze().real.get()
 
 #%%
 noise_gain_torch = min(0.8, 0.4 + 0.1333 * tiptorch_model.HOloop_delay.item())**2
-PW_torch = torch.matmul(tiptorch_model.P_beta_DM, tiptorch_model.W)
+PW_torch   = torch.matmul(tiptorch_model.P_beta_DM, tiptorch_model.W)
 PW_t_torch = torch.conj(PW_torch.transpose(-2, -1))
-tmp_torch = torch.matmul(PW_torch, torch.matmul(tiptorch_model.C_b, PW_t_torch))
+tmp_torch  = torch.matmul(PW_torch, torch.matmul(tiptorch_model.C_b, PW_t_torch))
 
 PSD_noise_tiptorch = pdims(tiptorch_model.mask_corrected_AO * tiptorch_model.piston_filter, 2) * tmp_torch * noise_gain_torch
 PSD_noise_tiptorch = half_to_full_reconstructor(PSD_noise_tiptorch).squeeze().real
-
-
-#%%
-
-key = 'WFS noise'
-
-WFS_P3 = P3_PSDs[key]
-WFS_TipTorch = TipTorch_PSDs[key]
-
-rel_diff = WFS_TipTorch / WFS_P3
-
-med_rel_diff = np.nanmedian(rel_diff)
-
 
 #%%
 def display_map(im, title='', cmap='viridis', show_axis=True, fontsize=12, ax=None, vmin=None, vmax=None, scale='log', colorbar=True):
@@ -346,8 +331,8 @@ for key in TipTorch_PSDs.keys():
 # %%
 from photutils.profiles import RadialProfile
 
-# choice = ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'diff. refract', 'chromatism']
-choice = ['fitting', 'WFS noise', 'chromatism']
+choice = ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'diff. refract', 'chromatism']
+# choice = ['fitting', 'WFS noise', 'chromatism']
 
 def plot_PSD_radial_profile(img, title, linestyle='-', color=None):
     xycen = (img.shape[-1]//2, img.shape[-2]//2)
@@ -401,7 +386,6 @@ P_beta_L_P3_data    = np.abs(P_beta_L_P3)   [..., 0, i_layer]
 freq_t_torch_data = np.abs(freq_t_torch)[..., i_layer]
 freq_t_P3_data    = np.abs(freq_t_P3)   [..., i_layer]
 
-# plot_side_by_side(W_tomo_torch_data, W_tomo_P3_data, title='W_tomo')
 plot_difference_map(W_tomo_torch_data, W_tomo_P3_data, title='W_tomo')
 
 # plot_side_by_side(W_alpha_torch_data, W_alpha_P3_data, title='W_alpha')

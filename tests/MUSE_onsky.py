@@ -119,13 +119,13 @@ cmap.set_bad(color='black')
 
 for j in range(N_src):
     for i in range(N_wvl):
-        im = PSF_0[j,i,...].cpu().numpy()
+        im = PSF_1[j,i,...].cpu().numpy()
         vmin = np.percentile(im[im > 0], 10) if np.any(im > 0) else 1
         vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
 
         plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
         plt.axis('off')
-        # plt.show()
+        plt.show()
         
     plt.show()
 

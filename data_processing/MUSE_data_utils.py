@@ -1678,7 +1678,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
 
     # Select sparse wavelength set
     # TODO: a code to select the specified number of spectral slices
-    ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 2)
+    ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
     λ_sparse  =  λ_binned[..., ids_λ_sparse]
     Δλ_binned = Δλ_binned[..., ids_λ_sparse]
     model_config['sources_science']['Wavelength'] = λ_sparse

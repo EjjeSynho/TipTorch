@@ -324,7 +324,7 @@ selected_entries_input = muse_df_norm.columns.values.tolist()
 NN_inp = torch.tensor(df_norm[selected_entries_input].loc[0].to_numpy()).to(device).float().unsqueeze(0)
 
 #%%
-from PSF_models.TipToy_MUSE_multisrc import TipTorch
+from PSF_models.TipTorch import TipTorch
 # from PSF_models.TipTorch import TipTorch
 # from tools.utils import SausageFeature
 

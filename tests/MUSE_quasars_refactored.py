@@ -25,82 +25,11 @@ from pathlib import Path
 
 from tools.utils import mask_circle
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
-from tools.normalizers import CreateTransformSequenceFromFile_legacy
 
-
-#%%
-'''
-import os
-from astropy.io import fits
-from astroquery.eso import Eso
-from astroquery.exceptions import NoResultsWarning
-import warnings
-
-
-def parse_muse_cube_header(cube_path):
-    hdr = fits.getheader(cube_path, ext=0)
-    prog_id   = hdr.get('HIERARCH ESO OBS PROG ID')
-    obs_block = hdr.get('HIERARCH ESO OBS ID')
-    if prog_id is None or obs_block is None:
-        raise KeyError(f"Could not find ESO PROG ID / OBS ID in header of {cube_path}")
-    return prog_id.strip(), obs_block
-
-
-def find_raw_muse_exposures(prog_id, obs_block, eso=None):
-    eso = eso or Eso()
-    # If you haven't yet, authenticate for proprietary data:
-    # eso.login(store_password=True)
-    
-    # (Optional) Inspect what filters and columns the MUSE-form supports:
-    # eso.query_instrument('muse', help=True)
-    
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", NoResultsWarning)
-        raw_table = eso.query_instrument(
-            'muse',
-            column_filters={
-                # These keys must match exactly the HTML form inputs;
-                # if in doubt, run the help=True step above.
-                'prog_id':   prog_id,
-                'obs_id':    obs_block,
-            },
-            # explicitly request the filename & download URL columns
-            columns=['filename', 'productURL']
-        )
-    if raw_table is None or len(raw_table) == 0:
-        raise RuntimeError(f"No raw MUSE exposures found for {prog_id}, {obs_block}")
-    return raw_table
-
-
-def download_raw_files(raw_table, out_dir):
-    os.makedirs(out_dir, exist_ok=True)
-    eso = Eso()
-    paths = []
-    for row in raw_table:
-        fn = row['filename']
-        url= row['productURL']
-        dest = os.path.join(out_dir, fn)
-        if not os.path.exists(dest):
-            print(f"Downloading {fn} …")
-            eso.retrieve_data(url, location=out_dir)
-        else:
-            print(f"Already have {fn}; skipping.")
-        paths.append(dest)
-    return paths
-
-
-def fetch_raw_for_cube(cube_path, out_dir='.'):
-    prog_id, obs_block = parse_muse_cube_header(cube_path)
-    print(f"Programme: {prog_id}, OB: {obs_block}")
-    tbl = find_raw_muse_exposures(prog_id, obs_block)
-    print(f"Found {len(tbl)} raw exposures; downloading …")
-    return download_raw_files(tbl, out_dir)
-'''
 
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
-# data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
-data_folder = MUSE_DATA_FOLDER / 'clumpy_galaxies/' # change to your actual path with the MUSE NFM data
+data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
 
 if not isinstance(data_folder, Path):
     data_folder = Path(data_folder)
@@ -109,13 +38,9 @@ if not isinstance(data_folder, Path):
 # cube_path  = data_folder / "J0259/J0259-0901_all.fits"
 # cache_path = data_folder / "J0259/J0259-0901_all.pickle"
 
-# cube_path  = data_folder / "J0144/J0144-5745.fits"
-# cache_path = data_folder / "J0144/J0144-5745_cache.pickle"
-# raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
-
-cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
-raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
-cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
+cube_path  = data_folder / "J0144/J0144-5745.fits"
+cache_path = data_folder / "J0144/J0144-5745_cache.pickle"
+raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
 
 #%
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
@@ -133,18 +58,17 @@ N_wvl = cube_sparse.shape[0] # dims are [N_wvls, H, W]
 flux_λ_norm = torch.tensor(Δλ_full / Δλ_binned, device=device, dtype=torch.float32)
 cube_sparse *= flux_λ_norm[:, None, None]
 
-model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0, 1e4]], device=device)
-model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=device)
-model_config['atmosphere']['WindDirection'] = model_config['atmosphere']['WindDirection'][0,:2]
-model_config['atmosphere']['WindSpeed']     = model_config['atmosphere']['WindSpeed'][0,:2]
+# model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0, 1e4]], device=device)
+# model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=device)
+# model_config['atmosphere']['WindDirection'] = model_config['atmosphere']['WindDirection'][0,:2]
+# model_config['atmosphere']['WindSpeed']     = model_config['atmosphere']['WindSpeed'][0,:2]
 
 #%%
 from tools.multisources import add_ROIs, DetectSources, ExtractSources
 
 PSF_size = 111  # Define the size of each extracted PSF
 
-# sources = DetectSources(cube_sparse, threshold='auto', nsigma=10, display=True, draw_win_size=20)
-sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_win_size=20)
+sources = DetectSources(cube_sparse, threshold='auto', nsigma=10, display=True, draw_win_size=20)
 # Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
 srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
@@ -183,166 +107,49 @@ plt.grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-#%%
-from tools.utils import PupilVLT
-from PSF_models.TipTorch import TipTorch
-
-LO_map_size = 31
-
-# Initialize the PSF model
-pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device, dtype=default_torch_type)
-PSD_include = {
-    'fitting':         True,
-    'WFS noise':       True,
-    'spatio-temporal': True,
-    'aliasing':        False,
-    'chromatism':      True,
-    'diff. refract':   True,
-    'Moffat':          False
-}
-model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1, dtype=default_torch_type)
-model.to_float()
-model.to(device)
-
-_ = model()
 
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
-from tools.normalizers import Uniform, SoftmaxInv, Identity
-from managers.input_manager import InputsManager, InputsManagersUnion
+from PSF_models.NFM_wrapper import PSFModelNFM
 
-df_transforms_fitted = CreateTransformSequenceFromFile_legacy(PROJECT_PATH / 'data/reduced_telemetry/MUSE/legacy/muse_df_fitted_transforms.pickle')
-
-shared_inputs = InputsManager()
-
-shared_inputs.add('r0',    torch.tensor([model.r0[0].item()]), df_transforms_fitted['r0'])
-shared_inputs.add('F',     torch.tensor([[1.0,]*N_wvl]), df_transforms_fitted['F'])
-shared_inputs.add('bg',    torch.tensor([[0,]*N_wvl]),   df_transforms_fitted['bg'])
-shared_inputs.add('dn',    torch.tensor([1.5]),          df_transforms_fitted['dn'])
-shared_inputs.add('Jx',    torch.tensor([[10,]*N_wvl]),  df_transforms_fitted['Jx'])
-shared_inputs.add('Jy',    torch.tensor([[10,]*N_wvl]),  df_transforms_fitted['Jy'])
-shared_inputs.add('Jxy',   torch.tensor([[0]]), df_transforms_fitted['Jxy'])
-shared_inputs.add('amp',   torch.tensor([0.0]), df_transforms_fitted['amp'])
-shared_inputs.add('b',     torch.tensor([0.0]), df_transforms_fitted['b'])
-shared_inputs.add('alpha', torch.tensor([4.5]), df_transforms_fitted['alpha'])
-shared_inputs.add('beta',  torch.tensor([2.5]), df_transforms_fitted['beta'])
-shared_inputs.add('ratio', torch.tensor([1.0]), df_transforms_fitted['ratio'])
-shared_inputs.add('theta', torch.tensor([0.0]), df_transforms_fitted['theta']) 
-shared_inputs.add('s_pow', torch.tensor([0.0]), df_transforms_fitted['s_pow'])
-# shared_inputs.add('Cn2_weights', model.Cn2_weights.cpu().detach().clone(), SoftmaxInv())
-
-if LO_map_size is not None:
-    shared_inputs.add('LO_coefs', torch.zeros([1, LO_map_size**2]), Uniform(a=-100, b=100))
-    shared_inputs.set_optimizable('LO_coefs', False)
-
-shared_inputs.set_optimizable(['ratio', 'theta', 'alpha', 'beta', 'amp', 'b'], False)
-shared_inputs.set_optimizable(['Jxy'], False)
-
-shared_inputs.to_float()
-shared_inputs.to(device)
-
-print(shared_inputs)
-
-
-individual_inputs = InputsManager()
-
-individual_inputs.add('dx', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dx'])
-individual_inputs.add('dy', torch.tensor([[0.0,]]*N_src),     df_transforms_fitted['dy'])
-individual_inputs.add('F_norm', torch.tensor([[1.0,]]*N_src), df_transforms_fitted['F'])
-
-individual_inputs.to_float()
-individual_inputs.to(device)
-
-individual_inputs.set_optimizable(['F_norm'], False)
-
-print(individual_inputs)
-
-
-#%%
-from machine_learning.calibrator import Calibrator, Gnosis
-from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe, normalize_df
-import pickle
-
-'''
-def GetReducedTelemetryInputs(cached_data):
-    with open(PROJECT_PATH / 'data/reduced_telemetry/MUSE/legacy/muse_df_norm_imputed.pickle', 'rb') as handle:
-        muse_df_norm = pickle.load(handle)
-
-    df = cached_data['All data']
-    df['ID'] = 0
-    df.loc[0, 'Pupil angle'] = 0.0
-
-    df_pruned  = filter_dataframe(df.copy())
-    df_reduced = reduce_dataframe(df_pruned.copy())
-    df_transforms = CreateTransformSequenceFromFile_legacy(PROJECT_PATH / 'data/reduced_telemetry/MUSE/legacy/muse_df_norm_transforms.pickle')
-    df_norm = normalize_df(df_reduced, df_transforms)
-    df_norm = df_norm.fillna(0)
-
-    selected_entries_input = muse_df_norm.columns.values.tolist()
-    return df_norm[selected_entries_input].loc[0]
-
-
-telemetry_inputs = GetReducedTelemetryInputs(data_cache)
-
-
-calibrator = Calibrator(
-    inputs_manager=shared_inputs,
-    predicted_values = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow', 'amp', 'b', 'alpha'],
-    device=device,
-    dtype=default_torch_type,
-    calibrator_network = {
-        'artichitecture': Gnosis,
-        'inputs_size': len(telemetry_inputs),
-        'NN_kwargs': {
-            'hidden_size': 200,
-            'dropout_p': 0.1
-        },
-        'weights_folder': PROJECT_PATH / 'data/weights/MUSE_calibrator.dict'
-    }
+model = PSFModelNFM(
+    model_config,
+    multiple_obs    = False,
+    LO_NCPAs        = True,
+    chrom_defocus   = False,
+    use_splines     = True,
+    Moffat_absorber = False, 
+    Z_mode_max      = 9,
+    device          = device
 )
-calibrator.eval()
-
-predicted_model_inputs = calibrator(telemetry_inputs)
-shared_inputs.update(predicted_model_inputs) # update the internal values of the inputs_manager class
-'''
-
-predicted_model_inputs = shared_inputs.to_dict()
 
 #%%
-def compute_flux_normalization_factor(x_dict, PSF_size, flux_core_radius):
-    with torch.no_grad():
-        # Quasi-infinite PSF image to compute how much flux is lost while cropping
-        model_config['sensor_science']['FieldOfView'] = 511
-        model.Update(config=model_config, grids=True, pupils=True, tomography=True)
-        PSF_pred_big = model(x_dict).clone() # First initial prediction of the "big" PSF
+with torch.no_grad():
+    # Quasi-infinite PSF image to compute how much flux is lost while cropping
+    model_config['sensor_science']['FieldOfView'] = 511
+    model.model.Update(config=model_config, grids=True, pupils=True, tomography=True)
+    PSF_pred_big = model().clone() # First initial prediction of the "big" PSF
 
-        # The actual size of the simulated PSFs
-        model_config['sensor_science']['FieldOfView'] = PSF_size
-        model.Update(config=model_config, grids=True, pupils=True, tomography=True)
-        PSF_pred_small = model(x_dict)
+    # The actual size of the simulated PSFs
+    model_config['sensor_science']['FieldOfView'] = PSF_size
+    model.model.Update(config=model_config, grids=True, pupils=True, tomography=True)
+    PSF_pred_small = model()
 
-        torch.cuda.empty_cache()
+#%% Compute spectral flux normalization factor
+from tools.normalizers import Uniform
 
-        # Compute spectral flux normalization factor
-        # How much flux is cropped by assuming the finite size of the PSF box. Since PSFs are normalized to sum of 1 per wavelength,
-        # the crop ratio is given by the ratio of the max pixel values in the small and quasi-infinite PSF images
-        crop_ratio = (PSF_pred_big.amax(dim=(-2,-1)) / PSF_pred_small.amax(dim=(-2,-1))).squeeze()
+# How much flux is cropped by assuming the finite size of the PSF box (PSF_pred_big is assumed to be quasi-infinite)
+crop_ratio = (PSF_pred_big.amax(dim=(-2,-1)) / PSF_pred_small.amax(dim=(-2,-1))).squeeze()
 
-        core_mask     = torch.tensor(mask_circle(PSF_size, flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
-        core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+core_mask     = torch.tensor(mask_circle(PSF_size, flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
 
-        # How much flux is spread out of the PSF core because PSF is not a single pixel but rather "a blob"
-        core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
+# How much flux is spread out of the PSF core because PSF is not a single pixel but rather "a blob"
+core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
+# PSF_norm_factor = N_core_pixels / flux_λ_norm / core_flux_ratio / crop_ratio
+PSF_norm_factor = N_core_pixels / core_flux_ratio / crop_ratio
 
-        PSF_norm_factor = N_core_pixels / core_flux_ratio / crop_ratio
-
-    return PSF_pred_big, PSF_pred_small, PSF_norm_factor.float(), crop_ratio.float(), core_flux_ratio.float(), core_mask.float()
-
-
-PSF_pred_big, PSF_pred_small, PSF_norm_factor, crop_ratio, core_flux_ratio, core_mask = compute_flux_normalization_factor(predicted_model_inputs, PSF_size, flux_core_radius)
-
-# norm_transform = Uniform(PSF_norm_factor.min().int().item(), PSF_norm_factor.max().int().item())
-shared_inputs.add('PSF_norm_factor', PSF_norm_factor.to(device), Identity(), False)
-
+norm_transform = Uniform(PSF_norm_factor.min().int().item(),  PSF_norm_factor.max().int().item())
+shared_inputs.add('PSF_norm_factor', PSF_norm_factor.float().to(device), norm_transform, False)
 
 #%% Fine tunes sources astrometry but don't touch the PSF model parameters
 def func_dxdy(x_):
@@ -380,7 +187,7 @@ PSFs_fitted = torch.stack(PSFs_fitted, dim=0)
 
 
 #%% Initial guess, will be inaccurate
-from tools.multisources import VisualizeSources, PlotSourcesProfiles, ROI_from_valid_mask
+from tools.multisources import VisualizeSources, PlotSourcesProfiles
 
 model_sparse = add_ROIs(
     torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device), # blanck baase image
@@ -389,9 +196,7 @@ model_sparse = add_ROIs(
     srcs_image_data["img_slices"]
 )
 
-# ROI_plot = np.s_[..., 125:225, 125:225]
-ROI_plot = ROI_from_valid_mask(valid_mask)["slice"]
-
+ROI_plot = np.s_[..., 125:225, 125:225]
 norm_field = LogNorm(vmin=1, vmax=cube_sparse.sum(dim=0).max()) # again, rather empirical values
 
 VisualizeSources(cube_sparse, model_sparse, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
@@ -432,19 +237,11 @@ empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]],
 wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) + 1 #TODO: fix it
 # wvl_weights = wvl_weights * 0 + 1
 
-def x_unstack(x):
-    params_dict = shared_inputs.unstack(x[:x_size].unsqueeze(0), update=True)
-    F_dxdy_dict = individual_inputs.unstack(x[x_size:].view(N_src, -1), update=True)
-    return params_dict, F_dxdy_dict
-
-
 def func_fit(x): # TODO: relative weights for different brigtness
     PSFs_fit = []
     for i in range(N_src):
-        # params_dict = shared_inputs.unstack(x[:x_size].unsqueeze(0), update=True)
-        # F_dxdy_dict = individual_inputs.unstack(x[x_size:].view(N_src, -1), update=True)
-
-        params_dict, F_dxdy_dict = x_unstack(x)
+        params_dict = shared_inputs.unstack(x[:x_size].unsqueeze(0))
+        F_dxdy_dict = individual_inputs.unstack(x[x_size:].view(N_src, -1))
 
         phase_func = lambda: LO_basis(shared_inputs["LO_coefs"].view(1, LO_map_size, LO_map_size))
 
@@ -472,76 +269,31 @@ def func_fit(x): # TODO: relative weights for different brigtness
 #     J_ratio_penalty = (1.0 - shared_inputs['Jx']/shared_inputs['Jy']).abs().mean()
     
 #     # Combine the loss terms
-#     return l1*1.5 + l2*0.25 + negative_residual_penalty*3 + J_ratio_penalty*0.25
+#     return l1*1.5 + l2*0.25 + negative_residual_penalty*3 * J_ratio_penalty*0.25
 
 
 def loss_PSF(PSF_data, PSF_model, w_MSE, w_MAE):
     diff = (PSF_model-PSF_data) * wvl_weights
     # w = 2e4 # Empirical weight to balance the loss magnitude with the regularization terms
-    w = 0.001
+    w = 0.01
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean()  * w_MAE
 
-    J_ratio_penalty = (2.0 - shared_inputs['Jx']/shared_inputs['Jy'] - shared_inputs['Jy']/shared_inputs['Jx']).abs().mean()
-
-    F_penalty = (shared_inputs['F'] - 1.0).abs().mean()
-
-    return w * (MSE_loss + MAE_loss) + J_ratio_penalty * 0.35 + F_penalty * 0.1
-
+    return w * (MSE_loss + MAE_loss)
 
 def loss(x_, data, func):
     model = func(x_)
     return loss_PSF(data, model, w_MSE=900.0, w_MAE=1.6)
 
-#%%
 _ = func_fit(x0)
 
-result_global = minimize(lambda x: loss(x, cube_sparse, func_fit), x0, max_iter=500, tol=1e-3, method='bfgs', disp=2)
+result_global = minimize(lambda x: loss(x, cube_sparse, func_fit), x0, max_iter=300, tol=1e-3, method='bfgs', disp=2)
 x0 = result_global.x.clone()
-
-# _ = x_unstack(x0)
-
-# F_mean = shared_inputs['F'].mean()
-# shared_inputs['F'] = shared_inputs['F'] / F_mean
-# individual_inputs['F_norm'] = individual_inputs['F_norm'] * F_mean
-# x0 = torch.cat([ shared_inputs.stack().flatten(), individual_inputs.stack().flatten() ])
-# inputs_after_fit = x_unstack(x0)
-
-#%%
-# print('--- Before fitting ---')
-# PSF_norm_factor_2, crop_ratio_2, core_flux_ratio_2, _ = compute_flux_normalization_factor(predicted_model_inputs, PSF_size, flux_core_radius)
-# print(np.round(PSF_norm_factor_2.cpu().numpy(), 3).tolist())
-# print(np.round(crop_ratio_2.cpu().numpy(), 3).tolist())
-# print(np.round(core_flux_ratio_2.cpu().numpy(), 3).tolist())
-
-#%%
-print('--- After fitting ---')
-
-PSF_pred_big, PSF_pred_small, PSF_norm_factor_1, crop_ratio_1, core_flux_ratio_1, _ = compute_flux_normalization_factor(inputs_after_fit, PSF_size, flux_core_radius)
-core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
-
-c_psd = PSF_pred_big.shape[-1]   // 2
-w_psd = PSF_pred_small.shape[-1] // 2
-
-PSD_big_cropped = PSF_pred_big[..., c_psd-w_psd:c_psd+w_psd+1, c_psd-w_psd:c_psd+w_psd+1]
-core_mask_big_cropped = core_mask_big[..., c_psd-w_psd:c_psd+w_psd+1, c_psd-w_psd:c_psd+w_psd+1]
-
-# PSD_big_cropped = PSF_pred_big
-# core_mask_big_cropped = core_mask_big
-
-plt.imshow((PSD_big_cropped*core_mask_big_cropped).mean(dim=(0,1)).abs().log().cpu().numpy(), origin='lower')
-
-print((PSD_big_cropped*core_mask_big_cropped).sum(dim=(-2,-1)).cpu().numpy() / PSD_big_cropped.sum(dim=(-2,-1)).cpu().numpy())
-
-# shared_inputs['PSF_norm_factor'] = PSF_norm_factor_1.to(device)
-# print(np.round(PSF_norm_factor_1.cpu().numpy(), 3).tolist())
-# print(np.round(crop_ratio_1.cpu().numpy(), 3).tolist())
-# print(np.round(core_flux_ratio_1.cpu().numpy(), 3).tolist())
-
+x_fit_dict = shared_inputs.unstack(x0.unsqueeze(0), include_all=False)
 
 #%%
 with torch.no_grad():
-    model_fit = func_fit(x0).detach()
+    model_fit = func_fit(result_global.x).detach()
 
 VisualizeSources(cube_sparse, model_fit, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(cube_sparse, model_fit, sources, radius=16, title='Fitted PSFs')
@@ -891,12 +643,12 @@ diff_rgb = plot_wavelength_rgb_log(
     min_val=500, max_val=60000, show=False
 )
 
-# for info in targets_diff_info:
-#     # Note, that boxes position is shifted according to plotting ROI
-#     aperture = RectangularAperture([info['coords'][0]-ROI_plot[1].start, info['coords'][1]-ROI_plot[2].start], info['radius']*2+1, info['radius']*2+1, theta=0)
-#     aperture.plot(color=info['color'], lw=1, label=info['name'])
-# plt.legend()
-# plt.show()
+for info in targets_diff_info:
+    # Note, that boxes position is shifted according to plotting ROI
+    aperture = RectangularAperture([info['coords'][0]-ROI_plot[1].start, info['coords'][1]-ROI_plot[2].start], info['radius']*2+1, info['radius']*2+1, theta=0)
+    aperture.plot(color=info['color'], lw=1, label=info['name'])
+plt.legend()
+plt.show()
 
 diff_rgb = plot_wavelength_rgb_log(
     cube_full[ROI_plot],

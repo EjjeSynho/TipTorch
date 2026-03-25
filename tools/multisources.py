@@ -1,8 +1,8 @@
-import numpy as np
 import torch
+import numpy as np
+import pandas as pd
 from typing import Union
 from sklearn.cluster import DBSCAN
-import pandas as pd
 from matplotlib import pyplot as plt
 from astropy.visualization import simple_norm
 from astropy.visualization import LinearStretch, ImageNormalize
@@ -10,8 +10,8 @@ from astropy.stats import sigma_clipped_stats
 from photutils.detection import find_peaks
 from photutils.aperture import RectangularAperture
 from matplotlib.colors import LogNorm
-from traitlets import Instance
 from tools.plotting import plot_radial_PSF_profiles
+from scipy import ndimage
 
 
 """
@@ -119,9 +119,10 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
 
 def DetectSources(data_cube, threshold, nsigma=3.0, display=False, draw_win_size=None, sort=True):
 
-    data_src = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_src.sum(axis=0)
+    data_src = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_cube.sum(axis=0)
+    data_src = np.nan_to_num(data_src)
     
-    _, median, std = sigma_clipped_stats(np.nan_to_num(data_src), sigma=nsigma)
+    _, median, std = sigma_clipped_stats(data_src[data_src > 0], sigma=nsigma)
     
     if threshold is None or threshold == 'auto':
         threshold = median + nsigma * std
@@ -319,8 +320,8 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
         if show: plt.show()
 
     return diff_vis
-    
-    
+
+
 def PlotSourcesProfiles(data, model, sources, radius, title=''):
 
     ROIs_0, _, _, _ = extract_ROIs(data,  sources, box_size=np.round(radius*2+4).astype('int'))
@@ -350,3 +351,135 @@ def select_sources(src_dict: dict, selected_ids: Union[list, int]) -> dict:
         else:
             result_dict[key] = tensor
     return result_dict
+
+
+def ROI_from_valid_mask(
+    mask,
+    *,
+    fill_holes=True,
+    close_radius=1,
+    occupancy_threshold=0.999,
+    center=None,
+    return_clean_mask=True,
+):
+    """
+    Find the largest axis-aligned square grown from a given center inside a binary mask.
+
+    Parameters
+    ----------
+    mask : np.ndarray or torch.Tensor
+        2D binary/grayscale mask. Nonzero = inside.
+    fill_holes : bool
+        Fill internal black holes in the white region.
+    close_radius : int
+        Radius of morphological closing to suppress tiny black defects/cracks.
+        Set to 0 to disable.
+    occupancy_threshold : float
+        Fraction of white pixels required inside the candidate square.
+        1.0 means strict containment.
+        Slightly below 1 tolerates a few bad black pixels.
+    center : tuple[float, float] or None
+        (cx, cy) in pixel coordinates. If None, uses mask centroid.
+    return_clean_mask : bool
+        Whether to include the cleaned mask in the output.
+
+    Returns
+    -------
+    out : dict
+        {
+            "center": (cx, cy),
+            "half_size": ...,
+            "side_pixels": ...,
+            "bbox": (x0, y0, x1, y1),   # x1,y1 exclusive
+            "corners": array of shape (4, 2),
+            "slice": np.s_[..., y0:y1, x0:x1],
+            "mask_clean": ...           # only if return_clean_mask=True
+        }
+    """
+    # Torch-safe conversion without importing torch
+    if hasattr(mask, "detach") and hasattr(mask, "cpu"):
+        mask = mask.detach().cpu().numpy()
+
+    mask = np.squeeze(np.asarray(mask))
+    
+    if mask.ndim != 2:
+        raise ValueError(f"`mask` must be 2D, got shape {mask.shape}")
+
+    # --- clean mask ---
+    mask_clean = mask > 0
+
+    if fill_holes:
+        mask_clean = ndimage.binary_fill_holes(mask_clean)
+
+    if close_radius > 0:
+        y, x = np.ogrid[-close_radius:close_radius+1, -close_radius:close_radius+1]
+        selem = (x * x + y * y) <= close_radius * close_radius
+        mask_clean = ndimage.binary_closing(mask_clean, structure=selem)
+
+    H, W = mask_clean.shape
+
+    # --- choose center ---
+    if center is None:
+        ys, xs = np.nonzero(mask_clean)
+        if len(xs) == 0:
+            raise ValueError("Empty mask after cleaning.")
+        cx, cy = xs.mean(), ys.mean()
+    else:
+        cx, cy = center
+
+    # --- integral image ---
+    ii = np.pad(mask_clean.astype(np.uint8), ((1, 0), (1, 0)), mode="constant")
+    ii = ii.cumsum(axis=0).cumsum(axis=1)
+
+    def rect_sum(x0, y0, x1, y1):
+        return ii[y1, x1] - ii[y0, x1] - ii[y1, x0] + ii[y0, x0]
+
+    def fits(half_size):
+        x0 = int(np.ceil(cx - half_size))
+        x1 = int(np.floor(cx + half_size)) + 1
+        y0 = int(np.ceil(cy - half_size))
+        y1 = int(np.floor(cy + half_size)) + 1
+
+        if x0 < 0 or y0 < 0 or x1 > W or y1 > H:
+            return False
+
+        area = (x1 - x0) * (y1 - y0)
+        inside = rect_sum(x0, y0, x1, y1)
+        return inside >= occupancy_threshold * area
+
+    # --- binary search for largest square ---
+    lo, hi = 0.0, min(H, W) / 2.0
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if fits(mid):
+            lo = mid
+        else:
+            hi = mid
+
+    half_size = lo
+    x0 = int(np.ceil(cx - half_size))
+    x1 = int(np.floor(cx + half_size)) + 1
+    y0 = int(np.ceil(cy - half_size))
+    y1 = int(np.floor(cy + half_size)) + 1
+
+    bbox = (x0, y0, x1, y1)
+    corners = np.array([
+        [x0,     y0],
+        [x1 - 1, y0],
+        [x1 - 1, y1 - 1],
+        [x0,     y1 - 1],
+    ], dtype=int)
+
+    out = {
+        "center": (cx, cy),
+        "half_size": half_size,
+        "side_pixels": min(x1 - x0, y1 - y0),
+        "bbox": bbox,
+        "corners": corners,
+        "slice": np.s_[..., y0:y1, x0:x1],
+    }
+
+    if return_clean_mask:
+        out["mask_clean"] = mask_clean
+
+    return out

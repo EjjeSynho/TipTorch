@@ -17,7 +17,7 @@ from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis, MUSE
 from tools.utils import PupilVLT
 from managers.config_manager import MultipleTargetsInDifferentObservations
 from managers.input_manager  import InputsManager, InputsManagersUnion
-from tools.normalizers import Uniform, Uniform0_1, SoftmaxInv, Identity
+from tools.normalizers import Uniform, Uniform0_1, SoftmaxInv, Identity, SafeLog10
 
 from warnings import warn
 from project_settings import device
@@ -203,7 +203,7 @@ class PSFModelNFM:
     def _init_model(self, config):
         pupil_angle = config['telescope']['PupilAngle']
         
-        if hasattr(pupil_angle, '__len__'):
+        if hasattr(pupil_angle, '__len__') and pupil_angle.ndim > 0:
             if len(pupil_angle) > 1:
                 if not torch.allclose(pupil_angle, pupil_angle[0]):
                     warn('Different pupil angles for different observations are not supported yet.')
@@ -258,8 +258,8 @@ class PSFModelNFM:
                 # is_shared flag is ignored in this configuration since all inputs are per-source
                 self.inputs_manager.add(name, values, norm, optimizable=optimizable)   
         else:
-            # Meanwhile, this configuration assumes that most of the inputs are shared between different
-            # sources since they are all observed simultaneosuly
+            # Meanwhile, this configuration assumes that most of the model inputs are shared between different sources 
+            # since they are all share the same atmospheric conditions, and only a few of them are source-specific (e.g. astrometry and photometry corrections)
             self.inputs_manager = InputsManagersUnion({
                 'shared':  InputsManager(),
                 'per_src': InputsManager()
@@ -267,9 +267,9 @@ class PSFModelNFM:
          
             def add_input(name, values, norm, optimizable=True, is_shared=False):
                 if is_shared:
-                    self.inputs_manager.managers['shared'].add(name, values, norm, optimizable=optimizable)
+                    self.inputs_manager.input_managers['shared'].add(name, values, norm, optimizable=optimizable)
                 else:
-                    self.inputs_manager.managers['per_src'].add(name, values, norm, optimizable=optimizable)
+                    self.inputs_manager.input_managers['per_src'].add(name, values, norm, optimizable=optimizable)
 
         N_wvl = len(self.wavelengths)
         N_src = self.model.N_src # number of simulated sources
@@ -278,15 +278,16 @@ class PSFModelNFM:
         assert N_obs == 1 or self.multiple_obs, "Multiple observations >1 is only supported when multiple_obs=True"
 
         # Initialize normalizing transforms
-        # The values are chosen in such a way so that on average, normalized parameters values
-        # are distributed as Gauss(mu=0, std=1) 
+        # On average, normalized parameters values are distributed between -1 and 1
+        # Helps with the convergence by avoiding extreme parameter values at initialization while still allowing a wide exploration range
+        # Normalization is ONLY applied when parameters are stacked in the single vector for the sake of optimization or NN training
         norm_F           = Uniform(a=0.0,   b=1.0)
         norm_bg          = Uniform(a=-5e-6, b=5e-6)
         norm_r0          = Uniform(a=0.08,  b=0.15)
         norm_L0          = Uniform(a=6,     b=34)
         norm_dxy         = Uniform(a=-1,    b=1)
         norm_J           = Uniform(a=0,     b=30)
-        norm_Jxy         = Uniform(a=-180,  b=180)
+        # norm_Jxy         = Uniform(a=-180,  b=180)
         norm_dn          = Uniform(a=0,     b=5)
         norm_amp         = Uniform(a=0,     b=10)
         norm_b           = Uniform(a=0,     b=0.1)
@@ -295,9 +296,12 @@ class PSFModelNFM:
         norm_ratio       = Uniform(a=0,     b=2)
         norm_theta       = Uniform(a=-np.pi/2, b=np.pi/2)
         norm_wind_speed  = Uniform(a=0, b=20)
+        norm_flux_crop   = Uniform(a=0.5, b=1.0)
         norm_LO          = Uniform(a=-20, b=50)
         norm_src_coords  = Uniform(None, -1.8e-5, 1.8e-5)
         norm_Cn2_profile = SoftmaxInv()
+        norm_F_norm      = SafeLog10()
+        
                 
         # Add main PSF model parameters
         if self.use_splines:
@@ -332,22 +336,22 @@ class PSFModelNFM:
         add_input('Cn2_weights', self.model.Cn2_weights.detach().clone(), norm_Cn2_profile, optimizable=False, is_shared=True)
         
         # Auxiliary parameter to account for flux cropping due to finite PSF image size (computed on demand)
-        add_input('flux_crop_ctrl', torch.tensor([[1.0,]*self.N_wvl_ctrl]*N_src), optimizable=False, is_shared=False)
+        add_input('flux_crop_ctrl', torch.tensor([[1.0,]*self.N_wvl_ctrl]*N_src), norm=norm_flux_crop, optimizable=False, is_shared=False)
         
         # Overall per-source flux scaling factor
-        add_input('F_norm', torch.tensor([[1.0,]]*N_src), optimizable=(not self.multiple_obs), is_shared=False)
+        add_input('F_norm', torch.tensor([[1.0,]]*N_src), norm=norm_F_norm, optimizable=(not self.multiple_obs), is_shared=False)
         # Sources direction within the field of view
         add_input('src_dirs_x', self.model.src_dirs_x.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
         add_input('src_dirs_y', self.model.src_dirs_y.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
 
         # Add Moffat PSD absorber's parameters
         if self.Moffat_absorber:
-            add_input('amp',   torch.tensor([1e-4]*N_obs), norm_amp, is_shared=True)
-            add_input('b',     torch.tensor([0.0]*N_obs), norm_b, is_shared=True)
-            add_input('alpha', torch.tensor([2.0]*N_obs), norm_alpha, is_shared=True)
-            add_input('beta',  torch.tensor([2.5]*N_obs), norm_beta, is_shared=True)
-            add_input('ratio', torch.tensor([1.0]*N_obs), norm_ratio, is_shared=True)
-            add_input('theta', torch.tensor([0.0]*N_obs), norm_theta, is_shared=True)
+            add_input('amp',   torch.tensor([1e-4]*N_obs), norm_amp,   is_shared=True)
+            add_input('b',     torch.tensor([0.0]*N_obs),  norm_b,     is_shared=True)
+            add_input('alpha', torch.tensor([2.0]*N_obs),  norm_alpha, is_shared=True)
+            add_input('beta',  torch.tensor([2.5]*N_obs),  norm_beta,  is_shared=True)
+            add_input('ratio', torch.tensor([1.0]*N_obs),  norm_ratio, is_shared=True)
+            add_input('theta', torch.tensor([0.0]*N_obs),  norm_theta, is_shared=True)
 
         if self.LO_NCPAs:
             if isinstance(self.LO_basis, PixelmapBasis):
@@ -390,7 +394,7 @@ class PSFModelNFM:
         if self.multiple_obs:
             self.per_src_inputs_list = [p for p in self.inputs_manager.parameters]
         else:
-            self.per_src_inputs_list = [p for p in self.inputs_manager.managers['per_src'].parameters]
+            self.per_src_inputs_list = [p for p in self.inputs_manager.input_managers['per_src'].parameters]
 
 
     def reset_parameters(self):
@@ -412,7 +416,7 @@ class PSFModelNFM:
     
         if src_ids is not None:
             if self.multiple_obs:
-                raise warn("Source selection is not implemented yet for multiple observations case. All sources will be simulated.")
+                raise warn("Source selection is not implemented yet for multiple observations case. All sources will be simulated.") #TODO: why isn't it possible?
             else:
                 for key in self.per_src_inputs_list:
                     x_dict[key] = x_dict[key][src_ids, :]

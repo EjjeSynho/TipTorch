@@ -34,8 +34,6 @@ class ParameterParser():
 
 
     def __init__(self, path_ini):
-        # if not isinstance(path_ini, str):
-        #     raise TypeError("The input must be a string representing a file path")
         
         self.params = None
 
