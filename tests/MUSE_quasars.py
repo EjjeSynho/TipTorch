@@ -236,6 +236,7 @@ if LO_map_size is not None:
 
 shared_inputs.set_optimizable(['ratio', 'theta', 'alpha', 'beta', 'amp', 'b'], False)
 shared_inputs.set_optimizable(['Jxy'], False)
+shared_inputs.set_optimizable(['bg'], False)
 
 shared_inputs.to_float()
 shared_inputs.to(device)
@@ -452,7 +453,7 @@ def func_fit(x): # TODO: relative weights for different brigtness
         F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).unsqueeze(0) # assuming the same shift for all wavelengths
 
         inputs = params_dict | F_dxdy_dict
-        flux_norm = (src_spectra_sparse[i] * PSF_norm_factor)[:,None,None] * F_dxdy_dict['F_norm'][i]
+        flux_norm = (src_spectra_sparse[i] * shared_inputs['PSF_norm_factor'])[:,None,None] * F_dxdy_dict['F_norm'][i]
 
         PSFs_fit.append( model(inputs, phase_generator=phase_func).squeeze() * flux_norm )
         
@@ -505,43 +506,82 @@ x0 = result_global.x.clone()
 # shared_inputs['F'] = shared_inputs['F'] / F_mean
 # individual_inputs['F_norm'] = individual_inputs['F_norm'] * F_mean
 # x0 = torch.cat([ shared_inputs.stack().flatten(), individual_inputs.stack().flatten() ])
-# inputs_after_fit = x_unstack(x0)
+inputs_after_fit = x_unstack(x0)[0] | x_unstack(x0)[1]
+
+from copy import deepcopy
+inputs_after_fit_backup = deepcopy(inputs_after_fit) # Just in case we want to revert the changes and try a different fitting strategy
 
 #%%
-# print('--- Before fitting ---')
-# PSF_norm_factor_2, crop_ratio_2, core_flux_ratio_2, _ = compute_flux_normalization_factor(predicted_model_inputs, PSF_size, flux_core_radius)
-# print(np.round(PSF_norm_factor_2.cpu().numpy(), 3).tolist())
+print('--- Before fitting ---')
+PSF_pred_big, PSF_pred_small, PSF_norm_factor_2, crop_ratio_2, core_flux_ratio_2, _ = compute_flux_normalization_factor(predicted_model_inputs, PSF_size, flux_core_radius)
+print(np.round(PSF_norm_factor_2.cpu().numpy(), 3).tolist())
 # print(np.round(crop_ratio_2.cpu().numpy(), 3).tolist())
 # print(np.round(core_flux_ratio_2.cpu().numpy(), 3).tolist())
 
 #%%
 print('--- After fitting ---')
-
 PSF_pred_big, PSF_pred_small, PSF_norm_factor_1, crop_ratio_1, core_flux_ratio_1, _ = compute_flux_normalization_factor(inputs_after_fit, PSF_size, flux_core_radius)
 core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+print(np.round(PSF_norm_factor_1.cpu().numpy(), 3).tolist())
 
-c_psd = PSF_pred_big.shape[-1]   // 2
-w_psd = PSF_pred_small.shape[-1] // 2
+# c_psd = PSF_pred_big.shape[-1]   // 2
+# w_psd = PSF_pred_small.shape[-1] // 2
 
-PSD_big_cropped = PSF_pred_big[..., c_psd-w_psd:c_psd+w_psd+1, c_psd-w_psd:c_psd+w_psd+1]
-core_mask_big_cropped = core_mask_big[..., c_psd-w_psd:c_psd+w_psd+1, c_psd-w_psd:c_psd+w_psd+1]
+# croppa = np.s_[..., c_psd-w_psd:c_psd+w_psd+1, c_psd-w_psd:c_psd+w_psd+1]
 
-# PSD_big_cropped = PSF_pred_big
-# core_mask_big_cropped = core_mask_big
+# PSF_big_cropped = PSF_pred_big[croppa]
 
-plt.imshow((PSD_big_cropped*core_mask_big_cropped).mean(dim=(0,1)).abs().log().cpu().numpy(), origin='lower')
+# crop_r = PSF_pred_big[croppa].sum(dim=(-2,-1)) / PSF_pred_big.sum(dim=(-2,-1))
 
-print((PSD_big_cropped*core_mask_big_cropped).sum(dim=(-2,-1)).cpu().numpy() / PSD_big_cropped.sum(dim=(-2,-1)).cpu().numpy())
+# core_mask_small = core_mask_big[croppa]
 
-# shared_inputs['PSF_norm_factor'] = PSF_norm_factor_1.to(device)
-# print(np.round(PSF_norm_factor_1.cpu().numpy(), 3).tolist())
-# print(np.round(crop_ratio_1.cpu().numpy(), 3).tolist())
-# print(np.round(core_flux_ratio_1.cpu().numpy(), 3).tolist())
+# a = (PSF_big_cropped*core_mask_small).sum(dim=(-2,-1)) / PSF_big_cropped.sum(dim=(-2,-1))
+# b = (PSF_pred_small*core_mask_small).sum(dim=(-2,-1))  / PSF_big_cropped.sum(dim=(-2,-1))
+# c = (PSF_pred_big*core_mask_big).sum(dim=(-2,-1))      / PSF_pred_big.sum(dim=(-2,-1))
+
+# croppa_fac = crop_ratio_1 * crop_r
+
+# print(((a-b*crop_ratio_1).abs()/a).mean()*100)
+# print(((c-b*croppa_fac).abs()/c).mean()*100)
+
+# core_flux_ratio_big   = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
+# core_flux_ratio_small = torch.squeeze((PSF_pred_small*core_mask_small).sum(dim=(-2,-1), keepdim=True) / PSF_pred_small.sum(dim=(-2,-1), keepdim=True))
+
+# print(core_flux_ratio_big)
+# print(core_flux_ratio_small * crop_ratio_1)
+
+
+# print('PSF_small')
+# print(PSF_pred_small.sum(dim=(-2,-1)))
+# print((PSF_pred_small*core_mask_small).sum(dim=(-2,-1)))
+# print((PSF_pred_small*(1-core_mask_small)).sum(dim=(-2,-1)) / crop_ratio_1)
+
+# print('PSF_big')
+# print(PSF_pred_big.sum(dim=(-2,-1)))
+# print((PSF_pred_big*core_mask_big).sum(dim=(-2,-1)))
+# print((PSF_pred_big*(1-core_mask_big)).sum(dim=(-2,-1)))
 
 
 #%%
+F_norm_correction = (PSF_norm_factor_1 / PSF_norm_factor_2).mean().item()
+
+individual_inputs['F_norm'] /= F_norm_correction
+shared_inputs['PSF_norm_factor'] = PSF_norm_factor_1.clone()
+
+x1 = torch.cat([
+    shared_inputs.stack().flatten(),
+    individual_inputs.stack().flatten(),
+])
+
+#%%
+_ = func_fit(x1)
+
+result_global = minimize(lambda x: loss(x, cube_sparse, func_fit), x1, max_iter=500, tol=1e-3, method='bfgs', disp=2)
+x2 = result_global.x.clone()
+
+#%%
 with torch.no_grad():
-    model_fit = func_fit(x0).detach()
+    model_fit = func_fit(x2).detach()
 
 VisualizeSources(cube_sparse, model_fit, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(cube_sparse, model_fit, sources, radius=16, title='Fitted PSFs')
