@@ -649,9 +649,9 @@ def GetLGSdata(hdul_cube, exposure_start, exposure_end, fill_missing=False, verb
     return pd.concat([LGS_flux_df, LGS_slopes_df], axis=1)
 
 
-def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
+def GetSpectrum(data, point, radius=1, mask_type='square', debug_show_ROI=False):
     """
-    Extract spectral data from a 3D data cube at a specified point.
+    Extract spectral data from a 3D data cube at a specified point within a given radius, using either a square or circular mask.
 
     Parameters:
     -----------
@@ -660,7 +660,11 @@ def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
     point : list, tuple, ndarray, pd.Series, torch.Tensor, CuPy array
         The (x, y) coordinates of the point
     radius : int, default=1
-        Radius of the region around the point to compute the spectrum from. Despite the naming, it's a square region
+        Radius of the region around the point.
+        For mask_type='square', selects a square ROI.
+        For mask_type='circle', selects pixels inside a circular mask.
+    mask_type : {'square', 'circle'}, default='square'
+        Shape of the averaging region.
     debug_show_ROI : bool, default=False
         If True, displays the ROI used for calculation
 
@@ -671,45 +675,82 @@ def GetSpectrum(data, point, radius=1, debug_show_ROI=False):
     # Convert point to NumPy array
     if isinstance(point, (list, tuple)):
         point = np.array(point)
-        
+
     elif isinstance(point, pd.Series):
         point = point.to_numpy()
-        
+
     elif torch.is_tensor(point):
         point = point.cpu().numpy()
-        
+
     elif hasattr(point, 'get'):  # CuPy array
         point = point.get()
-        
+
     elif not isinstance(point, np.ndarray):
         raise TypeError(f'Unsupported point type: {type(point).__name__}')
 
-    x, y = point[:2].astype('int')
-    
-    if radius == 0:  # No averaging over a radius
+    if mask_type not in ('square', 'circle'):
+        raise ValueError("mask_type must be either 'square' or 'circle'")
+
+    x, y = point[:2].astype(int)
+
+    if radius == 0:
         return data[:, y, x]
-    
+
     y_min = max(0, y - radius)
     x_min = max(0, x - radius)
     y_max = min(data.shape[1], y + radius + 1)
     x_max = min(data.shape[2], x + radius + 1)
 
-    # Handle different data array types
+    # Handle square exactly as before
+    if mask_type == 'square':
+        if torch.is_tensor(data):
+            roi = data[:, y_min:y_max, x_min:x_max]
+            if debug_show_ROI:
+                plt.imshow(torch.nansum(roi, dim=0).cpu().numpy(), origin='lower')
+                plt.show()
+            return torch.nanmean(roi, dim=(-2, -1))
+
+        else:  # NumPy or CuPy array
+            array_module = check_framework(data)
+            roi = data[:, y_min:y_max, x_min:x_max]
+            if debug_show_ROI:
+                plt.imshow(array_module.nansum(roi, axis=0), origin='lower')
+                plt.show()
+            return array_module.nanmean(roi, axis=(-2, -1))
+
+    # Circular mask
+    yy, xx = np.meshgrid(np.arange(y_min, y_max)-y, np.arange(x_min, x_max)-x, indexing='ij')
+    mask_np = (xx**2 + yy**2) < radius**2
+
     if torch.is_tensor(data):
         roi = data[:, y_min:y_max, x_min:x_max]
+
+        mask = torch.as_tensor(mask_np, dtype=torch.bool, device=roi.device)
+        masked_roi = torch.where(mask.unsqueeze(0), roi, torch.tensor(float('nan'), device=roi.device, dtype=roi.dtype))
+
         if debug_show_ROI:
-            plt.imshow(torch.nansum(roi, dim=0).cpu().numpy(), origin='lower')
+            plt.imshow(torch.nansum(masked_roi, dim=0).cpu().numpy(), origin='lower')
             plt.show()
-        return torch.nanmean(roi, dim=(-2, -1))
-    
+
+        return torch.nanmean(masked_roi, dim=(-2, -1))
+
     else:  # NumPy or CuPy array
         array_module = check_framework(data)
         roi = data[:, y_min:y_max, x_min:x_max]
-        if debug_show_ROI:
-            plt.imshow(array_module.nansum(roi, axis=0), origin='lower')
-            plt.show()
-        return array_module.nanmean(roi, axis=(-2, -1))
 
+        if array_module.__name__ == 'cupy':
+            mask = array_module.asarray(mask_np)
+        else:
+            mask = mask_np
+
+        masked_roi = array_module.where(mask[None, :, :], roi, array_module.nan)
+
+        if debug_show_ROI:
+            plt.imshow(array_module.nansum(masked_roi, axis=0), origin='lower')
+            plt.show()
+
+        return array_module.nanmean(masked_roi, axis=(-2, -1))
+    
 
 def range_overlap(v_min, v_max, h_min, h_max):
     start_of_overlap, end_of_overlap = max(v_min, h_min), min(v_max, h_max)

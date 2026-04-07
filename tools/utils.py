@@ -166,6 +166,20 @@ def gaussian_centroid(img):
         return x_, y_
 
 
+def mask_square(N, a, center=(0, 0), centered=True):
+    factor = 0.5 * (1 - N % 2)
+    if centered:
+        coord_range = np.linspace(-N // 2 + N % 2 + factor, N // 2 - factor, N)
+    else:
+        coord_range = np.linspace(0, N - 1, N)
+
+    xx, yy = np.meshgrid(coord_range - center[1], coord_range - center[0])
+
+    pupil_square = np.zeros((N, N), dtype=np.int32)
+    pupil_square[(np.abs(xx) < a) & (np.abs(yy) < a)] = 1
+    return pupil_square
+
+
 def mask_circle(N, r, center=(0,0), centered=True):
     factor = 0.5 * (1-N%2)
     if centered:
@@ -173,6 +187,7 @@ def mask_circle(N, r, center=(0,0), centered=True):
     else:
         coord_range = np.linspace(0, N-1, N)
     xx, yy = np.meshgrid(coord_range-center[1], coord_range-center[0])
+    
     pupil_round = np.zeros([N, N], dtype=np.int32)
     pupil_round[np.sqrt(yy**2+xx**2) < r] = 1
     return pupil_round
