@@ -166,18 +166,6 @@ if λ_weighting:
     wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 else:
     wvl_weights = 1.0
-
-# mask = torch.tensor(mask_circle(PSF_0.shape[-1], 5)).view(1, 1, *PSF_0.shape[-2:]).to(device)
-# mask_inv = 1.0 - mask
-
-# loss_radial_fn = RadialProfileLossSimple(
-#     n_bins=64,
-#     loss="mse",
-#     bin_weight="r",
-#     log_profile=False
-# )
-# loss_MAE = torch.nn.L1Loss(reduction='mean')
-# loss_MSE = torch.nn.MSELoss(reduction='mean')
     
     
 def loss_PSF(PSF_data, PSF_model, w_MSE, w_MAE):
@@ -310,7 +298,7 @@ include_general = ['r0', 'dn'] + \
                   (['Cn2_weights'] if fit_Cn2_profile else []) + \
                   (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else [])
 
-exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.Moffat_absorber else []
+exclude_general = ['ratio', 'theta', 'beta', 'F_λ_norm_ctrl', 'F_norm'] if PSF_model.Moffat_absorber else []
 
 include_general, exclude_general = set(include_general), set(exclude_general)
 

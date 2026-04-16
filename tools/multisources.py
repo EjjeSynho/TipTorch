@@ -323,19 +323,13 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
 
 
 def PlotSourcesProfiles(data, model, sources, radius, title=''):
-
+    # Extract PSFs from the image
     ROIs_0, _, _, _ = extract_ROIs(data,  sources, box_size=np.round(radius*2+4).astype('int'))
     ROIs_1, _, _, _ = extract_ROIs(model, sources, box_size=np.round(radius*2+4).astype('int'))
     
-    if isinstance(data, torch.Tensor):
-        PSFs_0_white = torch.stack(ROIs_0).mean(dim=1).cpu().numpy()
-    else:
-        PSFs_0_white = np.mean(np.stack(ROIs_0), axis=1)
-    
-    if isinstance(model, torch.Tensor):
-        PSFs_1_white = torch.stack(ROIs_1).mean(dim=1).cpu().numpy()
-    else:
-        PSFs_1_white = np.mean(np.stack(ROIs_1), axis=1)
+    # Spectrally average the PSFs
+    PSFs_0_white = torch.stack(ROIs_0).mean(dim=1).cpu().numpy() if isinstance(data, torch.Tensor)  else np.mean(np.stack(ROIs_0), axis=1)
+    PSFs_1_white = torch.stack(ROIs_1).mean(dim=1).cpu().numpy() if isinstance(model, torch.Tensor) else np.mean(np.stack(ROIs_1), axis=1)
     
     plot_radial_PSF_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'Model', title=title, cutoff=radius, y_min=5e-2)
     plt.show()

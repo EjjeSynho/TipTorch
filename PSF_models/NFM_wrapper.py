@@ -1,11 +1,7 @@
 # %reload_ext autoreload
 # %autoreload 2
 
-from logging import warning
 import sys
-
-from astropy import conf
-from zmq import has
 sys.path.insert(0, '..')
 
 import torch
@@ -17,7 +13,7 @@ from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis, MUSE
 from tools.utils import PupilVLT
 from managers.config_manager import MultipleTargetsInDifferentObservations
 from managers.input_manager  import InputsManager, InputsManagersUnion
-from tools.normalizers import Uniform, Uniform0_1, SoftmaxInv, Identity, SafeLog10
+from tools.normalizers import DataTransform, Uniform, Uniform0_1, SoftmaxInv, Identity, SafeLog10
 
 from warnings import warn
 from project_settings import device
@@ -41,59 +37,53 @@ class PSFModelNFM:
         self.LO_N_params = None
         
         self.LO_NCPAs        = LO_NCPAs
-        self.multiple_obs    = multiple_obs
         self.device          = device
         self.Moffat_absorber = Moffat_absorber
         self.use_splines     = use_splines
         self.chrom_defocus   = chrom_defocus and LO_NCPAs
-        self.__config_raw    = config # Input config file
+        self.__config_raw    = config # Input config dictionary, defined in TipTop-style
+                
+        # The PSF model can be used in two configurations:
+        #  1) Simulating different sources in multiple observations with different conditions -- used mostly in ML training and PSF model calibration
+        #  2) Simulating multiple sources in the same observation -- the practical use-case when multiple sources are simulated in one science exposure.
+        #                                                            In this case, atmospheric conditions and AO correction is shared by all sources
+        self.multiple_obs    = multiple_obs
         
         _config = self._init_configs(self.__config_raw) # Processed and converted config
         self.wavelengths = _config['sources_science']['Wavelength'].squeeze()
         
-        # Spectrum of MUSE NFM
+        # Full spectrum span of MUSE NFM
         self.λ_min = 475.e-9
         self.λ_max = 935.e-9
         self.Δλ = 0.125e-9
         self.num_λ_slices = 3681
         self.λ_full = np.arange(self.num_λ_slices) * self.Δλ + self.λ_min
         
-        # Initialize TipTorch model
+        # Initialize the TipTorch model
         self._init_model(_config)
         # Initialize LO NCPAs
         if LO_NCPAs:
             self._init_NCPAs()
         
-        self.polychromatic_params = ['F', 'dx', 'dy', 'bg'] + (['chrom_defocus'] if self.chrom_defocus else ['J'])
+        self.polychromatic_params = ['F', 'dx', 'dy', 'bg', 'F_norm_λ'] + (['chrom_defocus'] if self.chrom_defocus else ['J'])
 
         if self.use_splines:
+            # If splines are used, the chromatic parameters are represented by their values at a few control wavelengths and interpolated at the simulated
+            # wavelengths using natural cubic splines. If so, all parameters must be defined only at the control wavelengths. Unlike objects spectra,
+            # the chromatic behavior of the PSF is generally smooth and doesn't have high-frequency features, so a small number of control λs is fine.
+            # The same control wavelengths must be used for all chromatic parameters to ensure consistency.
             self.N_wvl_ctrl = 5
-            self.norm_wvl = Uniform0_1(a=self.λ_min, b=self.λ_max) # MUSE NFM wavelength range, [nm]
-            self.λ_ctrl   = torch.linspace(0, 1, self.N_wvl_ctrl, device=self.device) # normalized to [0...1]
-            self.λ_ctrl_denorm = self.norm_wvl.inverse(self.λ_ctrl) # de-normalized back to the wavl range, [nm]
+            self.norm_wvl = Uniform0_1(a=self.λ_min, b=self.λ_max) # [nm], MUSE NFM wavelength range
+            self.λ_ctrl   = torch.linspace(0, 1, self.N_wvl_ctrl, device=self.device) # control λ nodes normalized to [0...1]
+            self.λ_ctrl_denorm = self.norm_wvl.inverse(self.λ_ctrl) # [nm], control λs re-normalized back to the physical range
 
         self._init_model_inputs()
         
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
-            torch.cuda.synchronize()
             
         if self.device.type == 'mps':
             torch.mps.empty_cache()
-            torch.mps.synchronize()
-    
-
-    # def _cleanup_dict_recursive(self, obj):
-    #     """Recursively clean up tensors in nested dictionaries"""
-    #     if isinstance(obj, dict):
-    #         for key in list(obj.keys()):
-    #             self._cleanup_dict_recursive(obj[key])
-    #             del obj[key]
-    #     elif isinstance(obj, (list, tuple)):
-    #         for item in obj:
-    #             self._cleanup_dict_recursive(item)
-    #     elif isinstance(obj, torch.Tensor):
-    #         del obj
     
     
     def cleanup(self):
@@ -156,7 +146,7 @@ class PSFModelNFM:
         new_instance.model.tomography = self.model.tomography
         new_instance.model.approx_noise_gain = self.model.approx_noise_gain
         
-        # Copy wavelengths (already handled by config, but ensure reference is correct)
+        # Copy wavelengths (handled by config as well)
         new_instance.wavelengths = self.wavelengths.clone()
         
         # Deep copy the inputs manager using its built-in copy method
@@ -173,14 +163,16 @@ class PSFModelNFM:
             if hasattr(self, 'norm_wvl'):
                 new_instance.norm_wvl = copy.deepcopy(self.norm_wvl)
         
-        # Copy LO basis if it exists
+        # Copy LO basis for NCPAs (if it exists)
         if hasattr(self, 'LO_basis'):
             # The basis is already recreated in __init__, but we need to ensure
             # it has the same state if there are any learned parameters
             if hasattr(self.LO_basis, 'basis'):
                 new_instance.LO_basis.basis = self.LO_basis.basis.clone()
+            
             if hasattr(self.LO_basis, 'OPD_map'):
-                new_instance.LO_basis.OPD_map = self.LO_basis.OPD_map.clone()
+                raise NotImplementedError("LO basis with PixelmapBasis is not supported yet.")
+                # new_instance.LO_basis.OPD_map = self.LO_basis.OPD_map.clone()
         
         return new_instance
 
@@ -247,25 +239,37 @@ class PSFModelNFM:
         self.LO_basis = ArbitraryBasis(self.model, composite_basis, ignore_pupil=False)
         self.LO_N_params = self.LO_basis.N_modes
         
-        
+    
+    def _update_manager_params(self, x_dict: dict, src_ids: bool | None = None) -> None:
+        if self.multiple_obs:
+            if src_ids is not None:
+                raise warn("Source selection is not implemented yet for multiple observations case. All sources will be updated.")
+            
+            self.inputs_manager.update(x_dict)
+        else:
+            # Update only the values related to the simulated sources if src_ids is specified
+            self.inputs_manager.input_managers['per_src'].update(x_dict, selected_ids=src_ids)
+            # Shared parameters are updated for all sources regardless of src_ids selection
+            self.inputs_manager.input_managers['shared'].update(x_dict)
+    
+    
     def _init_model_inputs(self):
-        
         if self.multiple_obs:
             # This configuration assumes that no inputs are shared between different sources
             self.inputs_manager = InputsManager()
             
-            def add_input(name, values, norm=Identity(), optimizable=True, is_shared=False):
-                # is_shared flag is ignored in this configuration since all inputs are per-source
+            def add_input(name: str, values: torch.Tensor, norm: DataTransform=Identity(), optimizable: bool=True, is_shared: bool=False):
+                # is_shared flag is ignored in this configuration since all inputs are per-source anyway
                 self.inputs_manager.add(name, values, norm, optimizable=optimizable)   
         else:
-            # Meanwhile, this configuration assumes that most of the model inputs are shared between different sources 
-            # since they are all share the same atmospheric conditions, and only a few of them are source-specific (e.g. astrometry and photometry corrections)
+            # Meanwhile, this configuration assumes that most of the model inputs are shared between different sources # since they are all share
+            # the same atmospheric conditions, and only a few of them are source-specific (e.g. astrometry and photometry corrections)
             self.inputs_manager = InputsManagersUnion({
                 'shared':  InputsManager(),
                 'per_src': InputsManager()
             })
          
-            def add_input(name, values, norm, optimizable=True, is_shared=False):
+            def add_input(name: str, values: torch.Tensor, norm: DataTransform=Identity(), optimizable: bool=True, is_shared: bool=False):
                 if is_shared:
                     self.inputs_manager.input_managers['shared'].add(name, values, norm, optimizable=optimizable)
                 else:
@@ -278,16 +282,15 @@ class PSFModelNFM:
         assert N_obs == 1 or self.multiple_obs, "Multiple observations >1 is only supported when multiple_obs=True"
 
         # Initialize normalizing transforms
-        # On average, normalized parameters values are distributed between -1 and 1
-        # Helps with the convergence by avoiding extreme parameter values at initialization while still allowing a wide exploration range
-        # Normalization is ONLY applied when parameters are stacked in the single vector for the sake of optimization or NN training
+        # Normalized parameters values are (approximately) distributed in the range between -1 and 1.
+        # It helps with the convergence by avoiding extreme parameter values while PSF fitting or NNs training.
+        # Normalization is ONLY applied when parameters are stacked in the single vector
         norm_F           = Uniform(a=0.0,   b=1.0)
         norm_bg          = Uniform(a=-5e-6, b=5e-6)
         norm_r0          = Uniform(a=0.08,  b=0.15)
         norm_L0          = Uniform(a=6,     b=34)
         norm_dxy         = Uniform(a=-1,    b=1)
         norm_J           = Uniform(a=0,     b=30)
-        # norm_Jxy         = Uniform(a=-180,  b=180)
         norm_dn          = Uniform(a=0,     b=5)
         norm_amp         = Uniform(a=0,     b=10)
         norm_b           = Uniform(a=0,     b=0.1)
@@ -296,27 +299,33 @@ class PSFModelNFM:
         norm_ratio       = Uniform(a=0,     b=2)
         norm_theta       = Uniform(a=-np.pi/2, b=np.pi/2)
         norm_wind_speed  = Uniform(a=0, b=20)
-        norm_flux_crop   = Uniform(a=0.5, b=1.0)
+        norm_F_λ_norm    = Uniform(a=0.5, b=1.0)
         norm_LO          = Uniform(a=-20, b=50)
         norm_src_coords  = Uniform(None, -1.8e-5, 1.8e-5)
         norm_Cn2_profile = SoftmaxInv()
         norm_F_norm      = SafeLog10()
         
-                
         # Add main PSF model parameters
         if self.use_splines:
-            add_input('F_ctrl',  torch.tensor([[1.0,]*self.N_wvl_ctrl]*N_obs),  norm_F,   is_shared=True)  # Chromatic flux normalization correction shared by all PSFs
-            add_input('dx_ctrl', torch.tensor([[0.0,]*self.N_wvl_ctrl]*N_src),  norm_dxy, is_shared=False) # Per-source precise chromatic astrometry correction
-            add_input('dy_ctrl', torch.tensor([[0.0,]*self.N_wvl_ctrl]*N_src),  norm_dxy, is_shared=False) # -//-
-            add_input('bg_ctrl', torch.tensor([[0.0,]*self.N_wvl_ctrl]*N_src),  norm_bg,  is_shared=False) # Per-source chromatic photomentry bias correction
+            # Chromatic flux normalization correction shared by all PSFs
+            add_input('F_ctrl',  torch.tensor([[1.0,]*self.N_wvl_ctrl]*N_obs),  norm_F,   is_shared=True)
+            # Shared chromatic photometry bias correction
+            add_input('bg_ctrl', torch.tensor([[0.0,]*self.N_wvl_ctrl]*N_obs),  norm_bg,  is_shared=True)
+            # Precise per-source chromatic astrometry correction
+            add_input('dx_ctrl', torch.tensor([[0.0,]*self.N_wvl_ctrl]*N_src),  norm_dxy, is_shared=False)
+            add_input('dy_ctrl', torch.tensor([[0.0,]*self.N_wvl_ctrl]*N_src),  norm_dxy, is_shared=False) 
+            # An auxiliary chromatic normalization factor. It's different from F and used to store chromatic flux crop factor due to finite PSF size and
+            # chromatic core vs. wings flux ratio, Meanwhile F, is used to normalize the overall flux level of the PSF across wavelengths due to its morphology
+            add_input('F_norm_λ_ctrl', torch.tensor([[1.0,]*self.N_wvl_ctrl]*N_obs), norm=norm_F_λ_norm, optimizable=False, is_shared=True)  
         else:
             add_input('F',  torch.tensor([[1.0,]*N_wvl]*N_obs),  norm_F,   is_shared=True)
+            add_input('bg', torch.tensor([[0.0,]*N_wvl]*N_obs),  norm_bg,  is_shared=True)
             add_input('dx', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_dxy, is_shared=False)
             add_input('dy', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_dxy, is_shared=False)
-            add_input('bg', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_bg,  is_shared=False)
+            add_input('F_norm_λ', torch.tensor([[1.0,]*self.N_wvl_ctrl]*N_obs), norm=norm_F_λ_norm, optimizable=False, is_shared=True)
 
         # Enabling chromatic defocus means that chromatic PSF bluriness is attributed to chromatic defocus aberration only.
-        # Thus, jitter is considered monochromatic in this case.
+        # Thus, TT jitter is considered monochromatic in this case. Otherwise, this bluriness is "absorbed" by the chromatic jitter parameters Jx and Jy
         if self.chrom_defocus:
             add_input('J', torch.tensor([[25.0]]*N_obs), norm_J, is_shared=True) # If chromatic defocus is enabled, jitter is monochromatic
         else:
@@ -325,26 +334,25 @@ class PSFModelNFM:
             else:
                 add_input('J', torch.tensor([[25.0]*N_wvl]*N_obs), norm_J, is_shared=True)
 
+        add_input('Jxy', torch.tensor([0.0]), norm_J, optimizable=False, is_shared=True) # essentially, this disables the TT jitter anisotropy
+
         add_input('r0', self.model.r0.detach().clone(), norm_r0, is_shared=True)
         add_input('L0', self.model.L0.detach().clone(), norm_L0, is_shared=True)
-        # add_input('Jxy', torch.tensor([[0.0]]*N_obs), norm_Jxy, optimizable=False, is_shared=True) # No fitter anisotropy
-        add_input('dn',  torch.tensor([0.25]*N_obs),  norm_dn, is_shared=True) # HO WFSing error correction factor
+        add_input('dn',  torch.tensor([0.25]*N_obs),    norm_dn, is_shared=True) # HO WFSing error correction factor
 
-        # Wind speed and direction are only accounted for the ground layer in this wrapper
+        # Wind speed and direction are only accounted for the ground layer
         add_input('wind_speed_single', self.model.wind_speed[:,0].detach().clone().unsqueeze(-1), norm_wind_speed, is_shared=True)
         add_input('wind_dir_single', self.model.wind_dir[:,0].detach().clone().unsqueeze(-1), norm_wind_speed, optimizable=False, is_shared=True)
         add_input('Cn2_weights', self.model.Cn2_weights.detach().clone(), norm_Cn2_profile, optimizable=False, is_shared=True)
         
-        # Auxiliary parameter to account for flux cropping due to finite PSF image size (computed on demand)
-        add_input('flux_crop_ctrl', torch.tensor([[1.0,]*self.N_wvl_ctrl]*N_src), norm=norm_flux_crop, optimizable=False, is_shared=False)
-        
-        # Overall per-source flux scaling factor
+        # Overall per-source flux scaling factor, can be used per-source for photometry fine tuning
         add_input('F_norm', torch.tensor([[1.0,]]*N_src), norm=norm_F_norm, optimizable=(not self.multiple_obs), is_shared=False)
-        # Sources direction within the field of view
+        
+        # Sources directions within the FoV
         add_input('src_dirs_x', self.model.src_dirs_x.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
         add_input('src_dirs_y', self.model.src_dirs_y.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
 
-        # Add Moffat PSD absorber's parameters
+        # Add Moffat PSD absorber's parameters (if one is enabled)
         if self.Moffat_absorber:
             add_input('amp',   torch.tensor([1e-4]*N_obs), norm_amp,   is_shared=True)
             add_input('b',     torch.tensor([0.0]*N_obs),  norm_b,     is_shared=True)
@@ -403,6 +411,12 @@ class PSFModelNFM:
     
 
     def evaluate_splines(self, y_points, λ_grid):
+        if y_points.shape[-1] != self.N_wvl_ctrl:
+            raise ValueError(f"Number of control λs must match the last dimension of the input parameter values. Expected {self.N_wvl_ctrl}, got {y_points.shape[-1]}")
+        
+        if y_points.ndim <= 1:
+            y_points = y_points.unsqueeze(0) # Ensure there's a batch dimension even when only one source is simulated
+        
         spline = NaturalCubicSpline(natural_cubic_spline_coeffs(t=self.λ_ctrl, x=y_points.T))
         return spline.evaluate(λ_grid).T
 
@@ -411,16 +425,24 @@ class PSFModelNFM:
         # TODO: add logic to limit the maximum number of simulated sources
         # TODO: pad individual inputs when simulating less sources than model.N_src
         
+        need_update = True
+        
         if x_dict is None:
             x_dict = self.inputs_manager.to_dict()
+            need_update = False
     
+        # Select a subset of sources to simulate
         if src_ids is not None:
             if self.multiple_obs:
-                raise warn("Source selection is not implemented yet for multiple observations case. All sources will be simulated.") #TODO: why isn't it possible?
+                raise warn("Source selection is not implemented yet for multiple observations case. All sources will be simulated.")
+                #TODO: why isn't it possible? -> because then, the entire TipTorch's config must be changed. Doable but meh, maybe later
             else:
                 for key in self.per_src_inputs_list:
-                    x_dict[key] = x_dict[key][src_ids, :]
-    
+                    x_dict[key] = x_dict[key][src_ids]
+                    if x_dict[key].dim() <= 1: # When only one src is simulated, keep the batch dimension for consistency
+                        x_dict[key] = x_dict[key].unsqueeze(0)
+
+        # Evaluate all polychromatic quantities at the simulated wavelengths using the spline representation
         if self.use_splines:
             for entry in self.polychromatic_params:
                 if entry+'_ctrl' in x_dict:
@@ -430,9 +452,10 @@ class PSFModelNFM:
         x_dict['Jx'] = x_dict['J']
         x_dict['Jy'] = x_dict['J']
         
+        # Create a per-layer wind profile assuming there is no wind outside the ground layer
         if 'wind_speed_single' in x_dict:
             x_dict['wind_speed'] = torch.nn.functional.pad(x_dict['wind_speed_single'].view(-1, 1), (0, self.model.N_L - 1))
-        
+            
         if 'wind_dir_single' in x_dict:
             x_dict['wind_dir'] = torch.nn.functional.pad(x_dict['wind_dir_single'].view(-1, 1), (0, self.model.N_L - 1))
 
@@ -442,41 +465,108 @@ class PSFModelNFM:
 
         phase_ = (lambda: self.phase_func(x_dict['LO_coefs'], chrom_defocus)) if self.LO_NCPAs else None
 
-        self.inputs_manager.update(x_dict)
+        if need_update:
+            self._update_manager_params(x_dict, src_ids=src_ids)
+        
+        # Update inputs manager based of x_dict inputs
 
         return self.model(x_, None, phase_generator=phase_)
 
 
-    def forward_full_spectrum(self, x_dict=None, src_ids=None, include_list=None):
-        raise NotImplementedError("This function is not fully implemented yet.")
-        return
-    
+    @torch.no_grad()
+    def simulate_full_spectrum(self, x_dict=None, src_ids=None, include_list=None, verbose=False):
         if not self.use_splines:
             raise ValueError("Full spectrum evaluation is only available when using the spline representation of the polychromatic parameters.")
-        
-        # Split λ array into batches
-        max_λ_batch_size = 100
+
+        max_λ_batch_size = 128 # TODO: adjust based on memory available and the number of sources simulated
         λ_batches = [self.λ_full[i:i + max_λ_batch_size] for i in range(0, len(self.λ_full), max_λ_batch_size)]
 
         _initial_wvl = self.wavelengths.clone()
 
-        with torch.no_grad():
-            PSFs_all_sources = torch.zeros((self.model.N_src, self.num_λ_slices, self.model.N_pix, self.model.N_pix), device='cpu') # Force CPU to avoid memory overuse
-            
-            for i, λ_batch in enumerate(λ_batches):
-                current_batch_size = len(λ_batch)
-                λ_ids = slice(i*current_batch_size, (i+1)*current_batch_size)
-                # Update simulated wavelengths
-                self.SetWavelengths( torch.tensor(λ_batch, device=self.device) )
-                # Need to simulate per-source due to memory limitations when simulating large wavelengths batches
-                for src_id in src_ids if src_ids is not None else range(self.model.N_src):
-                    # Evaluate PSF for the current λ batch
-                    PSF_batch = self.forward(x_dict, src_ids=[src_id], include_list=include_list) #TODO (!): implement src_id in forward()
-                    PSFs_all_sources[src_id, λ_ids, ...] = PSF_batch # Keep only the current source
+        # Get the base parameter dict once (no copy — we won't mutate it directly)
+        base_dict = self.inputs_manager.to_dict() if x_dict is None else x_dict
+
+        # --- Pre-compute ALL spline quantities over the full λ range at once ---
+        # This avoids re-evaluating splines N_src × N_batches times in the hot loop.
+        λ_full_tensor = torch.tensor(self.λ_full, device=self.device, dtype=_initial_wvl.dtype)
+        λ_full_norm   = self.norm_wvl(λ_full_tensor)
+        # precomp_full[entry] has shape [N_obs, num_λ_slices] for shared params,
+        # or [N_src, num_λ_slices] for per-source params (dx, dy)
+        precomp_full = {}
+        for entry in self.polychromatic_params:
+            if entry + '_ctrl' in base_dict:
+                precomp_full[entry] = self.evaluate_splines(base_dict[entry + '_ctrl'], λ_full_norm)
+
+        # Pre-compute static derived quantities (wind, Jx/Jy aliases) — done once, reused every batch
+        wind_speed = torch.nn.functional.pad(base_dict['wind_speed_single'].view(-1, 1), (0, self.model.N_L - 1)) \
+            if 'wind_speed_single' in base_dict else None
+        wind_dir = torch.nn.functional.pad(base_dict['wind_dir_single'].view(-1, 1), (0, self.model.N_L - 1)) \
+            if 'wind_dir_single' in base_dict else None
+
+        # Per-source non-chromatic params (F_norm, src_dirs_x/y): pre-slice to avoid repeated indexing
+        per_src_static = {}
+        for key in self.per_src_inputs_list:
+            if key not in base_dict:
+                continue
+            val = base_dict[key]
+            per_src_static[key] = [val[s:s+1] for s in range(val.shape[0])]
+
+        # Store on CPU to avoid memory overuse
+        PSFs_combined = torch.zeros((self.model.N_src, self.num_λ_slices, self.model.N_pix, self.model.N_pix), device='cpu')
+
+        pbar = None
+        if verbose:
+            from tqdm import tqdm
+            pbar = tqdm(total=self.num_λ_slices, desc=f"Simulating λ slices ({self.model.N_src} sources)", unit="slice")
+
+        active_src_ids = src_ids if src_ids is not None else range(self.model.N_src)
+
+        for i, λ_batch in enumerate(λ_batches):
+            current_batch_size = len(λ_batch)
+            start  = i * max_λ_batch_size
+            λ_ids  = slice(start, start + current_batch_size)
+
+            self.SetWavelengths(torch.tensor(λ_batch, device=self.device))
+
+            # Slice pre-computed chromatic tensors to the current λ batch — O(1) view, no recomputation
+            batch_chrom = {entry: vals[..., λ_ids] for entry, vals in precomp_full.items()}
+            if 'J' in batch_chrom:
+                batch_chrom['Jx'] = batch_chrom['J']
+                batch_chrom['Jy'] = batch_chrom['J']
+
+            for src_id in active_src_ids:
+                # Build the per-call dict: base non-chromatic params …
+                src_dict = {**base_dict}
+                # … overwrite with static derived quantities …
+                src_dict['wind_speed'] = wind_speed
+                src_dict['wind_dir']   = wind_dir
+                # … overwrite with batch-sliced chromatic shared params …
+                src_dict.update(batch_chrom)
+                # … then fix the per-source chromatic params (dx, dy: [N_src, N_λ] → [1, batch])
+                for entry in ('dx', 'dy'):
+                    if entry in batch_chrom:
+                        src_dict[entry] = batch_chrom[entry][src_id:src_id+1]
+                # … and fix non-chromatic per-source params (F_norm, src_dirs_x/y)
+                for key, slices in per_src_static.items():
+                    idx = src_id if src_id < len(slices) else 0
+                    src_dict[key] = slices[idx]
+
+                chrom_defocus_batch = batch_chrom.get('chrom_defocus') if self.chrom_defocus else None
+                phase_ = (lambda cd=chrom_defocus_batch: self.phase_func(src_dict['LO_coefs'], cd)) if self.LO_NCPAs else None
+
+                x_ = {key: src_dict[key] for key in include_list} if include_list is not None else src_dict
+                PSFs_combined[src_id, λ_ids, ...] = self.model(x_, None, phase_generator=phase_).cpu()
+
+            if pbar is not None:
+                pbar.update(current_batch_size)
+
+        if pbar is not None:
+            pbar.close()
 
         self.SetWavelengths(_initial_wvl)
-        
-        return PSFs_all_sources
+        torch.cuda.empty_cache()
+
+        return PSFs_combined
     
 
     def SetWavelengths(self, wavelengths):
@@ -494,33 +584,6 @@ class PSFModelNFM:
             return
         self.model.SetImageSize(img_size)
     
-    
-    def EvaluateFluxCropFactor(self):
-        ''' Computes how much flux is cropped by the finite PSF image size in comparison to a quasi-infinite PSF'''
-        quasi_inf_PSF_size = 511
-        
-        with torch.no_grad():
-            if self.use_splines:
-                wvl_current = self.wavelengths.clone()
-                self.SetWavelengths(self.λ_ctrl_denorm)
-
-            # The actual size of the simulated PSFs
-            current_PSF_size = self.model.N_pix
-            PSF_small = self.forward()
-            # Quasi-infinite PSF image to compute how much flux is lost while cropping
-            self.SetImageSize(quasi_inf_PSF_size)
-            PSF_big = self.forward()
-            self.SetImageSize(current_PSF_size)
-            
-            if self.use_splines:
-                self.SetWavelengths(wvl_current)
-                
-        flux_correction = (PSF_big.amax(dim=(-2,-1)) / PSF_small.amax(dim=(-2,-1)))
-
-        self.inputs_manager['flux_crop_ctrl'] = flux_correction.detach().clone()
-
-        return self.evaluate_splines(self.inputs_manager['flux_crop_ctrl'], self.norm_wvl(self.wavelengths))            
-
 
     __call__ = forward
 

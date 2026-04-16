@@ -237,7 +237,7 @@ class InputsManager:
         for name, value in other.items():
             if name in self.parameters:
                 if selected_ids is not None:
-                    self.parameters[name].value[selected_ids] = value[selected_ids]
+                    self.parameters[name].value[selected_ids] = value
                 else:
                     self.parameters[name].value = value
 

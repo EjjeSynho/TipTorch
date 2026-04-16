@@ -4,6 +4,8 @@ try:
     if ipy:
         ipy.run_line_magic('reload_ext', 'autoreload')
         ipy.run_line_magic('autoreload', '2')
+        import linecache
+        ipy.events.register('post_execute', lambda: linecache.clearcache())
 except NameError:
     pass
 
@@ -14,61 +16,78 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from project_settings import PROJECT_PATH, device, default_torch_type
 
 import torch
-import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
-
 from matplotlib.colors import LogNorm
+
 from torchmin import minimize
 from tqdm import tqdm
 from pathlib import Path
 
-from tools.utils import mask_circle
+from tools.utils import mask_circle, mask_square
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
 
 
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
 data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
+# data_folder = MUSE_DATA_FOLDER / 'clumpy_galaxies/' # change to your actual path with the MUSE NFM data
 
 if not isinstance(data_folder, Path):
     data_folder = Path(data_folder)
 
-# raw_path   = data_folder / "J0259/MUSE.2024-12-05T03_15_37.598.fits.fz"
-# cube_path  = data_folder / "J0259/J0259-0901_all.fits"
-# cache_path = data_folder / "J0259/J0259-0901_all.pickle"
+raw_path   = data_folder / "J0259/MUSE.2024-12-05T03_15_37.598.fits.fz"
+cube_path  = data_folder / "J0259/J0259-0901_all.fits"
+cache_path = data_folder / "J0259/J0259-0901_all.pickle"
 
-cube_path  = data_folder / "J0144/J0144-5745.fits"
-cache_path = data_folder / "J0144/J0144-5745_cache.pickle"
-raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
+# cube_path  = data_folder / "J0144/J0144-5745.fits"
+# cache_path = data_folder / "J0144/J0144-5745_cache.pickle"
+# raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
 
-#%
+# cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
+# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
+# cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
+
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
 # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
-spectral_cubes, spectral_info, data_cache, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, _, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 # Extract full and binned spectral cubes. Sparse cube selects a set of 7 binned wavelengths ranges
-cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
+cube_full, cube_binned, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_binned"], spectral_cubes["mask"]
 
-N_wvl = cube_sparse.shape[0] # dims are [N_wvls, H, W]
+#%%
+# To save memory and compute time, we don't need neither the full spectral cube, nor even the binned one. It's enough to have a sparse subset of spectral
+# slices that cover the whole wavelength range, which is enough to constrain the chromatic behavior of PSFs. It is referred to as "sparse" cube.
+λ_full,   Δλ_full   = spectral_info['λ_full'],   spectral_info['Δλ_full']
+λ_binned, Δλ_binned = spectral_info['λ_binned'], spectral_info['Δλ_binned']
 
-λ_full,   λ_sparse = spectral_info['λ_full'],  spectral_info['λ_sparse']
-Δλ_full, Δλ_binned = spectral_info['Δλ_full'], spectral_info['Δλ_binned']
+# Here, it's assumed to be every 5th bin, but it can be changed to any other selection strategy.
+ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
+λ_sparse  =  λ_binned[..., ids_λ_sparse]
+Δλ_sparse = Δλ_binned[..., ids_λ_sparse]
 
-#TODO: fix binned and sparse consistency
-flux_λ_norm = torch.tensor(Δλ_full / Δλ_binned, device=device, dtype=torch.float32)
+#  The model config is also updated to simulate only sparse λs
+model_config['sources_science']['Wavelength'] = torch.tensor(λ_sparse, device=device, dtype=torch.float32) * 1e-9 #[m]
+cube_sparse = cube_binned[ids_λ_sparse, ...] # Select the sparse subset ofspectral slices
+N_wvl = cube_sparse.shape[0]
+
+# Since spectral bins are the sum, they need to be re-normalized to averages to be compatible with the full spectrum
+# Δλ_sparse ≡ Δλ_binned
+flux_λ_norm = torch.tensor(Δλ_full / Δλ_sparse, device=device, dtype=torch.float32)
 cube_sparse *= flux_λ_norm[:, None, None]
 
-# model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0, 1e4]], device=device)
-# model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=device)
-# model_config['atmosphere']['WindDirection'] = model_config['atmosphere']['WindDirection'][0,:2]
-# model_config['atmosphere']['WindSpeed']     = model_config['atmosphere']['WindSpeed'][0,:2]
+model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0, 1e4]], device=device)
+model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=device)
+model_config['atmosphere']['WindDirection'] = model_config['atmosphere']['WindDirection'][0,:2].unsqueeze(0)
+model_config['atmosphere']['WindSpeed']     = model_config['atmosphere']['WindSpeed'][0,:2].unsqueeze(0)
 
 #%%
 from tools.multisources import add_ROIs, DetectSources, ExtractSources
+from tools.utils import rad2mas, rad2arc
 
 PSF_size = 111  # Define the size of each extracted PSF
 
-sources = DetectSources(cube_sparse, threshold='auto', nsigma=10, display=True, draw_win_size=20)
+# sources = DetectSources(cube_sparse, threshold='auto', nsigma=10, display=True, draw_win_size=20)
+sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_win_size=20)
 # Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
 srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
@@ -76,27 +95,48 @@ N_src   = srcs_image_data["count"]
 sources = srcs_image_data["coords"]
 ROIs    = srcs_image_data["images"]
 
-def get_src_coords_in_pixels(src_idx):
-    return \
-        np.round(sources['x_peak'].iloc[src_idx]).astype(int), \
-        np.round(sources['y_peak'].iloc[src_idx]).astype(int)
+pixel_scale = model_config['sensor_science']['PixelScale'] # [mas/pix]
+
+# Compute the center of mass for valid mask assuming it's the center of the science field
+yy, xx = torch.where(valid_mask.squeeze() > 0)
+field_center = np.stack([xx.float().mean().item(), yy.float().mean().item()])[None,...]
+
+# Sources coordinates that can be understood by TipTorch model
+sources_coords  = np.stack([sources['x_peak'].values, sources['y_peak'].values], axis=1)
+sources_coords -= field_center
+sources_coords  = sources_coords*pixel_scale / rad2mas  # [pix] -> [rad]
+
+# Convert to zenith and azimuth angles
+sources_zenith  = np.arctan(np.sqrt(sources_coords[:,0]**2 + sources_coords[:,1]**2)) * rad2arc # [arcsec]
+sources_azimuth = np.degrees(np.arctan2(sources_coords[:,1], sources_coords[:,0]))  # [deg]
+
+# Update the model config with the sources coordinates
+model_config['NumberSources'] = N_src
+model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']['PupilAngle'], device=device) # Assuming the pupil angle is 0 for simplicity, it can be updated if known
+model_config['sources_science']['Zenith']  = torch.tensor(sources_zenith, device=device).unsqueeze(-1)
+model_config['sources_science']['Azimuth'] = torch.tensor(sources_azimuth, device=device).unsqueeze(-1)
 
 #%%
 # Correct for the difference in energy per λ bin
 flux_core_radius = 2  # [pix]
-N_core_pixels = (flux_core_radius*2 + 1)**2  # [pix^2]
+N_core_pixels = (flux_core_radius*2 + 1)**2  # [pix^2], assuming a square mask for the core flux estimation
 
-# It tells the average flux in the PSF core for each source
-src_spectra_sparse = [GetSpectrum(cube_sparse, sources.iloc[i], radius=flux_core_radius) for i in range(N_src)]
-src_spectra_full   = [GetSpectrum(cube_full,   sources.iloc[i], radius=flux_core_radius) for i in range(N_src)]
+# Contains the spectrum per source AVERAGED across the PSF core pixels. The core mask here MUST match EXACTLY the one
+# used for the flux normalization factor estimation later
+src_spectra_sparse = [GetSpectrum(cube_sparse, sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
+src_spectra_full   = [GetSpectrum(cube_full,   sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
+
+src_spectra_sparse = torch.stack(src_spectra_sparse, dim=0) # This one is stored on GPU
+src_spectra_full   = np.stack(src_spectra_full, axis=0) # This one is stored on CPU to save memory
 
 colors = [f'tab:{color}' for color in ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan'][:N_src]]
 
 plt.figure(figsize=(6, 4))
 for i_src in range(N_src):
     plt.plot(λ_full, src_spectra_full[i_src], linewidth=0.25, alpha=0.3, color=colors[i_src], label=f'Source {i_src+1} (full spectrum)')
-    
-    plt.scatter(λ_sparse.cpu().numpy(), src_spectra_sparse[i_src].cpu().numpy(), color=colors[i_src], marker='o', s=30, alpha=0.8,
+    plt.scatter(λ_sparse,
+                src_spectra_sparse[i_src].cpu().numpy(),
+                color=colors[i_src], marker='o', s=30, alpha=0.8,
                 label=f'Source {i_src+1} (sparse samples)')
 
 plt.xlabel('Wavelength, [nm]')
@@ -107,362 +147,179 @@ plt.grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
 from PSF_models.NFM_wrapper import PSFModelNFM
 
-model = PSFModelNFM(
+PSF_model = PSFModelNFM(
     model_config,
     multiple_obs    = False,
     LO_NCPAs        = True,
     chrom_defocus   = False,
     use_splines     = True,
-    Moffat_absorber = False, 
+    Moffat_absorber = False,
     Z_mode_max      = 9,
     device          = device
 )
 
 #%%
-with torch.no_grad():
-    # Quasi-infinite PSF image to compute how much flux is lost while cropping
-    model_config['sensor_science']['FieldOfView'] = 511
-    model.model.Update(config=model_config, grids=True, pupils=True, tomography=True)
-    PSF_pred_big = model().clone() # First initial prediction of the "big" PSF
+@torch.no_grad()
+def EvaluateFluxNormalizationFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size=511):
+    ''' Computes composite chromatic flux normalization factor. '''
 
-    # The actual size of the simulated PSFs
-    model_config['sensor_science']['FieldOfView'] = PSF_size
-    model.model.Update(config=model_config, grids=True, pupils=True, tomography=True)
-    PSF_pred_small = model()
+    current_PSF_size = PSF_model.model.N_pix # the actual size of the simulated PSFs
+    # Ensure that if PSF's small size is odd, then quasi-infinite PSF size is also odd to avoid sub-pixel shifts of the PSF core
+    quasi_inf_PSF_size -= (1-current_PSF_size % 2)
 
-#%% Compute spectral flux normalization factor
-from tools.normalizers import Uniform
+    if PSF_model.use_splines:
+        wvl_current = PSF_model.wavelengths.clone()
+        PSF_model.SetWavelengths(PSF_model.λ_ctrl_denorm) # isntead of anchor λs, evaluate at spline nodes
 
-# How much flux is cropped by assuming the finite size of the PSF box (PSF_pred_big is assumed to be quasi-infinite)
-crop_ratio = (PSF_pred_big.amax(dim=(-2,-1)) / PSF_pred_small.amax(dim=(-2,-1))).squeeze()
+    # backup the original coordinates
+    coords_backup = (
+        PSF_model.inputs_manager['src_dirs_x'].clone(),
+        PSF_model.inputs_manager['src_dirs_y'].clone()
+    )
+    # Assume on-axis PSF for computing the ratio
+    PSF_model.inputs_manager['src_dirs_x'] *= 0.0
+    PSF_model.inputs_manager['src_dirs_y'] *= 0.0
 
-core_mask     = torch.tensor(mask_circle(PSF_size, flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
-core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+    PSF_small = PSF_model.forward(src_ids=0) # compute only for the first source ignoring the field variability (just for speed's sake)
+    PSF_model.SetImageSize(quasi_inf_PSF_size) # quasi-infinite PSF image to compute how much flux is lost while cropping
 
-# How much flux is spread out of the PSF core because PSF is not a single pixel but rather "a blob"
-core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
-# PSF_norm_factor = N_core_pixels / flux_λ_norm / core_flux_ratio / crop_ratio
-PSF_norm_factor = N_core_pixels / core_flux_ratio / crop_ratio
+    PSF_inf = PSF_model.forward(src_ids=0)
+    PSF_model.SetImageSize(current_PSF_size)
 
-norm_transform = Uniform(PSF_norm_factor.min().int().item(),  PSF_norm_factor.max().int().item())
-shared_inputs.add('PSF_norm_factor', PSF_norm_factor.float().to(device), norm_transform, False)
+    if PSF_model.use_splines:
+        PSF_model.SetWavelengths(wvl_current) # switch back to the original wavelengths
 
-#%% Fine tunes sources astrometry but don't touch the PSF model parameters
-def func_dxdy(x_):
-    dxdy_inp = individual_inputs.unstack(x_.unsqueeze(0), update=False) # Don't update interal values
-    return model(predicted_model_inputs | dxdy_inp)
+    # Restore the original coordinates
+    PSF_model.inputs_manager['src_dirs_x'], PSF_model.inputs_manager['src_dirs_y'] = coords_backup
 
+    # How much flux is cropped by assuming the finite size of the PSF. Since PSFs are normalized to ∑PSF≈1 per wavelength,
+    # the crop ratio is given by the ratio of the max pixel values in the small and quasi-infinite PSF images
+    crop_ratio = (PSF_inf.amax(dim=(-2,-1)) / PSF_small.amax(dim=(-2,-1))).squeeze()
 
-def fit_dxdy(i_src, verbose=0):
-    dxdy_0 = individual_inputs.stack()[i_src,:]
-    PSF_data = torch.nan_to_num(ROIs[i_src].unsqueeze(0)) * (src_spectra_sparse[i_src]).view(1,-1,1,1)
-    # [None,:,None,None]
-    peaks_scaler = PSF_pred_big.amax(dim=(-2,-1)) / (PSF_data*core_mask).amax(dim=(-2,-1))
-    PSF_data *= peaks_scaler[:, :, None, None] # a sort of normalizing fetch-factor
+    # How much flux is spread out of the PSF core because PSF is not a single pixel but rather "a blob". In other words,
+    # compute the ratio of the flux in the PSF core (defined by a mask) to the total flux in the quasi-infinite PSF image.
+    # core_mask       = torch.tensor(mask_square(current_PSF_size,   flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+    core_mask_inf   = torch.tensor(mask_square(quasi_inf_PSF_size, flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+    core_flux_ratio = torch.squeeze((PSF_inf * core_mask_inf).sum(dim=(-2,-1), keepdim=True) / PSF_inf.sum(dim=(-2,-1), keepdim=True))
+
+    # Compute composite normalization factor. Since the spectrum extracted from the PSF core is averaged over the core,
+    # we need to multiply it by the number of core pixels to get the total flux in the PSF core
+    PSF_norm_factor = N_core_pixels / core_flux_ratio / crop_ratio
+    torch.cuda.empty_cache()
     
-    loss = lambda dxdy_: F.smooth_l1_loss(PSF_data*core_mask, func_dxdy(dxdy_)*core_mask, reduction='sum')*1e3
-    result = minimize(loss, dxdy_0, max_iter=100, tol=1e-3, method='bfgs', disp=verbose)
-
-    # Update managers internal values with the new fitted values
-    dxdy_1 = individual_inputs.unstack(result.x.unsqueeze(0), update=False)
-    individual_inputs['dx'][i_src,:] = dxdy_1['dx'].flatten()
-    individual_inputs['dy'][i_src,:] = dxdy_1['dy'].flatten()
-    
-    return func_dxdy(result.x).detach().clone().squeeze(), result.x.detach().clone()
+    if PSF_model.use_splines:
+        # For convenience, reproject back on the control λs
+        PSF_model.inputs_manager['F_norm_λ_ctrl'] = PSF_norm_factor.clone() # we'll need it later when simulating full spectrum
+        return PSF_model.evaluate_splines(PSF_norm_factor, PSF_model.norm_wvl(PSF_model.wavelengths)).float(), PSF_inf, PSF_small
+    else:
+        PSF_model.inputs_manager['F_norm_λ'] = PSF_norm_factor.unsqueeze(0).clone() # we'll need it later when simulating full spectrum
+        return PSF_norm_factor.float(), PSF_inf, PSF_small
 
 
-PSFs_fitted = []
+# from tools.plotting import plot_radial_PSF_profiles
 
-# The PSF model generates PSFs normalized to sum of 1 per wavelength. We need to normalize them to the flux of the sources.
-# To do so, we need to account for: 1. the flux normalization factor, 2. the crop ratio, 3. the core to wings flux ratio.
-for i in tqdm(range(N_src)):
-    PSF_fitted, dxdy = fit_dxdy(i, verbose=0)
-    PSFs_fitted.append(PSF_fitted * (src_spectra_sparse[i] * shared_inputs['PSF_norm_factor'])[:,None,None])
-    
-PSFs_fitted = torch.stack(PSFs_fitted, dim=0)
+# core_mask     = torch.tensor(mask_square(current_PSF_size,   flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+# core_mask_inf   = torch.tensor(mask_square(quasi_inf_PSF_size, flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
 
+# _c = (quasi_inf_PSF_size - current_PSF_size) // 2
+# inf_crop = np.s_[..., _c:_c+current_PSF_size, _c:_c+current_PSF_size]
 
-#%% Initial guess, will be inaccurate
-from tools.multisources import VisualizeSources, PlotSourcesProfiles
+# PSF_small_ = PSF_small / PSF_small.sum(dim=(-2,-1), keepdim=True) # Normalize to unit flux
+# PSF_inf_crop_ = PSF_inf[inf_crop] / PSF_inf[inf_crop].sum(dim=(-2,-1), keepdim=True) # Normalize to unit flux
 
-model_sparse = add_ROIs(
-    torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device), # blanck baase image
-    [PSFs_fitted[i,...] for i in range(N_src)], # predicted flux-normalized PSFs after coordinates tuning
-    srcs_image_data["img_crops"],
-    srcs_image_data["img_slices"]
-)
+# d = (PSF_small_ - PSF_inf_crop_).abs().mean(dim=(0,1))
+# d[current_PSF_size//2, current_PSF_size//2] = 0 # Set the central pixel to zero to avoid it dominating the difference due to the high flux concentration in the PSF core
 
-ROI_plot = np.s_[..., 125:225, 125:225]
-norm_field = LogNorm(vmin=1, vmax=cube_sparse.sum(dim=0).max()) # again, rather empirical values
+# plot_radial_PSF_profiles(PSF_small_.mean(dim=(0,1)), PSF_inf_crop_.mean(dim=(0,1)), 'Data', 'Model', title='Windsong', cutoff=16, y_min=5e-2)
 
-VisualizeSources(cube_sparse, model_sparse, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
-PlotSourcesProfiles(cube_sparse, model_sparse, sources, radius=16, title='Initiall guess')
-
-#%% Manage PSF model input params 
-from tools.static_phase import PixelmapBasis
-
-LO_basis = PixelmapBasis(model, ignore_pupil=False)
-
-# inputs_manager.set_optimizable('LO_coefs', False)
-shared_inputs.set_optimizable('LO_coefs', False)
-shared_inputs.set_optimizable('Jxy', False)
-
-shared_inputs.delete('amp')
-shared_inputs.delete('beta')
-shared_inputs.delete('alpha')
-shared_inputs.delete('b')
-shared_inputs.delete('ratio')
-shared_inputs.delete('theta')
-
-shared_inputs.delete('dx')
-shared_inputs.delete('dy')
-shared_inputs.delete('s_pow')
-
-print(shared_inputs)
-
-individual_inputs.set_optimizable('F_norm', True)
+PSF_norm_factor, _, _ = EvaluateFluxNormalizationFactor(PSF_model, N_core_pixels)
 
 #%%
-x0 = torch.cat([
-    shared_inputs.stack().flatten(),
-    individual_inputs.stack().flatten(),
-])
-x_size = shared_inputs.get_stacked_size()
-
 empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
 wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) + 1 #TODO: fix it
 # wvl_weights = wvl_weights * 0 + 1
 
-def func_fit(x): # TODO: relative weights for different brigtness
-    PSFs_fit = []
-    for i in range(N_src):
-        params_dict = shared_inputs.unstack(x[:x_size].unsqueeze(0))
-        F_dxdy_dict = individual_inputs.unstack(x[x_size:].view(N_src, -1))
+# TODO: weighting factor from the averae spectrum of the soucres in the field or even per-source?
+# TODO: relative weights for different brigtness?
 
-        phase_func = lambda: LO_basis(shared_inputs["LO_coefs"].view(1, LO_map_size, LO_map_size))
-
-        F_dxdy_dict['dx'] = F_dxdy_dict['dx'][i].unsqueeze(-1).unsqueeze(0) # Extend to simulated number of wavelength
-        F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).unsqueeze(0) # assuming the same shift for all wavelengths
-
-        inputs = params_dict | F_dxdy_dict
-        flux_norm = (src_spectra_sparse[i] * PSF_norm_factor)[:,None,None] * F_dxdy_dict['F_norm'][i]
-
-        PSFs_fit.append( model(inputs, phase_generator=phase_func).squeeze() * flux_norm )
-        
-    return add_ROIs( empty_img*0.0, PSFs_fit, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
+def func(x):
+    x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True)
+    PSFs_ = PSF_model(x_dict)
+    flux_normalization = x_dict['F_norm'].unsqueeze(-1)  * PSF_norm_factor * src_spectra_sparse
+    PSFs_ *= flux_normalization.view(N_src, N_wvl, 1, 1)
+    return add_ROIs( empty_img*0.0, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
 
-# def loss(x_, data, func):
-#     model_ = func(x_)
-#     l1 = F.smooth_l1_loss(data*wvl_weights, model_*wvl_weights, reduction='mean')
-#     l2 = F.mse_loss      (data*wvl_weights, model_*wvl_weights, reduction='mean')
-
-#     # Enforce positivity of the residual
-#     residual = data - model_
-#     negative_residual_penalty = F.relu(-residual).mean()
-    
-#     # Enforce Jx/Jy ratio being close to 1
-#     J_ratio_penalty = (1.0 - shared_inputs['Jx']/shared_inputs['Jy']).abs().mean()
-    
-#     # Combine the loss terms
-#     return l1*1.5 + l2*0.25 + negative_residual_penalty*3 * J_ratio_penalty*0.25
-
-
-def loss_PSF(PSF_data, PSF_model, w_MSE, w_MAE):
-    diff = (PSF_model-PSF_data) * wvl_weights
-    # w = 2e4 # Empirical weight to balance the loss magnitude with the regularization terms
-    w = 0.01
+def loss_PSF(PSF_data, PSF_pred, w_total, w_MSE, w_MAE):
+    diff = (PSF_pred-PSF_data) * wvl_weights
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean()  * w_MAE
+    # Since x input in func() updates the internal values for PSF_model (inluding F_norm),
+    # they now can directly use them to compute the flux normalization factor
+    F_penalty = (PSF_model.inputs_manager['F_ctrl'] - 1.0).abs().mean()
+    return w_total * (MSE_loss + MAE_loss) + F_penalty * 0.2
 
-    return w * (MSE_loss + MAE_loss)
 
 def loss(x_, data, func):
     model = func(x_)
-    return loss_PSF(data, model, w_MSE=900.0, w_MAE=1.6)
-
-_ = func_fit(x0)
-
-result_global = minimize(lambda x: loss(x, cube_sparse, func_fit), x0, max_iter=300, tol=1e-3, method='bfgs', disp=2)
-x0 = result_global.x.clone()
-x_fit_dict = shared_inputs.unstack(x0.unsqueeze(0), include_all=False)
+    return loss_PSF(data, model, w_total=1e-3,  w_MSE=900.0, w_MAE=1.6)
 
 #%%
+x0 = PSF_model.inputs_manager.stack().clone()
+x1 = x0.clone()
+
+for i in range(2):
+    result_global = minimize(lambda x: loss(x, cube_sparse, func), x1, max_iter=250, tol=1e-3, method='l-bfgs', disp=2)
+    x1 = result_global.x.clone()
+
+#%%
+PSF_norm_factor_1, _, _ = EvaluateFluxNormalizationFactor(PSF_model, N_core_pixels)
+
+# Compute the updated normalization factor to account for the new PSF morphology after the first fitting step.
+# This is necessary to ensure that the flux normalization is consistent with the actual PSF shape, which may have changed during the optimization.
+F_norm_correction = (PSF_norm_factor_1 / PSF_norm_factor).mean().item()
+
+PSF_model.inputs_manager['F_norm'] /= F_norm_correction
+# F_norm_λ is already updated inside the EvaluateFluxNormalizationFactor function
+PSF_norm_factor = PSF_norm_factor_1.clone()
+
+#TODO: fit only F_norm
+# Update the parameters to account for the new normalization factor
+result_global = minimize(lambda x: loss(x, cube_sparse, func), x1, max_iter=500, tol=1e-3, method='l-bfgs', disp=2)
+x2 = result_global.x.clone()
+
+#%%
+from tools.multisources import VisualizeSources, PlotSourcesProfiles, ROI_from_valid_mask
+
 with torch.no_grad():
-    model_fit = func_fit(result_global.x).detach()
+    model_fit = func(x1).detach()
+
+ROI_plot = ROI_from_valid_mask(valid_mask)["slice"]
+norm_field = LogNorm(vmin=1, vmax=cube_sparse.sum(dim=0).max()) # again, rather empirical values
 
 VisualizeSources(cube_sparse, model_fit, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(cube_sparse, model_fit, sources, radius=16, title='Fitted PSFs')
 
 #%% Compute Strehl ratio
-def func_just_for_Strehl(x): # TODO: relative weights for different brigtness
-    PSFs_fit = []
-    for i in range(N_src):
-        params_dict = shared_inputs.unstack(x[:x_size].unsqueeze(0))
-        F_dxdy_dict = individual_inputs.unstack(x[x_size:].view(N_src, -1))
-
-        phase_func = lambda: LO_basis(shared_inputs["LO_coefs"].view(1, LO_map_size, LO_map_size))
-
-        F_dxdy_dict['dx'] = F_dxdy_dict['dx'][i].unsqueeze(-1).unsqueeze(0) # Extend to simulated number of wavelength
-        F_dxdy_dict['dy'] = F_dxdy_dict['dy'][i].unsqueeze(-1).unsqueeze(0) # assuming the same shift for all wavelengths
-
-        inputs = params_dict | F_dxdy_dict
-
-        PSFs_fit.append( model(inputs, phase_generator=phase_func).squeeze() )
-    return PSFs_fit
-
 with torch.no_grad():
-    PSFs_pred = func_just_for_Strehl(result_global.x)
-    PSF_DL = model.DLPSF().squeeze()
-    Strehls_per_λ = PSFs_pred[0].amax(dim=(-2,-1)) / PSF_DL.amax(dim=(-2,-1))
+    PSFs_pred = PSF_model()
+    PSF_DL = PSF_model.model.DLPSF().squeeze()
+    
+Strehls_per_λ = PSFs_pred[0].amax(dim=(-2,-1)) / PSF_DL.amax(dim=(-2,-1))
 
 plt.title('Strehl ratio vs. λ (for the 1st source)')
-plt.plot(λ_sparse.cpu(), 100* Strehls_per_λ.cpu())
-plt.ylabel('Strehl ratio [%]')
-plt.xlabel('Wavelength [nm]')
+plt.plot(λ_sparse, 100.0 * Strehls_per_λ.flatten().cpu())
+plt.ylabel('Strehl ratio, [%]')
+plt.xlabel('Wavelength, [nm]')
 plt.grid()
 plt.show()
 
-#%% Interpolate PSF model parameters over the full wavelengths range assuming they change smooth
-from tools.curves import QuadraticModel
-
-F_model    = QuadraticModel(λ_sparse)
-Jx_model   = QuadraticModel(λ_sparse)
-Jy_model   = QuadraticModel(λ_sparse)
-norm_model = QuadraticModel(λ_sparse)
-
-params_Jx   = Jx_model.fit(shared_inputs['Jx'].flatten())
-params_Jy   = Jy_model.fit(shared_inputs['Jy'].flatten())
-params_F    = F_model.fit(shared_inputs['F'].flatten())
-params_norm = norm_model.fit(PSF_norm_factor.flatten(), [2, 1, 1e3])
-
-Fx_curve_fit   = Jx_model(params_Jx)
-Fy_curve_fit   = Jy_model(params_Jy)
-F_curve_fit    = F_model (params_F)
-norm_curve_fit = norm_model(params_norm)
-
-curve_inputs = InputsManager()
-
-curve_inputs.add('Jx_A', torch.tensor([params_Jx[0]]), Uniform(a=-5e-5, b=5e-5))
-curve_inputs.add('Jx_B', torch.tensor([params_Jx[1]]), Uniform(a=-2e-2, b=2e-2))
-curve_inputs.add('Jx_C', torch.tensor([params_Jx[2]]), Uniform(a=30,    b=60))
-
-curve_inputs.add('Jy_A', torch.tensor([params_Jy[0]]), Uniform(a=-5e-5, b=5e-5))
-curve_inputs.add('Jy_B', torch.tensor([params_Jy[1]]), Uniform(a=-5e-2, b=5e-2))
-curve_inputs.add('Jy_C', torch.tensor([params_Jy[2]]), Uniform(a=30,    b=60))
-
-curve_inputs.add('F_A',  torch.tensor([params_F[0]]),  Uniform(a=5e-7,  b=10e-7))
-curve_inputs.add('F_B',  torch.tensor([params_F[1]]),  Uniform(a=-2e-3, b=0))
-curve_inputs.add('F_C',  torch.tensor([params_F[2]]),  Uniform(a=0,     b=2))
-
-curve_inputs.add('norm_A', torch.tensor([params_norm[0]]), Uniform(a=0, b=2e-2))
-curve_inputs.add('norm_B', torch.tensor([params_norm[1]]), Uniform(a=50, b=-20))
-curve_inputs.add('norm_C', torch.tensor([params_norm[2]]), Uniform(a=2e4, b=4e4))
-
-curve_inputs.set_optimizable(['norm_A', 'norm_B', 'norm_C'], False)
-
-curve_inputs.to_float()
-curve_inputs.to(device)
-
-
-curve_params_ = curve_inputs.unstack(curve_inputs.stack())
-
-curve_sample = lambda x, curve_p, p_name: Jx_model.quadratic_function(
-    x,
-    curve_p[f'{p_name}_A'],
-    curve_p[f'{p_name}_B'],
-    curve_p[f'{p_name}_C']
-)
-
-Jx_new   = curve_sample(λ_sparse, curve_params_, 'Jx')
-Jy_new   = curve_sample(λ_sparse, curve_params_, 'Jy')
-F_new    = curve_sample(λ_sparse, curve_params_, 'F')
-norm_new = curve_sample(λ_sparse, curve_params_, 'norm')
-
-if False:
-    plt.figure(figsize=(10, 6))
-
-    plt.plot(λ_sparse.cpu(), shared_inputs['Jx'].flatten().cpu(), label='Fitted Jx', color='tab:blue')
-    plt.plot(λ_sparse.cpu(), Fx_curve_fit.cpu(), label='Interpolated quadratic curve', linestyle='--', color='tab:blue')
-    plt.scatter(λ_sparse.cpu(), Jx_new.cpu(), label='Tuned quadratic curve', color='tab:blue', marker='x')
-
-    plt.plot(λ_sparse.cpu(), shared_inputs['Jy'].flatten().cpu(), label='Fitted Jy', color='tab:orange')
-    plt.plot(λ_sparse.cpu(), Fy_curve_fit.cpu(), label='Interpolated quadratic curve', linestyle='--', color='tab:orange')
-    plt.scatter(λ_sparse.cpu(), Jy_new.cpu(), label='Tuned quadratic curve', color='tab:orange', marker='x')
-    plt.xlabel('Wavelength [nm]')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    # plt.plot(λ_sparse.cpu(), inputs_manager['norm'].flatten().cpu(), label='Data', color='tab:orange')
-    plt.plot(λ_sparse.cpu(), PSF_norm_factor.flatten().cpu(), label='Flux normalization factor', color='tab:orange')
-    plt.plot(λ_sparse.cpu(), norm_curve_fit.cpu(), label='Interpolated quadratic curve', linestyle='--', color='tab:orange')
-    plt.scatter(λ_sparse.cpu(), norm_new.cpu(), label='Tuned quadratic curve', color='tab:orange', marker='x')
-    plt.xlabel('Wavelength [nm]')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-    plt.plot(λ_sparse.cpu(), shared_inputs['F'].flatten().cpu(), label='PSF normalization factor', color='tab:green')
-    plt.plot(λ_sparse.cpu(), F_curve_fit.cpu(), label='Interpolated quadratic curve', linestyle='--', color='tab:green')
-    plt.scatter(λ_sparse.cpu(), F_new.cpu(), label='Tuned quadratic curve', color='tab:green', marker='x')
-    plt.xlabel('Wavelength [nm]')
-    plt.legend()
-    plt.grid(True)
-    plt.show()
-
-
-#%% Do fine-adjustment of the parameters extrapolators by fitting their parameters
-shared_inputs.set_optimizable(['F', 'Jx', 'Jy'],  False)
-individual_inputs.set_optimizable(['dx', 'dy'], False)
-
-print(shared_inputs)
-
-x_size_model = shared_inputs.get_stacked_size()
-x_size_curve = curve_inputs.get_stacked_size()
-x_size_total = x_size_curve + x_size_model
-
-x2 = torch.cat([
-    shared_inputs.stack().flatten(),
-    curve_inputs.stack().flatten(),
-    individual_inputs.stack().flatten(),
-])
-
-
-def func_fit_curve(x):
-    PSFs_fit = []
-    for i in range(N_src):
-        params_dict = shared_inputs.unstack(x[:x_size_model].unsqueeze(0))
-        curve_p_    = curve_inputs.unstack(x[x_size_model:x_size_curve+x_size_model].unsqueeze(0))
-        F_dxdy_dict = individual_inputs.unstack(x[x_size_curve+x_size_model:].view(N_src, -1))
-        
-        curve_dict = {p: curve_sample(λ_sparse, curve_p_, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
-        
-        phase_func = lambda: LO_basis(shared_inputs["LO_coefs"].view(1, LO_map_size, LO_map_size))
-        
-        F_dxdy_dict['dx'] = individual_inputs['dx'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # Extend to simulated number of wavelength
-        F_dxdy_dict['dy'] = individual_inputs['dy'][i].unsqueeze(-1).repeat(N_wvl).unsqueeze(0) # assuming the same shift for all wavelengths
-
-        inputs = params_dict | curve_dict | F_dxdy_dict
-        flux_norm = (src_spectra_sparse[i] * norm_new)[:,None,None] * F_dxdy_dict['F_norm'][i]
-        
-        PSFs_fit.append( model(inputs, phase_generator=phase_func).squeeze() * flux_norm )
-    
-    return add_ROIs( empty_img*0.0, PSFs_fit, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
-
-
-# _ = loss_fit_curve(x2)
-
-result_global = minimize(lambda x: loss(x, cube_sparse, func_fit_curve), x2, max_iter=300, tol=1e-3, method='bfgs', disp=2)
-x2 = result_global.x.clone().detach()
-
-x_fit_dict = shared_inputs.unstack(x2[:x_size_model].unsqueeze(0))
-x_curve_fit_dict = curve_inputs.unstack(x2[x_size_model:x_size_curve+x_size_model].unsqueeze(0))
-flux_corrections = individual_inputs['F_norm']
+#%%
+# Simulate PSFs across the full wavelength range
+model_full = PSF_model.simulate_full_spectrum(verbose=True)
 
 #%% Predict PSFs over the full wavelengths range
 from tools.multisources import add_ROIs_separately
@@ -533,6 +390,10 @@ PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSF
 #%% ============== Plotting the residual spectrum ===================
 from astropy.convolution import convolve, Box1DKernel
 
+def get_src_coords_in_pixels(src_idx):
+    return np.round(sources['x_peak'].iloc[src_idx]).astype(int), \
+           np.round(sources['y_peak'].iloc[src_idx]).astype(int)
+           
 # NOTE: these coords are hard-coded for J0529 obs
 host_coords  = [178, 162]
 AGN_coords_1 = list(get_src_coords_in_pixels(0))
@@ -643,12 +504,12 @@ diff_rgb = plot_wavelength_rgb_log(
     min_val=500, max_val=60000, show=False
 )
 
-for info in targets_diff_info:
-    # Note, that boxes position is shifted according to plotting ROI
-    aperture = RectangularAperture([info['coords'][0]-ROI_plot[1].start, info['coords'][1]-ROI_plot[2].start], info['radius']*2+1, info['radius']*2+1, theta=0)
-    aperture.plot(color=info['color'], lw=1, label=info['name'])
-plt.legend()
-plt.show()
+# for info in targets_diff_info:
+#     # Note, that boxes position is shifted according to plotting ROI
+#     aperture = RectangularAperture([info['coords'][0]-ROI_plot[1].start, info['coords'][1]-ROI_plot[2].start], info['radius']*2+1, info['radius']*2+1, theta=0)
+#     aperture.plot(color=info['color'], lw=1, label=info['name'])
+# plt.legend()
+# plt.show()
 
 diff_rgb = plot_wavelength_rgb_log(
     cube_full[ROI_plot],

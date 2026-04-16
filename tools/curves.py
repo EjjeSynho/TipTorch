@@ -86,6 +86,7 @@ class QuadraticModel:
         Parameters:
             x (torch.Tensor): Tensor of x-values.
         """
+        
         self.x = x
 
     @staticmethod

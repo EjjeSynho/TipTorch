@@ -48,10 +48,10 @@ class TipTorch(torch.nn.Module):
         self.wvl_atm = self.config['atmosphere']['Wavelength']
 
         # Science sources positions relative to the center of FOV, input in [arc]
-        self.src_zenith  = self.config['sources_science']['Zenith'].flatten() / self.rad2arc  # [N_src]
-        self.src_azimuth = torch.deg2rad(self.config['sources_science']['Azimuth']).flatten() # [N_src]
-        self.src_dirs_x  = torch.tan(self.src_zenith) * torch.cos(self.src_azimuth) # [N_src]
-        self.src_dirs_y  = torch.tan(self.src_zenith) * torch.sin(self.src_azimuth) # [N_src]
+        src_zenith  = self.config['sources_science']['Zenith'].flatten() / self.rad2arc  # [N_src]
+        src_azimuth = torch.deg2rad(self.config['sources_science']['Azimuth']).flatten() # [N_src]
+        self.src_dirs_x  = torch.tan(src_zenith) * torch.cos(src_azimuth) # [N_src]
+        self.src_dirs_y  = torch.tan(src_zenith) * torch.sin(src_azimuth) # [N_src]
         
         #TODO: make it robust to src_dirs_x re-initialization
         # self.on_axis = (self.src_dirs_x.abs().sum() + self.src_dirs_y.abs().sum() == 0).item() # all angles are zeros
@@ -68,10 +68,10 @@ class TipTorch(torch.nn.Module):
         # Guide stars parameters
         self.GS_wvl      = self.config['sources_HO']['Wavelength'] #[m]
         self.GS_height   = min_2d(self.config['sources_HO']['Height']) * self.airmass #[m]
-        self.GS_angles   = self.config['sources_HO']['Zenith'] / self.rad2arc # defined in [arcsec] from on-axis
-        self.GS_azimuths = torch.deg2rad(self.config['sources_HO']['Azimuth']) # defined in [deg] from on-axis
-        self.GS_dirs_x   = torch.tan(self.GS_angles) * torch.cos(self.GS_azimuths) # [N_obs, N_GS]
-        self.GS_dirs_y   = torch.tan(self.GS_angles) * torch.sin(self.GS_azimuths) # [N_obs, N_GS]
+        GS_angles   = self.config['sources_HO']['Zenith'] / self.rad2arc # defined in [arcsec] from on-axis
+        GS_azimuths = torch.deg2rad(self.config['sources_HO']['Azimuth']) # defined in [deg] from on-axis
+        self.GS_dirs_x   = torch.tan(GS_angles) * torch.cos(GS_azimuths) # [N_obs, N_GS]
+        self.GS_dirs_y   = torch.tan(GS_angles) * torch.sin(GS_azimuths) # [N_obs, N_GS]
         
         self.N_GS = self.GS_dirs_y.size(-1)
      
@@ -80,8 +80,6 @@ class TipTorch(torch.nn.Module):
         self.wind_dir    = self.config['atmosphere']['WindDirection']
         self.Cn2_weights = self.config['atmosphere']['Cn2Weights']
         self.Cn2_heights = self.config['atmosphere']['Cn2Heights'] * self.airmass # [m]
-        
-        self.h_ = (self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height))) # [N_obs x N_layers]
         
         self.N_L = self.Cn2_heights.shape[-1]
         
@@ -138,8 +136,9 @@ class TipTorch(torch.nn.Module):
         self.r0 = self.rad2arc * 0.976 * self.config['atmosphere']['Wavelength'] / self.config['atmosphere']['Seeing'] # [m]
         self.L0 = self.config['atmosphere']['L0'].flatten() # [m]
         
-        self.r0_ = lambda : self.r0.abs().flatten() * self.airmass.flatten()**(-3.0/5.0)
-        
+        self.r0_ = lambda : self.r0.abs().flatten() * self.airmass.flatten()**(-3.0/5.0)# [N_obs]
+        self.h_  = lambda: (self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height))) # [N_obs x N_layers]
+    
         self.F   = torch.ones (self.N_src, self.N_wvl, device=self.device)
         self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
         self.dx  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
@@ -536,8 +535,10 @@ class TipTorch(torch.nn.Module):
         ky = pdims(self.ky_AO, 1) # [1 x nOtf_AO x nOtf_AO x 1]
         h_DM = self.h_DM.view(1, 1, 1, self.N_DM) # [N_obs x 1 x 1 x N_DM]
         
-        beta_x = self.src_dirs_x.view(self.N_src, 1, 1, 1)
-        beta_y = self.src_dirs_y.view(self.N_src, 1, 1, 1)
+        N_src_ = len(self.src_dirs_x.flatten())
+        
+        beta_x = self.src_dirs_x.view(N_src_, 1, 1, 1)
+        beta_y = self.src_dirs_y.view(N_src_, 1, 1, 1)
     
         f = (beta_x*kx + beta_y*ky) * self.mask_corrected_AO.unsqueeze(-1)
 
@@ -547,7 +548,7 @@ class TipTorch(torch.nn.Module):
 
     def OptimalDMProjector(self, inv_method='lstsq'):
         h_dm = self.h_DM.view(1, 1, 1, self.N_DM)
-        h = self.h_.view(self.N_obs, 1, 1, 1, self.N_L)
+        h = self.h_().view(self.N_obs, 1, 1, 1, self.N_L)
         
         opt_w = self.DM_opt_weight.view(self.N_obs, 1, 1, self.N_optdir, 1, 1)
 
@@ -685,10 +686,11 @@ class TipTorch(torch.nn.Module):
         else:
             kx = pdims(self.kx_AO, 1)
             ky = pdims(self.ky_AO, 1)
-            h = self.h_.view(self.N_obs, 1, 1, self.N_L)
+            h = self.h_().view(self.N_obs, 1, 1, self.N_L)
         
-            beta_x = self.src_dirs_x.view(self.N_src, 1, 1, 1)
-            beta_y = self.src_dirs_y.view(self.N_src, 1, 1, 1)
+            N_src_ = len(self.src_dirs_x.flatten())
+            beta_x = self.src_dirs_x.view(N_src_, 1, 1, 1)
+            beta_y = self.src_dirs_y.view(N_src_, 1, 1, 1)
             
             # delta_T = ((1 + self.HOloop_delay) / self.HOloop_rate).view(self.N_obs, 1, 1, 1) #TODO: cross-check it
             delta_T = (self.HOloop_delay / self.HOloop_rate).view(self.N_obs, 1, 1, 1)
@@ -696,7 +698,7 @@ class TipTorch(torch.nn.Module):
             self.P_beta_L = torch.exp( 2j*torch.pi * (h*(beta_x*kx + beta_y*ky) - delta_T*self.freq_t) ).unsqueeze(-2)
             proj = self.P_beta_L - self.P_beta_DM @ self.W_alpha
             proj_t = torch.conj(torch.permute(proj, (0,1,2,4,3)))
-            PSD_ST = torch.squeeze(torch.squeeze(torch.abs((proj @ self.C_phi @ proj_t)))) * self.piston_filter * self.mask_corrected_AO
+            PSD_ST = (proj @ self.C_phi @ proj_t).abs().squeeze() * self.piston_filter * self.mask_corrected_AO
 
         return PSD_ST
 
@@ -768,15 +770,17 @@ class TipTorch(torch.nn.Module):
 
     def DifferentialRefractionPSD(self):
         # TODO: account for the pupil angle?
-        h = self.h_.view(self.N_obs, 1, 1, 1, self.N_L)
+        h = self.h_().view(self.N_obs, 1, 1, 1, self.N_L)
         
         w = self.Cn2_weights.view(self.N_obs, 1, 1, 1, self.N_L)
         k = self.k_AO.view(1, 1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
 
-        cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - pdims(self.src_azimuth, 2)).unsqueeze(1) # [N_src x 1 x nOtf_AO_y x nOtf_AO_x]
-        tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle)) # [N_src x N_wvl]
+        src_azimuth = pdims(torch.arctan2(self.src_dirs_y, self.src_dirs_x), 2) # [N_src]
+
+        cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - src_azimuth).unsqueeze(1) # [N_src x 1 x nOtf_AO_y x nOtf_AO_x]
+        tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle)) # [N_obs x N_wvl]
         
-        return self.W_atm.unsqueeze(1) * ( 2*w*(1-torch.cos(2*torch.pi*h*k * pdims(tan_theta,3) * pdims(cos_ang,1))) ).sum(dim=-1) * self.mask_corrected_AO
+        return self.W_atm.unsqueeze(1) * ( 2*w*(1.0 - torch.cos(2*torch.pi*h*k * pdims(tan_theta, 3) * pdims(cos_ang, 1))) ).sum(dim=-1) * self.mask_corrected_AO
     
 
     def JitterKernel(self, Jx, Jy, Jxy):
@@ -889,7 +893,7 @@ class TipTorch(torch.nn.Module):
         then it's possible to compute one tomographic reconstructor for all simulated sources.
         For example, this is the case when all objects are within one FoV and belong to one observation
         '''
-        h = self.h_.view(self.N_obs, 1, 1, 1, self.N_L)
+        h = self.h_().view(self.N_obs, 1, 1, 1, self.N_L)
         
         kx = pdims(self.kx_AO, 2)
         ky = pdims(self.ky_AO, 2)
@@ -967,7 +971,7 @@ class TipTorch(torch.nn.Module):
     
     def DLPSF(self):
         ''' Computes a diffraction-limited PSF '''
-        self.PSF_DL = self.OTF2PSF(self.OTF_static_default) / self.norm_scale
+        self.PSF_DL = self.OTF2PSF_legacy(self.OTF_static_default) / self.norm_scale
         return self.PSF_DL
 
 

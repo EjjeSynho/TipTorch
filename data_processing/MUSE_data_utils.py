@@ -1656,7 +1656,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     nan_mask = np.abs(np.nansum(cube_full, axis=0)) < 1e-12
     nan_mask = binary_dilation(nan_mask, iterations=2, )
     valid_mask = ~nan_mask
-    # Filter out NaN values
+    # Remove NaN values
     cube_full = np.nan_to_num(cube_full, nan=0.0) * valid_mask[np.newaxis, :, :]
 
     valid_mask = torch.tensor(valid_mask, dtype=default_torch_type, device=device).unsqueeze(0)
@@ -1664,7 +1664,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     if os.path.exists(cache_path):
         if verbose: print('Loading existing cached data cube...')
         with open(cache_path, 'rb') as f:
-            data_cached = pickle.load(f)
+            data_cache = pickle.load(f)
     else:
         if verbose: print('Generating new cached data cube...')
 
@@ -1674,7 +1674,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
             if verbose:
                 print(f"Folder '{os.path.dirname(cache_path)}' created.")
 
-        data_cached, _ = ProcessMUSEcube(
+        data_cache, _ = ProcessMUSEcube(
             path_raw  = raw_path,
             path_cube = cube_path,
             crop = False,
@@ -1688,46 +1688,45 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     
     # Compute wavelength data
     #TODO: fix uneven Δλ division!
-    λ_min, λ_max, Δλ_full = data_cached['spectral data']['wvl range']
-    λ_bins = data_cached['spectral data']['wvl bins']
-    # Δλ_binned = np.median(np.concatenate([np.diff(λ_bins[λ_bins < 589]), np.diff(λ_bins[λ_bins > 589])]))
+    λ_min, λ_max, Δλ_full = data_cache['spectral data']['wvl range']
+    λ_bins = data_cache['spectral data']['wvl bins'] # boundaries of the λ bins
     Δλ_binned = np.concatenate([np.diff(λ_bins[λ_bins < 589]), np.diff(λ_bins[λ_bins > 589])])
+    λ_binned = data_cache['spectral data']['wvls binned'] # nm, center of the λ bins
 
-    if hasattr(λ_max, 'item'): # To compensate for a small error in the data reduction routine
-        λ_max = λ_max.item()
+    # if hasattr(λ_max, 'item'): λ_max = λ_max.item()
 
-    λ_full = np.linspace(λ_min, λ_max, np.round((λ_max-λ_min)/Δλ_full+1).astype('int'))
+    λ_full = np.linspace(λ_min, λ_max, np.round( (λ_max-λ_min)/Δλ_full + 1 ).astype('int'))
     assert len(λ_full) == cube_full.shape[0]
 
-    cube_binned = torch.tensor(data_cached['images']['cube'], dtype=default_torch_type, device=device)
+    # Spectrally binned MUSE NFM cube
+    cube_binned = torch.tensor(data_cache['images']['cube'], dtype=default_torch_type, device=device)
     cube_binned = cube_binned.squeeze() * valid_mask
-
-    # Correct the flux to match MUSE cube
+    # Correct the total flux in the binned cube to match one in the full MUSE cube
     cube_binned = cube_binned * (cube_full.sum(axis=0).max() /  cube_binned.sum(axis=0).max())
 
     # Extract config file and update it
-    model_config = InitNFMConfig(data_cached, cube_binned, device=device, convert_config=True)
+    model_config = InitNFMConfig(data_cache, cube_binned, device=device, convert_config=True)
     cube_binned = cube_binned.squeeze()
 
-    model_config['NumberSources'] = 1
+    model_config['NumberSources'] = 1 # Placeholder value
     # The bigger size of initialized PSF is needed to extract the flux loss due to cropping to the box_size later
-    model_config['sensor_science']['FieldOfView'] = 111 #TODO: set from outside
+    model_config['sensor_science']['FieldOfView'] = 111 # Placeholder value
     # Select only a subset of predicted wavelengths and modify the config file accordingly
-    λ_binned = model_config['sources_science']['Wavelength'].clone()
-    # Assumes that we are not in the pupil tracking mode
-    model_config['telescope']['PupilAngle'] = torch.zeros(1, device=device)
-
+    # λ_binned = model_config['sources_science']['Wavelength'].clone()
+    # model_config['telescope']['PupilAngle'] = torch.zeros(1, device=device) # Placeholder value that assumes that we are not in the pupil tracking mode
+    
     # Select sparse wavelength set
     # TODO: a code to select the specified number of spectral slices
-    ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
-    λ_sparse  =  λ_binned[..., ids_λ_sparse]
-    Δλ_binned = Δλ_binned[..., ids_λ_sparse]
-    model_config['sources_science']['Wavelength'] = λ_sparse
+    # ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
+    # λ_sparse  =  λ_binned[..., ids_λ_sparse]
+    # Δλ_binned = Δλ_binned[..., ids_λ_sparse]
+    # model_config['sources_science']['Wavelength'] = λ_sparse
 
-    cube_sparse = cube_binned.clone()[ids_λ_sparse, ...] # Select the subset of λs
+    # cube_sparse = cube_binned.clone()[ids_λ_sparse, ...] # Select the subset of λs
 
     spectral_info = {
-        "λ_sparse":  λ_sparse.flatten() * 1e9, # [nm]
+        # "λ_sparse":  λ_sparse.flatten() * 1e9, # [nm]
+        "λ_binned":  λ_binned, # [nm]
         "λ_full":    λ_full, # [nm]
         "Δλ_binned": Δλ_binned,
         "Δλ_full":   Δλ_full
@@ -1736,17 +1735,18 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     if save_cache:
         try:
             with open(cache_path, 'wb') as handle:
-                pickle.dump(data_cached, handle, protocol=pickle.HIGHEST_PROTOCOL)
+                pickle.dump(data_cache, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
         except Exception as e:
             print(f'Error: {e}')
 
     spectral_cubes = {
         "cube_full":   cube_full,   # this one contains all spectral slices
-        "cube_sparse": cube_sparse, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
+        # "cube_sparse": cube_sparse, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
+        "cube_binned": cube_binned, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
         "mask":        valid_mask   # this one contains the mask of the data cube
     }
-    return spectral_cubes, spectral_info, data_cached, model_config
+    return spectral_cubes, spectral_info, data_cache, model_config
 
 
 def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
@@ -1768,13 +1768,13 @@ def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
 
     nan_mask_frac = np.isnan(Cn2_frac)
     
-    # Filter out Cn2 weights below 5 km that are too low
+    # Filter out Cn² weights below 5 km that are too low
     for i in range(1, 8):
         if Cn2_alt[i] < 5.0 and np.abs(Cn2_frac[i]) < 1e-2:
             nan_mask_frac[i] = True
             
     # Cn2_frac[nan_mask_frac] = 0.0
-    # Filter out layers with NaN Cn2 weights
+    # Filter out layers with NaN-valued Cn² weights
     Cn2_frac = Cn2_frac[~nan_mask_frac]
     Cn2_alt  = Cn2_alt [~nan_mask_frac]
     
