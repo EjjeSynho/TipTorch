@@ -147,7 +147,7 @@ def load_and_fit_sample(id):
 
     N_wvl = PSF_0.shape[1]
     N_src = PSF_0.shape[0]
-    wavelengths = PSF_model.wavelengths
+    wavelengths = PSF_model.λ_sim
 
     # Retrieve flags from dataframe
     blurry_PSF_flag = psf_df.loc[id]['Bad quality'].item()

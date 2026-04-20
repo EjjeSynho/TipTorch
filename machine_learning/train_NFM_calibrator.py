@@ -545,7 +545,7 @@ else:
 
 # %%
 # To save GPU memory, PSFs are predicted and compared to data only for a subset of wavelengths at a time
-λ_full = PSF_model.wavelengths.clone() # [nm]
+λ_full = PSF_model.λ_sim.clone() # [nm]
 
 def generate_wavelength_sets(step, max_val):
     """ Generates wavelength index sets for training, ensuring coverage of all wavelengths with a given step size. """
@@ -592,12 +592,12 @@ def run_model(x_dict_NN, config, idx, λ_ids):
     
     config['sources_science']['Wavelength'] = current_wavelengths.view(1,-1) # [1, N_wvl_selected]
     
-    if current_wavelengths.shape == PSF_model.wavelengths.shape and torch.allclose(current_wavelengths, PSF_model.wavelengths, atol=1e-12):
+    if current_wavelengths.shape == PSF_model.λ_sim.shape and torch.allclose(current_wavelengths, PSF_model.λ_sim, atol=1e-12):
         PSF_model.model.Update(config=config, grids=False, pupils=False, tomography=True)
     else:
         # Update the internal state of the PSF model for the given batch config. Update just model parameters, not grids
         # This could be done with the SetWavelengths method, but it does some extra re-initializations, so we do it manually to save
-        PSF_model.wavelengths = current_wavelengths.clone()
+        PSF_model.λ_sim = current_wavelengths.clone()
         PSF_model.model.Update(config=config, grids=True, pupils=False, tomography=True)
     
     return PSF_model(x_dict) # Run given the predicted parameters and the updated internal state, get the predicted PSF cubes

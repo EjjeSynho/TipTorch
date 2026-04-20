@@ -111,7 +111,7 @@ PSF_1 = func(x0 := PSF_model.inputs_manager.stack() )
 N_wvl = PSF_0.shape[1]
 N_src = PSF_0.shape[0]
 
-wavelengths = PSF_model.wavelengths
+wavelengths = PSF_model.λ_sim
 
 #%%
 cmap = mpl.colormaps.get_cmap('gray')  # viridis is the default colormap for imshow

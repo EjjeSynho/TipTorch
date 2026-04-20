@@ -31,12 +31,10 @@ class TipTorch(torch.nn.Module):
         phase_size = self.pupil.shape[-1]
         self.pupil_padder = torch.nn.ZeroPad2d( int(round(phase_size*self.sampling_min/2-phase_size/2)) )
         
-        # Invalidate cache so ComputeStaticOTF recomputes from the new pupil/grid
-        if hasattr(self, 'OTF_static_default'):
-            del self.OTF_static_default
-
-        self.OTF_static_default = self.ComputeStaticOTF()
-        self.OTF_static = self.OTF_static_default
+        # Compute the diffraction-limited OTF from the pupil (and apodizer if present)
+        pupil_phase = self.pupil * self.apodizer if self.apodizer is not None else self.pupil
+        self.OTF_static_default = self.Phase2OTF(pupil_phase) # diffraction-limited reference, kept for DL PSF computation
+        self.OTF_static = self.OTF_static_default.clone()     # live OTF used by the model, persists until explicitly updated
         
 
     def InitValues(self):
@@ -387,15 +385,7 @@ class TipTorch(torch.nn.Module):
     def ComputeStaticOTF(self, phase=None):
         if phase is not None:
             self.OTF_static = self.Phase2OTF(phase)
-        else:
-            # Recompute default from pupil only when called from InitPupils (i.e. OTF_static_default does not exist yet).
-            # Otherwise restore the cached default since grids haven't changed and it is faster than recomputing it from the pupil again
-            if not hasattr(self, 'OTF_static_default'):
-                pupil_phase = self.pupil * self.apodizer if self.apodizer is not None else self.pupil
-                self.OTF_static_default = self.Phase2OTF(pupil_phase)
-                
-            self.OTF_static = self.OTF_static_default
-
+        # When phase is None, just keep the current OTF_static as-is
         return self.OTF_static
 
 
@@ -976,7 +966,8 @@ class TipTorch(torch.nn.Module):
     
     def DLPSF(self):
         ''' Computes a diffraction-limited PSF '''
-        self.PSF_DL = self.OTF2PSF_legacy(self.OTF_static_default) / self.norm_scale
+        self.PSF_DL = self.OTF2PSF(self.OTF_static_default) / self.norm_scale
+        
         return self.PSF_DL
 
 
@@ -1072,7 +1063,7 @@ class TipTorch(torch.nn.Module):
         ], dim=-1) # Works only for odd num. of pixels
     
 
-    def OTF2PSF_legacy(self, OTF): 
+    def OTF2PSF(self, OTF): 
         PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF, dim=(-2,-1))), dim=(-2,-1)).abs()
         
         PSF = []
@@ -1235,7 +1226,7 @@ class TipTorch(torch.nn.Module):
         
         # Computing final PSF
         # PSF_out = self.OTF2PSF(self.OTF)
-        PSF_out = self.OTF2PSF_legacy(self.OTF)
+        PSF_out = self.OTF2PSF(self.OTF)
         self.norm_scale = self.normalizer(PSF_out, dim=(-2,-1), keepdim=True)
         
         return (PSF_out / self.norm_scale) * F + bg

@@ -175,8 +175,8 @@ def EvaluateFluxNormalizationFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size
     quasi_inf_PSF_size -= (1-current_PSF_size % 2)
 
     if PSF_model.use_splines:
-        wvl_current = PSF_model.wavelengths.clone()
-        PSF_model.SetWavelengths(PSF_model.λ_ctrl_denorm) # isntead of anchor λs, evaluate at spline nodes
+        wvl_current = PSF_model.λ_sim.clone()
+        PSF_model.SetWavelengths(PSF_model.λ_ctrl) # isntead of anchor λs, evaluate at spline nodes
 
     # backup the original coordinates
     coords_backup = (
@@ -215,9 +215,9 @@ def EvaluateFluxNormalizationFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size
     torch.cuda.empty_cache()
     
     if PSF_model.use_splines:
-        # For convenience, reproject back on the control λs
-        PSF_model.inputs_manager['F_norm_λ_ctrl'] = PSF_norm_factor.clone() # we'll need it later when simulating full spectrum
-        return PSF_model.evaluate_splines(PSF_norm_factor, PSF_model.norm_wvl(PSF_model.wavelengths)).float(), PSF_inf, PSF_small
+        PSF_model.inputs_manager['F_norm_λ_ctrl'] = PSF_norm_factor.clone() # store it, we'll need it later when simulating full spectrum
+        # For convenience, reproject back on the simulated λs
+        return PSF_model.evaluate_splines(PSF_norm_factor, PSF_model.λ_sim_normed), PSF_inf, PSF_small
     else:
         PSF_model.inputs_manager['F_norm_λ'] = PSF_norm_factor.unsqueeze(0).clone() # we'll need it later when simulating full spectrum
         return PSF_norm_factor.float(), PSF_inf, PSF_small
@@ -278,7 +278,7 @@ def loss(x_, data, func):
 x0 = PSF_model.inputs_manager.stack().clone()
 x1 = x0.clone()
 
-for i in range(2):
+for i in range(3):
     result_global = minimize(lambda x: loss(x, cube_sparse, func), x1, max_iter=250, tol=1e-3, method='bfgs', disp=2)
     x1 = result_global.x.clone()
 
@@ -324,123 +324,37 @@ plt.xlabel('Wavelength, [nm]')
 plt.grid()
 plt.show()
 
-#%%
-from tqdm import tqdm
 
-selff = PSF_model
 
-λ_full_tensor = torch.tensor(selff.λ_full, device=selff.device, dtype=selff.wavelengths.dtype)
-λ_full_norm   = selff.norm_wvl(λ_full_tensor)
-
-x_dict = selff.inputs_manager.to_dict()
-x_dict_λ_full = {}
-
-# Evaluate all spline parameters at the full λs range beforehand to avoid redundant computations during the PSF simulation loop
-for entry in selff.polychromatic_params:
-    if entry + '_ctrl' in x_dict:
-        x_dict_λ_full[entry] = selff.evaluate_splines(x_dict[entry + '_ctrl'], λ_full_norm)
-        x_dict[entry + '_ctrl']
-        x_dict.pop(entry + '_ctrl') # Remove the control λs from x_dict to avoid confusion, since we now have the full λs values for these parameters
-
-x_dict_λ_full['Jx'] = x_dict_λ_full['J']
-x_dict_λ_full['Jy'] = x_dict_λ_full['J']
-x_dict_λ_full.pop('J') # Remove the joint jitter parameter
-
-# Extend to all atmospheric layers assuming the wind is only in ground layer
-if 'wind_speed_single' in x_dict:
-    x_dict['wind_speed'] = torch.nn.functional.pad(x_dict['wind_speed_single'].view(-1, 1), (0, selff.model.N_L - 1))
-    x_dict.pop('wind_speed_single')
-
-if 'wind_dir_single' in x_dict:
-    x_dict['wind_dir'] = torch.nn.functional.pad(x_dict['wind_dir_single'].view(-1, 1), (0, selff.model.N_L - 1))
-    x_dict.pop('wind_dir_single')
-
-chrom_defocus = x_dict['chrom_defocus'] if selff.chrom_defocus else None
-phase_ = selff.phase_func(x_dict['LO_coefs'], chrom_defocus) if selff.LO_NCPAs else None
-
-# The final dictionary with all necessary values stored inside
-x_dict.update(x_dict_λ_full)
-
-per_src_params = [p.replace('_ctrl', '') for p in selff.inputs_manager.input_managers['per_src'].to_dict().keys()]
-polychromatic_params = list(x_dict_λ_full.keys())
-
-# Full spectral cubes for each source
-PSFs_combined = torch.zeros((selff.model.N_src, selff.num_λ_slices, selff.model.N_pix, selff.model.N_pix), device='cpu')
 
 #%%
-max_λ_batch_size = 100 # TODO: adjust based on memory available and the number of sources simulated
-λ_batches = [torch.tensor(selff.λ_full[i:i + max_λ_batch_size], device=selff.device) for i in range(0, len(selff.λ_full), max_λ_batch_size)]
+empty_img_full = torch.zeros([PSF_model.num_λ_slices, cube_sparse.shape[-2], cube_sparse.shape[-1]], device='cpu')
 
-_initial_wvl = selff.wavelengths.clone()
-_N_src = selff.model.N_src
+@torch.no_grad()
+def func_full():
+    # No inputs since SimulateFullSpectrum() fully relies on the inputs stored in the inputs_manager, which are already up-to-date
+    PSFs_combined = PSF_model.SimulateFullSpectrum(verbose=True)
+    # Now, chromatic PSF normalization factor must be re-evaluated for the full spectrum
+    PSF_norm_factor_full = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_full_normed).cpu()
+    flux_normalization   = PSF_model.inputs_manager['F_norm'].unsqueeze(-1).cpu() * PSF_norm_factor_full * src_spectra_full
+    # Apply the flux normalization to the PSFs similar to func()
+    PSFs_ = PSFs_combined * flux_normalization.unsqueeze(-1).unsqueeze(-1)
 
-selff.model.N_src = 1 # Temporarily set to 1 to compute PSFs for each source separately
+    return add_ROIs( empty_img_full, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
-with torch.no_grad():
-    # Copy all shared non-chromatic entries, they stay the same for every λ and every source
-    x_ = { key: x_dict[key] for key in x_dict.keys() if (key not in per_src_params) and (key not in polychromatic_params) }
-    
-    for i, λ_batch in tqdm(enumerate(λ_batches)):
-        current_batch_size = len(λ_batch)
-        start = i * max_λ_batch_size
-        λ_ids = slice(start, start + current_batch_size)
-
-        selff.model.SetWavelengths(λ_batch)
-        
-        # Select current λ batch for all chromatic parameters
-        for entry in polychromatic_params:
-            x_[entry] = x_dict[entry][..., λ_ids]
-        
-        # Compute the static OTF once per batch — it's source-independent
-        if selff.LO_NCPAs:
-            chrom_defocus_batch = x_dict['chrom_defocus'][..., λ_ids] if selff.chrom_defocus else None
-            selff.model.ComputeStaticOTF(selff.phase_func(x_dict['LO_coefs'], chrom_defocus_batch))
-
-        # Iterate over all sources
-        for src_id in range(_N_src):
-            # Select current object simulated
-            for entry in per_src_params:
-                if entry in polychromatic_params:
-                    # Both per-source AND chromatic (e.g. dx, dy): select source dim AND λ batch
-                    x_[entry] = x_dict[entry][src_id, λ_ids].unsqueeze(0)
-                else:
-                    x_[entry] = x_dict[entry][src_id, ...].unsqueeze(0)
-
-            PSFs_combined[src_id, λ_ids, ...] = selff.model(x_, None, None).cpu()
-
-
-selff.model.N_src = _N_src  # Restore the original number of sources
-selff.SetWavelengths(_initial_wvl)  # recomputes grids + tomographic projectors for correct N_src
-# Restore OTF_static for the original wavelengths and LO coefficients
-if selff.LO_NCPAs:
-    selff.model.ComputeStaticOTF(phase_)
-
-torch.cuda.empty_cache()
-
-#%%
-λ_full_tensor = torch.tensor(selff.λ_full, device=selff.device, dtype=selff.wavelengths.dtype)
-λ_full_norm   = selff.norm_wvl(λ_full_tensor)
-
-PSF_norm_factor_full = selff.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], λ_full_norm).cpu()
-
-flux_normalization = PSF_model.inputs_manager['F_norm'].unsqueeze(-1).cpu() * PSF_norm_factor_full * src_spectra_full
-
-#%%
-empty_img = torch.zeros([PSF_model.num_λ_slices, cube_sparse.shape[-2], cube_sparse.shape[-1]], device='cpu')
-PSFs_ = PSFs_combined * flux_normalization.unsqueeze(-1).unsqueeze(-1) # Apply the flux normalization to the PSFs
-
-model_full = add_ROIs( empty_img, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
 #%%
 
-plt.plot(λ_full, selff.evaluate_splines(PSF_model.inputs_manager['F_ctrl'][0,...], λ_full_norm).squeeze().cpu().numpy())
-
+model_full = func_full()
 
 #%%
 diff_img_full = (cube_full - model_full.numpy()) * valid_mask.cpu().numpy()
 
 # VisualizeSources(cube_full, model_full, norm=LogNorm(vmin=1e1, vmax=25000*10), mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSFs')
+
+#%%
+plt.plot(λ_full, PSF_model.evaluate_splines(PSF_model.inputs_manager['F_ctrl'][0,...], PSF_model.λ_full_normed).squeeze().cpu().numpy())
 
 #%% ============== Plotting the residual spectrum ===================
 from astropy.convolution import convolve, Box1DKernel
