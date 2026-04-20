@@ -24,7 +24,7 @@ except Exception:
 
 
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
-from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarData
+from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarCache
 from PSF_models.IRDIS_wrapper import PSFModelIRDIS
 
 from project_settings import device
@@ -46,7 +46,7 @@ BATCH_SIZE = 1
 sample_id = 1778
 
 print(f"Loading sample {sample_id}...")
-PSF_data, data_sample, configs = LoadSTDStarData(
+PSF_data, data_sample, configs = LoadSTDStarCache(
     sample_id,
     normalize=True,
     subtract_background=True,

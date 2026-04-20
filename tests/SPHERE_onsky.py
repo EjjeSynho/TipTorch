@@ -11,7 +11,7 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
-from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarData, STD_FOLDER
+from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarCache, STD_FOLDER
 from project_settings import device
 from tools.utils import rad2mas, GradientLoss
 from torchmin import minimize
@@ -39,7 +39,7 @@ subset_df = subset_df[subset_df['LWE'] == True]
 # sample_id = 2219 # -- interesting LWE-cross
 sample_id = 1778  # -- explicit wings
 
-PSF_data, data_sample, model_config = LoadSTDStarData(
+PSF_data, data_sample, model_config = LoadSTDStarCache(
     sample_id,
     normalize=True,
     subtract_background=True,

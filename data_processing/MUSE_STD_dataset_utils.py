@@ -23,7 +23,7 @@ def LoadSTDStarCacheByID(id):
     return data_sample
 
 
-def LoadSTDStarData(
+def LoadSTDStarCache(
     ids,
     derotate_PSF = False,
     normalize = True,

@@ -351,7 +351,7 @@ good_samples = muse_df.index.values
 #%%
 for id in tqdm(good_samples):
     try:
-        PSF_data, _, _, model_config = LoadSTDStarData(
+        PSF_data, _, _, model_config = LoadSTDStarCache(
             ids = id,
             derotate_PSF = True,
             normalize = True,

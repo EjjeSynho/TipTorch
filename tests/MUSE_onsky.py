@@ -14,7 +14,7 @@ import matplotlib as mpl
 from torchmin import minimize
 from matplotlib.colors import LogNorm
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
-from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarData
+from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarCache
 from PSF_models.NFM_wrapper import PSFModelNFM
 from project_settings import device
 
@@ -83,7 +83,7 @@ ids = 462 # good one
 # ids = 456 # large tomographic error
 # ids = 125
 
-PSF_0, norms, bgs, configs = LoadSTDStarData(
+PSF_0, norms, bgs, configs = LoadSTDStarCache(
     ids                 = ids,
     derotate_PSF        = True,
     normalize           = True,
@@ -99,9 +99,9 @@ PSF_model = PSFModelNFM(
     multiple_obs    = True,
     LO_NCPAs        = True,
     chrom_defocus   = False,
-    use_splines     = True,
     Moffat_absorber = False, 
     Z_mode_max      = 9,
+    N_spline_nodes  = 5,
     device          = device
 )
 
@@ -138,7 +138,7 @@ from tools.utils import RadialProfileLossSimple
 
 blurry_PSF_flag = muse_df.loc[ids]['Bad quality'].item()
 
-fit_wind_dir    = False
+fit_wind_dir    = True
 fit_wind_speed  = False
 fit_outerscale  = False
 fit_Cn2_profile = True
@@ -146,7 +146,7 @@ fit_Cn2_profile = True
 if N_src > 1:
     suppress_bump_flag = False
     suppress_LO_flag   = False
-        
+    
 else:
     # Supress fiting of these entries in the case of very blurry PSFs, as it may overfit
     suppress_bump_flag = blurry_PSF_flag | (not muse_df.loc[ids]['Non-point'].item())
@@ -206,9 +206,10 @@ prior_mean = { param: PSF_model.inputs_manager[param].detach().clone() for param
 
 # Pre-defined STDs
 prior_STD = {
-    'r0':   0.2,
-    'L0':   25,
-    'wind_speed_single': 5.0
+    'r0': 0.2,
+    'L0': 25,
+    'wind_speed_single': 5.0,
+    'wind_dir_single': 10.0,
 }
 
 def compute_MAP_err(param: str):
@@ -222,6 +223,7 @@ def loss_MAP():
     loss  = compute_MAP_err('r0')
     loss += compute_MAP_err('L0') if fit_outerscale else 0.0
     loss += compute_MAP_err('wind_speed_single') if fit_wind_speed else 0.0
+    loss += compute_MAP_err('wind_dir_single') if fit_wind_dir else 0.0
     
     # Also, force L0, r0, and wind speed to be positive to avoid unphysical values
     loss += force_positive(PSF_model.inputs_manager['r0'])
@@ -229,7 +231,7 @@ def loss_MAP():
         loss += force_positive(PSF_model.inputs_manager['L0'])
     if fit_wind_speed:
         loss += force_positive(PSF_model.inputs_manager['wind_speed_single'])
-    
+
     w = 0.025 # Empirical weight to balance the loss magnitude with the PSF loss
     return loss * w
 

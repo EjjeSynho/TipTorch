@@ -196,7 +196,7 @@ def ProcessPSFCubes(data_samples, size, remove_background=True, normalize=True):
 
 
   
-def LoadSTDStarData(
+def LoadSTDStarCache(
     ids,
     normalize = True,
     subtract_background = True,

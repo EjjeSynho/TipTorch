@@ -583,7 +583,7 @@ model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ_full, device=device),
 norms_new_full_λ = curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, 'norm')
 
 # Split λ array into batches
-λ_split_size = 192
+λ_split_size = 100
 λ_batches = [λ_full[i:i + λ_split_size] for i in range(0, len(λ_full), λ_split_size)]
 
 model_full = []

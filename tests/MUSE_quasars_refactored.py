@@ -128,6 +128,7 @@ src_spectra_full   = [GetSpectrum(cube_full,   sources.iloc[i], radius=flux_core
 
 src_spectra_sparse = torch.stack(src_spectra_sparse, dim=0) # This one is stored on GPU
 src_spectra_full   = np.stack(src_spectra_full, axis=0) # This one is stored on CPU to save memory
+src_spectra_full   = torch.tensor(src_spectra_full, device='cpu', dtype=torch.float32)
 
 colors = [f'tab:{color}' for color in ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan'][:N_src]]
 
@@ -140,6 +141,7 @@ for i_src in range(N_src):
                 label=f'Source {i_src+1} (sparse samples)')
 
 plt.xlabel('Wavelength, [nm]')
+plt.xlim(λ_full.min(), λ_full.max())
 plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
 plt.title('Sources spectra preview')
 plt.legend()
@@ -155,11 +157,13 @@ PSF_model = PSFModelNFM(
     multiple_obs    = False,
     LO_NCPAs        = True,
     chrom_defocus   = False,
-    use_splines     = True,
     Moffat_absorber = False,
+    N_spline_nodes  = 3,
     Z_mode_max      = 9,
     device          = device
 )
+
+PSF_model.inputs_manager.set_optimizable('bg_ctrl', False)
 
 #%%
 @torch.no_grad()
@@ -254,13 +258,16 @@ def func(x):
 
 
 def loss_PSF(PSF_data, PSF_pred, w_total, w_MSE, w_MAE):
-    diff = (PSF_pred-PSF_data) * wvl_weights
+    residuals = PSF_data - PSF_pred
+    diff = residuals * wvl_weights
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean()  * w_MAE
     # Since x input in func() updates the internal values for PSF_model (inluding F_norm),
     # they now can directly use them to compute the flux normalization factor
     F_penalty = (PSF_model.inputs_manager['F_ctrl'] - 1.0).abs().mean()
-    return w_total * (MSE_loss + MAE_loss) + F_penalty * 0.2
+    # Soft non-negativity penalty: penalize when residuals (data - model) are negative
+    non_negativity_penalty = torch.nn.functional.relu(-residuals).mean()
+    return w_total * (MSE_loss + MAE_loss) + F_penalty * 0.2 + non_negativity_penalty * 0.05
 
 
 def loss(x_, data, func):
@@ -272,7 +279,7 @@ x0 = PSF_model.inputs_manager.stack().clone()
 x1 = x0.clone()
 
 for i in range(2):
-    result_global = minimize(lambda x: loss(x, cube_sparse, func), x1, max_iter=250, tol=1e-3, method='l-bfgs', disp=2)
+    result_global = minimize(lambda x: loss(x, cube_sparse, func), x1, max_iter=250, tol=1e-3, method='bfgs', disp=2)
     x1 = result_global.x.clone()
 
 #%%
@@ -318,71 +325,119 @@ plt.grid()
 plt.show()
 
 #%%
-# Simulate PSFs across the full wavelength range
-model_full = PSF_model.simulate_full_spectrum(verbose=True)
+from tqdm import tqdm
 
-#%% Predict PSFs over the full wavelengths range
-from tools.multisources import add_ROIs_separately
+selff = PSF_model
 
-print('Extending the prediction over the whole wavelengths range...')
-torch.cuda.empty_cache()
+λ_full_tensor = torch.tensor(selff.λ_full, device=selff.device, dtype=selff.wavelengths.dtype)
+λ_full_norm   = selff.norm_wvl(λ_full_tensor)
 
-model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
-norms_new_full_λ = curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, 'norm')
+x_dict = selff.inputs_manager.to_dict()
+x_dict_λ_full = {}
 
-# Split λ array into batches
-λ_split_size = 100
-λ_batches = [λ_full[i:i + λ_split_size] for i in range(0, len(λ_full), λ_split_size)]
+# Evaluate all spline parameters at the full λs range beforehand to avoid redundant computations during the PSF simulation loop
+for entry in selff.polychromatic_params:
+    if entry + '_ctrl' in x_dict:
+        x_dict_λ_full[entry] = selff.evaluate_splines(x_dict[entry + '_ctrl'], λ_full_norm)
+        x_dict[entry + '_ctrl']
+        x_dict.pop(entry + '_ctrl') # Remove the control λs from x_dict to avoid confusion, since we now have the full λs values for these parameters
 
-model_full = []
-model_full_split = []
+x_dict_λ_full['Jx'] = x_dict_λ_full['J']
+x_dict_λ_full['Jy'] = x_dict_λ_full['J']
+x_dict_λ_full.pop('J') # Remove the joint jitter parameter
 
-wvl_temp = model_config['sources_science']['Wavelength'].clone()
+# Extend to all atmospheric layers assuming the wind is only in ground layer
+if 'wind_speed_single' in x_dict:
+    x_dict['wind_speed'] = torch.nn.functional.pad(x_dict['wind_speed_single'].view(-1, 1), (0, selff.model.N_L - 1))
+    x_dict.pop('wind_speed_single')
+
+if 'wind_dir_single' in x_dict:
+    x_dict['wind_dir'] = torch.nn.functional.pad(x_dict['wind_dir_single'].view(-1, 1), (0, selff.model.N_L - 1))
+    x_dict.pop('wind_dir_single')
+
+chrom_defocus = x_dict['chrom_defocus'] if selff.chrom_defocus else None
+phase_ = selff.phase_func(x_dict['LO_coefs'], chrom_defocus) if selff.LO_NCPAs else None
+
+# The final dictionary with all necessary values stored inside
+x_dict.update(x_dict_λ_full)
+
+per_src_params = [p.replace('_ctrl', '') for p in selff.inputs_manager.input_managers['per_src'].to_dict().keys()]
+polychromatic_params = list(x_dict_λ_full.keys())
+
+# Full spectral cubes for each source
+PSFs_combined = torch.zeros((selff.model.N_src, selff.num_λ_slices, selff.model.N_pix, selff.model.N_pix), device='cpu')
+
+#%%
+max_λ_batch_size = 100 # TODO: adjust based on memory available and the number of sources simulated
+λ_batches = [torch.tensor(selff.λ_full[i:i + max_λ_batch_size], device=selff.device) for i in range(0, len(selff.λ_full), max_λ_batch_size)]
+
+_initial_wvl = selff.wavelengths.clone()
+_N_src = selff.model.N_src
+
+selff.model.N_src = 1 # Temporarily set to 1 to compute PSFs for each source separately
 
 with torch.no_grad():
-    for batch_id in tqdm(range(len(λ_batches))):
-        batch_size = len(λ_batches[batch_id])
-        model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
-        model.Update(grids=True, pupils=True, tomography=True)
+    # Copy all shared non-chromatic entries, they stay the same for every λ and every source
+    x_ = { key: x_dict[key] for key in x_dict.keys() if (key not in per_src_params) and (key not in polychromatic_params) }
+    
+    for i, λ_batch in tqdm(enumerate(λ_batches)):
+        current_batch_size = len(λ_batch)
+        start = i * max_λ_batch_size
+        λ_ids = slice(start, start + current_batch_size)
 
-        empty_img = torch.zeros([batch_size, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
-        PSF_batch = []
-
-        for i in range(N_src):
-            batch_ids = slice(batch_id*batch_size, (batch_id+1)*batch_size)
-
-            dict_selected = {
-                key: model_inputs_full_λ[key][:,batch_ids]
-                for key in model_inputs_full_λ.keys()
-            }
-
-            dxdy_dict = {
-                'dx': individual_inputs['dx'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0), # Extend to simulated number of wavelength
-                'dy': individual_inputs['dy'][i].unsqueeze(-1).repeat(batch_size).unsqueeze(0) # assuming the same shift for all wavelengths
-            }
-
-            dict_selected = x_fit_dict | dict_selected | dxdy_dict
-            dict_selected['bg'] = torch.zeros([1, batch_size], device=device)
-
-            del dict_selected['LO_coefs']
-
-            flux_norm = norms_new_full_λ[batch_ids]\
-                * flux_corrections[i]\
-                * torch.as_tensor(src_spectra_full[i][batch_ids], device=device)
-
-            PSF_batch.append( (model(dict_selected).squeeze() * flux_norm[:,None,None]).detach() )
-
-        model_full.append( add_ROIs( empty_img*0.0, PSF_batch, srcs_image_data["img_crops"], srcs_image_data["img_slices"] ).cpu().numpy() )
-        model_full_split.append( add_ROIs_separately( empty_img*0.0, PSF_batch, srcs_image_data["img_crops"], srcs_image_data["img_slices"] ).cpu().numpy() )
+        selff.model.SetWavelengths(λ_batch)
         
-model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
-model.Update(grids=True, pupils=True, tomography=True)
+        # Select current λ batch for all chromatic parameters
+        for entry in polychromatic_params:
+            x_[entry] = x_dict[entry][..., λ_ids]
+        
+        # Compute the static OTF once per batch — it's source-independent
+        if selff.LO_NCPAs:
+            chrom_defocus_batch = x_dict['chrom_defocus'][..., λ_ids] if selff.chrom_defocus else None
+            selff.model.ComputeStaticOTF(selff.phase_func(x_dict['LO_coefs'], chrom_defocus_batch))
 
-model_full = np.vstack(model_full)
-model_full_split = np.concatenate(model_full_split, axis=1)
-diff_img_full = (cube_full - model_full) * valid_mask.cpu().numpy()
+        # Iterate over all sources
+        for src_id in range(_N_src):
+            # Select current object simulated
+            for entry in per_src_params:
+                if entry in polychromatic_params:
+                    # Both per-source AND chromatic (e.g. dx, dy): select source dim AND λ batch
+                    x_[entry] = x_dict[entry][src_id, λ_ids].unsqueeze(0)
+                else:
+                    x_[entry] = x_dict[entry][src_id, ...].unsqueeze(0)
+
+            PSFs_combined[src_id, λ_ids, ...] = selff.model(x_, None, None).cpu()
+
+
+selff.model.N_src = _N_src  # Restore the original number of sources
+selff.SetWavelengths(_initial_wvl)  # recomputes grids + tomographic projectors for correct N_src
+# Restore OTF_static for the original wavelengths and LO coefficients
+if selff.LO_NCPAs:
+    selff.model.ComputeStaticOTF(phase_)
+
 torch.cuda.empty_cache()
 
+#%%
+λ_full_tensor = torch.tensor(selff.λ_full, device=selff.device, dtype=selff.wavelengths.dtype)
+λ_full_norm   = selff.norm_wvl(λ_full_tensor)
+
+PSF_norm_factor_full = selff.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], λ_full_norm).cpu()
+
+flux_normalization = PSF_model.inputs_manager['F_norm'].unsqueeze(-1).cpu() * PSF_norm_factor_full * src_spectra_full
+
+#%%
+empty_img = torch.zeros([PSF_model.num_λ_slices, cube_sparse.shape[-2], cube_sparse.shape[-1]], device='cpu')
+PSFs_ = PSFs_combined * flux_normalization.unsqueeze(-1).unsqueeze(-1) # Apply the flux normalization to the PSFs
+
+model_full = add_ROIs( empty_img, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
+
+#%%
+
+plt.plot(λ_full, selff.evaluate_splines(PSF_model.inputs_manager['F_ctrl'][0,...], λ_full_norm).squeeze().cpu().numpy())
+
+
+#%%
+diff_img_full = (cube_full - model_full.numpy()) * valid_mask.cpu().numpy()
 
 # VisualizeSources(cube_full, model_full, norm=LogNorm(vmin=1e1, vmax=25000*10), mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSFs')

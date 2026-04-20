@@ -4,6 +4,7 @@
 import sys
 sys.path.insert(0, '..')
 
+from sympy import N
 import torch
 import numpy as np
 from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
@@ -27,9 +28,9 @@ class PSFModelNFM:
         multiple_obs    = False,
         LO_NCPAs        = True,
         chrom_defocus   = False,
-        use_splines     = False,
         Moffat_absorber = False,
         Z_mode_max      = 9,
+        N_spline_nodes  = 5,
         device          = device
     ):
         
@@ -39,9 +40,13 @@ class PSFModelNFM:
         self.LO_NCPAs        = LO_NCPAs
         self.device          = device
         self.Moffat_absorber = Moffat_absorber
-        self.use_splines     = use_splines
+        self.use_splines     = not (N_spline_nodes is None)
         self.chrom_defocus   = chrom_defocus and LO_NCPAs
         self.__config_raw    = config # Input config dictionary, defined in TipTop-style
+                
+        if N_spline_nodes:
+            if N_spline_nodes < 2 or N_spline_nodes > 3681:
+                raise ValueError(f"Number of control wavelengths for spline representation must be between 2 and 3681. Got {N_spline_nodes}.")
                 
         # The PSF model can be used in two configurations:
         #  1) Simulating different sources in multiple observations with different conditions -- used mostly in ML training and PSF model calibration
@@ -51,7 +56,7 @@ class PSFModelNFM:
         
         _config = self._init_configs(self.__config_raw) # Processed and converted config
         self.wavelengths = _config['sources_science']['Wavelength'].squeeze()
-        
+
         # Full spectrum span of MUSE NFM
         self.λ_min = 475.e-9
         self.λ_max = 935.e-9
@@ -72,10 +77,12 @@ class PSFModelNFM:
             # wavelengths using natural cubic splines. If so, all parameters must be defined only at the control wavelengths. Unlike objects spectra,
             # the chromatic behavior of the PSF is generally smooth and doesn't have high-frequency features, so a small number of control λs is fine.
             # The same control wavelengths must be used for all chromatic parameters to ensure consistency.
-            self.N_wvl_ctrl = 5
+            self.N_wvl_ctrl = N_spline_nodes
             self.norm_wvl = Uniform0_1(a=self.λ_min, b=self.λ_max) # [nm], MUSE NFM wavelength range
             self.λ_ctrl   = torch.linspace(0, 1, self.N_wvl_ctrl, device=self.device) # control λ nodes normalized to [0...1]
             self.λ_ctrl_denorm = self.norm_wvl.inverse(self.λ_ctrl) # [nm], control λs re-normalized back to the physical range
+            self.λ_normed = self.norm_wvl(self.wavelengths) # [0...1], simulated wavelengths normalized to [0...1] range for spline evaluation
+
 
         self._init_model_inputs()
         
@@ -235,7 +242,7 @@ class PSFModelNFM:
             (sausage_basis.OPD_map).unsqueeze(0).flip(-2)*5e6*self.model.pupil.unsqueeze(0),
             Z_basis.basis[2:self.Z_mode_max,...]
         ], dim=0)
-
+        # We need a composite basis because of the presence of phase bump mode, which is not orthogonal to the Zernike modes
         self.LO_basis = ArbitraryBasis(self.model, composite_basis, ignore_pupil=False)
         self.LO_N_params = self.LO_basis.N_modes
         
@@ -421,11 +428,11 @@ class PSFModelNFM:
         return spline.evaluate(λ_grid).T
 
 
-    def forward(self, x_dict=None, src_ids=None, include_list=None):
+    def forward(self, x_dict=None, src_ids=None, include_list=None, update_params=True):
         # TODO: add logic to limit the maximum number of simulated sources
         # TODO: pad individual inputs when simulating less sources than model.N_src
         
-        need_update = True
+        need_update = True and update_params
         
         if x_dict is None:
             x_dict = self.inputs_manager.to_dict()
@@ -446,7 +453,7 @@ class PSFModelNFM:
         if self.use_splines:
             for entry in self.polychromatic_params:
                 if entry+'_ctrl' in x_dict:
-                    x_dict[entry] = self.evaluate_splines(x_dict[entry+'_ctrl'], self.norm_wvl(self.wavelengths))
+                    x_dict[entry] = self.evaluate_splines(x_dict[entry+'_ctrl'], self.λ_normed)
 
         # Clone J entry to Jx and Jy
         x_dict['Jx'] = x_dict['J']
@@ -463,119 +470,28 @@ class PSFModelNFM:
         
         chrom_defocus = x_dict['chrom_defocus'] if self.chrom_defocus else None
 
-        phase_ = (lambda: self.phase_func(x_dict['LO_coefs'], chrom_defocus)) if self.LO_NCPAs else None
+        phase_ = self.phase_func(x_dict['LO_coefs'], chrom_defocus) if self.LO_NCPAs else None
 
         if need_update:
+            # Update inputs manager based of x_dict inputs
             self._update_manager_params(x_dict, src_ids=src_ids)
         
-        # Update inputs manager based of x_dict inputs
+        return self.model(x_, None, phase=phase_)
 
-        return self.model(x_, None, phase_generator=phase_)
-
-
-    @torch.no_grad()
-    def simulate_full_spectrum(self, x_dict=None, src_ids=None, include_list=None, verbose=False):
-        if not self.use_splines:
-            raise ValueError("Full spectrum evaluation is only available when using the spline representation of the polychromatic parameters.")
-
-        max_λ_batch_size = 128 # TODO: adjust based on memory available and the number of sources simulated
-        λ_batches = [self.λ_full[i:i + max_λ_batch_size] for i in range(0, len(self.λ_full), max_λ_batch_size)]
-
-        _initial_wvl = self.wavelengths.clone()
-
-        # Get the base parameter dict once (no copy — we won't mutate it directly)
-        base_dict = self.inputs_manager.to_dict() if x_dict is None else x_dict
-
-        # --- Pre-compute ALL spline quantities over the full λ range at once ---
-        # This avoids re-evaluating splines N_src × N_batches times in the hot loop.
-        λ_full_tensor = torch.tensor(self.λ_full, device=self.device, dtype=_initial_wvl.dtype)
-        λ_full_norm   = self.norm_wvl(λ_full_tensor)
-        # precomp_full[entry] has shape [N_obs, num_λ_slices] for shared params,
-        # or [N_src, num_λ_slices] for per-source params (dx, dy)
-        precomp_full = {}
-        for entry in self.polychromatic_params:
-            if entry + '_ctrl' in base_dict:
-                precomp_full[entry] = self.evaluate_splines(base_dict[entry + '_ctrl'], λ_full_norm)
-
-        # Pre-compute static derived quantities (wind, Jx/Jy aliases) — done once, reused every batch
-        wind_speed = torch.nn.functional.pad(base_dict['wind_speed_single'].view(-1, 1), (0, self.model.N_L - 1)) \
-            if 'wind_speed_single' in base_dict else None
-        wind_dir = torch.nn.functional.pad(base_dict['wind_dir_single'].view(-1, 1), (0, self.model.N_L - 1)) \
-            if 'wind_dir_single' in base_dict else None
-
-        # Per-source non-chromatic params (F_norm, src_dirs_x/y): pre-slice to avoid repeated indexing
-        per_src_static = {}
-        for key in self.per_src_inputs_list:
-            if key not in base_dict:
-                continue
-            val = base_dict[key]
-            per_src_static[key] = [val[s:s+1] for s in range(val.shape[0])]
-
-        # Store on CPU to avoid memory overuse
-        PSFs_combined = torch.zeros((self.model.N_src, self.num_λ_slices, self.model.N_pix, self.model.N_pix), device='cpu')
-
-        pbar = None
-        if verbose:
-            from tqdm import tqdm
-            pbar = tqdm(total=self.num_λ_slices, desc=f"Simulating λ slices ({self.model.N_src} sources)", unit="slice")
-
-        active_src_ids = src_ids if src_ids is not None else range(self.model.N_src)
-
-        for i, λ_batch in enumerate(λ_batches):
-            current_batch_size = len(λ_batch)
-            start  = i * max_λ_batch_size
-            λ_ids  = slice(start, start + current_batch_size)
-
-            self.SetWavelengths(torch.tensor(λ_batch, device=self.device))
-
-            # Slice pre-computed chromatic tensors to the current λ batch — O(1) view, no recomputation
-            batch_chrom = {entry: vals[..., λ_ids] for entry, vals in precomp_full.items()}
-            if 'J' in batch_chrom:
-                batch_chrom['Jx'] = batch_chrom['J']
-                batch_chrom['Jy'] = batch_chrom['J']
-
-            for src_id in active_src_ids:
-                # Build the per-call dict: base non-chromatic params …
-                src_dict = {**base_dict}
-                # … overwrite with static derived quantities …
-                src_dict['wind_speed'] = wind_speed
-                src_dict['wind_dir']   = wind_dir
-                # … overwrite with batch-sliced chromatic shared params …
-                src_dict.update(batch_chrom)
-                # … then fix the per-source chromatic params (dx, dy: [N_src, N_λ] → [1, batch])
-                for entry in ('dx', 'dy'):
-                    if entry in batch_chrom:
-                        src_dict[entry] = batch_chrom[entry][src_id:src_id+1]
-                # … and fix non-chromatic per-source params (F_norm, src_dirs_x/y)
-                for key, slices in per_src_static.items():
-                    idx = src_id if src_id < len(slices) else 0
-                    src_dict[key] = slices[idx]
-
-                chrom_defocus_batch = batch_chrom.get('chrom_defocus') if self.chrom_defocus else None
-                phase_ = (lambda cd=chrom_defocus_batch: self.phase_func(src_dict['LO_coefs'], cd)) if self.LO_NCPAs else None
-
-                x_ = {key: src_dict[key] for key in include_list} if include_list is not None else src_dict
-                PSFs_combined[src_id, λ_ids, ...] = self.model(x_, None, phase_generator=phase_).cpu()
-
-            if pbar is not None:
-                pbar.update(current_batch_size)
-
-        if pbar is not None:
-            pbar.close()
-
-        self.SetWavelengths(_initial_wvl)
-        torch.cuda.empty_cache()
-
-        return PSFs_combined
-    
 
     def SetWavelengths(self, wavelengths):
-        # Compare values with some tolerance to avoid unnecessary updates
-        if self.wavelengths.shape == wavelengths.shape and torch.allclose(wavelengths.flatten(), self.wavelengths.flatten(), atol=1e-12):
+        # Cheap pointer check first (same tensor object → same values, no GPU sync needed)
+        if self.wavelengths.data_ptr() == wavelengths.data_ptr():
             return
-        
+        # Fallback value check — forces a CUDA sync, but only reached for distinct tensor objects
+        if self.wavelengths.shape == wavelengths.shape and \
+            torch.allclose(wavelengths.flatten(), self.wavelengths.flatten(), atol=1e-12):
+            return
+
         self.model.SetWavelengths(wavelengths)
         self.wavelengths = wavelengths
+        if self.use_splines:
+            self.λ_normed = self.norm_wvl(self.wavelengths) # [0...1], simulated wavelengths normalized to [0...1] range for spline evaluation
 
 
     def SetImageSize(self, img_size):

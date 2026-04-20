@@ -1,7 +1,5 @@
 #%%
 import sys
-
-from astropy.units import d
 sys.path.insert(0, '..')
 
 import warnings
@@ -33,8 +31,12 @@ class TipTorch(torch.nn.Module):
         phase_size = self.pupil.shape[-1]
         self.pupil_padder = torch.nn.ZeroPad2d( int(round(phase_size*self.sampling_min/2-phase_size/2)) )
         
+        # Invalidate cache so ComputeStaticOTF recomputes from the new pupil/grid
+        if hasattr(self, 'OTF_static_default'):
+            del self.OTF_static_default
+
         self.OTF_static_default = self.ComputeStaticOTF()
-        self.OTF_static = self.OTF_static_default.clone()
+        self.OTF_static = self.OTF_static_default
         
 
     def InitValues(self):
@@ -382,14 +384,17 @@ class TipTorch(torch.nn.Module):
         return OTF_ / OTF_.abs().amax(dim=(-2,-1), keepdim=True) # normalize OTF
     
     
-    def ComputeStaticOTF(self, phase_generator=None):
-        if phase_generator is not None:
-            # Use external phase generator to compute the static OTF
-            self.OTF_static = self.Phase2OTF(phase_generator())
+    def ComputeStaticOTF(self, phase=None):
+        if phase is not None:
+            self.OTF_static = self.Phase2OTF(phase)
         else:
-            # Compute the default static OTF using the pupil and, optionally, apodizer
-            pupil_phase = self.pupil * self.apodizer if self.apodizer is not None else self.pupil
-            self.OTF_static = self.Phase2OTF(pupil_phase)
+            # Recompute default from pupil only when called from InitPupils (i.e. OTF_static_default does not exist yet).
+            # Otherwise restore the cached default since grids haven't changed and it is faster than recomputing it from the pupil again
+            if not hasattr(self, 'OTF_static_default'):
+                pupil_phase = self.pupil * self.apodizer if self.apodizer is not None else self.pupil
+                self.OTF_static_default = self.Phase2OTF(pupil_phase)
+                
+            self.OTF_static = self.OTF_static_default
 
         return self.OTF_static
 
@@ -1090,96 +1095,96 @@ class TipTorch(torch.nn.Module):
         return torch.hstack(PSF)
     
     
-    def complex_grid_sample(self, x, grid, mode='bicubic'):
-        """
-        x    : [B, 1, H, W] complex, centered
-        grid : [B, Hout, Wout, 2] in normalized source coordinates
-            last dim = (x, y)
-        """
-        xr = grid_sample(x.real, grid, mode=mode, padding_mode='zeros', align_corners=True)
-        xi = grid_sample(x.imag, grid, mode=mode, padding_mode='zeros', align_corners=True)
-        return torch.complex(xr, xi)
+    # def complex_grid_sample(self, x, grid, mode='bicubic'):
+    #     """
+    #     x    : [B, 1, H, W] complex, centered
+    #     grid : [B, Hout, Wout, 2] in normalized source coordinates
+    #         last dim = (x, y)
+    #     """
+    #     xr = grid_sample(x.real, grid, mode=mode, padding_mode='zeros', align_corners=True)
+    #     xi = grid_sample(x.imag, grid, mode=mode, padding_mode='zeros', align_corners=True)
+    #     return torch.complex(xr, xi)
 
 
-    def detector_OTF_grid(self, N):
-        """
-        Centered detector OTF coordinates consistent with fftshift/ifftshift.
-        Returned coordinates are normalized so that they live roughly in [-1, 1).
-        """
-        u = 2.0 * torch.fft.fftshift(torch.fft.fftfreq(N, d=1.0, device=self.device, dtype=self.dtype))
-        V_det, U_det = torch.meshgrid(u, u, indexing='ij')
-        return U_det, V_det
+    # def detector_OTF_grid(self, N):
+    #     """
+    #     Centered detector OTF coordinates consistent with fftshift/ifftshift.
+    #     Returned coordinates are normalized so that they live roughly in [-1, 1).
+    #     """
+    #     u = 2.0 * torch.fft.fftshift(torch.fft.fftfreq(N, d=1.0, device=self.device, dtype=self.dtype))
+    #     V_det, U_det = torch.meshgrid(u, u, indexing='ij')
+    #     return U_det, V_det
 
 
-    def pixel_MTF_detector_grid(self, U_det, V_det):
-        """
-        Square-pixel detector MTF on the detector OTF grid.
-        torch.sinc(x) = sin(pi x)/(pi x)
-        """
-        mtf = torch.sinc(0.5 * U_det) * torch.sinc(0.5 * V_det)
-        return mtf.unsqueeze(0).unsqueeze(0)  # [1,1,N,N]
+    # def pixel_MTF_detector_grid(self, U_det, V_det):
+    #     """
+    #     Square-pixel detector MTF on the detector OTF grid.
+    #     torch.sinc(x) = sin(pi x)/(pi x)
+    #     """
+    #     mtf = torch.sinc(0.5 * U_det) * torch.sinc(0.5 * V_det)
+    #     return mtf.unsqueeze(0).unsqueeze(0)  # [1,1,N,N]
 
 
-    def zoom_OTF_complex(self, OTF, scale, out_size, mode='bicubic'):
-        """
-        OTF     : [N_src, 1, H, W] complex, centered, sampled on the source normalized grid
-                used in this codebase (self.U/self.V ~ linspace(-1,1,self.nOtf))
-        scale   : >1 compresses PSF in image space
-        out_size: detector-grid size
+    # def zoom_OTF_complex(self, OTF, scale, out_size, mode='bicubic'):
+    #     """
+    #     OTF     : [N_src, 1, H, W] complex, centered, sampled on the source normalized grid
+    #             used in this codebase (self.U/self.V ~ linspace(-1,1,self.nOtf))
+    #     scale   : >1 compresses PSF in image space
+    #     out_size: detector-grid size
 
-        Returns : [N_src, 1, out_size, out_size] complex, centered
-        """
+    #     Returns : [N_src, 1, out_size, out_size] complex, centered
+    #     """
 
-        # Detector OTF coordinates on the OUTPUT Fourier grid
-        U_det, V_det = self.detector_OTF_grid(out_size)
+    #     # Detector OTF coordinates on the OUTPUT Fourier grid
+    #     U_det, V_det = self.detector_OTF_grid(out_size)
 
-        # Image compression by scale s <=> OTF(u,v) evaluated at (u/s, v/s)
-        # Since the source OTF grid is normalized to [-1,1] in this codebase,
-        # these are directly the grid_sample coordinates when align_corners=True.
-        grid = torch.stack((U_det/scale, V_det/scale), dim=-1)  # [N, N, 2]
-        grid = grid.unsqueeze(0).expand(self.N_src, -1, -1, -1) # [N_src, N, N, 2]
+    #     # Image compression by scale s <=> OTF(u,v) evaluated at (u/s, v/s)
+    #     # Since the source OTF grid is normalized to [-1,1] in this codebase,
+    #     # these are directly the grid_sample coordinates when align_corners=True.
+    #     grid = torch.stack((U_det/scale, V_det/scale), dim=-1)  # [N, N, 2]
+    #     grid = grid.unsqueeze(0).expand(self.N_src, -1, -1, -1) # [N_src, N, N, 2]
 
-        return self.complex_grid_sample(OTF, grid, mode=mode)
+    #     return self.complex_grid_sample(OTF, grid, mode=mode)
 
 
-    def OTF2PSF(self, OTF):
-        """
-        OTF: [B, Nwvl or 1, H, W] complex, centered
-        Returns detector-sampled PSFs [B, Nwvl, N_pix, N_pix]
-        """
-        out = []
-        eps = torch.finfo(OTF.real.dtype).eps
+    # def OTF2PSF(self, OTF):
+    #     """
+    #     OTF: [B, Nwvl or 1, H, W] complex, centered
+    #     Returns detector-sampled PSFs [B, Nwvl, N_pix, N_pix]
+    #     """
+    #     out = []
+    #     eps = torch.finfo(OTF.real.dtype).eps
 
-        for i in range(self.wvl.shape[-1]):
-            n = 0 if OTF.shape[1] == 1 else i
+    #     for i in range(self.wvl.shape[-1]):
+    #         n = 0 if OTF.shape[1] == 1 else i
 
-            # effective image-plane compression factor for this wavelength
-            s = float(self.nOtfs[i]) / float(self.N_pix)
+    #         # effective image-plane compression factor for this wavelength
+    #         s = float(self.nOtfs[i]) / float(self.N_pix)
 
-            OTF_i = OTF[:, n:n+1, :, :]  # [B,1,H,W], centered
+    #         OTF_i = OTF[:, n:n+1, :, :]  # [B,1,H,W], centered
 
-            # 1) resample OTF onto the detector Fourier grid
-            OTF_det = self.zoom_OTF_complex(OTF_i, scale=s, out_size=self.N_pix, mode='bicubic')
+    #         # 1) resample OTF onto the detector Fourier grid
+    #         OTF_det = self.zoom_OTF_complex(OTF_i, scale=s, out_size=self.N_pix, mode='bicubic')
 
-            # 2) apply square-pixel MTF on THAT detector grid
-            U_det, V_det = self.detector_OTF_grid(self.N_pix)
-            pix_mtf = self.pixel_MTF_detector_grid(U_det, V_det)
-            OTF_det = OTF_det * pix_mtf
+    #         # 2) apply square-pixel MTF on THAT detector grid
+    #         U_det, V_det = self.detector_OTF_grid(self.N_pix)
+    #         pix_mtf = self.pixel_MTF_detector_grid(U_det, V_det)
+    #         OTF_det = OTF_det * pix_mtf
 
-            # 3) preserve DC exactly (helps keep total flux stable after interpolation)
-            dc_src  = OTF_i[..., OTF_i.shape[-2] // 2, OTF_i.shape[-1] // 2].real
-            dc_det  = OTF_det[..., self.N_pix // 2, self.N_pix // 2].real.clamp_min(eps)
-            OTF_det = OTF_det * (dc_src / dc_det).unsqueeze(-1).unsqueeze(-1)
+    #         # 3) preserve DC exactly (helps keep total flux stable after interpolation)
+    #         dc_src  = OTF_i[..., OTF_i.shape[-2] // 2, OTF_i.shape[-1] // 2].real
+    #         dc_det  = OTF_det[..., self.N_pix // 2, self.N_pix // 2].real.clamp_min(eps)
+    #         OTF_det = OTF_det * (dc_src / dc_det).unsqueeze(-1).unsqueeze(-1)
 
-            # 4) detector-sampled PSF
-            PSF_i = torch.fft.fftshift( torch.fft.ifft2( torch.fft.ifftshift(OTF_det, dim=(-2, -1)), dim=(-2, -1) ), dim=(-2, -1) ).real
+    #         # 4) detector-sampled PSF
+    #         PSF_i = torch.fft.fftshift( torch.fft.ifft2( torch.fft.ifftshift(OTF_det, dim=(-2, -1)), dim=(-2, -1) ), dim=(-2, -1) ).real
 
-            # numerical cleanup
-            PSF_i = PSF_i.clamp_min(0.0)
+    #         # numerical cleanup
+    #         PSF_i = PSF_i.clamp_min(0.0)
 
-            out.append(PSF_i)
+    #         out.append(PSF_i)
 
-        return torch.cat(out, dim=1)
+    #     return torch.cat(out, dim=1)
 
 
     def OTF2PSF_no_interp(self, OTF):
@@ -1310,18 +1315,15 @@ class TipTorch(torch.nn.Module):
         return self
 
 
-    def forward(self, x=None, PSD=None, phase_generator=None):
+    def forward(self, x=None, PSD=None, phase=None):
         if x is not None:
             for name, value in x.items():
                 if hasattr(self, name):
-                    if isinstance(getattr(self, name), nn.Parameter):
-                        setattr(self, name, nn.Parameter(value))
-                    else:
-                        setattr(self, name, value)
-            
-        return self.PSD2PSF(\
-            self.ComputePSD() if PSD is None else PSD, \
-            self.ComputeStaticOTF(phase_generator)
+                    setattr(self, name, value)
+
+        return self.PSD2PSF(
+            self.ComputePSD() if PSD is None else PSD,
+            self.ComputeStaticOTF(phase)
         )
 
 

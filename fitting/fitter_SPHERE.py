@@ -29,7 +29,7 @@ import numpy as np
 from torch.autograd.functional import hessian
 from torchmin import minimize
 
-from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarData, erode_mask, STD_FOLDER
+from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarCache, erode_mask, STD_FOLDER
 from PSF_models.IRDIS_wrapper import PSFModelIRDIS
 from managers.config_manager import ConfigManager
 from tools.utils import SR, GradientLoss, mask_circle, FWHM_fitter
@@ -131,7 +131,7 @@ def load_and_fit_sample(id):
     """Load and fit a single sample using the IRDIS wrapper"""
     try:
         # Load data using the original loading function
-        PSF_data, data_sample, model_config = LoadSTDStarData(
+        PSF_data, data_sample, model_config = LoadSTDStarCache(
             id,
             normalize=True,
             subtract_background=True,
