@@ -24,7 +24,7 @@ from torchmin import minimize
 from tqdm import tqdm
 from pathlib import Path
 
-from tools.utils import mask_circle, mask_square
+from tools.utils import mask_square
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
 
 
@@ -60,8 +60,9 @@ cube_full, cube_binned, valid_mask = spectral_cubes["cube_full"], spectral_cubes
 λ_full,   Δλ_full   = spectral_info['λ_full'],   spectral_info['Δλ_full']
 λ_binned, Δλ_binned = spectral_info['λ_binned'], spectral_info['Δλ_binned']
 
-# Here, it's assumed to be every 5th bin, but it can be changed to any other selection strategy.
+# Here, it's assumed to be every 5th bin, but it can be changed to any other selection strategy
 ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
+# ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 3)
 λ_sparse  =  λ_binned[..., ids_λ_sparse]
 Δλ_sparse = Δλ_binned[..., ids_λ_sparse]
 
@@ -75,19 +76,63 @@ N_wvl = cube_sparse.shape[0]
 flux_λ_norm = torch.tensor(Δλ_full / Δλ_sparse, device=device, dtype=torch.float32)
 cube_sparse *= flux_λ_norm[:, None, None]
 
-model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0, 1e4]], device=device)
-model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=device)
-model_config['atmosphere']['WindDirection'] = model_config['atmosphere']['WindDirection'][0,:2].unsqueeze(0)
-model_config['atmosphere']['WindSpeed']     = model_config['atmosphere']['WindSpeed'][0,:2].unsqueeze(0)
+model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']['PupilAngle'], device=device) # Assuming the pupil angle is 0 for simplicity, it can be updated if known
+
+if True: # TODO: remove this pre-assumption
+    model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0,  1e4]], device=device)
+    model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=device)
+    model_config['atmosphere']['WindDirection'] = model_config['atmosphere']['WindDirection'][0,:2].unsqueeze(0)
+    model_config['atmosphere']['WindSpeed']     = model_config['atmosphere']['WindSpeed'][0,:2].unsqueeze(0)
+
+# model_config['telescope']['PupilAngle'] *= -1
 
 #%%
 from tools.multisources import add_ROIs, DetectSources, ExtractSources
-from tools.utils import rad2mas, rad2arc
 
+
+def AddSourcesToModel(model_config, sources, valid_mask):
+    from tools.utils import rad2mas, rad2arc
+    # Compute the center of mass for valid mask assuming it's the center of the science field
+    yy, xx = torch.where(valid_mask.squeeze() > 0)
+    field_center = np.stack([xx.float().mean().item(), yy.float().mean().item()])[None,...]
+
+    pixel_scale = model_config['sensor_science']['PixelScale'] # [mas/pix]
+    
+    # Sources coordinates that can be understood by TipTorch model
+    sources_coords  = np.stack([sources['x_peak'].values, sources['y_peak'].values], axis=1)
+    sources_coords -= field_center
+    sources_coords  = sources_coords * pixel_scale / rad2mas  # [pix] -> [rad]
+
+    # Convert to zenith and azimuth angles
+    sources_zenith  = np.arctan(np.sqrt(sources_coords[:,0]**2 + sources_coords[:,1]**2)) * rad2arc # [arcsec]
+    sources_azimuth = np.degrees(np.arctan2(sources_coords[:,1], sources_coords[:,0]))  # [deg]
+
+    # Update the model config with the sources coordinates
+    model_config['NumberSources'] = len(sources)
+    model_config['sources_science']['Zenith']  = torch.tensor(sources_zenith, device=device).unsqueeze(-1)
+    model_config['sources_science']['Azimuth'] = torch.tensor(sources_azimuth, device=device).unsqueeze(-1)
+    
+    
+def ExtractSpectraFromCore(cube_sparse, cube_full, sources, flux_core_radius):
+    N_core_pixels = (flux_core_radius*2 + 1)**2  # [pix²], assuming a square mask for the core flux estimation
+
+    # Contains the spectrum per source AVERAGED across the PSF core pixels. The core mask here MUST match EXACTLY the one
+    # used for the flux normalization factor estimation later
+    src_spectra_sparse = [GetSpectrum(cube_sparse, sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
+    src_spectra_full   = [GetSpectrum(cube_full,   sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
+
+    src_spectra_sparse = torch.stack(src_spectra_sparse, dim=0) # This one is stored on GPU
+    src_spectra_full   = np.stack(src_spectra_full, axis=0) # This one is stored on CPU to save memory
+    src_spectra_full   = torch.tensor(src_spectra_full, device='cpu', dtype=torch.float32)
+    
+    return src_spectra_sparse, src_spectra_full, N_core_pixels
+
+
+#%%
 PSF_size = 111  # Define the size of each extracted PSF
 
-# sources = DetectSources(cube_sparse, threshold='auto', nsigma=10, display=True, draw_win_size=20)
-sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_win_size=20)
+sources = DetectSources(cube_sparse, threshold='auto', nsigma=15, display=True, draw_win_size=20)
+# sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_win_size=20)
 # Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
 srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
@@ -95,40 +140,13 @@ N_src   = srcs_image_data["count"]
 sources = srcs_image_data["coords"]
 ROIs    = srcs_image_data["images"]
 
-pixel_scale = model_config['sensor_science']['PixelScale'] # [mas/pix]
-
-# Compute the center of mass for valid mask assuming it's the center of the science field
-yy, xx = torch.where(valid_mask.squeeze() > 0)
-field_center = np.stack([xx.float().mean().item(), yy.float().mean().item()])[None,...]
-
-# Sources coordinates that can be understood by TipTorch model
-sources_coords  = np.stack([sources['x_peak'].values, sources['y_peak'].values], axis=1)
-sources_coords -= field_center
-sources_coords  = sources_coords*pixel_scale / rad2mas  # [pix] -> [rad]
-
-# Convert to zenith and azimuth angles
-sources_zenith  = np.arctan(np.sqrt(sources_coords[:,0]**2 + sources_coords[:,1]**2)) * rad2arc # [arcsec]
-sources_azimuth = np.degrees(np.arctan2(sources_coords[:,1], sources_coords[:,0]))  # [deg]
-
-# Update the model config with the sources coordinates
-model_config['NumberSources'] = N_src
-model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']['PupilAngle'], device=device) # Assuming the pupil angle is 0 for simplicity, it can be updated if known
-model_config['sources_science']['Zenith']  = torch.tensor(sources_zenith, device=device).unsqueeze(-1)
-model_config['sources_science']['Azimuth'] = torch.tensor(sources_azimuth, device=device).unsqueeze(-1)
+AddSourcesToModel(model_config, sources, valid_mask)
 
 #%%
-# Correct for the difference in energy per λ bin
+
 flux_core_radius = 2  # [pix]
-N_core_pixels = (flux_core_radius*2 + 1)**2  # [pix^2], assuming a square mask for the core flux estimation
 
-# Contains the spectrum per source AVERAGED across the PSF core pixels. The core mask here MUST match EXACTLY the one
-# used for the flux normalization factor estimation later
-src_spectra_sparse = [GetSpectrum(cube_sparse, sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
-src_spectra_full   = [GetSpectrum(cube_full,   sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
-
-src_spectra_sparse = torch.stack(src_spectra_sparse, dim=0) # This one is stored on GPU
-src_spectra_full   = np.stack(src_spectra_full, axis=0) # This one is stored on CPU to save memory
-src_spectra_full   = torch.tensor(src_spectra_full, device='cpu', dtype=torch.float32)
+src_spectra_sparse, src_spectra_full, N_core_pixels = ExtractSpectraFromCore(cube_sparse, cube_full, sources, flux_core_radius)
 
 colors = [f'tab:{color}' for color in ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan'][:N_src]]
 
@@ -149,6 +167,7 @@ plt.grid(alpha=0.3)
 plt.tight_layout()
 plt.show()
 
+
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
 from PSF_models.NFM_wrapper import PSFModelNFM
 
@@ -167,7 +186,7 @@ PSF_model.inputs_manager.set_optimizable('bg_ctrl', False)
 
 #%%
 @torch.no_grad()
-def EvaluateFluxNormalizationFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size=511):
+def EvaluateCoreFluxFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size=511) -> None:
     ''' Computes composite chromatic flux normalization factor. '''
 
     current_PSF_size = PSF_model.model.N_pix # the actual size of the simulated PSFs
@@ -217,43 +236,53 @@ def EvaluateFluxNormalizationFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size
     if PSF_model.use_splines:
         PSF_model.inputs_manager['F_norm_λ_ctrl'] = PSF_norm_factor.clone() # store it, we'll need it later when simulating full spectrum
         # For convenience, reproject back on the simulated λs
-        return PSF_model.evaluate_splines(PSF_norm_factor, PSF_model.λ_sim_normed), PSF_inf, PSF_small
+        # return PSF_model.evaluate_splines(PSF_norm_factor, PSF_model.λ_sim_normed), PSF_norm_factor, PSF_inf, PSF_small
     else:
         PSF_model.inputs_manager['F_norm_λ'] = PSF_norm_factor.unsqueeze(0).clone() # we'll need it later when simulating full spectrum
-        return PSF_norm_factor.float(), PSF_inf, PSF_small
+        # return PSF_norm_factor.float(), None, PSF_inf, PSF_small
 
 
-# from tools.plotting import plot_radial_PSF_profiles
+@torch.no_grad()
+def UpdateFluxNormalization(PSF_model) -> None:
+    # PSF_norm_factor_old = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_sim_normed).clone()
+    PSF_norm_factor_old = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
 
-# core_mask     = torch.tensor(mask_square(current_PSF_size,   flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
-# core_mask_inf   = torch.tensor(mask_square(quasi_inf_PSF_size, flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+    EvaluateCoreFluxFactor(PSF_model, N_core_pixels)
 
-# _c = (quasi_inf_PSF_size - current_PSF_size) // 2
-# inf_crop = np.s_[..., _c:_c+current_PSF_size, _c:_c+current_PSF_size]
+    # PSF_norm_factor_new = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_sim_normed).clone()
+    PSF_norm_factor_new = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
 
-# PSF_small_ = PSF_small / PSF_small.sum(dim=(-2,-1), keepdim=True) # Normalize to unit flux
-# PSF_inf_crop_ = PSF_inf[inf_crop] / PSF_inf[inf_crop].sum(dim=(-2,-1), keepdim=True) # Normalize to unit flux
+    # Compute the updated normalization factor to account for the new PSF morphology after the first fitting step.
+    # This is necessary to ensure that the flux normalization is consistent with the actual PSF shape, which may have changed during the optimization.
+    F_norm_correction = (PSF_norm_factor_new / PSF_norm_factor_old).mean().item()
 
-# d = (PSF_small_ - PSF_inf_crop_).abs().mean(dim=(0,1))
-# d[current_PSF_size//2, current_PSF_size//2] = 0 # Set the central pixel to zero to avoid it dominating the difference due to the high flux concentration in the PSF core
+    PSF_model.inputs_manager['F_norm'] /= F_norm_correction
 
-# plot_radial_PSF_profiles(PSF_small_.mean(dim=(0,1)), PSF_inf_crop_.mean(dim=(0,1)), 'Data', 'Model', title='Windsong', cutoff=16, y_min=5e-2)
+    # Since F_ctrl is the parameter that directly controls the overall flux normalization in the model, we can use its mean value to correct
+    # for per-source flux normalization. This is a rather empirical correction
+    F_mean_correction = PSF_model.inputs_manager['F_ctrl'].mean().item()
+    PSF_model.inputs_manager['F_ctrl'] /= F_mean_correction
+    PSF_model.inputs_manager['F_norm'] *= F_mean_correction
 
-PSF_norm_factor, _, _ = EvaluateFluxNormalizationFactor(PSF_model, N_core_pixels)
 
 #%%
 empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
 wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) + 1 #TODO: fix it
-# wvl_weights = wvl_weights * 0 + 1
+
+wvl_weights = wvl_weights * 0 + 1
 
 # TODO: weighting factor from the averae spectrum of the soucres in the field or even per-source?
 # TODO: relative weights for different brigtness?
 
 def func(x):
-    x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True)
-    PSFs_ = PSF_model(x_dict)
+    x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True) # update model inputs with the values from the stacked vector
+    PSFs_ = PSF_model(x_dict) # simulate PSFs nromalized to ΣPSF≈1 per wavelength, but not yet flux-normalized to the actual sources spectra
+    
+    PSF_norm_factor = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_sim_normed)
     flux_normalization = x_dict['F_norm'].unsqueeze(-1)  * PSF_norm_factor * src_spectra_sparse
+    
     PSFs_ *= flux_normalization.view(N_src, N_wvl, 1, 1)
+    
     return add_ROIs( empty_img*0.0, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
 
@@ -267,7 +296,7 @@ def loss_PSF(PSF_data, PSF_pred, w_total, w_MSE, w_MAE):
     F_penalty = (PSF_model.inputs_manager['F_ctrl'] - 1.0).abs().mean()
     # Soft non-negativity penalty: penalize when residuals (data - model) are negative
     non_negativity_penalty = torch.nn.functional.relu(-residuals).mean()
-    return w_total * (MSE_loss + MAE_loss) + F_penalty * 0.2 + non_negativity_penalty * 0.05
+    return w_total * (MSE_loss + MAE_loss) + F_penalty * 0.2 + non_negativity_penalty * 2.0
 
 
 def loss(x_, data, func):
@@ -275,34 +304,25 @@ def loss(x_, data, func):
     return loss_PSF(data, model, w_total=1e-3,  w_MSE=900.0, w_MAE=1.6)
 
 #%%
-x0 = PSF_model.inputs_manager.stack().clone()
-x1 = x0.clone()
+EvaluateCoreFluxFactor(PSF_model, N_core_pixels)
+x_params = PSF_model.inputs_manager.stack().clone()
 
 for i in range(3):
-    result_global = minimize(lambda x: loss(x, cube_sparse, func), x1, max_iter=250, tol=1e-3, method='bfgs', disp=2)
-    x1 = result_global.x.clone()
+    result_global = minimize(lambda x: loss(x, cube_sparse, func), x_params, max_iter=250, tol=1e-3, method='bfgs', disp=2)
+    x_params = result_global.x.clone()
 
-#%%
-PSF_norm_factor_1, _, _ = EvaluateFluxNormalizationFactor(PSF_model, N_core_pixels)
+UpdateFluxNormalization(PSF_model)
 
-# Compute the updated normalization factor to account for the new PSF morphology after the first fitting step.
-# This is necessary to ensure that the flux normalization is consistent with the actual PSF shape, which may have changed during the optimization.
-F_norm_correction = (PSF_norm_factor_1 / PSF_norm_factor).mean().item()
-
-PSF_model.inputs_manager['F_norm'] /= F_norm_correction
-# F_norm_λ is already updated inside the EvaluateFluxNormalizationFactor function
-PSF_norm_factor = PSF_norm_factor_1.clone()
-
-#TODO: fit only F_norm
+#TODO: fit only F_norm and F?
 # Update the parameters to account for the new normalization factor
-result_global = minimize(lambda x: loss(x, cube_sparse, func), x1, max_iter=500, tol=1e-3, method='l-bfgs', disp=2)
-x2 = result_global.x.clone()
+result_global = minimize(lambda x: loss(x, cube_sparse, func), x_params, max_iter=500, tol=1e-3, method='l-bfgs', disp=2)
+x_params = result_global.x.clone()
 
 #%%
 from tools.multisources import VisualizeSources, PlotSourcesProfiles, ROI_from_valid_mask
 
 with torch.no_grad():
-    model_fit = func(x1).detach()
+    model_fit = func(x_params).detach()
 
 ROI_plot = ROI_from_valid_mask(valid_mask)["slice"]
 norm_field = LogNorm(vmin=1, vmax=cube_sparse.sum(dim=0).max()) # again, rather empirical values
@@ -325,13 +345,11 @@ plt.grid()
 plt.show()
 
 
-
-
 #%%
 empty_img_full = torch.zeros([PSF_model.num_λ_slices, cube_sparse.shape[-2], cube_sparse.shape[-1]], device='cpu')
 
 @torch.no_grad()
-def func_full():
+def func_full(): #TODO: spplit output
     # No inputs since SimulateFullSpectrum() fully relies on the inputs stored in the inputs_manager, which are already up-to-date
     PSFs_combined = PSF_model.SimulateFullSpectrum(verbose=True)
     # Now, chromatic PSF normalization factor must be re-evaluated for the full spectrum
@@ -342,8 +360,6 @@ def func_full():
 
     return add_ROIs( empty_img_full, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
-
-#%%
 
 model_full = func_full()
 
@@ -506,7 +522,7 @@ if split_PSFs:
     # Convert model_full_split to float32 to save space (this is a 4D array with objects as first dimension)
     # Create primary HDU
 
-    hdu = fits.PrimaryHDU(model_full_split.astype(np.float32))
+    hdu = fits.PrimaryHDU(model_full.astype(np.float32))
 
     hdu.header['CRVAL1'] = 1                     # Reference pixel value for x axis
     hdu.header['CDELT1'] = 1                     # Pixel step size for x axis
