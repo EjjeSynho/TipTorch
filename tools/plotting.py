@@ -1,3 +1,5 @@
+from warnings import deprecated
+
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -56,7 +58,7 @@ def wavelength_to_rgb(wavelength, gamma=0.8, show_invisible=False):
             
     return (R, G, B)
 
-
+@deprecated("render_spectral_PSF is deprecated and will be removed in future versions. Use plot_wavelength_rgb_linear or plot_wavelength_rgb_log instead.")
 def render_spectral_PSF(spectral_cube, λs):
     Rs, Gs, Bs = np.zeros_like(λs), np.zeros_like(λs), np.zeros_like(λs)
 
@@ -108,20 +110,32 @@ def plot_wavelength_rgb_linear(image,
     image_RGB : ndarray, shape (H, W, 3)
         The raw RGB array (before normalization).
     """
-    # move torch → numpy
-    if torch.is_tensor(image):
-        image = image.cpu().numpy()
-        
-    # build RGB weights for each wavelength
+    if wavelengths is None:
+        raise ValueError("wavelengths must be provided")
+
+    image_t = image if torch.is_tensor(image) else torch.as_tensor(image)
+    if image_t.ndim != 3:
+        raise ValueError(f"Expected image with shape (N_waves, H, W), got {tuple(image_t.shape)}")
+
     wavelengths = np.asarray(wavelengths)
-    rgb_weights = np.array([wavelength_to_rgb(λ, show_invisible=True)
-                             for λ in wavelengths]).T
-    
-    # apply weights and sum to get an RGB image
-    # weighted shape: (3, N_waves, H, W) → sum over axis=1 → (3, H, W)
-    weighted   = rgb_weights[:, :, None, None] * image[None, :, :, :]
-    image_RGB  = np.abs(weighted.sum(axis=1))        # (3, H, W)
-    image_RGB  = np.moveaxis(image_RGB, 0, -1)       # (H, W, 3)
+    rgb_weights_np = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths], dtype=np.float32).T
+
+    use_cuda = False
+    if torch.cuda.is_available():
+        n_waves, h, w = image_t.shape
+        elem_size = torch.finfo(torch.float32).bits // 8
+        # image + output + temporary margin
+        est_bytes = (n_waves * h * w + 3 * h * w) * elem_size
+        free_mem, _ = torch.cuda.mem_get_info()
+        use_cuda = free_mem > est_bytes * 3
+
+    device = torch.device("cuda") if use_cuda else image_t.device
+    image_work = image_t.to(device=device, dtype=torch.float32, copy=False)
+    rgb_weights = torch.as_tensor(rgb_weights_np, device=device, dtype=torch.float32)
+
+    # Memory-efficient channel mixing: (3, N_waves) x (N_waves, H, W) -> (3, H, W)
+    image_RGB_t = torch.einsum("cn,nhw->chw", rgb_weights, image_work).abs()
+    image_RGB = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
     
     # linear clipping + normalization
     image_clipped = np.clip(image_RGB, min_val, max_val)
@@ -140,19 +154,31 @@ def plot_wavelength_rgb_linear(image,
     return image_RGB
 
 
-def plot_wavelength_rgb_log(image, wavelengths=None, min_val=1e-3, max_val=1e1, title=None, show=True):
-    if torch.is_tensor(image):
-        image = image.cpu().numpy()
-        
-    wavelengths = np.asarray(wavelengths)
-    rgb_weights = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths]).T
+def plot_wavelength_rgb_log(image, wavelengths, min_val=1e-6, max_val=1e2, title=None, show=True):
+    image_t = image if torch.is_tensor(image) else torch.as_tensor(image)
+    if image_t.ndim != 3:
+        raise ValueError(f"Expected image with shape (N_waves, H, W), got {tuple(image_t.shape)}")
 
-    weighted = rgb_weights[:, :, None, None] * image[None, :, :, :]
-    image_RGB = np.abs(weighted.sum(axis=1))  # shape: (3, height, width)
-    image_RGB = np.moveaxis(image_RGB, 0, -1)
+    wavelengths = np.asarray(wavelengths)
+    rgb_weights_np = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths], dtype=np.float32).T
+
+    use_cuda = False
+    if torch.cuda.is_available():
+        n_waves, h, w = image_t.shape
+        elem_size = torch.finfo(torch.float32).bits // 8
+        est_bytes = (n_waves * h * w + 3 * h * w) * elem_size
+        free_mem, _ = torch.cuda.mem_get_info()
+        use_cuda = free_mem > est_bytes * 3
+
+    device = torch.device("cuda") if use_cuda else image_t.device
+    image_work = image_t.to(device=device, dtype=torch.float32, copy=False)
+    rgb_weights = torch.as_tensor(rgb_weights_np, device=device, dtype=torch.float32)
+
+    image_RGB_t = torch.einsum("cn,nhw->chw", rgb_weights, image_work).abs()
+    image_RGB = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
 
     log_min, log_max = np.log10(min_val), np.log10(max_val)
-    image_log = np.log10(image_RGB+1e-10)
+    image_log = np.log10(image_RGB + 1e-10)
 
     image_clipped = np.clip(image_log, log_min, log_max)
     norm_image = (image_clipped - log_min) / (log_max - log_min)

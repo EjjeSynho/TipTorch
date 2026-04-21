@@ -47,10 +47,10 @@ PSF_data, data_sample, model_config = LoadSTDStarCache(
     device=device
 )
 
-PSF_0 = PSF_data[0]['PSF (mean)']
-PSF_var = PSF_data[0]['PSF (var)']
+PSF_0    = PSF_data[0]['PSF (mean)']
+PSF_var  = PSF_data[0]['PSF (var)']
 PSF_mask = PSF_data[0]['mask (mean)']
-norms = PSF_data[0]['norm (mean)']
+norms    = PSF_data[0]['norm (mean)']
 del PSF_data
 
 LWE_flag = True

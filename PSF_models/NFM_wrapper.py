@@ -419,6 +419,18 @@ class PSFModelNFM:
         ''' Reset model input parameters to their initial values'''
         self.inputs_manager = self.backup_manager.copy()
     
+    
+    def get_optimizable_param_names(self):
+        return self.inputs_manager.get_names(optimizable_only=True, flattened=False)
+
+
+    def get_param_names(self):
+        return self.inputs_manager.get_names(optimizable_only=False, flattened=False)
+
+
+    def get_fixed_param_names(self):
+        return list(set(self.get_param_names()) - set(self.get_optimizable_param_names()))
+
 
     def evaluate_splines(self, y_points, λ_grid):
         if y_points.shape[-1] != self.N_wvl_ctrl:
@@ -603,8 +615,23 @@ class PSFModelNFM:
 
         torch.cuda.empty_cache()
         
-        return PSFs_combined # [N_src, N_λ_slices, N_pix, N_pix]
-    
+        return PSFs_combined # [N_src, N_λ_full, N_pix, N_pix]
 
 
+    @torch.no_grad()
+    def ComputeStrehl(self):
+        ''' Computes Strehl ratio (SR) across the simulated wavelengths for the on-axis PSF '''
+        # backup the original coordinates
+        coords_backup = ( self.inputs_manager['src_dirs_x'].clone(), self.inputs_manager['src_dirs_y'].clone() )
+        # Assume on-axis PSF for computing the ratio
+        self.inputs_manager['src_dirs_x'] *= 0.0
+        self.inputs_manager['src_dirs_y'] *= 0.0
+        # compute only for the first source ignoring the field variability (just for speed's sake)  
+        PSFs_pred = self.forward(src_ids=0)
+        # Restore the original coordinates
+        self.inputs_manager['src_dirs_x'], self.inputs_manager['src_dirs_y'] = coords_backup
 
+        PSF_DL = self.model.DLPSF() # compute diffraction limited PSF
+        
+        Strehl_vs_λ = PSFs_pred[0,...].amax(dim=(-2,-1)) / PSF_DL[0,...].amax(dim=(-2,-1))
+        return Strehl_vs_λ

@@ -53,9 +53,7 @@ class TipTorch(torch.nn.Module):
         self.src_dirs_x  = torch.tan(src_zenith) * torch.cos(src_azimuth) # [N_src]
         self.src_dirs_y  = torch.tan(src_zenith) * torch.sin(src_azimuth) # [N_src]
         
-        #TODO: make it robust to src_dirs_x re-initialization
-        # self.on_axis = (self.src_dirs_x.abs().sum() + self.src_dirs_y.abs().sum() == 0).item() # all angles are zeros
-        self.on_axis = False #TODO: fix this properly later
+        self.on_axis = False # can be assigned externally to simplify tomographic/anisoplanatic computations
         
         self.psInMas = self.config['sensor_science']['PixelScale']
         self.D       = self.config['telescope']['TelescopeDiameter'] # [m]
@@ -68,8 +66,8 @@ class TipTorch(torch.nn.Module):
         # Guide stars parameters
         self.GS_wvl      = self.config['sources_HO']['Wavelength'] #[m]
         self.GS_height   = min_2d(self.config['sources_HO']['Height']) * self.airmass #[m]
-        GS_angles   = self.config['sources_HO']['Zenith'] / self.rad2arc # defined in [arcsec] from on-axis
-        GS_azimuths = torch.deg2rad(self.config['sources_HO']['Azimuth']) # defined in [deg] from on-axis
+        GS_angles   = self.config['sources_HO']['Zenith'] / self.rad2arc # [arcsec] from on-axis
+        GS_azimuths = torch.deg2rad(self.config['sources_HO']['Azimuth']) # [deg] from on-axis
         self.GS_dirs_x   = torch.tan(GS_angles) * torch.cos(GS_azimuths) # [N_obs, N_GS]
         self.GS_dirs_y   = torch.tan(GS_angles) * torch.sin(GS_azimuths) # [N_obs, N_GS]
         
@@ -673,7 +671,7 @@ class TipTorch(torch.nn.Module):
     
     def SpatioTemporalPSD(self):
         if not self.tomography:
-            #TODO: fix it. "A" should be initialized differently? Wait, what does it mean even? Leave it like this.
+            #TODO: fix it. "A" should be initialized differently? It just ones!
             A = torch.ones([self.W_atm.shape[0], self.nOtf_AO_y, self.nOtf_AO_x], device=self.device)
             Ff = self.Rx*self.SxAv + self.Ry*self.SyAv
             PSD_ST = (1 + Ff.abs()**2 * self.h2 - 2*torch.real(Ff*self.h1*A)) * self.W_atm * self.mask_corrected_AO
@@ -966,7 +964,9 @@ class TipTorch(torch.nn.Module):
     
     def DLPSF(self):
         ''' Computes a diffraction-limited PSF '''
-        self.PSF_DL = self.OTF2PSF(self.OTF_static_default) / self.norm_scale
+        self.PSF_DL = self.OTF2PSF(self.OTF_static_default)
+        DL_norm_scale = self.normalizer(self.PSF_DL, dim=(-2,-1), keepdim=True)
+        self.PSF_DL /= DL_norm_scale
         
         return self.PSF_DL
 
@@ -1038,7 +1038,7 @@ class TipTorch(torch.nn.Module):
               self.PSDs['Moffat'] + \
               self.PSDs['diff. refract'])
       
-        # Removing the DC component
+        # Removing the DC component from half-PSD
         PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0
       
         # All PSDs are computed in [rad^2] at the atmospheric wvls and then normalized to [nm^2] OPD at science wvl
@@ -1060,7 +1060,7 @@ class TipTorch(torch.nn.Module):
         return torch.cat([
             torch.flip(matrix_rfft2[..., :, 1:].conj(), dims=[-2,-1]),
             matrix_rfft2
-        ], dim=-1) # Works only for odd num. of pixels
+        ], dim=-1) # Works only for odd number of pixels
     
 
     def OTF2PSF(self, OTF): 
@@ -1178,21 +1178,21 @@ class TipTorch(torch.nn.Module):
     #     return torch.cat(out, dim=1)
 
 
-    def OTF2PSF_no_interp(self, OTF):
-        ''' Debug version of OTF2PSF that only center-crops without interpolation '''
-        PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF, dim=(-2,-1))), dim=(-2,-1)).abs()
+    # def OTF2PSF_no_interp(self, OTF):
+    #     ''' Debug version of OTF2PSF that only center-crops without interpolation '''
+    #     PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF, dim=(-2,-1))), dim=(-2,-1)).abs()
         
-        PSF = []
-        for i in range(self.wvl.shape[-1]):
-            transform = transforms.CenterCrop((self.nOtfs[i], self.nOtfs[i]))
-            n = 0 if PSF_big.shape[1] == 1 else i # when there is no chromatic OTF
+    #     PSF = []
+    #     for i in range(self.wvl.shape[-1]):
+    #         transform = transforms.CenterCrop((self.nOtfs[i], self.nOtfs[i]))
+    #         n = 0 if PSF_big.shape[1] == 1 else i # when there is no chromatic OTF
             
-            PSF_cropped = transforms.CenterCrop((self.N_pix, self.N_pix))(
-                transform(PSF_big[:,n,...])
-            ).unsqueeze(1)
-            PSF.append(PSF_cropped)
+    #         PSF_cropped = transforms.CenterCrop((self.N_pix, self.N_pix))(
+    #             transform(PSF_big[:,n,...])
+    #         ).unsqueeze(1)
+    #         PSF.append(PSF_cropped)
 
-        return torch.hstack(PSF)
+    #     return torch.hstack(PSF)
 
 
     def PSD2PSF(self, PSD, OTF_static):
@@ -1233,7 +1233,7 @@ class TipTorch(torch.nn.Module):
 
 
     def ErrorBudget(self, verbose=False):
-        # Compute error budget over PSDs in [nm RMS]
+        '''' Compute error budget over simulated PSD contributors in [nm RMS] assuming their statistical indipendence '''
         error_budget = {}
 
         for entry in self.PSD_include:
@@ -1249,9 +1249,13 @@ class TipTorch(torch.nn.Module):
                     print(f"{entry:15s}: {np.sqrt(error_budget[entry]):.2f} [nm RMS]")
                 
         total_PSD = self.PSD.real
-        error_budget['Total PSD'] = total_PSD.sum().item()
+        error_budget['Total HO'] = total_PSD.sum().item()
+        
         if verbose:
-            print(f"{'Total PSD':15s}: {np.sqrt(error_budget['Total PSD']):.2f} [nm RMS]")
+            print(f"{'Total HO':15s}: {np.sqrt(error_budget['Total HO']):.2f} [nm RMS]")
+            
+        #TODO: TT jitter error in [nm RMS] 
+            
         return error_budget
 
 

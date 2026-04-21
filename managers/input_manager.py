@@ -522,6 +522,8 @@ class InputsManagersUnion:
                 return manager.parameters[name].value
         raise KeyError(f"Parameter '{name}' not found in any input manager")
 
+    
+
     def get_transform(self, name: str) -> Any:
         """Get the transform of a parameter from the first manager that contains it.
 
@@ -569,6 +571,43 @@ class InputsManagersUnion:
             if name in manager.parameters:
                 return manager.parameters[name].optimizable
         raise KeyError(f"Parameter '{name}' not found in any input manager")
+
+    def get_names(self, optimizable_only: bool = True, flattened: bool = False) -> list:
+        """Get parameter names across all input managers.
+
+        Args:
+            optimizable_only (bool): Whether to return only optimizable parameter names.
+            flattened (bool): Whether to return flattened names that map 1-to-1 to elements
+                              of the stacked vector.
+
+        Returns:
+            list: Parameter names.
+        """
+        if not flattened:
+            names = []
+            seen = set()
+
+            for manager in self.input_managers.values():
+                for name, param in manager.parameters.items():
+                    if optimizable_only and not param.optimizable:
+                        continue
+                    if name not in seen:
+                        names.append(name)
+                        seen.add(name)
+
+            return names
+
+        # Flattened names are derived from each manager's current stacked slices.
+        # Re-stack to ensure slices are up-to-date before collecting names.
+        if self.stack() is None:
+            return []
+
+        flattened_names = []
+        for key in self.slices.keys():
+            manager = self.input_managers[key]
+            flattened_names.extend(manager.get_names(optimizable_only=True, flattened=True))
+
+        return flattened_names
 
     def to_dict(self) -> dict:
         """Convert all parameters from all managers to a dictionary.

@@ -1711,21 +1711,8 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     model_config['NumberSources'] = 1 # Placeholder value
     # The bigger size of initialized PSF is needed to extract the flux loss due to cropping to the box_size later
     model_config['sensor_science']['FieldOfView'] = 111 # Placeholder value
-    # Select only a subset of predicted wavelengths and modify the config file accordingly
-    # λ_binned = model_config['sources_science']['Wavelength'].clone()
-    # model_config['telescope']['PupilAngle'] = torch.zeros(1, device=device) # Placeholder value that assumes that we are not in the pupil tracking mode
-    
-    # Select sparse wavelength set
-    # TODO: a code to select the specified number of spectral slices
-    # ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
-    # λ_sparse  =  λ_binned[..., ids_λ_sparse]
-    # Δλ_binned = Δλ_binned[..., ids_λ_sparse]
-    # model_config['sources_science']['Wavelength'] = λ_sparse
-
-    # cube_sparse = cube_binned.clone()[ids_λ_sparse, ...] # Select the subset of λs
 
     spectral_info = {
-        # "λ_sparse":  λ_sparse.flatten() * 1e9, # [nm]
         "λ_binned":  λ_binned, # [nm]
         "λ_full":    λ_full, # [nm]
         "Δλ_binned": Δλ_binned,
@@ -1742,7 +1729,6 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
 
     spectral_cubes = {
         "cube_full":   cube_full,   # this one contains all spectral slices
-        # "cube_sparse": cube_sparse, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
         "cube_binned": cube_binned, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
         "mask":        valid_mask   # this one contains the mask of the data cube
     }

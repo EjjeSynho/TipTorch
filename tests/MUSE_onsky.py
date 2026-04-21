@@ -125,7 +125,7 @@ for j in range(N_src):
 
         plt.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
         plt.axis('off')
-        plt.show()
+        # plt.show()
         
     plt.show()
 

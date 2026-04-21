@@ -117,7 +117,7 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
     return ROIs, roi_local_coords, roi_global_coords, valid_ids
 
 
-def DetectSources(data_cube, threshold, nsigma=3.0, display=False, draw_win_size=None, sort=True):
+def DetectSources(data_cube, threshold, nsigma=3.0, display=False, draw_win_size=None, sort_by_brightness=True):
 
     data_src = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_cube.sum(axis=0)
     data_src = np.nan_to_num(data_src)
@@ -144,7 +144,7 @@ def DetectSources(data_cube, threshold, nsigma=3.0, display=False, draw_win_size
         plt.show()
 
     # Sort in descending order of flux (peak value)
-    if sort:
+    if sort_by_brightness:
         sources_df = sources_df.sort_values(by='peak_value', ascending=False).reset_index(drop=True)
 
     return sources_df

@@ -20,8 +20,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
-from torchmin import minimize
-from tqdm import tqdm
 from pathlib import Path
 
 from tools.utils import mask_square
@@ -53,6 +51,8 @@ cache_path = data_folder / "J0259/J0259-0901_all.pickle"
 spectral_cubes, spectral_info, _, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 # Extract full and binned spectral cubes. Sparse cube selects a set of 7 binned wavelengths ranges
 cube_full, cube_binned, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_binned"], spectral_cubes["mask"]
+
+# MUSE cube flux units are [10^-20 erg s^-1 cm^-2 Å^-1], all cubes are normalized to this flux unit
 
 #%%
 # To save memory and compute time, we don't need neither the full spectral cube, nor even the binned one. It's enough to have a sparse subset of spectral
@@ -88,7 +88,6 @@ if True: # TODO: remove this pre-assumption
 
 #%%
 from tools.multisources import add_ROIs, DetectSources, ExtractSources
-
 
 def AddSourcesToModel(model_config, sources, valid_mask):
     from tools.utils import rad2mas, rad2arc
@@ -130,10 +129,17 @@ def ExtractSpectraFromCore(cube_sparse, cube_full, sources, flux_core_radius):
 
 #%%
 PSF_size = 111  # Define the size of each extracted PSF
+model_config['sensor_science']['FieldOfView'] = PSF_size
 
-sources = DetectSources(cube_sparse, threshold='auto', nsigma=15, display=True, draw_win_size=20)
-# sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_win_size=20)
-# Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
+# Simple sources detector function. For now, make sure that only point sources are adressed
+# This function also defines the order in which sources are indexed ad processed later, so it's important to use it before extracting the source images
+# and spectra. The order is defined by the brightness of the sources, so the brightest source will be indexed as 0, the second brightest as 1, and so on
+sources = DetectSources(cube_sparse, threshold='auto', nsigma=20, display=True, draw_win_size=20, sort_by_brightness=True)
+# sources = DetectSources(cube_sparse, threshold='auto', nsigma=15, display=True, draw_win_size=20, sort_by_brightness=True)
+
+# --------------- If some sources must be filtered out, here is the right place to do it --------------------------------------
+
+# Extract separate source images + other auxilliary data. It's necessary for later fitting and performance evaluation
 srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
 N_src   = srcs_image_data["count"]
@@ -143,16 +149,30 @@ ROIs    = srcs_image_data["images"]
 AddSourcesToModel(model_config, sources, valid_mask)
 
 #%%
-
 flux_core_radius = 2  # [pix]
 
+# This function computes average spectrum around the PSF core for each source within a square with side size of 2*flux_core_radius + 1
 src_spectra_sparse, src_spectra_full, N_core_pixels = ExtractSpectraFromCore(cube_sparse, cube_full, sources, flux_core_radius)
 
-colors = [f'tab:{color}' for color in ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan'][:N_src]]
+# Generate random sources plot colors. Use palette colors first, then random colors after the palette is exhausted.
+palette = plt.rcParams['axes.prop_cycle'].by_key()['color']
+colors = palette[:N_src]
+if N_src > len(palette):
+    n_extra = N_src - len(palette)
+    extra_colors = [
+        f'#{np.random.randint(0, 256):02x}{np.random.randint(0, 256):02x}{np.random.randint(0, 256):02x}'
+        for _ in range(n_extra)
+    ]
+    colors = palette + extra_colors
 
+# Plot full and sparse spectra for each source
 plt.figure(figsize=(6, 4))
 for i_src in range(N_src):
-    plt.plot(λ_full, src_spectra_full[i_src], linewidth=0.25, alpha=0.3, color=colors[i_src], label=f'Source {i_src+1} (full spectrum)')
+    plt.plot(λ_full,
+             src_spectra_full[i_src],
+             linewidth=0.25, alpha=0.3, color=colors[i_src],
+             label=f'Source {i_src+1} (full spectrum)')
+    
     plt.scatter(λ_sparse,
                 src_spectra_sparse[i_src].cpu().numpy(),
                 color=colors[i_src], marker='o', s=30, alpha=0.8,
@@ -244,18 +264,13 @@ def EvaluateCoreFluxFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size=511) -> 
 
 @torch.no_grad()
 def UpdateFluxNormalization(PSF_model) -> None:
-    # PSF_norm_factor_old = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_sim_normed).clone()
     PSF_norm_factor_old = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
-
-    EvaluateCoreFluxFactor(PSF_model, N_core_pixels)
-
-    # PSF_norm_factor_new = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_sim_normed).clone()
+    
+    EvaluateCoreFluxFactor(PSF_model, N_core_pixels) # update the core flux normalization factor based on the current PSF morphology
     PSF_norm_factor_new = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
 
-    # Compute the updated normalization factor to account for the new PSF morphology after the first fitting step.
-    # This is necessary to ensure that the flux normalization is consistent with the actual PSF shape, which may have changed during the optimization.
+    # Compute the updated normalization factors
     F_norm_correction = (PSF_norm_factor_new / PSF_norm_factor_old).mean().item()
-
     PSF_model.inputs_manager['F_norm'] /= F_norm_correction
 
     # Since F_ctrl is the parameter that directly controls the overall flux normalization in the model, we can use its mean value to correct
@@ -266,63 +281,88 @@ def UpdateFluxNormalization(PSF_model) -> None:
 
 
 #%%
-empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) + 1 #TODO: fix it
+# Empty image to store the simulated PSFs while adding them to the right locations in the field. This is more memory efficient than storing all PSFs
+# separately and also allows to overlap sources on top of each other, which is important for a realistic simulation and fitting
+canvas = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
 
-wvl_weights = wvl_weights * 0 + 1
+# Compute loss weighting factors per source based on total flux per source
+src_fluxes = torch.tensor(sources['peak_value'].to_numpy(), device=device, dtype=torch.float32)
+src_mask = torch.ones_like(src_fluxes) # mask out certain sources from loss
 
-# TODO: weighting factor from the averae spectrum of the soucres in the field or even per-source?
-# TODO: relative weights for different brigtness?
+max_flux = src_fluxes.max().item()
+src_relative_weights = torch.clamp(src_fluxes / max_flux, min=0.2, max=1.0) * src_mask# limit the loss influence limit
+# Compute weighted mean of the src_fluxes to get a more robust estimate of the typical source flux in the field, which can be used for normalization
+w_total = src_relative_weights.sum() / (src_fluxes * src_relative_weights).sum() # this normalization ensures that loss is ~10⁰-10¹
 
-def func(x):
+# Compute chromatic loss weighting factors per source based on it's spectrum
+w_spectral = src_spectra_sparse.amax(dim=-1, keepdim=True) / src_spectra_sparse
+w_spectral /= w_spectral.mean(dim=0, keepdim=True) # normalize to the mean to avoid changing the overall loss scale
+w_spectral = torch.clamp(w_spectral, min=0.2, max=2.0) # limit the loss influence of certain wavelengths
+w_spectral = w_spectral.view(N_src, N_wvl, 1, 1) # reshape for broadcasting
+
+
+def simulate_sparse(x):
     x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True) # update model inputs with the values from the stacked vector
-    PSFs_ = PSF_model(x_dict) # simulate PSFs nromalized to ΣPSF≈1 per wavelength, but not yet flux-normalized to the actual sources spectra
-    
+    PSFs_  = PSF_model(x_dict) # simulate PSFs normalized to ΣPSF≈1 per wavelength, but not yet scaled to the actual sources spectra
     PSF_norm_factor = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_sim_normed)
-    flux_normalization = x_dict['F_norm'].unsqueeze(-1)  * PSF_norm_factor * src_spectra_sparse
-    
+    flux_normalization = x_dict['F_norm'].unsqueeze(-1) * PSF_norm_factor * src_spectra_sparse
     PSFs_ *= flux_normalization.view(N_src, N_wvl, 1, 1)
     
-    return add_ROIs( empty_img*0.0, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
+    return add_ROIs( canvas*0.0, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
 
-def loss_PSF(PSF_data, PSF_pred, w_total, w_MSE, w_MAE):
+def loss_PSF(PSF_data, PSF_pred, weights_λ, weight_total, w_MSE, w_MAE):
     residuals = PSF_data - PSF_pred
-    diff = residuals * wvl_weights
+    diff = residuals * weights_λ
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean()  * w_MAE
-    # Since x input in func() updates the internal values for PSF_model (inluding F_norm),
-    # they now can directly use them to compute the flux normalization factor
+    # Since x input in simulate_sparse() updates the internal values for the PSF_model (inluding F_norm),
+    # they now can be used directly
     F_penalty = (PSF_model.inputs_manager['F_ctrl'] - 1.0).abs().mean()
-    # Soft non-negativity penalty: penalize when residuals (data - model) are negative
+    # Soft non-negativity penalty: penalize when residuals (data - model) are negative to prevent ouversubtracting simulated PSFs
     non_negativity_penalty = torch.nn.functional.relu(-residuals).mean()
-    return w_total * (MSE_loss + MAE_loss) + F_penalty * 0.2 + non_negativity_penalty * 2.0
+    return (MSE_loss + MAE_loss) * weight_total + F_penalty * 0.2 + non_negativity_penalty * 2.0
 
 
 def loss(x_, data, func):
     model = func(x_)
-    return loss_PSF(data, model, w_total=1e-3,  w_MSE=900.0, w_MAE=1.6)
+    # return loss_PSF(data, model, weights=1e-3,  w_MSE=900.0, w_MAE=1.6)
+    return loss_PSF(data, model, weights_λ=w_spectral, weight_total=w_total, w_MSE=900.0, w_MAE=1.6)
 
 #%%
-EvaluateCoreFluxFactor(PSF_model, N_core_pixels)
-x_params = PSF_model.inputs_manager.stack().clone()
+from fitting.PSF_optimizer import OptimizePSFModel
 
-for i in range(3):
-    result_global = minimize(lambda x: loss(x, cube_sparse, func), x_params, max_iter=250, tol=1e-3, method='bfgs', disp=2)
-    x_params = result_global.x.clone()
+EvaluateCoreFluxFactor(PSF_model, N_core_pixels)
+
+x_params, _ = OptimizePSFModel(
+    PSF_model,
+    lambda x: loss(x, cube_sparse, simulate_sparse),
+    max_iter = 250,
+    n_attempts = 3,
+    verbose = True,
+    force_bfgs = True
+)
 
 UpdateFluxNormalization(PSF_model)
 
-#TODO: fit only F_norm and F?
-# Update the parameters to account for the new normalization factor
-result_global = minimize(lambda x: loss(x, cube_sparse, func), x_params, max_iter=500, tol=1e-3, method='l-bfgs', disp=2)
-x_params = result_global.x.clone()
+# Update the parameters to account for the new flux normalization factors
+# result_global = minimize(lambda x: loss(x, cube_sparse, simulate_sparse), x_params, max_iter=500, tol=1e-3, method='l-bfgs', disp=2)
+
+x_params, _ = OptimizePSFModel(
+    PSF_model,
+    lambda x: loss(x, cube_sparse, simulate_sparse),
+    x_initial = x_params.clone(),
+    max_iter = 250,
+    n_attempts = 1,
+    verbose = True,
+    force_bfgs = True
+)
 
 #%%
 from tools.multisources import VisualizeSources, PlotSourcesProfiles, ROI_from_valid_mask
 
 with torch.no_grad():
-    model_fit = func(x_params).detach()
+    model_fit = simulate_sparse(x_params)
 
 ROI_plot = ROI_from_valid_mask(valid_mask)["slice"]
 norm_field = LogNorm(vmin=1, vmax=cube_sparse.sum(dim=0).max()) # again, rather empirical values
@@ -330,13 +370,8 @@ norm_field = LogNorm(vmin=1, vmax=cube_sparse.sum(dim=0).max()) # again, rather 
 VisualizeSources(cube_sparse, model_fit, norm=norm_field, mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(cube_sparse, model_fit, sources, radius=16, title='Fitted PSFs')
 
-#%% Compute Strehl ratio
-with torch.no_grad():
-    PSFs_pred = PSF_model()
-    PSF_DL = PSF_model.model.DLPSF().squeeze()
-    
-Strehls_per_λ = PSFs_pred[0].amax(dim=(-2,-1)) / PSF_DL.amax(dim=(-2,-1))
-
+#%% 
+Strehls_per_λ = PSF_model.ComputeStrehl()
 plt.title('Strehl ratio vs. λ (for the 1st source)')
 plt.plot(λ_sparse, 100.0 * Strehls_per_λ.flatten().cpu())
 plt.ylabel('Strehl ratio, [%]')
@@ -344,12 +379,11 @@ plt.xlabel('Wavelength, [nm]')
 plt.grid()
 plt.show()
 
-
 #%%
-empty_img_full = torch.zeros([PSF_model.num_λ_slices, cube_sparse.shape[-2], cube_sparse.shape[-1]], device='cpu')
+canvas_full = torch.zeros([PSF_model.num_λ_slices, cube_sparse.shape[-2], cube_sparse.shape[-1]], device='cpu')
 
 @torch.no_grad()
-def func_full(): #TODO: spplit output
+def simulate_full(): #TODO: spplit output
     # No inputs since SimulateFullSpectrum() fully relies on the inputs stored in the inputs_manager, which are already up-to-date
     PSFs_combined = PSF_model.SimulateFullSpectrum(verbose=True)
     # Now, chromatic PSF normalization factor must be re-evaluated for the full spectrum
@@ -358,10 +392,10 @@ def func_full(): #TODO: spplit output
     # Apply the flux normalization to the PSFs similar to func()
     PSFs_ = PSFs_combined * flux_normalization.unsqueeze(-1).unsqueeze(-1)
 
-    return add_ROIs( empty_img_full, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
+    return add_ROIs(canvas_full, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"])
 
 
-model_full = func_full()
+model_full = simulate_full()
 
 #%%
 diff_img_full = (cube_full - model_full.numpy()) * valid_mask.cpu().numpy()
@@ -369,8 +403,8 @@ diff_img_full = (cube_full - model_full.numpy()) * valid_mask.cpu().numpy()
 # VisualizeSources(cube_full, model_full, norm=LogNorm(vmin=1e1, vmax=25000*10), mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSFs')
 
-#%%
-plt.plot(λ_full, PSF_model.evaluate_splines(PSF_model.inputs_manager['F_ctrl'][0,...], PSF_model.λ_full_normed).squeeze().cpu().numpy())
+
+# plt.plot(λ_full, PSF_model.evaluate_splines(PSF_model.inputs_manager['F_ctrl'][0,...], PSF_model.λ_full_normed).squeeze().cpu().numpy())
 
 #%% ============== Plotting the residual spectrum ===================
 from astropy.convolution import convolve, Box1DKernel
