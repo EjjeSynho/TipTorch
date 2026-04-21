@@ -11,7 +11,7 @@ def OptimizePSFModel(
     *,
     max_iter:    int   = 300,
     n_attempts:  int   = 1,
-    loss_thresh: float = 2.0,
+    loss_thresh: float = 1e1,
     verbose:     bool  = False,
     force_bfgs:  bool  = False,
     perturb_between_attempts: bool = False,

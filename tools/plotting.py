@@ -137,6 +137,8 @@ def plot_wavelength_rgb_linear(image,
     image_RGB_t = torch.einsum("cn,nhw->chw", rgb_weights, image_work).abs()
     image_RGB = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
     
+    torch.cuda.empty_cache() if use_cuda else None
+    
     # linear clipping + normalization
     image_clipped = np.clip(image_RGB, min_val, max_val)
     norm_image    = (image_clipped - min_val) / (max_val - min_val)
@@ -176,6 +178,8 @@ def plot_wavelength_rgb_log(image, wavelengths, min_val=1e-6, max_val=1e2, title
 
     image_RGB_t = torch.einsum("cn,nhw->chw", rgb_weights, image_work).abs()
     image_RGB = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
+
+    torch.cuda.empty_cache() if use_cuda else None
 
     log_min, log_max = np.log10(min_val), np.log10(max_val)
     image_log = np.log10(image_RGB + 1e-10)

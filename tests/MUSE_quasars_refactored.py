@@ -25,18 +25,17 @@ from pathlib import Path
 from tools.utils import mask_square
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
 
-
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
-data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
-# data_folder = MUSE_DATA_FOLDER / 'clumpy_galaxies/' # change to your actual path with the MUSE NFM data
+# data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
+data_folder = MUSE_DATA_FOLDER / 'clumpy_galaxies/' # change to your actual path with the MUSE NFM data
 
 if not isinstance(data_folder, Path):
     data_folder = Path(data_folder)
 
-raw_path   = data_folder / "J0259/MUSE.2024-12-05T03_15_37.598.fits.fz"
-cube_path  = data_folder / "J0259/J0259-0901_all.fits"
-cache_path = data_folder / "J0259/J0259-0901_all.pickle"
+# raw_path   = data_folder / "J0259/MUSE.2024-12-05T03_15_37.598.fits.fz"
+# cube_path  = data_folder / "J0259/J0259-0901_all.fits"
+# cache_path = data_folder / "J0259/J0259-0901_all.pickle"
 
 # cube_path  = data_folder / "J0144/J0144-5745.fits"
 # cache_path = data_folder / "J0144/J0144-5745_cache.pickle"
@@ -45,6 +44,20 @@ cache_path = data_folder / "J0259/J0259-0901_all.pickle"
 # cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
 # cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
+    
+# cube_path  = data_folder / "reduced_cubes/CUBE_0002.fits"
+# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_11_59.783.fits.fz"
+# cache_path = data_folder / "reduced_telemetry/CUBE_0002.pickle"
+
+# cube_path  = data_folder / "reduced_cubes/CUBE_0003.fits"
+# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
+# cache_path = data_folder / "reduced_telemetry/CUBE_0003.pickle"
+
+
+cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
+raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
+cache_path = data_folder / "reduced_telemetry/CUBE_0021.pickle"
+
 
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
 # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
@@ -78,7 +91,7 @@ cube_sparse *= flux_λ_norm[:, None, None]
 
 model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']['PupilAngle'], device=device) # Assuming the pupil angle is 0 for simplicity, it can be updated if known
 
-if True: # TODO: remove this pre-assumption
+if False: # TODO: remove this pre-assumption
     model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0,  1e4]], device=device)
     model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=device)
     model_config['atmosphere']['WindDirection'] = model_config['atmosphere']['WindDirection'][0,:2].unsqueeze(0)
@@ -134,8 +147,9 @@ model_config['sensor_science']['FieldOfView'] = PSF_size
 # Simple sources detector function. For now, make sure that only point sources are adressed
 # This function also defines the order in which sources are indexed ad processed later, so it's important to use it before extracting the source images
 # and spectra. The order is defined by the brightness of the sources, so the brightest source will be indexed as 0, the second brightest as 1, and so on
-sources = DetectSources(cube_sparse, threshold='auto', nsigma=20, display=True, draw_win_size=20, sort_by_brightness=True)
 # sources = DetectSources(cube_sparse, threshold='auto', nsigma=15, display=True, draw_win_size=20, sort_by_brightness=True)
+# sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_win_size=20, sort_by_brightness=True)
+sources = DetectSources(cube_sparse, threshold='auto', nsigma=35, display=True, draw_win_size=20, sort_by_brightness=True)
 
 # --------------- If some sources must be filtered out, here is the right place to do it --------------------------------------
 
@@ -203,6 +217,9 @@ PSF_model = PSFModelNFM(
 )
 
 PSF_model.inputs_manager.set_optimizable('bg_ctrl', False)
+# PSF_model.inputs_manager.set_optimizable('L0', False)
+# PSF_model.inputs_manager.set_optimizable('wind_speed_single', False)
+PSF_model.inputs_manager.set_optimizable('wind_dir', False)
 
 #%%
 @torch.no_grad()
@@ -300,6 +317,8 @@ w_spectral /= w_spectral.mean(dim=0, keepdim=True) # normalize to the mean to av
 w_spectral = torch.clamp(w_spectral, min=0.2, max=2.0) # limit the loss influence of certain wavelengths
 w_spectral = w_spectral.view(N_src, N_wvl, 1, 1) # reshape for broadcasting
 
+# w_spectral *= 0
+# w_spectral += 1.0 # for now, use uniform spectral weighting, but this can be easily changed to give more importance to certain wavelengths if needed
 
 def simulate_sparse(x):
     x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True) # update model inputs with the values from the stacked vector
@@ -324,39 +343,59 @@ def loss_PSF(PSF_data, PSF_pred, weights_λ, weight_total, w_MSE, w_MAE):
     return (MSE_loss + MAE_loss) * weight_total + F_penalty * 0.2 + non_negativity_penalty * 2.0
 
 
+suppress_bump_flag = False
+suppress_LO_flag   = False
+
+# LO fitting weights        
+w_suppress_bump = 1e3 if suppress_bump_flag else 1
+w_suppress_LO   = 1e3 if suppress_LO_flag   else 1
+
+force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
+
+def loss_LO(w_bump, w_LO):
+    # L2 regularization on all LO coefficients
+    LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * w_suppress_LO
+    # Constraint to enforce first element of LO_coefs to be positive
+    phase_bump_positive = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 0]) * w_bump * w_suppress_bump
+    # Force defocus to be positive to mitigate sign ambiguity
+    first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_LO * w_suppress_LO #NOTE: won't work with the chromatic defocus
+    
+    LO_loss += phase_bump_positive + first_defocus_penalty
+    return LO_loss
+
+
 def loss(x_, data, func):
     model = func(x_)
-    # return loss_PSF(data, model, weights=1e-3,  w_MSE=900.0, w_MAE=1.6)
-    return loss_PSF(data, model, weights_λ=w_spectral, weight_total=w_total, w_MSE=900.0, w_MAE=1.6)
+    LO_loss  = loss_LO(w_bump=5e-5, w_LO=1e-7)
+    PSF_loss = loss_PSF(data, model, weights_λ=w_spectral, weight_total=w_total, w_MSE=900.0, w_MAE=2.6)
+    
+    return LO_loss + PSF_loss
 
 #%%
 from fitting.PSF_optimizer import OptimizePSFModel
 
-EvaluateCoreFluxFactor(PSF_model, N_core_pixels)
+for i in range(2): # iterate the flux normalization update and fitting steps a few times to account for the interdependence between the PSF morphology and the flux normalization factor
+    UpdateFluxNormalization(PSF_model)
+    x_params, _ = OptimizePSFModel(
+        PSF_model,
+        lambda x: loss(x, cube_sparse, simulate_sparse),
+        max_iter = 250,
+        n_attempts = 2,
+        verbose = True,
+        force_bfgs = True
+    )
 
-x_params, _ = OptimizePSFModel(
-    PSF_model,
-    lambda x: loss(x, cube_sparse, simulate_sparse),
-    max_iter = 250,
-    n_attempts = 3,
-    verbose = True,
-    force_bfgs = True
-)
-
-UpdateFluxNormalization(PSF_model)
-
-# Update the parameters to account for the new flux normalization factors
-# result_global = minimize(lambda x: loss(x, cube_sparse, simulate_sparse), x_params, max_iter=500, tol=1e-3, method='l-bfgs', disp=2)
-
-x_params, _ = OptimizePSFModel(
-    PSF_model,
-    lambda x: loss(x, cube_sparse, simulate_sparse),
-    x_initial = x_params.clone(),
-    max_iter = 250,
-    n_attempts = 1,
-    verbose = True,
-    force_bfgs = True
-)
+    UpdateFluxNormalization(PSF_model)
+    # Update the parameters to account for the new flux normalization factors
+    x_params, _ = OptimizePSFModel(
+        PSF_model,
+        lambda x: loss(x, cube_sparse, simulate_sparse),
+        x_initial = x_params.clone(),
+        max_iter = 250,
+        n_attempts = 1,
+        verbose = True,
+        force_bfgs = True
+    )
 
 #%%
 from tools.multisources import VisualizeSources, PlotSourcesProfiles, ROI_from_valid_mask
@@ -403,58 +442,21 @@ diff_img_full = (cube_full - model_full.numpy()) * valid_mask.cpu().numpy()
 # VisualizeSources(cube_full, model_full, norm=LogNorm(vmin=1e1, vmax=25000*10), mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSFs')
 
-
 # plt.plot(λ_full, PSF_model.evaluate_splines(PSF_model.inputs_manager['F_ctrl'][0,...], PSF_model.λ_full_normed).squeeze().cpu().numpy())
 
 #%% ============== Plotting the residual spectrum ===================
 from astropy.convolution import convolve, Box1DKernel
 
-def get_src_coords_in_pixels(src_idx):
-    return np.round(sources['x_peak'].iloc[src_idx]).astype(int), \
-           np.round(sources['y_peak'].iloc[src_idx]).astype(int)
-           
-# NOTE: these coords are hard-coded for J0529 obs
-host_coords  = [178, 162]
-AGN_coords_1 = list(get_src_coords_in_pixels(0))
-AGN_coords_2 = list(get_src_coords_in_pixels(1))
-bg_coords    = [135, 183]
-lens_coords  = [180, 191]
-
-targets_diff_info = [
-    {
-        'coords': host_coords, # defines coordinates in pixels
-        'name': 'Host galaxy?', # target's label
-        'color': 'tab:blue', # display color
-        'radius': 2 # radius of the region around the window to compute the spectrum from, the full size of this win is 2*radius + 1
-    },
-    {
-        'coords': bg_coords,
-        'name': 'Background',
-        'color': 'tab:orange',
-        'radius': 5
-    },
-    {
-        'coords': AGN_coords_2,
-        'name': 'AGN im. #2 (after subtraction)',
-        'color': 'tab:green',
-        'radius': 2
-    },
-    {
-        'coords': lens_coords,
-        'name': 'Lens',
-        'color': 'tab:purple',
-        'radius': 2
-    }
-]
-
 # Plots the spectra of the targets after subtraction
 fig, ax = plt.subplots(figsize=(10,6))
-for info in targets_diff_info:
-    spectrum_sharp = GetSpectrum(diff_img_full, info['coords'], radius=info['radius'], debug_show_ROI=False )
+for i in range(N_src):
+    spectrum_sharp = GetSpectrum(diff_img_full, sources.iloc[i], radius=flux_core_radius, debug_show_ROI=False )
     spectrum_avg   = convolve(spectrum_sharp, Box1DKernel(10), boundary='extend')
-       
-    plt.plot(λ_full, spectrum_sharp, linewidth=0.5, alpha=0.25, color=info['color'], label=info['name'])
-    plt.plot(λ_full, spectrum_avg,   linewidth=1,   alpha=1,    color=info['color'], linestyle='--')
+
+    plt.plot(λ_full, spectrum_sharp, linewidth=0.5, alpha=0.25, color=colors[i])
+    plt.plot(λ_full, spectrum_avg,   linewidth=1,   alpha=1,    color=colors[i], linestyle='--')
+
+plt.axhline(0, color='gray', linestyle=':', linewidth=0.8)
 
 plt.legend()
 plt.xlim(λ_full.min(), λ_full.max())
@@ -464,51 +466,6 @@ plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$
 plt.xlabel('Wavelength, [nm]')
 plt.show()
 
-#%% Plotting the actual spectrum
-targets_info = [
-    {
-        'coords': bg_coords,
-        'name': 'Background',
-        'color': 'tab:orange',
-        'radius': 5
-    },
-    {
-        'coords': AGN_coords_1,
-        'name': 'AGN im. #1',
-        'color': 'tab:red',
-        'radius': 1
-    },
-    {
-        'coords': AGN_coords_2,
-        'name': 'AGN im. #2',
-        'color': 'tab:green',
-        'radius': 2
-    },
-    {
-        'coords': lens_coords,
-        'name': 'Lens',
-        'color': 'tab:purple',
-        'radius': 2
-    }
-]
-
-# Plots the spectra of the targets after subtraction
-fig, ax = plt.subplots(figsize=(10,6))
-for info in targets_info:
-    spectrum_sharp = GetSpectrum(cube_full, info['coords'], radius=info['radius'], debug_show_ROI=False )
-    spectrum_avg   = convolve(spectrum_sharp, Box1DKernel(10), boundary='extend')
-       
-    plt.plot(λ_full, spectrum_sharp, linewidth=0.5, alpha=0.25, color=info['color'], label=info['name'])
-    plt.plot(λ_full, spectrum_avg,   linewidth=1,   alpha=1,    color=info['color'], linestyle='--')
-
-plt.legend()
-plt.xlim(λ_full.min(), λ_full.max())
-plt.grid(alpha=0.2)
-plt.title('Spectra')
-plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
-plt.xlabel('Wavelength, [nm]')
-plt.show()
-    
 #%% Plot multispectral cubes as RGB images
 from tools.plotting import plot_wavelength_rgb_log, plot_wavelength_rgb_linear
 from photutils.aperture import RectangularAperture
@@ -520,28 +477,24 @@ diff_rgb = plot_wavelength_rgb_log(
     diff_img_full[ROI_plot],
     wavelengths=λ_vis,
     title="Difference",
-    min_val=500, max_val=60000, show=False
+    min_val=500, max_val=60000,
+    show=False
 )
-
-# for info in targets_diff_info:
-#     # Note, that boxes position is shifted according to plotting ROI
-#     aperture = RectangularAperture([info['coords'][0]-ROI_plot[1].start, info['coords'][1]-ROI_plot[2].start], info['radius']*2+1, info['radius']*2+1, theta=0)
-#     aperture.plot(color=info['color'], lw=1, label=info['name'])
-# plt.legend()
-# plt.show()
 
 diff_rgb = plot_wavelength_rgb_log(
     cube_full[ROI_plot],
     wavelengths=λ_vis,
     title=f"Data",
-    min_val=500, max_val=200000, show=True
+    min_val=500, max_val=200000,
+    show=True
 )
 
 diff_rgb = plot_wavelength_rgb_log(
     model_full[ROI_plot],
     wavelengths=λ_vis,
     title=f"Model",
-    min_val=500, max_val=200000, show=True
+    min_val=500, max_val=200000,
+    show=True
 )
 
 

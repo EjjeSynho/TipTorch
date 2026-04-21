@@ -297,14 +297,20 @@ def GetJmag(N_ph):
 
 # Adds singleton dimensions to the tensor. If negative, dimensions are added in the beginning, else in the end
 def pdims(x, ns):
-    expdims = lambda x, n: x.view(*x.shape, *[1 for _ in range(n)]) if n>0 else x.view(*[1 for _ in range(abs(n))], *x.shape)
+    def _expand_dims(t, n):
+        n = int(n)
+        if n == 0:
+            return t
+        if n > 0:
+            return t.view(*t.shape, *((1,) * n))
+        return t.view(*((1,) * (-n)), *t.shape)
 
-    if hasattr(ns, "__len__"):
+    if isinstance(ns, (list, tuple)):
         for n in ns:
-            x = expdims(x, n)
+            x = _expand_dims(x, n)
         return x
-    else:
-        return expdims(x, ns)
+
+    return _expand_dims(x, ns)
 
 
 min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
@@ -318,7 +324,7 @@ def SR(PSF, PSF_DL):
     else:
         return ratio.squeeze()
     
-
+@warnings.deprecated("This class is deprecated and may be removed in future versions.")
 class Photometry:
     def __init__(self):
         self.bands = {

@@ -495,8 +495,16 @@ class PSFModelNFM:
 
 
     __call__ = forward
-    
 
+
+    def __getitem__(self, item):
+        return self.inputs_manager[item]
+    
+    
+    def __setitem__(self, key, value):
+        self.inputs_manager[key] = value
+    
+    
     def SetWavelengths(self, wavelengths):
         # Cheap pointer check first (same tensor object → same values, no GPU sync needed)
         if self.λ_sim.data_ptr() == wavelengths.data_ptr():
