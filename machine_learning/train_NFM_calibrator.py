@@ -38,7 +38,7 @@ BATCH_SIZE = 16 # TODO: make it an argument
 pre_init_astrometry = True
 optimize_astrometry = False
 predict_Cn2_profile = True
-predict_LO_NCPAs = True
+predict_LO_NCPAs    = True
 
 # Set up logging
 log_dir = Path('../data/logs')
@@ -61,6 +61,15 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+
+def release_gpu_memory(sync=False):
+    """Best-effort VRAM cleanup without affecting model state."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        if sync:
+            torch.cuda.synchronize()
+
 logger.info("="*60)
 logger.info("NFM Calibrator Training Script")
 logger.info("="*60)
@@ -79,6 +88,8 @@ except SystemExit:
     args = argparse.Namespace(
         continue_training = True
     )
+
+# watch -n 0.1 'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits -i 0 | awk -F, "{printf \"GPU: %s%%  VRAM: %s / %s MiB\n\",\$1,\$2,\$3}"'
 
 #%%
 class NFMDataset(Dataset):
@@ -201,11 +212,15 @@ with torch.no_grad():
         multiple_obs    = True,
         LO_NCPAs        = True,
         chrom_defocus   = False,
-        use_splines     = True,
         Moffat_absorber = False,
+        N_spline_nodes  = 5,
         Z_mode_max      = 9,
         device          = device
     )
+
+# Initialization batch is no longer needed and can hold a large GPU allocation.
+del test_batch, PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs, random_idxs
+release_gpu_memory(sync=True)
     
 # Delete extra parameters that are pre-defined and thus don't need to be treated my the manager
 # Could be just disabled but instead deleted to save a bit of memory
@@ -216,8 +231,8 @@ PSF_model.inputs_manager.delete('dy_ctrl') # -//-
 PSF_model.inputs_manager.delete('L0')      # Managed by configs
 
 PSF_model.inputs_manager.delete('F_norm') # No photometric correction per source
-PSF_model.inputs_manager.delete('flux_crop_ctrl') # -//-
-PSF_model.inputs_manager.delete('src_dirs_x') # On-axis sources
+PSF_model.inputs_manager.delete('F_norm_λ_ctrl') # -//-
+PSF_model.inputs_manager.delete('src_dirs_x') # Only on-axis sources used for training
 PSF_model.inputs_manager.delete('src_dirs_y') # -//-
 
 PSF_model.inputs_manager.delete('wind_speed_single') # Wind vector is not predicted
@@ -229,7 +244,7 @@ if PSF_model.Moffat_absorber:
     PSF_model.inputs_manager.delete('theta')
     PSF_model.inputs_manager.delete('ratio')
 
-PSF_model.inputs_manager.set_optimizable(['LO_coefs'], predict_LO_NCPAs)
+PSF_model.inputs_manager.set_optimizable(['LO_coefs'],    predict_LO_NCPAs)
 PSF_model.inputs_manager.set_optimizable(['Cn2_weights'], predict_Cn2_profile)   
 
 print(PSF_model.inputs_manager)
@@ -269,7 +284,7 @@ torch.cuda.empty_cache()
 # Small batches - 8-16 samples (to limit the influence of outliers and increase regularization effect)
 # Early stopping - to prevent overfitting
 # Data augmentation - TODO: if possible, add small noise to telemetry inputs
-# Cross-validation - TODO: add k-fold CV for better estimates
+# Cross-validation  - TODO: add k-fold CV for better estimates
 
 import torch.nn as nn
 
@@ -318,34 +333,34 @@ class SmallCalibratorNet(nn.Module):
         return self.network(x)
 
 
-'''
+
 # Alternative: Even more compact version
-class TinyCalibratorNet(nn.Module):
-    """Ultra-compact version for very small datasets."""
-    def __init__(self, n_features, n_outputs, hidden_dim=24, dropout_rate=0.4):
-        super().__init__()
+# class TinyCalibratorNet(nn.Module):
+    # """Ultra-compact version for very small datasets."""
+    # def __init__(self, n_features, n_outputs, hidden_dim=24, dropout_rate=0.4):
+    #     super().__init__()
         
-        self.network = nn.Sequential(
-            nn.Linear(n_features, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            nn.Linear(hidden_dim, n_outputs),
-            nn.Tanh()
-        )
+    #     self.network = nn.Sequential(
+    #         nn.Linear(n_features, hidden_dim),
+    #         nn.LayerNorm(hidden_dim),
+    #         nn.ReLU(),
+    #         nn.Dropout(dropout_rate),
+    #         nn.Linear(hidden_dim, n_outputs),
+    #         nn.Tanh()
+    #     )
         
-        self._initialize_weights()
+    #     self._initialize_weights()
     
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight, gain=0.5)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
+    # def _initialize_weights(self):
+    #     for m in self.modules():
+    #         if isinstance(m, nn.Linear):
+    #             nn.init.xavier_uniform_(m.weight, gain=0.5)
+    #             if m.bias is not None:
+    #                 nn.init.zeros_(m.bias)
     
-    def forward(self, x):
-        return self.network(x)
-'''
+    # def forward(self, x):
+    #     return self.network(x)
+
 
 #%%
 import torch.optim as optim
@@ -485,10 +500,6 @@ if not args.continue_training:
         calibrator.load_state_dict(best_calibrator_state)
         logger.info(f"Restored best pre-training weights (val_loss: {best_pretrain_loss:.6f})")
 
-    gc.collect()
-    torch.cuda.empty_cache()
-    torch.cuda.synchronize()
-
     # Store best pretrain calibrator state in the file
     pretrain_weights_path = WEIGHTS_FOLDER / 'NFM_calibrator/pretrain_weights.pth'
     torch.save(best_calibrator_state, pretrain_weights_path)
@@ -502,6 +513,11 @@ else:
         logger.info(f"🔄 Loaded pre-training weights from {pretrain_weights_path}")
     else:
         logger.warning(f"❌ Pre-training weights not found at {pretrain_weights_path}. Continuing with current weights.")
+
+# Release pre-training artifacts that can pin optimizer states in VRAM.
+for _name in ('optimizer', 'scheduler_pretrain', 'loss_pretrain', 'best_calibrator_state', 'best_pretrain_state'):
+    globals().pop(_name, None)
+release_gpu_memory(sync=True)
 
 #%%
 fill_from_fitted = lambda key: np.array([d[key] for d in dataset.fitted_vals], dtype=np.float32) if key in dataset.fitted_vals[0] else None
@@ -574,7 +590,7 @@ def run_model(x_dict_NN, config, idx, λ_ids):
     # Get the current dict of input tensors from the PSF model's inputs manager    
     x_dict = PSF_model.inputs_manager.to_dict()
     # Update only the parameters that are predicted by the NN, keep the rest unchanged
-    x_dict = {key: x_dict_NN[key] for key in x_dict_NN.keys() if key in x_dict}
+    x_dict.update({key: x_dict_NN[key] for key in x_dict_NN if key in x_dict})
     # Set dx/dy for this batch (indexed by array's index)
     x_dict['dx_ctrl'] = dx[idx]
     x_dict['dy_ctrl'] = dy[idx]
@@ -585,22 +601,18 @@ def run_model(x_dict_NN, config, idx, λ_ids):
     )
     # Append Cn2 ground layer weight
     if predict_Cn2_profile:
-        GL_fraction = 1.0 - x_dict['Cn2_weights'].sum(dim=-1, keepdim=True)
+        GL_fraction = (1.0 - x_dict['Cn2_weights'].sum(dim=-1, keepdim=True)).clamp(min=0.0)
         x_dict['Cn2_weights'] = torch.hstack( (GL_fraction, x_dict['Cn2_weights']) )
 
     current_wavelengths = λ_full[λ_ids].to(device=device)
     
     config['sources_science']['Wavelength'] = current_wavelengths.view(1,-1) # [1, N_wvl_selected]
+    PSF_model.model.config = config
+    # N_obs is set by InitValues() via Update() inside SetWavelengths; do not assign directly
+    PSF_model.SetWavelengths(current_wavelengths)
     
-    if current_wavelengths.shape == PSF_model.λ_sim.shape and torch.allclose(current_wavelengths, PSF_model.λ_sim, atol=1e-12):
-        PSF_model.model.Update(config=config, grids=False, pupils=False, tomography=True)
-    else:
-        # Update the internal state of the PSF model for the given batch config. Update just model parameters, not grids
-        # This could be done with the SetWavelengths method, but it does some extra re-initializations, so we do it manually to save
-        PSF_model.λ_sim = current_wavelengths.clone()
-        PSF_model.model.Update(config=config, grids=True, pupils=False, tomography=True)
-    
-    return PSF_model(x_dict) # Run given the predicted parameters and the updated internal state, get the predicted PSF cubes
+    # Do not update internal inputs_manager with graph-connected tensors to avoid cross-batch graph retention.
+    return PSF_model(x_dict, update_params=False) # Run given the predicted parameters and the updated internal state, get the predicted PSF cubes
 
 #%%
 # Initialize training and validation loss function
@@ -617,8 +629,8 @@ else:
 force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
 # TODO: positive r0 regularization?
 
-def loss_PSF(PSF_data, PSF_model, w_MSE, w_MAE):
-    diff = (PSF_model-PSF_data) #* wvl_weights[:, λ_ids, ...] #TODO: add wvl selection
+def loss_PSF(PSF_data, PSF_pred, w_MSE, w_MAE):
+    diff = (PSF_pred-PSF_data) #* wvl_weights[:, λ_ids, ...] #TODO: add wvl selection
     w = 2e4 # Empirical weight to balance the loss magnitude with the regularization terms
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean()  * w_MAE
@@ -635,9 +647,9 @@ def loss_LO(coefs_vec, w_bump, w_LO):
     return LO_loss + phase_bump_positive + first_defocus_penalty
 
 
-def loss_fn(PSF_data, PSF_model, x_dict_pred):
-    # PSF_loss = loss_PSF(PSF_data, PSF_model, w_MSE=900.0, w_MAE=1.6) Used to be 900
-    PSF_loss = loss_PSF(PSF_data, PSF_model, w_MSE=1200.0, w_MAE=1.6)
+def loss_fn(PSF_data, PSF_pred, x_dict_pred):
+    # PSF_loss = loss_PSF(PSF_data, PSF_pred, w_MSE=900.0, w_MAE=1.6) Used to be 900
+    PSF_loss = loss_PSF(PSF_data, PSF_pred, w_MSE=1200.0, w_MAE=1.6)
     LO_loss  = loss_LO(x_dict_pred['LO_coefs'], w_bump=5e-5, w_LO=1e-7) if predict_LO_NCPAs else 0.0
     return PSF_loss + LO_loss
 
@@ -677,13 +689,20 @@ def validate(loader=None, return_cubes=True, verbose=False):
     NN_predictions = None
 
     if return_cubes:
-        N_samples = len(dataset)
+        N_samples = len(loader.dataset)
 
         PSFs_pred_cube = torch.zeros((N_samples, N_wvl_total, H, W), dtype=torch.float32, device='cpu')
         PSFs_data_cube = torch.zeros((N_samples, N_wvl_total, H, W), dtype=torch.float32, device='cpu')
         NN_predictions = torch.zeros((N_samples, N_outputs), dtype=torch.float32, device='cpu')
 
-        if verbose: logger.info(f"Validation dataset size: {N_samples} (full), batches: {len(loader)}")
+        # Map global dataset IDs to local positions within this loader's dataset split.
+        if isinstance(loader.dataset, Subset):
+            local_to_global = torch.tensor(loader.dataset.indices, dtype=torch.long)
+        else:
+            local_to_global = torch.arange(N_samples, dtype=torch.long)
+        global_to_local = {int(global_id): local_pos for local_pos, global_id in enumerate(local_to_global.tolist())}
+
+        if verbose: logger.info(f"Validation dataset size: {N_samples}, batches: {len(loader)}")
     
     with torch.no_grad():
         # Outer loop: iterate through batches
@@ -696,13 +715,14 @@ def validate(loader=None, return_cubes=True, verbose=False):
 
             if return_cubes:
                 validation_ids.extend(idxs_cpu.tolist())
+                local_positions = torch.tensor([global_to_local[int(global_id)] for global_id in idxs_cpu.tolist()], dtype=torch.long)
             
             # Get calibrator predictions (same for all wavelength sets since prediction is λ-agnostic)
             x_pred = calibrator(telemetry_inputs)
             x_dict_pred = calibrator_outputs_transformer.unstack(x_pred)
             
             if return_cubes:
-                NN_predictions[idxs_cpu, :] = x_pred.cpu()
+                NN_predictions[local_positions, :] = x_pred.cpu()
             
             if verbose: logger.info(f"Processed batch {batch_idx + 1}/{len(loader)}")
             
@@ -714,15 +734,15 @@ def validate(loader=None, return_cubes=True, verbose=False):
                 PSF_pred = run_model(x_dict_pred, batch_config, idxs, λ_id_set)
                 
                 # Calculate loss for this batch and wavelength set
-                loss = loss_fn(PSF_pred, PSF_data[:, λ_id_set, ...], x_dict_pred)
+                loss = loss_fn(PSF_data[:, λ_id_set, ...], PSF_pred, x_dict_pred)
                 total_loss += loss.item()
                 total_simulated_batches += 1
                 
                 if return_cubes:
                     # Fill in the wavelengths for this batch
                     for wvl_idx, λ_id in enumerate(λ_id_set):
-                        PSFs_pred_cube[idxs_cpu, λ_id, :, :] = PSF_pred[:, wvl_idx, :, :].cpu()
-                        PSFs_data_cube[idxs_cpu, λ_id, :, :] = PSF_data[:, λ_id, :, :].cpu()
+                        PSFs_pred_cube[local_positions, λ_id, :, :] = PSF_pred[:, wvl_idx, :, :].cpu()
+                        PSFs_data_cube[local_positions, λ_id, :, :] = PSF_data[:, λ_id, :, :].cpu()
                 
                 if verbose: logger.info(f"  >> λ set {current_λ_set_id + 1}/{len(λ_sets)}")
 
@@ -731,23 +751,16 @@ def validate(loader=None, return_cubes=True, verbose=False):
         logger.info(f"PSF data range: [{PSFs_data_cube.min():.4e}, {PSFs_data_cube.max():.4e}]")
 
     if return_cubes:
-        # Select only those samples that are actually in the validation set (in case of Subset with non-contiguous indices)
-        validation_ids = torch.tensor(validation_ids, dtype=torch.long)
-        PSFs_pred_cube = PSFs_pred_cube[validation_ids]
-        PSFs_data_cube = PSFs_data_cube[validation_ids]
-        NN_predictions = NN_predictions[validation_ids]
-        
+        # Return global dataset IDs matching the row order in returned cubes/predictions.
+        validation_ids = local_to_global
         return PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, total_loss / total_simulated_batches if total_simulated_batches > 0 else 0.0
     else:
         return total_loss / total_simulated_batches if total_simulated_batches > 0 else 0.0
 
 #%%
 # Validate after calibrator pre-training, before the main training loop, to check that everything is working and to have a baseline for comparison
-PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, val_loss_total = validate(loader=val_loader, verbose=True, return_cubes=True)
-
-gc.collect()
-torch.cuda.empty_cache()
-torch.cuda.synchronize()
+val_loss_total = validate(loader=val_loader, verbose=True, return_cubes=False)
+release_gpu_memory(sync=True)
 
 #%%
 # Optimizer with weight decay (L2 regularization)
@@ -838,30 +851,31 @@ def train(num_epochs=50, patience=10, nan_recovery=True, max_nan_recoveries=3):
         train_batch_count = 0
         nan_detected_this_epoch = False
         
-        for current_λ_set_id in range(len(λ_sets)):
-            PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=device))
-            λ_id_set = λ_id_sets[current_λ_set_id]
-            
-            for batch_idx, batch in enumerate(train_loader):        
-                PSF_data, telemetry_inputs, _, batch_config, idxs = batch
-                
-                optimizer.zero_grad()
-                
+        for batch_idx, batch in enumerate(train_loader):
+            PSF_data, telemetry_inputs, _, batch_config, idxs = batch
+
+            optimizer.zero_grad()
+            batch_loss_value = 0.0
+
+            # Backpropagate per wavelength subset to reduce peak graph memory.
+            for current_λ_set_id in range(len(λ_sets)):
+                λ_id_set = λ_id_sets[current_λ_set_id]
+
                 x_pred = calibrator(telemetry_inputs)
                 x_dict_pred = calibrator_outputs_transformer.unstack(x_pred)
 
                 PSF_pred = run_model(x_dict_pred, batch_config, idxs, λ_id_set)
-                loss = loss_fn(PSF_pred, PSF_data[:, λ_id_set, ...], x_dict_pred)
+                loss = loss_fn(PSF_data[:, λ_id_set, ...], PSF_pred, x_dict_pred)
 
                 # ========== NaN detection ==========
                 if check_for_nan(loss, calibrator, epoch, batch_idx):
                     nan_detected_this_epoch = True
-                    
+
                     if nan_recovery and nan_recovery_count < max_nan_recoveries:
                         nan_recovery_count += 1
                         loss_stats['nan_recoveries'] = nan_recovery_count
                         logger.error(f"🚨 NaN detected! Recovery attempt {nan_recovery_count}/{max_nan_recoveries}")
-                        
+
                         try:
                             # Load last good checkpoint
                             load_checkpoint(calibrator, optimizer, BEST_CALIB_PATH)
@@ -873,44 +887,46 @@ def train(num_epochs=50, patience=10, nan_recovery=True, max_nan_recoveries=3):
 
                             logger.info(f"✅ Recovered from checkpoint, LR reduced by {(1.-lr_decay) * 100:.0f}%")
                             logger.info("Model recovered from checkpoint, continuing training...")
+                            optimizer.zero_grad(set_to_none=True)
                             break  # Skip rest of this epoch, start fresh
-                            
+
                         except FileNotFoundError:
                             logger.error("❌ No checkpoint found! Cannot recover from NaN.")
                             raise ValueError("NaN detected but no checkpoint to recover from")
                     else:
                         logger.error(f"❌ Max NaN recoveries ({max_nan_recoveries}) reached or recovery disabled. Stopping training.")
                         raise ValueError(f"Training failed due to NaN after {nan_recovery_count} recovery attempts")
-                
-                loss.backward()
-                
-                # Gradient clipping (helps prevent NaN)
-                torch.nn.utils.clip_grad_norm_(calibrator.parameters(), max_norm=1.0)
-                
-                if optimize_astrometry:
-                    torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=10.0)  # Clip dx/dy too
-                
-                # Update calibrator and optionally dx/dy
-                optimizer.step()
-                
-                epoch_train_loss += loss.item()
-                train_batch_count += 1
-                
-                # Log batch loss
-                loss_stats['train_losses_per_batch'].append(loss.item())
-        
-                # Running loss info during wavelength iteration
-                current_lr = optimizer.param_groups[0]['lr']
 
-                logger.debug(f"Epoch {epoch}, λ set {current_λ_set_id + 1}/{len(λ_sets)}, "
-                             f"batch {batch_idx + 1}/{len(train_loader)}: train_loss = {loss.item():.6f}, LR = {current_lr:.2e}")
-            
-            # If NaN was detected, break out of wavelength loop too
+                loss.backward()
+                batch_loss_value += loss.item()
+
+                # Explicitly clear large intermediates between wavelength subsets.
+                del PSF_pred, x_pred, x_dict_pred, loss
+
             if nan_detected_this_epoch:
                 break
-        
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
+
+            # Gradient clipping (helps prevent NaN)
+            torch.nn.utils.clip_grad_norm_(calibrator.parameters(), max_norm=1.0)
+
+            if optimize_astrometry:
+                torch.nn.utils.clip_grad_norm_([dx, dy], max_norm=10.0)  # Clip dx/dy too
+
+            # Update calibrator and optionally dx/dy
+            optimizer.step()
+
+            epoch_train_loss += batch_loss_value
+            train_batch_count += 1
+
+            # Log batch loss
+            loss_stats['train_losses_per_batch'].append(batch_loss_value)
+
+            # Running loss info
+            current_lr = optimizer.param_groups[0]['lr']
+            logger.debug(f"Epoch {epoch}, batch {batch_idx + 1}/{len(train_loader)}: "
+                         f"train_loss = {batch_loss_value:.6f}, LR = {current_lr:.2e}")
+
+        release_gpu_memory(sync=True)
     
         # If NaN was detected, skip to next epoch
         if nan_detected_this_epoch:

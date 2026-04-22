@@ -7,7 +7,6 @@ from photutils.centroids import centroid_quadratic, centroid_com, centroid_com, 
 from astropy.modeling import models, fitting
 import matplotlib.pyplot as plt
 import seaborn as sns
-import warnings
 
 from project_settings import xp, use_cupy
 
@@ -324,7 +323,7 @@ def SR(PSF, PSF_DL):
     else:
         return ratio.squeeze()
     
-@warnings.deprecated("This class is deprecated and may be removed in future versions.")
+
 class Photometry:
     def __init__(self):
         self.bands = {

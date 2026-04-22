@@ -15,7 +15,7 @@ import matplotlib.pyplot as plt
 from tools.utils import mask_circle
 from tools.normalizers import Uniform
 from managers.input_manager import InputsManager
-from machine_learning.calibrator import Calibrator, Gnosis
+from deprecated.calibrator import Calibrator, Gnosis
 from tools.normalizers import CreateTransformSequenceFromFile
 from data_processing.project_settings import MUSE_DATA_FOLDER, DATASET_FOLDER
 from data_processing.MUSE_onsky_df import *

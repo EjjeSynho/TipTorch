@@ -249,7 +249,7 @@ print(model_inputs)
 model_inputs_copy = model_inputs.copy()
 
 #%%
-from machine_learning.calibrator import Calibrator, Gnosis
+from deprecated.calibrator import Calibrator, Gnosis
 
 calibrator = Calibrator(
     inputs_manager=shared_inputs,
