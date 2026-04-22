@@ -15,12 +15,13 @@ import logging
 import argparse
 import numpy as np
 import torch
-import pickle
+import torch.nn as nn
+import torch.optim as optim
 import matplotlib.pyplot as plt
 from copy import deepcopy
 
-from torch.utils.data import DataLoader, Subset, random_split
-from sklearn.model_selection import train_test_split, KFold
+from torch.utils.data import DataLoader, Subset
+from sklearn.model_selection import train_test_split
 from pathlib import Path
 from datetime import datetime
 from project_settings import *
@@ -29,11 +30,11 @@ from torch.utils.data import Dataset
 from managers.config_manager import MultipleTargetsInDifferentObservations
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
-STD_FOLDER = MUSE_DATA_FOLDER / 'standart_stars/'
-DATASET_CACHE = STD_FOLDER / 'dataset_cache'
-BEST_CALIB_PATH = WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth'
-DEBUG = True # TODO: make it an argument
-BATCH_SIZE = 16 # TODO: make it an argument
+STD_FOLDER       = MUSE_DATA_FOLDER / 'standart_stars/'
+DATASET_CACHE    = STD_FOLDER / 'dataset_cache'
+BEST_CALIB_PATH  = WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth'
+DEBUG            = True # TODO: make it an argument
+BATCH_SIZE       = 16 # TODO: make it an argument
 
 pre_init_astrometry = True
 optimize_astrometry = False
@@ -156,7 +157,7 @@ N_features = len(dataset.features)
 N_wvl_total = dataset.C # The number of spectral channels from the PSF data
 
 # Data loaders
-train_idx, test_idx = train_test_split(np.arange(len(dataset)), test_size=0.20, random_state=42)
+train_idx, test_idx = train_test_split(np.arange(len(dataset)), test_size=0.20, random_state=42) #TODO make it a part of the STD dataset
 
 H, W = dataset.H, dataset.W
 dx, dy = None, None
@@ -285,85 +286,7 @@ torch.cuda.empty_cache()
 # Early stopping - to prevent overfitting
 # Data augmentation - TODO: if possible, add small noise to telemetry inputs
 # Cross-validation  - TODO: add k-fold CV for better estimates
-
-import torch.nn as nn
-
-class SmallCalibratorNet(nn.Module):
-    """
-    Compact neural network for calibration with strong regularization.
-    Designed for small datasets (~500 samples).
-    
-    Args:
-        n_features: Number of input features
-        n_outputs: Number of output values
-        hidden_dim: Size of hidden layers (default: 32)
-        dropout_rate: Dropout probability (default: 0.3)
-    """
-    def __init__(self, n_features, n_outputs, hidden_dim=32, dropout_rate=0.3):
-        super().__init__()
-        
-        self.network = nn.Sequential(
-            # Input layer
-            nn.Linear(n_features, hidden_dim),
-            nn.LayerNorm(hidden_dim),  # Better than BatchNorm for small batches
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            
-            # Hidden layer
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(dropout_rate),
-            
-            # Output layer
-            nn.Linear(hidden_dim, n_outputs),
-        )
-        
-        # Initialize weights with smaller values for better regularization
-        self._initialize_weights()
-    
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Linear):
-                nn.init.xavier_uniform_(m.weight, gain=0.5)  # Smaller gain
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-    
-    def forward(self, x):
-        return self.network(x)
-
-
-
-# Alternative: Even more compact version
-# class TinyCalibratorNet(nn.Module):
-    # """Ultra-compact version for very small datasets."""
-    # def __init__(self, n_features, n_outputs, hidden_dim=24, dropout_rate=0.4):
-    #     super().__init__()
-        
-    #     self.network = nn.Sequential(
-    #         nn.Linear(n_features, hidden_dim),
-    #         nn.LayerNorm(hidden_dim),
-    #         nn.ReLU(),
-    #         nn.Dropout(dropout_rate),
-    #         nn.Linear(hidden_dim, n_outputs),
-    #         nn.Tanh()
-    #     )
-        
-    #     self._initialize_weights()
-    
-    # def _initialize_weights(self):
-    #     for m in self.modules():
-    #         if isinstance(m, nn.Linear):
-    #             nn.init.xavier_uniform_(m.weight, gain=0.5)
-    #             if m.bias is not None:
-    #                 nn.init.zeros_(m.bias)
-    
-    # def forward(self, x):
-    #     return self.network(x)
-
-
-#%%
-import torch.optim as optim
+from calibrators.NFM_calibrator import SmallCalibratorNet
 
 # Initialize calibrator NN
 calibrator = SmallCalibratorNet(
@@ -416,7 +339,7 @@ def load_checkpoint(calibrator, optimizer, path):
         if optimizer is not None:
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             logger.info("✅ Optimizer state loaded from checkpoint")
-            
+
         logger.info(f"🔄 Checkpoint loaded from {path} (epoch {checkpoint['epoch']})")
         return checkpoint['epoch'], checkpoint['train_loss'], checkpoint['val_loss']
     else:
@@ -449,7 +372,6 @@ if not args.continue_training:
 
     best_pretrain_loss = float('inf')
     best_calibrator_state = None
-
 
     for epoch in range(num_epochs_pretrain):
         calibrator.train()
@@ -517,6 +439,7 @@ else:
 # Release pre-training artifacts that can pin optimizer states in VRAM.
 for _name in ('optimizer', 'scheduler_pretrain', 'loss_pretrain', 'best_calibrator_state', 'best_pretrain_state'):
     globals().pop(_name, None)
+
 release_gpu_memory(sync=True)
 
 #%%
@@ -558,6 +481,7 @@ if predict_LO_NCPAs:
 else:
     logger.info(f"ℹ️ Initializing NCPAs with median values from fitting (same for all samples)")
     NCPAs_median = torch.tensor(np.median(LO_dataset, axis=0)[None,...], device=device, dtype=torch.float32)
+
 
 # %%
 # To save GPU memory, PSFs are predicted and compared to data only for a subset of wavelengths at a time
@@ -608,7 +532,6 @@ def run_model(x_dict_NN, config, idx, λ_ids):
     
     config['sources_science']['Wavelength'] = current_wavelengths.view(1,-1) # [1, N_wvl_selected]
     PSF_model.model.config = config
-    # N_obs is set by InitValues() via Update() inside SetWavelengths; do not assign directly
     PSF_model.SetWavelengths(current_wavelengths)
     
     # Do not update internal inputs_manager with graph-connected tensors to avoid cross-batch graph retention.
@@ -1061,6 +984,8 @@ calibrator, train_losses, val_losses = train(
     max_nan_recoveries=10
 )
 
+release_gpu_memory()
+
 print("\n" + "="*60)
 print("Training Complete!")
 print("="*60)
@@ -1252,9 +1177,6 @@ def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num
         logger.info(f"Tuning complete. Best val loss: {best_loss:.6f}")
 
 
-#%%
-gc.collect()
-torch.cuda.empty_cache()
 
 #%%
 tune_calibrator(calibrator, train_loader, val_loader, tuned_params=['F_ctrl'])
@@ -1269,6 +1191,7 @@ logger.info("Loading best model...")
 print("\nLoading best model...")
 
 epoch, train_loss, val_loss = load_checkpoint(calibrator, optimizer, BEST_CALIB_PATH)
+calibrator.eval()
 logger.info(f"Best validation loss: {val_loss:.6f} at epoch {epoch}")
 
 # Validate and collect all PSF predictions and data
@@ -1309,8 +1232,6 @@ print(f"Corresponding original dataset index: {validation_ids[id_src].item()}")
 PSF_0 = PSFs_data_cube[id_src]
 PSF_1 = PSFs_pred_cube[id_src]
 
-# NN_pred = NN_predictions[id_src].cpu().unsqueeze(0).numpy()
-# x_pred = inputs_transformer.unstack(NN_pred)
 
 vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
 vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
@@ -1326,7 +1247,8 @@ draw_PSF_stack(
     crop=100
 )
 
-fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
+#%%
+fig, ax = plt.subplots(1, len(wvl_select), figsize=(15, 1.35*len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
     plot_radial_PSF_profiles(
         PSF_disp(PSF_0, lmbd),
@@ -1337,12 +1259,13 @@ for i, lmbd in enumerate(wvl_select):
         y_min=3e-2,
         linthresh=1e-2,
         return_profiles=True,
-        ax=ax[i]        
+        ax=ax[i]
     )
+    ax[i].set_title(f"λ = {(λ_full[lmbd]*1e9).round().int().item()} nm")
 plt.show()
 
 #%%
-fig, ax = plt.subplots(1, len(wvl_select), figsize=(10, len(wvl_select)))
+fig, ax = plt.subplots(1, len(wvl_select), figsize=(15, 1.35*len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
     plot_radial_PSF_profiles(
         PSFs_data_cube[:, lmbd, ...].cpu().numpy(),
@@ -1351,15 +1274,14 @@ for i, lmbd in enumerate(wvl_select):
         'TipTorch',
         cutoff=40,
         ax=ax[i],
-        title=f"Wavelength {λ_full[lmbd].item():.2f} m"
+        title=f"λ = {(λ_full[lmbd]*1e9).round().int().item()} nm"
         #, centers=center)
     )
-plt.title('Radial PSF Profiles at Selected Wavelengths')
+plt.suptitle('Averaged radial PSF Profiles at selected Wavelengths')
 plt.show()
 
 #%%
 fig = plt.figure(figsize=(10, 6))
-plt.title('Polychromatic PSF')
 PSF_avg = lambda x: np.mean(x.cpu().numpy(), axis=1)
 plot_radial_PSF_profiles(
     PSF_avg(PSFs_data_cube),
@@ -1370,11 +1292,48 @@ plot_radial_PSF_profiles(
     cutoff=40,
     ax=fig.add_subplot(111)
 )
+plt.title('Spectrally averaged median PSF profile')
 plt.show()
+
+#%%
+def save_calibrator(path):
+    """
+    Save the complete calibrator state needed to restore inference,
+    without requiring the training script to be re-run.
+    """
+    state = {
+        # --- NN weights and architecture ---
+        'net_state_dict':   calibrator.state_dict(),
+        'net_arch': {
+            'n_features':   N_features,
+            'n_outputs':    N_outputs,
+            'hidden_dim':   calibrator.network[0].out_features,   # read back, not hardcoded
+            'dropout_rate': calibrator.network[3].p,
+        },
+
+        # --- Telemetry / parameters ---
+        'input_feature_names':  input_features,   # ordered list, matches telemetry tensor columns
+        'output_feature_names': output_features,  # ordered list of predicted parameter names
+        # Saved via InputsTransformer.save() so no lambdas/closures leak into the pickle
+        'outputs_transformer':  calibrator_outputs_transformer.save(),
+
+        # --- Prediction parameters ---
+        'predict_LO_NCPAs':    predict_LO_NCPAs,
+        'predict_Cn2_profile': predict_Cn2_profile,
+        'LO_modes_max':        PSF_model.Z_mode_max,
+        'N_spline_nodes':      PSF_model.N_wvl_ctrl,
+        'predict_phase_bump':  False,
+    }
+
+    torch.save(state, path)
+    logger.info(f"Calibrator state saved to {path}")
+
+
+save_calibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth')
 
 #%% ============================================================================================================================================================================================
 # Dummy optimization routine for debugging loss function and optimization behavior
-def debug_dummy_optimization(num_iters=100, initial_guess=None):
+def debug_dummy_optimization(num_iters=100, criterion, initial_guess=None):
     """
     Short debugging optimization loop that directly optimizes model inputs.
     

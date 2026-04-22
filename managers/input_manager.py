@@ -79,75 +79,87 @@ class InputsTransformer:
 
         return decomposed
 
-    def save(self, filename):
+    def save(self, filename=None):
         """
         Serializes and saves the InputsTransformer to a file, including slice information.
+        Transforms are stored using each class's store() method, which produces
+        (class_name, params) tuples that LoadTransforms() can reconstruct exactly.
 
         Args:
-            filename (str): Path to the file where the transformer will be saved
+            filename (str): Path to the file where the transformer will be saved.
+
+        Returns:
+            dict: The serializable save_data dict (also written to file when filename is given).
         """
         save_data = {
             'transforms': {},
             'slices': {},
-            'packed_size': self._packed_size
+            'packed_size': getattr(self, '_packed_size', None),
         }
 
-        # Store transform data
+        # Use store() so the class name is always included alongside the params.
+        # TransformSequence.store() -> list of (name, params) tuples, ready for LoadTransforms.
+        # Single DataTransform.store() -> (name, params) tuple; wrap in a list.
         for key, transform in self.transforms.items():
-            # For each transform, store its type and parameters
-            if hasattr(transform, 'get_params'):
-                save_data['transforms'][key] = transform.get_params()
+            if isinstance(transform, TransformSequence):
+                save_data['transforms'][key] = transform.store()
             else:
-                # If the transform is a sequence, handle specially
-                if isinstance(transform, TransformSequence):
-                    save_data['transforms'][key] = {
-                        'type': 'TransformSequence',
-                        'transforms': [t.get_params() for t in transform.transforms]
-                    }
-                else:
-                    save_data['transforms'][key] = {'type': type(transform).__name__}
+                save_data['transforms'][key] = [transform.store()]
 
         # Store slice information
         for key, sl in self.slices.items():
             save_data['slices'][key] = {'start': sl.start, 'stop': sl.stop, 'step': sl.step}
 
-        with open(filename, 'wb') as handle:
-            pickle.dump(save_data, handle)
+        if filename is not None:
+            with open(filename, 'wb') as handle:
+                pickle.dump(save_data, handle)
+
+        return save_data
+    
 
     @classmethod
-    def load(cls, filename):
+    def load(cls, data=None, filename=None):
         """
         Loads an InputsTransformer from a file, including slice information if available.
 
         Args:
-            filename (str): Path to the file containing the saved transformer
+            filename (str): Path to the file containing the saved transformer.
+            data (dict): Pre-loaded save_data dict (alternative to filename).
 
         Returns:
-            InputsTransformer: A new instance with the loaded transforms and slices
+            InputsTransformer: A new instance with the loaded transforms and slices.
         """
-        with open(filename, 'rb') as handle:
-            save_data = pickle.load(handle)
+        if filename is not None:
+            if data is not None:
+                print("Warning: Both data and filename provided to load method. "
+                      "Filename will be used and data will be ignored.")
+            with open(filename, 'rb') as handle:
+                save_data = pickle.load(handle)
+        elif data is not None:
+            save_data = data
+        else:
+            raise ValueError("Either data or filename must be provided for loading.")
 
-        # Handle backward compatibility with old format
+        # Backward compatibility: bare transforms dict without the envelope
         if not isinstance(save_data, dict) or 'transforms' not in save_data:
-            transform_data = save_data
-            save_data = {'transforms': transform_data, 'slices': {}}
+            save_data = {'transforms': save_data, 'slices': {}}
 
         transforms = {}
         for key, params in save_data['transforms'].items():
-            if isinstance(params, dict) and 'type' in params and params['type'] == 'TransformSequence':
-                # Handle TransformSequence
-                sub_transforms = []
+            if isinstance(params, dict) and params.get('type') == 'TransformSequence':
+                # Legacy format: {'type': 'TransformSequence', 'transforms': [sub_params, ...]}
+                # Convert to (class_name, params) tuples without mutating the in-memory dict.
+                sub_list = []
                 for t_params in params['transforms']:
-                    transform_type = t_params.pop('type', None)
-                    if transform_type:
-                        sub_transforms.append(globals()[transform_type](**t_params))
-                transforms[key] = TransformSequence(sub_transforms)
+                    t_params = dict(t_params)  # copy to avoid mutating cached data
+                    t_type = t_params.pop('type', None)
+                    if t_type:
+                        sub_list.append((t_type, t_params))
+                transforms[key] = LoadTransforms(sub_list)
             else:
-                # Use LoadTransforms for other transform types
+                # Current format: list of (class_name, params) tuples from store()
                 transforms[key] = LoadTransforms(params)
-                
-        # Create the instance
+
         instance = cls(transforms)
 
         # Restore slices if available
@@ -356,6 +368,68 @@ class InputsManager:
     
     def clone(self):
         return self.copy()
+
+    def save(self, filename=None):
+        """
+        Serialize the InputsManager to a dict, optionally writing to file.
+        Transforms are captured via InputsTransformer.save(); parameter values
+        and optimizable flags are stored per parameter.
+
+        Args:
+            filename (str): If given, pickle the result to this path.
+
+        Returns:
+            dict: Serializable save_data dict.
+        """
+        save_data = {
+            'transformer': self.inputs_transformer.save(),
+            'parameters': {
+                name: {
+                    'value':       param.value,
+                    'optimizable': param.optimizable,
+                }
+                for name, param in self.parameters.items()
+            },
+        }
+        if filename is not None:
+            with open(filename, 'wb') as handle:
+                pickle.dump(save_data, handle)
+        return save_data
+
+    @classmethod
+    def load(cls, data=None, filename=None):
+        """
+        Restore an InputsManager from a previously saved dict or file.
+
+        Args:
+            data (dict): Pre-loaded save_data dict.
+            filename (str): Path to a pickled save_data file.
+
+        Returns:
+            InputsManager: Fully restored instance.
+        """
+        if filename is not None:
+            if data is not None:
+                print("Warning: Both data and filename provided to load method. "
+                      "Filename will be used and data will be ignored.")
+            with open(filename, 'rb') as handle:
+                data = pickle.load(handle)
+        elif data is None:
+            raise ValueError("Either data or filename must be provided for loading.")
+
+        instance = cls()
+        instance.inputs_transformer = InputsTransformer.load(data=data['transformer'])
+
+        for name, param_data in data['parameters'].items():
+            raw_transform = instance.inputs_transformer.transforms.get(name, Identity())
+            instance.parameters[name] = InputParameter(
+                value=param_data['value'],
+                transform=(raw_transform if isinstance(raw_transform, TransformSequence)
+                           else TransformSequence(raw_transform)),
+                optimizable=param_data['optimizable'],
+            )
+
+        return instance
 
     def __str__(self) -> str:
         """Pretty print the InputsManager contents."""
@@ -688,6 +762,75 @@ class InputsManagersUnion:
     def clone(self) -> "InputsManagersUnion":
         """Create a deep copy of the InputsManagersUnion."""
         return self.copy()
+
+    def save(self, filename=None):
+        """
+        Serialize the InputsManagersUnion to a dict, optionally writing to file.
+        Each constituent InputsManager is saved via InputsManager.save().
+        The union-level slices/shapes (post-stack state) are preserved so they
+        can be restored without having to call stack() again.
+
+        Args:
+            filename (str): If given, pickle the result to this path.
+
+        Returns:
+            dict: Serializable save_data dict.
+        """
+        save_data = {
+            'input_managers': {
+                key: manager.save()
+                for key, manager in self.input_managers.items()
+            },
+            'slices': {
+                key: {'start': sl.start, 'stop': sl.stop, 'step': sl.step}
+                for key, sl in self.slices.items()
+            },
+            'shapes':        {key: list(shape) for key, shape in self.shapes.items()},
+            'stacked_size':  getattr(self, '_stacked_size', None),
+        }
+        if filename is not None:
+            with open(filename, 'wb') as handle:
+                pickle.dump(save_data, handle)
+        return save_data
+
+    @classmethod
+    def load(cls, data=None, filename=None):
+        """
+        Restore an InputsManagersUnion from a previously saved dict or file.
+
+        Args:
+            data (dict): Pre-loaded save_data dict.
+            filename (str): Path to a pickled save_data file.
+
+        Returns:
+            InputsManagersUnion: Fully restored instance.
+        """
+        if filename is not None:
+            if data is not None:
+                print("Warning: Both data and filename provided to load method. "
+                      "Filename will be used and data will be ignored.")
+            with open(filename, 'rb') as handle:
+                data = pickle.load(handle)
+        elif data is None:
+            raise ValueError("Either data or filename must be provided for loading.")
+
+        input_managers = {
+            key: InputsManager.load(data=manager_data)
+            for key, manager_data in data['input_managers'].items()
+        }
+        instance = cls(input_managers)
+
+        if data.get('slices'):
+            for key, sl_data in data['slices'].items():
+                instance.slices[key] = slice(sl_data['start'], sl_data['stop'], sl_data['step'])
+
+        if data.get('shapes'):
+            instance.shapes = {key: torch.Size(shape) for key, shape in data['shapes'].items()}
+
+        if data.get('stacked_size') is not None:
+            instance._stacked_size = data['stacked_size']
+
+        return instance
 
     def __str__(self) -> str:
         """Pretty print the InputsManagersUnion contents."""

@@ -61,10 +61,10 @@ wvl_bins = np.array([
     880.125, 893.875, 907.625, 921.25 , 935.
 ], dtype='float32')
 
+# If current installatino doesn't have a local copy of the reduced telemetry, fetch it from online
 fetch_reduced_telemetry_cache(verbose=True)
 
 
-#%%
 find_closest_λ   = lambda λ, λs: check_framework(λs).argmin(check_framework(λs).abs(λs-λ)).astype('int')
 pupil_angle_func = lambda par_ang: (45.0 - par_ang) % 360 # where par_ang is the parallactic angle
 

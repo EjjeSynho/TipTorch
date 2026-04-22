@@ -250,7 +250,7 @@ class PSFModelNFM:
         self.LO_N_params = self.LO_basis.N_modes
         
     
-    def _update_manager_params(self, x_dict: dict, src_ids: bool | None = None) -> None:
+    def update_manager_params(self, x_dict: dict, src_ids: bool | None = None) -> None:
         if self.multiple_obs:
             if src_ids is not None:
                 raise warn("Source selection is not implemented yet for multiple observations case. All sources will be updated.")
@@ -489,7 +489,7 @@ class PSFModelNFM:
 
         if need_update:
             # Update inputs manager based of x_dict inputs
-            self._update_manager_params(x_dict, src_ids=src_ids)
+            self.update_manager_params(x_dict, src_ids=src_ids)
         
         return self.model(x_, None, phase=phase_)
 

@@ -45,6 +45,7 @@ TELEMETRY_CACHE = DATA_FOLDER / 'reduced_telemetry/'
 
 default_torch_type = torch.float32
 
+
 def resolve_device(preferred: str) -> torch.device:
     """
     Resolve a torch.device by:
@@ -80,6 +81,7 @@ def resolve_device(preferred: str) -> torch.device:
 
     # 3) Give up and fall back to CPU
     return torch.device("cpu")
+
 
 device = resolve_device(project_settings["device"])
 # device = torch.device("cpu")

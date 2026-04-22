@@ -1,5 +1,3 @@
-from warnings import deprecated
-
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -58,7 +56,6 @@ def wavelength_to_rgb(wavelength, gamma=0.8, show_invisible=False):
             
     return (R, G, B)
 
-@deprecated("render_spectral_PSF is deprecated and will be removed in future versions. Use plot_wavelength_rgb_linear or plot_wavelength_rgb_log instead.")
 def render_spectral_PSF(spectral_cube, λs):
     Rs, Gs, Bs = np.zeros_like(λs), np.zeros_like(λs), np.zeros_like(λs)
 

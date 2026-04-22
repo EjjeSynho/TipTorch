@@ -16,12 +16,11 @@ import os
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import subprocess
 
 import pandas as pd
 from MUSE_STD_dataset_utils import *
 
-# import astropy.units as u
-# from astropy.coordinates import SkyCoord, AltAz
 
 #%%
 # Check the existence of all necessary folders and create them if they don't exist
@@ -58,7 +57,7 @@ else:
     print(f'Read file matches file from {match_path}')
 
 #%
-# # Move all files whoch are in file_mismatches raw column to a specified folder:
+# # Move all files which are in file_mismatches raw column to a specified folder:
 # for file in tqdm(file_mismatches['raw'].values):
 #     shutil.move(RAW_FOLDER+file, STD_FOLDER / 'file_mismatches/')
 
@@ -136,9 +135,6 @@ for file in tqdm(os.listdir(CUBES_CACHE)):
 
 
 #%% ================================ Label PSFs ================================
-import subprocess
-import sys
-
 # Execute the data labeler script
 result = subprocess.run([sys.executable, 'MUSE_STD_stars_labeler.py'],
                         capture_output=True,
@@ -347,7 +343,6 @@ muse_df = muse_df[muse_df['Bad quality'] == False]
 muse_df = muse_df.loc[muse_fitted_df.index.values]
 good_samples = muse_df.index.values
 
-
 #%%
 for id in tqdm(good_samples):
     try:
@@ -388,8 +383,12 @@ torch.save({
     'fitted_param_values': fitted_values,
 }, DATASET_CACHE / 'muse_STD_stars_dataset.pt')
 
+
 #%%
 '''
+import astropy.units as u
+from astropy.coordinates import SkyCoord, AltAz
+
 def convert_to_dms(angle):
     is_negative = angle < 0
     angle = abs(angle)
