@@ -90,7 +90,7 @@ except SystemExit:
         continue_training = True
     )
 
-# watch -n 0.1 'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits -i 0 | awk -F, "{printf \"GPU: %s%%  VRAM: %s / %s MiB\n\",\$1,\$2,\$3}"'
+# watch -n 0.1 'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits -i 1 | awk -F, "{printf \"GPU: %s%%  VRAM: %s / %s MiB\n\",\$1,\$2,\$3}"'
 
 #%%
 class NFMDataset(Dataset):
@@ -251,7 +251,7 @@ PSF_model.inputs_manager.set_optimizable(['Cn2_weights'], predict_Cn2_profile)
 print(PSF_model.inputs_manager)
 
 # Note that the inputs manager for the calibrator is different from the default one,
-# as some parameters are removed (GL weight can be computed) and some are set externally (phase bump)
+# as some parameters are set externally (phase bump)
 #%%
 calibrator_outputs_transformer = deepcopy(PSF_model.inputs_manager.get_transformer()) # The calibrator predicts the same parameters as the default model, but some of them are removed or set externally before running the model
 
@@ -264,10 +264,6 @@ output_features = [k for k in buf_x_dict.keys()]
 # Remove phase bump from the input dict, as it's set externally and not predicted by the NN
 if 'LO_coefs' in buf_x_dict:
     buf_x_dict['LO_coefs'] = buf_x_dict['LO_coefs'][:, 1:] 
-
-# Remove the first Cn2 weight, as it's determined by the others and the normalization to sum of 1
-if 'Cn2_weights' in buf_x_dict:
-    buf_x_dict['Cn2_weights'] = buf_x_dict['Cn2_weights'][:,1:]
 
 _ = calibrator_outputs_transformer.stack(buf_x_dict) # Update stacking dimensions
 
@@ -351,18 +347,30 @@ def load_checkpoint(calibrator, optimizer, path):
 # At this point, PSF model is no invloved yet, so it is a much easier task than predicting PSF cubes.
 # It may help the model to converge faster when we start training with the full PSF model in the loop.
 
-if not args.continue_training:
+pretrain_weights_path = WEIGHTS_FOLDER / 'NFM_calibrator/pretrain_weights.pth'
+should_run_pretraining = (not args.continue_training) or (args.continue_training and not pretrain_weights_path.exists())
+
+if should_run_pretraining:
+    if args.continue_training and not pretrain_weights_path.exists():
+        logger.warning(f"Pre-training weights not found at {pretrain_weights_path}. Starting pre-training.")
+
     optimizer = optim.AdamW(calibrator.parameters(), lr=default_lr, weight_decay=5e-4)
     scheduler_pretrain = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10, min_lr=1e-4)
 
-    num_epochs_pretrain = 100
+    num_epochs_pretrain  = 100
+    pretrain_patience    = 15
+    pretrain_pat_counter = 0
 
     def calibrator_friendly_fit_dict(x_dict_fitted):
         ''' This function modifies the input dict to be more suitable for the calibrator NN, by removing parameters that are not predicted. '''
         x_dict_fitted = {key: x_dict_fitted[key] for key in output_features if key in x_dict_fitted} # Keep only the parameters that are predicted by the NN
         if 'LO_coefs' in x_dict_fitted:
             x_dict_fitted['LO_coefs'] = x_dict_fitted['LO_coefs'][:, 1:]
-        # And Cn2_weights are already stored without the first weight in the fitting dataset
+        # The dataset stores Cn2_weights without the first (GL) layer. Reconstruct it so the target matches the full-profile output the calibrator
+        if 'Cn2_weights' in x_dict_fitted:
+            cn2 = x_dict_fitted['Cn2_weights'].clamp(min=1e-6) # NOTE: clamp all values to min=1e-6 to avoid log(0) in SoftmaxInv transform
+            GL_fraction = (1.0 - cn2.sum(dim=-1, keepdim=True)).clamp(min=1e-6)
+            x_dict_fitted['Cn2_weights'] = torch.hstack((GL_fraction, cn2))
         return x_dict_fitted
 
     # We can also use a simpler loss function for this pre-training, such as MSE between the predicted parameters and the fitted values
@@ -390,7 +398,17 @@ if not args.continue_training:
 
             optimizer.step()
             
-            epoch_loss += loss.item()
+            batch_loss = loss.item()
+            epoch_loss += batch_loss
+            running_avg = epoch_loss / (batch_idx + 1)
+            
+            print(f"\r  Pre-train Epoch {epoch+1:3d}/{num_epochs_pretrain} | "
+                  f"Batch {batch_idx+1:3d}/{len(train_loader)} | "
+                  f"running_loss = {running_avg:.6f}",
+                  end='', flush=True)
+            
+            # logger.debug(f"Pre-train Epoch {epoch+1}/{num_epochs_pretrain} | "
+            #              f"Batch {batch_idx+1}/{len(train_loader)} | loss = {batch_loss:.6f}")
             
         avg_loss = epoch_loss / len(train_loader)
 
@@ -411,30 +429,40 @@ if not args.continue_training:
         
         scheduler_pretrain.step(avg_val_loss)
 
-        if avg_val_loss < best_pretrain_loss:
+        is_best = avg_val_loss < best_pretrain_loss
+        if is_best:
             best_pretrain_loss = avg_val_loss
             best_calibrator_state = deepcopy(calibrator.state_dict())
+            pretrain_pat_counter = 0
+        else:
+            pretrain_pat_counter += 1
 
-        if (epoch + 1) % 10 == 0:
-            logger.info(f"Pre-train Epoch {epoch+1}: train_loss = {avg_loss:.6f}, val_loss = {avg_val_loss:.6f}")
+        current_lr = optimizer.param_groups[0]['lr']
+        progress_msg = (f"Pre-train Epoch {epoch+1:3d}/{num_epochs_pretrain} | "
+                        f"train_loss = {avg_loss:.6f} | val_loss = {avg_val_loss:.6f} | "
+                        f"LR = {current_lr:.2e} | patience = {pretrain_pat_counter}/{pretrain_patience}" +
+                        (" *" if is_best else ""))
+        # Overwrite the running-loss line, then move to next line
+        print(f"\r{progress_msg}")
+        logger.info(progress_msg)
+
+        if pretrain_pat_counter >= pretrain_patience:
+            logger.info(f"Pre-train early stopping at epoch {epoch+1} (patience={pretrain_patience})")
+            print(f"  Early stopping triggered at epoch {epoch+1}")
+            break
 
     if best_calibrator_state is not None:
         calibrator.load_state_dict(best_calibrator_state)
         logger.info(f"Restored best pre-training weights (val_loss: {best_pretrain_loss:.6f})")
 
     # Store best pretrain calibrator state in the file
-    pretrain_weights_path = WEIGHTS_FOLDER / 'NFM_calibrator/pretrain_weights.pth'
     torch.save(best_calibrator_state, pretrain_weights_path)
     logger.info(f"Saved best pre-training weights to {pretrain_weights_path}")
 else:
     # Load best pre-training weights if continue_training flag is set
-    pretrain_weights_path = WEIGHTS_FOLDER / 'NFM_calibrator/pretrain_weights.pth'
-    if pretrain_weights_path.exists():
-        best_pretrain_state = torch.load(pretrain_weights_path, map_location=device)
-        calibrator.load_state_dict(best_pretrain_state)
-        logger.info(f"🔄 Loaded pre-training weights from {pretrain_weights_path}")
-    else:
-        logger.warning(f"❌ Pre-training weights not found at {pretrain_weights_path}. Continuing with current weights.")
+    best_pretrain_state = torch.load(pretrain_weights_path, map_location=device)
+    calibrator.load_state_dict(best_pretrain_state)
+    logger.info(f"🔄 Loaded pre-training weights from {pretrain_weights_path}")
 
 # Release pre-training artifacts that can pin optimizer states in VRAM.
 for _name in ('optimizer', 'scheduler_pretrain', 'loss_pretrain', 'best_calibrator_state', 'best_pretrain_state'):
@@ -506,7 +534,7 @@ def generate_wavelength_sets(step, max_val):
 print(f"Total wavelengths: {N_wvl_total}, generated {len(λ_id_sets)} sets with step {λ_step}, set sizes are: {[len(s) for s in λ_id_sets]}")
 
 #%%
-# Now, we put the model in the loop and train it end-to-end to predict PSF cubes, using the full loss function that compares predicted and true PSFs.
+# Now, we put the model in the loop and train it end-to-end to predict PSF cubes, using the full loss function that compares PSFs
 
 def run_model(x_dict_NN, config, idx, λ_ids):
     ''' This function runs the PSF model to predict the batch of PSFs based on the dictionary of parameters predicted by the NN and the batch configuration. '''
@@ -523,11 +551,6 @@ def run_model(x_dict_NN, config, idx, λ_ids):
     x_dict['LO_coefs'] = torch.hstack( (phase_bump[idx].unsqueeze(-1), x_dict['LO_coefs']) ) if predict_LO_NCPAs \
                     else torch.hstack( (phase_bump[idx].unsqueeze(-1), NCPAs_median.repeat(len(idx),1))
     )
-    # Append Cn2 ground layer weight
-    if predict_Cn2_profile:
-        GL_fraction = (1.0 - x_dict['Cn2_weights'].sum(dim=-1, keepdim=True)).clamp(min=0.0)
-        x_dict['Cn2_weights'] = torch.hstack( (GL_fraction, x_dict['Cn2_weights']) )
-
     current_wavelengths = λ_full[λ_ids].to(device=device)
     
     config['sources_science']['Wavelength'] = current_wavelengths.view(1,-1) # [1, N_wvl_selected]
@@ -551,6 +574,7 @@ else:
 # Enforce positive values for modal coefficients to mitigate sign ambiguity and improve convergence
 force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
 # TODO: positive r0 regularization?
+
 
 def loss_PSF(PSF_data, PSF_pred, w_MSE, w_MAE):
     diff = PSF_pred - PSF_data #* wvl_weights[:, λ_ids, ...] #TODO: add wvl selection
@@ -583,21 +607,6 @@ def validate(loader=None, return_cubes=True, verbose=False):
     It can return either just the average loss, or the full predicted and data PSF cubes for all samples and wavelengths in addition.
     NOTE: validation dataset is ordered, so we can fill it batch by batch in the correct order to return full cubes without running out of memory.
     This is possible because we set shuffle=False and drop_last=False in the validation DataLoader.
-    
-    Args:
-        loader: DataLoader to use (default: val_loader)
-        return_cubes: If True, returns full PSF cubes (memory intensive). If False, returns only loss.
-        verbose: If True, prints progress and statistics
-    
-    Returns:
-        If return_cubes is True:
-            PSFs_pred_cube: Tensor of shape (N_val_samples_actual, N_wvl_total, H, W) with all predicted PSFs
-            PSFs_data_cube: Tensor of shape (N_val_samples_actual, N_wvl_total, H, W) with all data PSFs
-            validation_ids: Tensor of shape (N_val_samples_actual,) with validation sample IDs
-            NN_predictions: Tensor of shape (N_val_samples_actual, N_outputs) with NN predictions
-            avg_loss: Average validation loss
-        If return_cubes is False:
-            avg_loss: Average validation loss
     """
     if loader is None:
         loader = val_loader
@@ -1247,7 +1256,7 @@ draw_PSF_stack(
     crop=100
 )
 
-#%%
+#%
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(15, 1.35*len(wvl_select)))
 for i, lmbd in enumerate(wvl_select):
     plot_radial_PSF_profiles(
