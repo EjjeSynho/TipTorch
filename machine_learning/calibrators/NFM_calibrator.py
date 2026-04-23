@@ -81,12 +81,7 @@ class NFMCalibrator():
 
         # Outputs transformer — stored as a plain dict from InputsTransformer.save()
         raw = state['outputs_transformer']
-        if isinstance(raw, bytes):
-            # Legacy checkpoints serialised with cloudpickle
-            import cloudpickle
-            self.outputs_transformer = cloudpickle.loads(raw)
-        else:
-            self.outputs_transformer = InputsTransformer.load(data=raw)
+        self.outputs_transformer = InputsTransformer.load(data=raw)
         
         # Inputs transformers
         with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'rb') as handle:
@@ -94,25 +89,29 @@ class NFMCalibrator():
 
         with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as handle:
             self.telemetry_scaler = pickle.load(handle)
+            self.features = self.telemetry_scaler.feature_names_in_
 
         # Aux params
         self.LO_modes_max   = state.get('LO_modes_max', None)
         self.N_spline_nodes = state.get('N_spline_nodes', None)
 
 
-    def _prepare_telemetry(self, reduced_telemetry: pd.DataFrame) -> torch.Tensor:
+    def prepare_telemetry(self, reduced_telemetry: pd.DataFrame) -> torch.Tensor:
         telemetry_pruned = reduce_dataframe(filter_dataframe(reduced_telemetry))
-        numeric_cols = telemetry_pruned.select_dtypes(include="number").columns
+        # Standartize/normalize features
+        telemetry_ = self.telemetry_scaler.transform(telemetry_pruned[self.features])
+        # Restore feature names back to avoid warnings
+        telemetry_ = pd.DataFrame(telemetry_, columns=self.features, index=telemetry_pruned.index)
+        # Impute missing values
+        telemetry_ = self.telemetry_imputer.transform(telemetry_)
+        return torch.tensor(telemetry_, dtype=torch.float32, device=self.device)
 
-        telemetry_vec = telemetry_pruned[numeric_cols]
-        telemetry_vec = self.telemetry_scaler.transform(telemetry_vec)
-        telemetry_vec = self.telemetry_imputer.transform(telemetry_vec)
-        return torch.tensor(telemetry_vec, dtype=torch.float32, device=self.device)
-    
 
     def forward(self, reduced_telemetry: pd.DataFrame):
-        telemetry_vector = self._prepare_telemetry(reduced_telemetry)
+        # Prepare the telemetry data: filter, reduce, scale, and impute
+        telemetry_vector = self.prepare_telemetry(reduced_telemetry)
     
+        # Pass through the network to get predictions for the PSF model inputs
         x_pred = self.net(telemetry_vector)
         x_dict_pred = self.outputs_transformer.unstack(x_pred)
 
@@ -121,6 +120,12 @@ class NFMCalibrator():
             coefs = x_dict_pred['LO_coefs']
             phase_bump = torch.zeros(coefs.shape[0], 1, device=coefs.device, dtype=coefs.dtype)
             x_dict_pred['LO_coefs'] = torch.cat([phase_bump, coefs], dim=-1)
+
+        # For Cn2_weights, ensure they sum to 1 by prepending the GL fraction (1 - sum of predicted layers)
+        # This is because the net predicts only the relative weights of the non-GL layers, and GL is implicitly defined as the remainder to 1
+        if 'Cn2_weights' in x_dict_pred:
+            GL_fraction = (1.0 - x_dict_pred['Cn2_weights'].sum(dim=-1, keepdim=True)).clamp(min=0.0)
+            x_dict_pred['Cn2_weights'] = torch.hstack( (GL_fraction, x_dict_pred['Cn2_weights']) )
 
         return x_dict_pred
 
@@ -134,11 +139,14 @@ class NFMCalibrator():
         Method to get a reconciled parameter dict ready for PSFModelNFM.
         Checks compatibility and adapts the predicted parameters to match the PSF model's expected input structure.
         """
+        # Do parameters dict prediction
         x_dict_pred = self.forward(reduced_telemetry)
+        # If PSF modle has slightly different settings, adapt the predicted parameters accordingly (e.g. by cropping or padding with zeros)
         x_dict_adapted = self._adapt_to_PSF_model(x_dict_pred, PSF_model)
-        
         # Update PSF model's internal PSF model inputs with the predicted parameters
         PSF_model.update_manager_params(x_dict_adapted)
+        # Trigger PSF update with new parameters
+        _ = PSF_model()
 
 
     def check_compatibility(self, PSF_model) -> dict:

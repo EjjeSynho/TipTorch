@@ -166,16 +166,12 @@ if ($IntelCPU) {
 
 # Add pip packages
 $PipPackages = @(
-    'pillow',
-    'refractiveindex',
-    'unlzw3'
+    'pillow'
 )
 
 # Add development pip packages if Development flag is set
 if ($Development) {
     # Add any development-specific pip packages here if needed
-    $PipPackages += 'opencv-python'
-    $PipPackages += 'dynesty'
     $PipPackages += 'xgboost'
     $PipPackages += 'elasticsearch==6.8.2'
     $PipPackages += 'elasticsearch-dsl==6.4.0'

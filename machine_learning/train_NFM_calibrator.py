@@ -553,7 +553,7 @@ force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
 # TODO: positive r0 regularization?
 
 def loss_PSF(PSF_data, PSF_pred, w_MSE, w_MAE):
-    diff = (PSF_pred-PSF_data) #* wvl_weights[:, λ_ids, ...] #TODO: add wvl selection
+    diff = PSF_pred - PSF_data #* wvl_weights[:, λ_ids, ...] #TODO: add wvl selection
     w = 2e4 # Empirical weight to balance the loss magnitude with the regularization terms
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean()  * w_MAE

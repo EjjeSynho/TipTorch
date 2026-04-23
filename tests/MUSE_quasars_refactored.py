@@ -13,10 +13,11 @@ import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from project_settings import PROJECT_PATH, device, default_torch_type
+from project_settings import PROJECT_PATH, WEIGHTS_FOLDER, device, default_torch_type
 
 import torch
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
@@ -61,11 +62,14 @@ cache_path = data_folder / "reduced_telemetry/CUBE_0021.pickle"
 
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
 # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
-spectral_cubes, spectral_info, _, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, data_cache, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
 # Extract full and binned spectral cubes. Sparse cube selects a set of 7 binned wavelengths ranges
 cube_full, cube_binned, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_binned"], spectral_cubes["mask"]
 
 # MUSE cube flux units are [10^-20 erg s^-1 cm^-2 Å^-1], all cubes are normalized to this flux unit
+
+reduced_telemetry = data_cache['All data'] # this is the telemetry reduced to the format compatible with the model, it can be used to update the model config with the actual telemetry values
+del data_cache # free up memory, we won't need the rest of the data cache for now, but it can be useful for debugging and further analysis if needed
 
 #%%
 # To save memory and compute time, we don't need neither the full spectral cube, nor even the binned one. It's enough to have a sparse subset of spectral
@@ -216,6 +220,23 @@ PSF_model = PSFModelNFM(
     device          = device
 )
 
+#%%
+from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
+
+calibrator = NFMCalibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth', device=device)
+_ = calibrator.check_compatibility(PSF_model)
+
+#%%
+calibrator.calibrate(reduced_telemetry, PSF_model)
+
+#%%
+telemetry_vector = calibrator.prepare_telemetry(reduced_telemetry)
+
+x_pred = calibrator.net(telemetry_vector)
+
+x_dict_pred = calibrator.outputs_transformer.unstack(x_pred)
+
+#%%
 PSF_model.inputs_manager.set_optimizable('bg_ctrl', False)
 # PSF_model.inputs_manager.set_optimizable('L0', False)
 # PSF_model.inputs_manager.set_optimizable('wind_speed_single', False)

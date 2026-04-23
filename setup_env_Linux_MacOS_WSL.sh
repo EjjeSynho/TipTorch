@@ -209,10 +209,6 @@ cat >> "$ENV_YML" <<EOF
   - pip
   - pip:
     - pillow
-    - opencv-python
-    - dynesty
-    - refractiveindex
-    - unlzw3
     - xgboost
 EOF
 

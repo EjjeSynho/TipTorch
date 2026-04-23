@@ -347,6 +347,7 @@ def LoadTransforms(state):
         elif transform[0] == 'Atanh':      transforms.append(Atanh())
         elif transform[0] == 'Softmax':    transforms.append(Softmax())
         elif transform[0] == 'SoftmaxInv': transforms.append(SoftmaxInv())
+        elif transform[0] == 'SafeLog10':  transforms.append(SafeLog10())
         elif transform[0] == 'Identity':   transforms.append(Identity())
         else:
             raise ValueError(f"Unknown transform \"{transform[0]}\"!") 
@@ -369,6 +370,7 @@ def LoadTransforms_legacy(state):
         elif transform[0] == 'Atanh':      transforms.append(Atanh())
         elif transform[0] == 'Softmax':    transforms.append(Softmax())
         elif transform[0] == 'SoftmaxInv': transforms.append(SoftmaxInv())
+        elif transform[0] == 'SafeLog10':  transforms.append(SafeLog10())
         elif transform[0] == 'Identity':   transforms.append(Identity())
         else:
             raise ValueError(f"Unknown transform \"{transform[0]}\"!") 

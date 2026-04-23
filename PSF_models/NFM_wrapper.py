@@ -4,7 +4,6 @@
 import sys
 sys.path.insert(0, '..')
 
-from sympy import N
 import torch
 import numpy as np
 from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
