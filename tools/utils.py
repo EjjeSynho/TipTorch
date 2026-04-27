@@ -315,6 +315,21 @@ def pdims(x, ns):
 min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
 
 
+def generate_random_colors(N, random_seed=42):
+    # Generate random sources plot colors. Use palette colors first, then random colors after the palette is exhausted.
+    palette = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    colors = palette[:N]
+    if N > len(palette):
+        n_extra = N - len(palette)
+        rng = np.random.RandomState(random_seed)  # Set seed for reproducibility
+        extra_colors = [
+            f'#{rng.randint(0, 256):02x}{rng.randint(0, 256):02x}{rng.randint(0, 256):02x}'
+            for _ in range(n_extra)
+        ]
+        colors = palette + extra_colors
+    return colors
+
+
 # Computes Strehl ratio
 def SR(PSF, PSF_DL):
     ratio = torch.amax(PSF.abs(), dim=(-2,-1)) / torch.amax(PSF_DL, dim=(-2,-1)) * PSF_DL.sum(dim=(-2,-1)) / PSF.abs().sum(dim=(-2,-1)) 

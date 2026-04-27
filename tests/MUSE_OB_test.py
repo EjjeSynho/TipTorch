@@ -26,6 +26,7 @@ from pathlib import Path
 from tools.utils import mask_square
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
 
+
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
 # data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
@@ -42,10 +43,10 @@ if not isinstance(data_folder, Path):
 # cache_path = data_folder / "J0144/J0144-5745_cache.pickle"
 # raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
 
-# cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
-# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
-# cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
-    
+cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
+raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
+cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
+
 # cube_path  = data_folder / "reduced_cubes/CUBE_0002.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_11_59.783.fits.fz"
 # cache_path = data_folder / "reduced_telemetry/CUBE_0002.pickle"
@@ -55,9 +56,9 @@ if not isinstance(data_folder, Path):
 # cache_path = data_folder / "reduced_telemetry/CUBE_0003.pickle"
 
 
-cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
-raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
-cache_path = data_folder / "reduced_telemetry/CUBE_0021.pickle"
+# cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
+# raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
+# cache_path = data_folder / "reduced_telemetry/CUBE_0021.pickle"
 
 
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
@@ -66,7 +67,12 @@ spectral_cubes, spectral_info, data_cache, model_config = LoadCachedDataMUSE(raw
 # Extract full and binned spectral cubes. Sparse cube selects a set of 7 binned wavelengths ranges
 cube_full, cube_binned, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_binned"], spectral_cubes["mask"]
 
-# MUSE cube flux units are [10^-20 erg s^-1 cm^-2 Å^-1], all cubes are normalized to this flux unit
+#NOTE: MUSE cube flux units are [10^-20 erg s^-1 cm^-2 Å^-1], all cubes are normalized to this flux unit
+
+# Compute the center of mass for valid mask assuming it's the center of the science field
+yy, xx = torch.where(valid_mask.squeeze() > 0)
+field_center = np.stack([xx.float().mean().item(), yy.float().mean().item()])[None,...] # [pix]
+del yy, xx
 
 reduced_telemetry = data_cache['All data'] # this is the telemetry reduced to the format compatible with the model, it can be used to update the model config with the actual telemetry values
 del data_cache # free up memory, we won't need the rest of the data cache for now, but it can be useful for debugging and further analysis if needed
@@ -79,38 +85,19 @@ del data_cache # free up memory, we won't need the rest of the data cache for no
 
 # Here, it's assumed to be every 5th bin, but it can be changed to any other selection strategy
 ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
-# ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 3)
 λ_sparse  =  λ_binned[..., ids_λ_sparse]
-Δλ_sparse = Δλ_binned[..., ids_λ_sparse]
+Δλ_sparse = Δλ_binned[..., ids_λ_sparse] # Δλ_sparse ≡ Δλ_binned
 
-#  The model config is also updated to simulate only sparse λs
-model_config['sources_science']['Wavelength'] = torch.tensor(λ_sparse, device=device, dtype=torch.float32) * 1e-9 #[m]
 cube_sparse = cube_binned[ids_λ_sparse, ...] # Select the sparse subset ofspectral slices
 N_wvl = cube_sparse.shape[0]
 
 # Since spectral bins are the sum, they need to be re-normalized to averages to be compatible with the full spectrum
-# Δλ_sparse ≡ Δλ_binned
 flux_λ_norm = torch.tensor(Δλ_full / Δλ_sparse, device=device, dtype=torch.float32)
 cube_sparse *= flux_λ_norm[:, None, None]
 
-model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']['PupilAngle'], device=device) # Assuming the pupil angle is 0 for simplicity, it can be updated if known
-
-if False: # TODO: remove this pre-assumption
-    model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0,  1e4]], device=device)
-    model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=device)
-    model_config['atmosphere']['WindDirection'] = model_config['atmosphere']['WindDirection'][0,:2].unsqueeze(0)
-    model_config['atmosphere']['WindSpeed']     = model_config['atmosphere']['WindSpeed'][0,:2].unsqueeze(0)
-
-# model_config['telescope']['PupilAngle'] *= -1
-
 #%%
-from tools.multisources import add_ROIs, DetectSources, ExtractSources
-
-def AddSourcesToModel(model_config, sources, valid_mask):
+def AddSourcesToModelConfig(model_config, sources):
     from tools.utils import rad2mas, rad2arc
-    # Compute the center of mass for valid mask assuming it's the center of the science field
-    yy, xx = torch.where(valid_mask.squeeze() > 0)
-    field_center = np.stack([xx.float().mean().item(), yy.float().mean().item()])[None,...]
 
     pixel_scale = model_config['sensor_science']['PixelScale'] # [mas/pix]
     
@@ -127,87 +114,115 @@ def AddSourcesToModel(model_config, sources, valid_mask):
     model_config['NumberSources'] = len(sources)
     model_config['sources_science']['Zenith']  = torch.tensor(sources_zenith, device=device).unsqueeze(-1)
     model_config['sources_science']['Azimuth'] = torch.tensor(sources_azimuth, device=device).unsqueeze(-1)
-    
-    
-def ExtractSpectraFromCore(cube_sparse, cube_full, sources, flux_core_radius):
-    N_core_pixels = (flux_core_radius*2 + 1)**2  # [pix²], assuming a square mask for the core flux estimation
+
+
+def ExtractSpectraFromCore(sources, cube_full, cube_sparse, flux_core_radius):
+    N_core_pixels = (flux_core_radius*2 + 1)**2  # [pix²], this expression assumes a square mask for the core flux estimation
 
     # Contains the spectrum per source AVERAGED across the PSF core pixels. The core mask here MUST match EXACTLY the one
     # used for the flux normalization factor estimation later
-    src_spectra_sparse = [GetSpectrum(cube_sparse, sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
-    src_spectra_full   = [GetSpectrum(cube_full,   sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
+    src_spectra_full = [GetSpectrum(cube_full,   sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
+    src_spectra_full = np.stack(src_spectra_full, axis=0) # This one is stored on CPU to save memory
+    src_spectra_full = torch.tensor(src_spectra_full, device='cpu', dtype=torch.float32)
 
-    src_spectra_sparse = torch.stack(src_spectra_sparse, dim=0) # This one is stored on GPU
-    src_spectra_full   = np.stack(src_spectra_full, axis=0) # This one is stored on CPU to save memory
-    src_spectra_full   = torch.tensor(src_spectra_full, device='cpu', dtype=torch.float32)
+    if cube_sparse is not None:
+        src_spectra_sparse = [GetSpectrum(cube_sparse, sources.iloc[i], radius=flux_core_radius, mask_type='square') for i in range(N_src)]
+        src_spectra_sparse = torch.stack(src_spectra_sparse, dim=0) # This one is stored on GPU
+    else:
+        src_spectra_sparse = None
     
     return src_spectra_sparse, src_spectra_full, N_core_pixels
 
 
 #%%
+from tools.multisources import DisplaySources, add_ROIs, DetectSources, AddSources, ExtractSources
+
 PSF_size = 111  # Define the size of each extracted PSF
 model_config['sensor_science']['FieldOfView'] = PSF_size
 
 # Simple sources detector function. For now, make sure that only point sources are adressed
 # This function also defines the order in which sources are indexed ad processed later, so it's important to use it before extracting the source images
 # and spectra. The order is defined by the brightness of the sources, so the brightest source will be indexed as 0, the second brightest as 1, and so on
-# sources = DetectSources(cube_sparse, threshold='auto', nsigma=15, display=True, draw_win_size=20, sort_by_brightness=True)
-# sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_win_size=20, sort_by_brightness=True)
-sources = DetectSources(cube_sparse, threshold='auto', nsigma=35, display=True, draw_win_size=20, sort_by_brightness=True)
+sources = DetectSources(cube_sparse, threshold='auto', nsigma=35, box_size=11, sort_by_brightness=True, weight_from_flux=False)
+# sources = AddSources(cube_sparse, [[100, 200]], sources, weights=0.0, weight_from_flux=False)
+
+DisplaySources(cube_sparse, sources, draw_box_size=20, vmin=10, vmax=sources['peak_value'].max()*0.85)
 
 # --------------- If some sources must be filtered out, here is the right place to do it --------------------------------------
 
 # Extract separate source images + other auxilliary data. It's necessary for later fitting and performance evaluation
 srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
-N_src   = srcs_image_data["count"]
+N_src   = srcs_image_data["count" ]
 sources = srcs_image_data["coords"]
 ROIs    = srcs_image_data["images"]
 
-AddSourcesToModel(model_config, sources, valid_mask)
-
 #%%
+from tools.utils import generate_random_colors
+
 flux_core_radius = 2  # [pix]
 
 # This function computes average spectrum around the PSF core for each source within a square with side size of 2*flux_core_radius + 1
-src_spectra_sparse, src_spectra_full, N_core_pixels = ExtractSpectraFromCore(cube_sparse, cube_full, sources, flux_core_radius)
+src_spectra_sparse, src_spectra_full, N_core_pixels = ExtractSpectraFromCore(sources, cube_full, cube_sparse, flux_core_radius)
 
-# Generate random sources plot colors. Use palette colors first, then random colors after the palette is exhausted.
-palette = plt.rcParams['axes.prop_cycle'].by_key()['color']
-colors = palette[:N_src]
-if N_src > len(palette):
-    n_extra = N_src - len(palette)
-    extra_colors = [
-        f'#{np.random.randint(0, 256):02x}{np.random.randint(0, 256):02x}{np.random.randint(0, 256):02x}'
-        for _ in range(n_extra)
-    ]
-    colors = palette + extra_colors
+colors = generate_random_colors(N_src)
 
-# Plot full and sparse spectra for each source
-plt.figure(figsize=(6, 4))
-for i_src in range(N_src):
-    plt.plot(λ_full,
-             src_spectra_full[i_src],
-             linewidth=0.25, alpha=0.3, color=colors[i_src],
-             label=f'Source {i_src+1} (full spectrum)')
+def PlotSourceSpectra(
+    λ_full, src_spectra_full,
+    λ_sparse = None, src_spectra_sparse = None,
+    smooth_kernel = None,
+    title='Sources spectra preview', figsize=(10, 6)):
     
-    plt.scatter(λ_sparse,
-                src_spectra_sparse[i_src].cpu().numpy(),
-                color=colors[i_src], marker='o', s=30, alpha=0.8,
-                label=f'Source {i_src+1} (sparse samples)')
+    from astropy.convolution import convolve, Box1DKernel
+    
+    show_smooth = False
+    if smooth_kernel is not None:
+        if smooth_kernel > 1:
+            show_smooth = True
+                
+    show_sparse = (src_spectra_sparse is not None) and (λ_sparse is not None)
+                
+    plt.figure(figsize=figsize)
+    
+    N = src_spectra_sparse.shape[0] if src_spectra_sparse is not None else src_spectra_full.shape[0]  # Number of sources
+    
+    vmin = min(src_spectra_full.min().item(), src_spectra_sparse.min().item() if show_sparse else float('inf'))
+    
+    for i_src in range(N):
+        plt.plot(λ_full, src_spectra_full[i_src], linewidth=0.25, alpha=(0.5 if show_smooth else 0.8), color=colors[i_src], label=f'Source {i_src+1} (full spectrum)')
+        if show_sparse:
+            plt.scatter(λ_sparse, src_spectra_sparse[i_src].cpu().numpy(),
+                        color=colors[i_src], marker='o', s=30, alpha=1.0,
+                        label=f'Source {i_src+1} (sparse samples)')
+        if show_smooth:
+            spectrum_smooth = convolve(src_spectra_full[i_src].numpy(), Box1DKernel(smooth_kernel), boundary='extend')
+            plt.plot(λ_full, spectrum_smooth, linewidth=0.65, alpha=1, color=colors[i_src], label=f'Source {i_src+1}')
+            
+        plt.axhline(0, color='gray', linewidth=0.8)
 
-plt.xlabel('Wavelength, [nm]')
-plt.xlim(λ_full.min(), λ_full.max())
-plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
-plt.title('Sources spectra preview')
-plt.legend()
-plt.grid(alpha=0.3)
-plt.tight_layout()
-plt.show()
+    plt.xlabel('Wavelength, [nm]')
+    plt.xlim(λ_full.min(), λ_full.max())
+    plt.ylim(vmin, None)
+    plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
+    plt.title(title)
+    if N < 10: # Don't plot it when too many sources are displayed to avoid cluttering the legend
+        plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.show()
 
+
+PlotSourceSpectra(λ_full, src_spectra_full, λ_sparse=λ_sparse, src_spectra_sparse=src_spectra_sparse)
 
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
 from PSF_models.NFM_wrapper import PSFModelNFM
+from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
+
+#  The model config is also updated to simulate only sparse λs
+model_config['sources_science']['Wavelength'] = torch.tensor(λ_sparse, device=device, dtype=torch.float32) * 1e-9 #[m]
+model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']['PupilAngle'], device=device) # Assuming the pupil angle is 0 for simplicity, it can be updated if known
+
+AddSourcesToModelConfig(model_config, sources)
 
 PSF_model = PSFModelNFM(
     model_config,
@@ -215,32 +230,21 @@ PSF_model = PSFModelNFM(
     LO_NCPAs        = True,
     chrom_defocus   = False,
     Moffat_absorber = False,
-    N_spline_nodes  = 3,
+    N_spline_nodes  = 5,
     Z_mode_max      = 9,
     device          = device
 )
 
-#%%
-from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
-
+#  Get the initial guess for the PSF model parameters
 calibrator = NFMCalibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth', device=device)
 _ = calibrator.check_compatibility(PSF_model)
 
-#%%
 calibrator.calibrate(reduced_telemetry, PSF_model)
 
-#%%
-telemetry_vector = calibrator.prepare_telemetry(reduced_telemetry)
-
-x_pred = calibrator.net(telemetry_vector)
-
-x_dict_pred = calibrator.outputs_transformer.unstack(x_pred)
-
-#%%
+# Disable optimization of some variables
 PSF_model.inputs_manager.set_optimizable('bg_ctrl', False)
-# PSF_model.inputs_manager.set_optimizable('L0', False)
-# PSF_model.inputs_manager.set_optimizable('wind_speed_single', False)
 PSF_model.inputs_manager.set_optimizable('wind_dir', False)
+
 
 #%%
 @torch.no_grad()
@@ -293,11 +297,8 @@ def EvaluateCoreFluxFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size=511) -> 
     
     if PSF_model.use_splines:
         PSF_model.inputs_manager['F_norm_λ_ctrl'] = PSF_norm_factor.clone() # store it, we'll need it later when simulating full spectrum
-        # For convenience, reproject back on the simulated λs
-        # return PSF_model.evaluate_splines(PSF_norm_factor, PSF_model.λ_sim_normed), PSF_norm_factor, PSF_inf, PSF_small
     else:
         PSF_model.inputs_manager['F_norm_λ'] = PSF_norm_factor.unsqueeze(0).clone() # we'll need it later when simulating full spectrum
-        # return PSF_norm_factor.float(), None, PSF_inf, PSF_small
 
 
 @torch.no_grad()
@@ -325,7 +326,7 @@ canvas = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], devi
 
 # Compute loss weighting factors per source based on total flux per source
 src_fluxes = torch.tensor(sources['peak_value'].to_numpy(), device=device, dtype=torch.float32)
-src_mask = torch.ones_like(src_fluxes) # mask out certain sources from loss
+src_mask   = torch.tensor(sources['weight'].to_numpy(), device=device, dtype=torch.float32) # sources importance in loss function computation
 
 max_flux = src_fluxes.max().item()
 src_relative_weights = torch.clamp(src_fluxes / max_flux, min=0.2, max=1.0) * src_mask# limit the loss influence limit
@@ -338,8 +339,8 @@ w_spectral /= w_spectral.mean(dim=0, keepdim=True) # normalize to the mean to av
 w_spectral = torch.clamp(w_spectral, min=0.2, max=2.0) # limit the loss influence of certain wavelengths
 w_spectral = w_spectral.view(N_src, N_wvl, 1, 1) # reshape for broadcasting
 
-# w_spectral *= 0
-# w_spectral += 1.0 # for now, use uniform spectral weighting, but this can be easily changed to give more importance to certain wavelengths if needed
+w_spectral *= 0
+w_spectral += 1.0 # for now, use uniform spectral weighting, but this can be easily changed to give more importance to certain wavelengths if needed
 
 def simulate_sparse(x):
     x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True) # update model inputs with the values from the stacked vector
@@ -353,7 +354,7 @@ def simulate_sparse(x):
 
 def loss_PSF(PSF_data, PSF_pred, weights_λ, weight_total, w_MSE, w_MAE):
     residuals = PSF_data - PSF_pred
-    diff = residuals * weights_λ
+    diff = residuals * weights_λ * src_mask.view(-1, 1, 1, 1) # apply both spectral and source weights to the residuals
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean()  * w_MAE
     # Since x input in simulate_sparse() updates the internal values for the PSF_model (inluding F_norm),
@@ -395,28 +396,22 @@ def loss(x_, data, func):
 #%%
 from fitting.PSF_optimizer import OptimizePSFModel
 
-for i in range(2): # iterate the flux normalization update and fitting steps a few times to account for the interdependence between the PSF morphology and the flux normalization factor
-    UpdateFluxNormalization(PSF_model)
-    x_params, _ = OptimizePSFModel(
-        PSF_model,
-        lambda x: loss(x, cube_sparse, simulate_sparse),
-        max_iter = 250,
-        n_attempts = 2,
-        verbose = True,
-        force_bfgs = True
-    )
+def FitPSFModel(PSF_model, loss_fn, repeat=2, max_iter=200):
+    x_params = None
+    for _ in range(repeat):
+        UpdateFluxNormalization(PSF_model)
+        x_params, _ = OptimizePSFModel(
+            PSF_model,
+            loss_fn,
+            x_initial  = x_params.clone() if x_params is not None else None,
+            max_iter   = max_iter,
+            n_attempts = 1,
+            verbose    = True,
+            force_bfgs = True
+        )
+    return x_params
 
-    UpdateFluxNormalization(PSF_model)
-    # Update the parameters to account for the new flux normalization factors
-    x_params, _ = OptimizePSFModel(
-        PSF_model,
-        lambda x: loss(x, cube_sparse, simulate_sparse),
-        x_initial = x_params.clone(),
-        max_iter = 250,
-        n_attempts = 1,
-        verbose = True,
-        force_bfgs = True
-    )
+x_params = FitPSFModel(PSF_model, lambda x: loss(x, cube_sparse, simulate_sparse), repeat=3, max_iter=200)
 
 #%%
 from tools.multisources import VisualizeSources, PlotSourcesProfiles, ROI_from_valid_mask
@@ -452,40 +447,19 @@ def simulate_full(): #TODO: spplit output
     # Apply the flux normalization to the PSFs similar to func()
     PSFs_ = PSFs_combined * flux_normalization.unsqueeze(-1).unsqueeze(-1)
 
-    return add_ROIs(canvas_full, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"])
+    return add_ROIs(canvas_full, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"]), PSFs_
 
 
-model_full = simulate_full()
-
-#%%
+model_full, PSFs_separated = simulate_full()
 diff_img_full = (cube_full - model_full.numpy()) * valid_mask.cpu().numpy()
 
-# VisualizeSources(cube_full, model_full, norm=LogNorm(vmin=1e1, vmax=25000*10), mask=valid_mask, ROI=ROI_plot)
 PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSFs')
 
-# plt.plot(λ_full, PSF_model.evaluate_splines(PSF_model.inputs_manager['F_ctrl'][0,...], PSF_model.λ_full_normed).squeeze().cpu().numpy())
+#%% Plotting the residual spectrum
 
-#%% ============== Plotting the residual spectrum ===================
-from astropy.convolution import convolve, Box1DKernel
+_, src_diff_full, _ = ExtractSpectraFromCore(sources, diff_img_full, cube_sparse=None, flux_core_radius=flux_core_radius)
 
-# Plots the spectra of the targets after subtraction
-fig, ax = plt.subplots(figsize=(10,6))
-for i in range(N_src):
-    spectrum_sharp = GetSpectrum(diff_img_full, sources.iloc[i], radius=flux_core_radius, debug_show_ROI=False )
-    spectrum_avg   = convolve(spectrum_sharp, Box1DKernel(10), boundary='extend')
-
-    plt.plot(λ_full, spectrum_sharp, linewidth=0.5, alpha=0.25, color=colors[i])
-    plt.plot(λ_full, spectrum_avg,   linewidth=1,   alpha=1,    color=colors[i], linestyle='--')
-
-plt.axhline(0, color='gray', linestyle=':', linewidth=0.8)
-
-plt.legend()
-plt.xlim(λ_full.min(), λ_full.max())
-plt.grid(alpha=0.2)
-plt.title('Spectra after subtraction')
-plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
-plt.xlabel('Wavelength, [nm]')
-plt.show()
+PlotSourceSpectra(λ_full, src_diff_full)
 
 #%% Plot multispectral cubes as RGB images
 from tools.plotting import plot_wavelength_rgb_log, plot_wavelength_rgb_linear
@@ -521,74 +495,104 @@ diff_rgb = plot_wavelength_rgb_log(
 
 # %%
 from astropy.io import fits
-import numpy as np
 import os
 
-split_PSFs = True
 
-if split_PSFs:
-    # Convert model_full_split to float32 to save space (this is a 4D array with objects as first dimension)
-    # Create primary HDU
+def SaveModelCubeFITS(cube, output_path, λ_full, sources=None, compress=True, compression_type='GZIP_2'):
+    """
+    Save a 3D (N_wvl, H, W) or 4D (N_src, N_wvl, H, W) model cube to a FITS file.
 
-    hdu = fits.PrimaryHDU(model_full.astype(np.float32))
+    3D input → single image HDU (optionally compressed).
 
-    hdu.header['CRVAL1'] = 1                     # Reference pixel value for x axis
-    hdu.header['CDELT1'] = 1                     # Pixel step size for x axis
-    hdu.header['CUNIT1'] = 'pixel'               # Pixel unit for x axis
-    hdu.header['CTYPE1'] = 'PIXEL'                # Axis type is pixel for x axis
-    hdu.header['CRPIX1'] = 1                     # Reference pixel for x axis
-    
-    hdu.header['CRVAL2'] = 1                     # Reference pixel value for y axis
-    hdu.header['CDELT2'] = 1                     # Pixel step size for y axis
-    hdu.header['CUNIT2'] = 'pixel'               # Pixel unit for y axis
-    hdu.header['CTYPE2'] = 'PIXEL'                # Axis type is pixel for y axis
-    hdu.header['CRPIX2'] = 1                     # Reference pixel for y axis
-        
-    hdu.header['CRVAL3'] = λ_full[0]             # Reference wavelength value
-    hdu.header['CDELT3'] = λ_full[1] - λ_full[0] # Wavelength step size
-    hdu.header['CUNIT3'] = 'nm'                  # Wavelength unit
-    hdu.header['CTYPE3'] = 'WAVE'                # Axis type is wavelength
-    hdu.header['CRPIX3'] = 1                     # Reference pixel
+    4D input with sources=None → single zero-padded 4D image HDU (mostly zeros, poor use
+    of space even with compression).
 
-    hdu.header['CTYPE4'] = 'OBJECT'              # Fourth dimension is for different objects
-    hdu.header['CRPIX4'] = 1                     # Reference pixel for object dimension
-    hdu.header['CRVAL4'] = 1                     # First object has index 1
-    hdu.header['CDELT4'] = 1                     # Step size for object dimension
-    
-    # Create HDUList
-    hdul = fits.HDUList([hdu])
+    4D input with sources=<DataFrame> → multi-extension FITS: one compact HDU per source
+    (N_wvl, psf_H, psf_W), with the WCS in each extension encoding where the PSF belongs
+    in the full field. No zeros are stored at all — this is the recommended format.
+    Reading back: for source i, hdul[i+1].data gives its PSF cube; CRVAL1/2 give its
+    1-based (x, y) centroid in the full-field pixel frame.
 
-    # Save to file
-    output_file = data_folder / f'{os.path.splitext(os.path.basename(cube_path))[0]}_modeled_cube_objects.fits'
-    hdul.writeto(output_file, overwrite=True)
-    print(f"Saved 4D model cube to {output_file}")
-    
-else:
-    # Create primary HDU
-    hdu = fits.PrimaryHDU(model_full.astype(np.float32))
+    Available compression types (all lossless for float32):
+      'GZIP_2'  - byte-shuffle + gzip, best for float PSF data (default)
+      'RICE_1'  - fast, good general-purpose
+      'HCOMPRESS_1' - hierarchical, slightly lossy unless scale=0 enforced
 
-    hdu.header['CRVAL1'] = 1                     # Reference pixel value for x axis
-    hdu.header['CDELT1'] = 1                     # Pixel step size for x axis
-    hdu.header['CUNIT1'] = 'pixel'               # Pixel unit for x axis
-    hdu.header['CTYPE1'] = 'PIXEL'                # Axis type is pixel for x axis
-    hdu.header['CRPIX1'] = 1                     # Reference pixel for x axis
-    
-    hdu.header['CRVAL2'] = 1                     # Reference pixel value for y axis
-    hdu.header['CDELT2'] = 1                     # Pixel step size for y axis
-    hdu.header['CUNIT2'] = 'pixel'               # Pixel unit for y axis
-    hdu.header['CTYPE2'] = 'PIXEL'                # Axis type is pixel for y axis
-    hdu.header['CRPIX2'] = 1                     # Reference pixel for y axis
-        
-    hdu.header['CRVAL3'] = λ_full[0]             # Reference wavelength value
-    hdu.header['CDELT3'] = λ_full[1] - λ_full[0] # Wavelength step size
-    hdu.header['CUNIT3'] = 'nm'                  # Wavelength unit
-    hdu.header['CTYPE3'] = 'WAVE'                # Axis type is wavelength
-    hdu.header['CRPIX3'] = 1                     # Reference pixel
+    Parameters
+    ----------
+    cube             : array-like, shape (N_wvl, H, W) or (N_src, N_wvl, H, W)
+    output_path      : str or Path
+    λ_full           : 1-D array, wavelengths in nm
+    sources          : pd.DataFrame with 'x_peak' and 'y_peak' columns (0-based pixel coords),
+                       required for the compact multi-extension 4D format
+    compress         : bool, apply tile compression (default True)
+    compression_type : str, FITS tile compression algorithm (default 'GZIP_2')
+    """
+    data = np.asarray(cube, dtype=np.float32)
+    is_4d = data.ndim == 4
 
-    # Create HDUList
-    hdul = fits.HDUList([hdu])
-    output_file = data_folder / f'{os.path.splitext(os.path.basename(cube_path))[0]}_modeled_cube.fits'
-    hdul.writeto(output_file, overwrite=True)
+    def _wcs_λ(hdr, λ_full):
+        hdr['CRVAL3'] = float(λ_full[0]);  hdr['CDELT3'] = float(λ_full[1] - λ_full[0])
+        hdr['CUNIT3'] = 'nm';              hdr['CTYPE3'] = 'WAVE';  hdr['CRPIX3'] = 1
 
+    def _make_hdu(arr, hdr):
+        if compress:
+            return fits.CompImageHDU(arr, header=hdr, compression_type=compression_type)
+        return fits.ImageHDU(arr, header=hdr)
+
+    if is_4d and sources is not None:
+        # --- compact multi-extension format: one HDU per source, no zeros stored ---
+        primary = fits.PrimaryHDU()
+        primary.header['NSOURCES'] = (data.shape[0], 'Number of source PSF extensions')
+        primary.header['NWVL']     = (data.shape[1], 'Number of wavelength slices')
+        primary.header['COMMENT']  = 'Each extension contains one source PSF cube (N_wvl, H, W).'
+        primary.header['COMMENT']  = 'CRVAL1/2 gives the source centroid in full-field pixel coords (1-based).'
+        hdul = fits.HDUList([primary])
+
+        psf_h, psf_w = data.shape[2], data.shape[3]
+        crpix_x = (psf_w + 1) / 2.0  # centre of the PSF cutout (1-based)
+        crpix_y = (psf_h + 1) / 2.0
+
+        for i in range(data.shape[0]):
+            hdr = fits.Header()
+            # Spatial WCS: reference pixel is the PSF centre; CRVAL encodes its position
+            # in the full field (FITS 1-based convention, hence +1)
+            hdr['CRPIX1'] = crpix_x;               hdr['CRVAL1'] = float(sources.iloc[i]['x_peak']) + 1
+            hdr['CDELT1'] = 1;                      hdr['CUNIT1'] = 'pixel'; hdr['CTYPE1'] = 'PIXEL'
+            hdr['CRPIX2'] = crpix_y;               hdr['CRVAL2'] = float(sources.iloc[i]['y_peak']) + 1
+            hdr['CDELT2'] = 1;                      hdr['CUNIT2'] = 'pixel'; hdr['CTYPE2'] = 'PIXEL'
+            _wcs_λ(hdr, λ_full)
+            hdr['SRCIDX']  = (i,     'Source index (0-based)')
+            hdul.append(_make_hdu(data[i], hdr))
+
+        hdul.writeto(str(output_path), overwrite=True)
+        comp_label = f' ({compression_type} compressed)' if compress else ''
+        print(f"Saved {data.shape[0]}-source multi-extension FITS{comp_label} to {output_path}")
+
+    else:
+        # --- single HDU fallback (3D, or 4D without source positions) ---
+        hdr = fits.Header()
+        hdr['CRVAL1'] = 1; hdr['CDELT1'] = 1; hdr['CUNIT1'] = 'pixel'; hdr['CTYPE1'] = 'PIXEL'; hdr['CRPIX1'] = 1
+        hdr['CRVAL2'] = 1; hdr['CDELT2'] = 1; hdr['CUNIT2'] = 'pixel'; hdr['CTYPE2'] = 'PIXEL'; hdr['CRPIX2'] = 1
+        _wcs_λ(hdr, λ_full)
+        if is_4d:
+            hdr['CTYPE4'] = 'OBJECT'; hdr['CRPIX4'] = 1; hdr['CRVAL4'] = 1; hdr['CDELT4'] = 1
+
+        if compress:
+            hdul = fits.HDUList([fits.PrimaryHDU(), fits.CompImageHDU(data, header=hdr, compression_type=compression_type)])
+        else:
+            hdul = fits.HDUList([fits.PrimaryHDU(data, header=hdr)])
+
+        hdul.writeto(str(output_path), overwrite=True)
+        ndim_label = '4D' if is_4d else '3D'
+        comp_label = f' ({compression_type} compressed)' if compress else ''
+        print(f"Saved {ndim_label} model cube{comp_label} to {output_path}")
+
+
+# stem = os.path.splitext(os.path.basename(cube_path))[0]
+# suffix = '_modeled_cube_objects' if np.asarray(PSFs_separated).ndim == 4 else '_modeled_cube'
+# output_file = data_folder / f'{stem}{suffix}.fits'
+# Pass PSFs_separated (N_src, N_wvl, 111, 111) + source positions → compact multi-extension format, no zeros
+# SaveModelCubeFITS(PSFs_separated, output_file, λ_full, sources=sources)
 
 # %%

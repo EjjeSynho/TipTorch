@@ -1145,7 +1145,7 @@ PlotSourcesProfiles(cube_sparse, model_fit, sources, radius=16, title='Fitted PS
 
 
 #%% 0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
-from tools.curves import QuadraticModel
+from deprecated.curves import QuadraticModel
 
 
 λ_sparse = wavelength_selected.flatten() * 1e9 # [nm]

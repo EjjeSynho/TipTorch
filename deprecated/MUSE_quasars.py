@@ -156,7 +156,7 @@ from tools.multisources import add_ROIs, DetectSources, ExtractSources
 PSF_size = 111  # Define the size of each extracted PSF
 
 # sources = DetectSources(cube_sparse, threshold='auto', nsigma=10, display=True, draw_win_size=20)
-sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_win_size=20)
+sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_box_size=20)
 # Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
 srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
@@ -435,7 +435,7 @@ plt.grid()
 plt.show()
 
 #%% Interpolate PSF model parameters over the full wavelengths range assuming they change smooth
-from tools.curves import QuadraticModel
+from deprecated.curves import QuadraticModel
 
 λ_sparse_torch = torch.tensor(λ_sparse, device=device, dtype=torch.float32)
 
@@ -626,7 +626,8 @@ with torch.no_grad():
 
         model_full.append( add_ROIs( empty_img*0.0, PSF_batch, srcs_image_data["img_crops"], srcs_image_data["img_slices"] ).cpu().numpy() )
         model_full_split.append( add_ROIs_separately( empty_img*0.0, PSF_batch, srcs_image_data["img_crops"], srcs_image_data["img_slices"] ).cpu().numpy() )
-        
+
+
 model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
 model.Update(grids=True, pupils=True, tomography=True)
 

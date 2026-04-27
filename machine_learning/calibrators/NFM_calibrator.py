@@ -121,12 +121,6 @@ class NFMCalibrator():
             phase_bump = torch.zeros(coefs.shape[0], 1, device=coefs.device, dtype=coefs.dtype)
             x_dict_pred['LO_coefs'] = torch.cat([phase_bump, coefs], dim=-1)
 
-        # For Cn2_weights, ensure they sum to 1 by prepending the GL fraction (1 - sum of predicted layers)
-        # This is because the net predicts only the relative weights of the non-GL layers, and GL is implicitly defined as the remainder to 1
-        if 'Cn2_weights' in x_dict_pred:
-            GL_fraction = (1.0 - x_dict_pred['Cn2_weights'].sum(dim=-1, keepdim=True)).clamp(min=0.0)
-            x_dict_pred['Cn2_weights'] = torch.hstack( (GL_fraction, x_dict_pred['Cn2_weights']) )
-
         return x_dict_pred
 
 
@@ -134,6 +128,7 @@ class NFMCalibrator():
         return self.forward(reduced_telemetry)
 
 
+    @torch.no_grad()
     def calibrate(self, reduced_telemetry: pd.DataFrame, PSF_model) -> None:
         """
         Method to get a reconciled parameter dict ready for PSFModelNFM.

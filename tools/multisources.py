@@ -22,27 +22,164 @@ This module is used to manage the multi-source simulations. It contains function
 - visualize sources.
 """
 
-def detect_sources(data_src, threshold, box_size, eps=2, verbose=False):
+
+def DisplaySources(data_src, sources_df, draw_box_size, vmin, vmax, norm=LogNorm, shape='box'):
+    from photutils.aperture import CircularAperture
+    if isinstance(data_src, torch.Tensor):
+        data_src = data_src.sum(dim=0).cpu().numpy() if data_src.ndim == 3 else data_src.cpu().numpy()
+    srcs_pos = np.transpose((sources_df['x_peak'], sources_df['y_peak']))
+    norm_field = norm(vmin=vmin, vmax=vmax)
+
+    plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
+
+    if shape == 'circle':
+        apertures = CircularAperture(srcs_pos, r=draw_box_size / 2)
+    else:
+        apertures = RectangularAperture(srcs_pos, draw_box_size, draw_box_size)
+    apertures.plot(color='gold', lw=2, alpha=0.45)
+
+    for idx, row in sources_df.iterrows():
+        x, y = row['x_peak'], row['y_peak']
+        offset = draw_box_size / 2
+        plt.text(x - offset + 1, y - offset + 1, str(idx),
+                 color='gold', fontsize=7, va='bottom', ha='left',
+                 bbox=dict(boxstyle='square,pad=0', fc='none', ec='none'))
+    plt.show()
+
+
+def DetectSources(data_cube, threshold, nsigma=3.0, box_size=11, sort_by_brightness=True, weight_from_flux=False, display=False, draw_box_size=None, verbose=False):
+    """ Detects sources in a 3D data cube. """
     
-    sources = find_peaks(data_src, threshold=threshold, box_size=box_size)
-    if verbose: print(f"Detected {len(sources)} sources")
+    def _detect_sources(data_src, threshold, box_size, eps=2, verbose=False):
+        sources = find_peaks(data_src, threshold=threshold, box_size=box_size)
+        if verbose: print(f"Detected {len(sources)} sources")
 
-    # Helps in the case if a single source was detected as multiple peaks
-    positions = np.transpose((sources['x_peak'], sources['y_peak']))
+        # Helps in the case if a single source was detected as multiple
+        positions = np.transpose((sources['x_peak'], sources['y_peak']))
+        
+        db = DBSCAN(eps=eps, min_samples=1).fit(positions)
+
+        unique_labels = set(db.labels_)
+        merged_positions = np.array([ positions[db.labels_ == label].mean(axis=0) for label in unique_labels ])
+        merged_fluxes    = np.array([ data_src[int(pos[1]), int(pos[0])] for pos in merged_positions ])
+
+        merged_sources = pd.DataFrame(merged_positions, columns=['x_peak', 'y_peak'])
+        merged_sources['peak_value'] = merged_fluxes
+
+        if verbose:
+            print(f"Merged to {len(merged_sources)} sources")
+        
+        return merged_sources
     
-    db = DBSCAN(eps=eps, min_samples=1).fit(positions)
-
-    unique_labels = set(db.labels_)
-    merged_positions = np.array([ positions[db.labels_ == label].mean(axis=0) for label in unique_labels ])
-    merged_fluxes    = np.array([ data_src[int(pos[1]), int(pos[0])] for pos in merged_positions ])
-
-    merged_sources = pd.DataFrame(merged_positions, columns=['x_peak', 'y_peak'])
-    merged_sources['peak_value'] = merged_fluxes
-
-    if verbose:
-        print(f"Merged to {len(merged_sources)} sources")
+    data_src = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_cube.sum(axis=0)
+    data_src = np.nan_to_num(data_src)
     
-    return merged_sources
+    _, median, std = sigma_clipped_stats(data_src[data_src > 0], sigma=nsigma)
+    
+    if threshold is None or threshold == 'auto':
+        threshold = median + nsigma * std
+        if verbose:
+            print(f"[auto] using threshold = median + {nsigma}·std = {threshold:.2f}")
+    
+    sources_df = _detect_sources(data_src, threshold=threshold, box_size=box_size, verbose=verbose)
+
+    # Draw the detected sources
+    if display and draw_box_size is not None:
+        draw_box_size = box_size if draw_box_size is None else int(draw_box_size)
+        DisplaySources(data_src, sources_df, draw_box_size, median*0.9, threshold*10)
+
+    # Sort in descending order of flux (peak value)
+    if sort_by_brightness:
+        sources_df = sources_df.sort_values(by='peak_value', ascending=False).reset_index(drop=True)
+
+    # Add weight column
+    if weight_from_flux:
+        # In the case there is a goal to assign more weight to brighter sources
+        sources_df['weight'] = sources_df['peak_value'] / sources_df['peak_value'].sum()
+    else:
+        sources_df['weight'] = 1.0
+
+    sources_df.index.name = 'ID'
+    return sources_df
+
+
+def AddSources(data_cube, coords, sources_df=None, weights=None, weight_from_flux=False):
+    """
+    Append manually specified sources to an existing (or new) sources DataFrame.
+
+    Parameters
+    ----------
+    data_cube : torch.Tensor or np.ndarray
+        3D data cube (C, H, W) used to measure peak values at the given coordinates.
+    coords : array-like of shape (N, 2)
+        Pixel coordinates [[x0, y0], [x1, y1], ...] for the sources to add.
+    sources_df : pd.DataFrame or None
+        Existing sources DataFrame with columns [x_peak, y_peak, peak_value, weight].
+        If None, a new one is created.
+    weights : array-like of length N or None
+        Per-source weights. If None and weight_from_flux=False, weight=1.0.
+        If None and weight_from_flux=True, weight is proportional to peak_value.
+    weight_from_flux : bool
+        When True and weights is None, assign weight = peak_value / total_peak_value
+        across all sources in the returned DataFrame (including any pre-existing ones).
+
+    Returns
+    -------
+    pd.DataFrame
+        Updated (or newly created) sources DataFrame.
+    """
+    data_np = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_cube.sum(axis=0)
+    data_np = np.nan_to_num(data_np)
+
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim == 1:
+        coords = coords[np.newaxis, :]
+
+    N = len(coords)
+    if weights is not None:
+        weights = np.broadcast_to(np.asarray(weights, dtype=float).ravel(), (N,))
+
+    rows = []
+    for i, (x, y) in enumerate(coords):
+        xi, yi = int(round(x)), int(round(y))
+        xi = np.clip(xi, 0, data_np.shape[1] - 1)
+        yi = np.clip(yi, 0, data_np.shape[0] - 1)
+        peak_value = float(data_np[yi, xi])
+
+        w = float(weights[i]) if weights is not None else 1.0
+        rows.append({'x_peak': x, 'y_peak': y, 'peak_value': peak_value, 'weight': w})
+
+    new_df = pd.DataFrame(rows)
+
+    if sources_df is not None:
+        result_df = pd.concat([sources_df, new_df], ignore_index=True)
+    else:
+        result_df = new_df.reset_index(drop=True)
+
+    if weights is None and weight_from_flux:
+        total = result_df['peak_value'].sum()
+        result_df['weight'] = result_df['peak_value'] / total if total > 0 else 1.0
+
+    result_df.index.name = 'ID'
+    return result_df
+
+
+def ExtractSources(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
+    ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size)
+    # sources_valid = srcs_coords.iloc[valid_srcs].reset_index(drop=True) if filter_sources else srcs_coords
+    sources_valid = srcs_coords.iloc[valid_srcs] if filter_sources else srcs_coords
+
+    if debug_draw:
+        N_cols = min(8, int(np.ceil(np.sqrt(len(ROIs))))) # Automatically adjusts the number of displayed  columns
+        plot_ROIs_as_grid(ROIs, cols=N_cols)
+
+    return {
+        "images": ROIs,
+        "coords": sources_valid,
+        "count": len(sources_valid),
+        "img_slices": global_coords,
+        "img_crops": local_coords
+    }
 
 
 def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
@@ -117,57 +254,6 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
     return ROIs, roi_local_coords, roi_global_coords, valid_ids
 
 
-def DetectSources(data_cube, threshold, nsigma=3.0, display=False, draw_win_size=None, sort_by_brightness=True):
-
-    data_src = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_cube.sum(axis=0)
-    data_src = np.nan_to_num(data_src)
-    
-    _, median, std = sigma_clipped_stats(data_src[data_src > 0], sigma=nsigma)
-    
-    if threshold is None or threshold == 'auto':
-        threshold = median + nsigma * std
-        if display: print(f"[auto] using threshold = median + {nsigma}·std = {threshold:.2f}")
-    
-    # mean, median, std = sigma_clipped_stats(data_src, sigma=3.0)
-    sources_df = detect_sources(data_src, threshold=threshold, box_size=11, verbose=True)
-
-    # Draw the detected sources
-    if display and draw_win_size is not None:
-        # apertures = CircularAperture(srcs_pos, r=5)
-        srcs_pos  = np.transpose((sources_df['x_peak'], sources_df['y_peak']))
-        # srcs_flux = sources['peak_value'].to_numpy()
-        apertures_box = RectangularAperture(srcs_pos, draw_win_size, draw_win_size)
-        norm_field = LogNorm(vmin=median*0.9, vmax=threshold*10) # TODO: make it more statistical
-
-        plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
-        apertures_box.plot(color='gold', lw=2, alpha=0.45)
-        plt.show()
-
-    # Sort in descending order of flux (peak value)
-    if sort_by_brightness:
-        sources_df = sources_df.sort_values(by='peak_value', ascending=False).reset_index(drop=True)
-
-    return sources_df
-
-
-def ExtractSources(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
-    ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size)
-    # sources_valid = srcs_coords.iloc[valid_srcs].reset_index(drop=True) if filter_sources else srcs_coords
-    sources_valid = srcs_coords.iloc[valid_srcs] if filter_sources else srcs_coords
-
-    if debug_draw:
-        N_cols = min(8, int(np.ceil(np.sqrt(len(ROIs))))) # Automatically adjusts the number of displayed  columns
-        plot_ROIs_as_grid(ROIs, cols=N_cols)
-
-    return {
-        "images": ROIs,
-        "coords": sources_valid,
-        "count": len(sources_valid),
-        "img_slices": global_coords,
-        "img_crops": local_coords
-    }
-
-
 def extract_ROIs_from_coords(image, roi_local_coords, roi_global_coords, PSF_size):
     torch_flag = False
     if isinstance(image, np.ndarray):
@@ -187,12 +273,12 @@ def extract_ROIs_from_coords(image, roi_local_coords, roi_global_coords, PSF_siz
 
         # Create a blank 3D box filled with zeros
         if torch_flag:
-            roi = torch.zeros((D, PSF_size, PSF_size), dtype=image.dtype, device=image.device)
+            ROI = torch.zeros((D, PSF_size, PSF_size), dtype=image.dtype, device=image.device)
         else:
-            roi = xp.full((D, PSF_size, PSF_size), dtype=image.dtype, device=image.device)
+            ROI = xp.zeros((D, PSF_size, PSF_size), dtype=image.dtype, device=image.device)
         
-        roi[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi] = image[:, y_min_img:y_max_img, x_min_img:x_max_img]
-        ROIs.append(roi)
+        ROI[:, y_min_roi:y_max_roi, x_min_roi:x_max_roi] = image[:, y_min_img:y_max_img, x_min_img:x_max_img]
+        ROIs.append(ROI)
 
     return ROIs
 

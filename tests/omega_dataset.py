@@ -230,7 +230,7 @@ cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes
 from tools.multisources import DetectSources
 
 # Compute coordinates of sources in the field in arcsec relative to the center of pointing
-sources = DetectSources(cube_sparse, threshold=50000, display=True, draw_win_size=21)
+sources = DetectSources(cube_sparse, threshold=50000, display=True, draw_box_size=21)
 
 # Compute center of mass for valid mask assuming it's the center of the field
 yy, xx = np.where(valid_mask.cpu().numpy().squeeze() > 0)
