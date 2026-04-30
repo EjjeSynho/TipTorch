@@ -29,7 +29,7 @@ from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, mask_circle
 from managers.config_manager import ConfigManager
 from tools.normalizers import CreateTransformSequenceFromFile, InputsTransformer
 from tqdm import tqdm
-from project_settings import MUSE_DATA_FOLDER, device
+from project_settings import MUSE_DATA_FOLDER, default_device
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 from astropy.wcs import WCS
@@ -158,9 +158,9 @@ with open(MUSE_DATA_FOLDER + "wide_field/reduced/DATACUBEFINALexpcombine_2020022
 # box_size = 61  # Define the size of each ROI (in pixels)
 box_size = 111  # Define the size of each ROI (in pixels)
 
-data_onsky, var_mask, norms, bgs = LoadImages(data_sample, device=device, subtract_background=False, normalize=False, convert_images=True)
+data_onsky, var_mask, norms, bgs = LoadImages(data_sample, device=default_device, subtract_background=False, normalize=False, convert_images=True)
 data_onsky = data_onsky.squeeze()
-data_onsky *= torch.tensor(valid_mask, device=device).float().unsqueeze(0)
+data_onsky *= torch.tensor(valid_mask, device=default_device).float().unsqueeze(0)
 
 #%%
 data_src = data_onsky[-1,:,:].cpu().numpy()
@@ -321,7 +321,7 @@ df_norm = df_norm.fillna(0)
 
 selected_entries_input = muse_df_norm.columns.values.tolist()
 
-NN_inp = torch.tensor(df_norm[selected_entries_input].loc[0].to_numpy()).to(device).float().unsqueeze(0)
+NN_inp = torch.tensor(df_norm[selected_entries_input].loc[0].to_numpy()).to(default_device).float().unsqueeze(0)
 
 #%%
 from PSF_models.TipTorch import TipTorch
@@ -348,7 +348,7 @@ data_onsky_sparse = data_onsky.clone()[ids_wavelength_selected,...]
 Moffat_absorber = True
 predict_Moffat = Moffat_absorber
 
-toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
+toy = TipTorch(config_file, 'sum', default_device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 # toy = TipTorch(config_file, 'sum', device, TipTop=True, PSFAO=Moffat_absorber, oversampling=1)
 
 toy.PSD_include['fitting'] = True
@@ -456,7 +456,7 @@ class Gnosis(nn.Module):
     
 # Initialize the network, loss function and optimizer
 net = Gnosis(NN_inp.shape[-1], normalizer.get_stacked_size(), 200, 0.1)
-net.to(device)
+net.to(default_device)
 net.float()
 
 net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict', map_location=torch.device('cpu')))
@@ -487,7 +487,7 @@ def masked_flux_ratio(PSF, mask):
     F_norm = (PSF*mask).sum(dim=(-2,-1), keepdim=True) / PSF.sum(dim=(-2,-1), keepdim=True)
     return F_norm
 
-core_mask = torch.tensor(mask_circle(box_size, 3)[None,None,...]).to(device).float()
+core_mask = torch.tensor(mask_circle(box_size, 3)[None,None,...]).to(default_device).float()
 # more_mask = torch.tensor(mask_circle(box_size, 8)[None,None,...]).to(device).float()
 
 # core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], 4)[None,None,...]).to(device).float()
@@ -541,7 +541,7 @@ def fit_dxdy(source_id, verbose=0):
     F_norm = (PSF_0 * core_mask).sum(dim=(-2,-1), keepdim=True) / ratio_core
     PSF_0 /= F_norm
 
-    dxdy_0 = torch.zeros([2], device=device).float()
+    dxdy_0 = torch.zeros([2], device=default_device).float()
 
     _ = func(dxdy_0)
     loss = lambda dxdy_: F.smooth_l1_loss(PSF_0, func(dxdy_), reduction='sum')*1e3
@@ -593,7 +593,7 @@ print(f'Median absolute FWHM error: {absolute_err:.1f} [mas]')
 
 #%%
 composite_img = add_ROIs(
-    torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device),
+    torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=default_device),
     [(PSFs_1*fluxes)[i, ...] for i in range(PSFs_1.shape[0])],
     local_coords,
     global_coords
@@ -601,7 +601,7 @@ composite_img = add_ROIs(
 
 norm_field = LogNorm(vmin=1e4, vmax=1e7)
 
-diff_img = (data_onsky_sparse-composite_img) * torch.tensor(valid_mask[None,...], device=device).float()
+diff_img = (data_onsky_sparse-composite_img) * torch.tensor(valid_mask[None,...], device=default_device).float()
 
 plt.imshow(data_onsky_sparse.abs().sum(dim=0).cpu().numpy(), norm=norm_field, origin='lower')
 # plt.show()
@@ -637,16 +637,16 @@ N_src = len(ROIs)
 x_size = normalizer.get_stacked_size()
 
 x0 = normalizer.stack(pred_inputs).squeeze().clone().detach()
-Fs_flat = torch.ones([N_src], device=device)
+Fs_flat = torch.ones([N_src], device=default_device)
 x0 = torch.cat([x0, Fs_flat, dxdys.flatten()])
 # x0 = torch.cat([x0, dxdys.flatten()])
 x0.requires_grad = True
 
-empty_img = torch.zeros([N_wvl, data_onsky_sparse.shape[-2], data_onsky_sparse.shape[-1]], device=device)
+empty_img = torch.zeros([N_wvl, data_onsky_sparse.shape[-2], data_onsky_sparse.shape[-1]], device=default_device)
 
 # x = x0.clone()
 # plt.imshow(test.squeeze().sum(dim=0).detach().abs().cpu().numpy(), origin='lower')
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(default_device).view(1, N_wvl, 1, 1)
 
 # print( x0[N_src+x_size+i*2 : N_src+x_size+(i+1)*2] )
 
@@ -712,7 +712,7 @@ composite_img_fit = func_fit(result_global.x).detach()
 
 norm_field = LogNorm(vmin=1e4, vmax=1e7)
 
-diff_img = (data_onsky_sparse-composite_img_fit) * torch.tensor(valid_mask[None,...], device=device).float()
+diff_img = (data_onsky_sparse-composite_img_fit) * torch.tensor(valid_mask[None,...], device=default_device).float()
 
 plt.imshow(data_onsky_sparse.abs().sum(dim=0).cpu().numpy(), norm=norm_field, origin='lower')
 # plt.show()
@@ -804,16 +804,16 @@ class GaussianFitter(nn.Module):
 
 
 #%%
-gauss_fitter = GaussianFitter(num_targets=len(ROIs), PSF_size=(box_size, box_size), device=device)
-gauss_fitter.to(device)
+gauss_fitter = GaussianFitter(num_targets=len(ROIs), PSF_size=(box_size, box_size), device=default_device)
+gauss_fitter.to(default_device)
 
-ROIs_torch = torch.tensor(np.stack(ROIs), dtype=torch.float32, device=device)
+ROIs_torch = torch.tensor(np.stack(ROIs), dtype=torch.float32, device=default_device)
 ROIs_torch = torch.nan_to_num(ROIs_torch, nan=0.0)
 
-image_data_torch = torch.tensor(image_data, dtype=torch.float32, device=device)
+image_data_torch = torch.tensor(image_data, dtype=torch.float32, device=default_device)
 image_data_torch = torch.nan_to_num(image_data_torch, nan=0.0)
 
-image_blank  = torch.zeros_like(image_data_torch, device=device)
+image_blank  = torch.zeros_like(image_data_torch, device=default_device)
 image_filled = add_ROIs(image_blank, gauss_fitter(), local_coords, global_coords)
 
 #%%
@@ -827,7 +827,7 @@ for i in range(iterations):
     loss = F.mse_loss(
         image_data_torch,
         add_ROIs(
-            torch.zeros_like(image_data_torch, device=device),
+            torch.zeros_like(image_data_torch, device=default_device),
             gauss_fitter(),
             local_coords,
             global_coords
@@ -847,7 +847,7 @@ print(f'Epoch {iterations}/{iterations}, Loss: {loss.item()}')
 #%%
 result_simbad = (image_data_torch - \
     add_ROIs(
-        torch.zeros_like(image_data_torch, device=device),
+        torch.zeros_like(image_data_torch, device=default_device),
         gauss_fitter(), local_coords, global_coords
     )
 ).abs().cpu().detach().numpy()

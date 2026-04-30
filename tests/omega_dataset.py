@@ -12,16 +12,19 @@ import pickle
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import astropy.units as u
 from matplotlib import colors
 from astropy.io import fits
 from astropy.wcs import WCS
 from astropy.table import Table
 from astropy.coordinates import SkyCoord
 from astropy.io import fits
-import astropy.units as u
 from astropy.nddata import Cutout2D
+from pathlib import Path
 
-from data_processing.MUSE_data_utils import MUSE_DATA_FOLDER
+from project_settings import project_settings
+
+MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
 cube_path   = MUSE_DATA_FOLDER / "omega_cluster/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 data_folder = MUSE_DATA_FOLDER / 'omega_cluster/OmegaCentaury_data/'
@@ -217,13 +220,13 @@ except Exception as e:
 
 
 #%% ========================= Load MUSE data to detect and match sources =========================
-from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
-from project_settings import device
+from data_processing.MUSE.data_utils import GetSpectrum, LoadCachedDataMUSE
+from project_settings import default_device
 
 raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.fits.fz"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
-spectral_cubes, spectral_info, TELEMETRY_CACHE, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, TELEMETRY_CACHE, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=default_device, verbose=True)   
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
 
 #%%

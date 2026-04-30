@@ -2,6 +2,7 @@
 # %reload_ext autoreload
 # %autoreload 2
 
+from email.policy import default
 import sys
 import os
 from pathlib import Path
@@ -27,21 +28,20 @@ import numpy as np
 
 from torchmin import minimize
 
-from data_processing.MUSE_STD_dataset_utils import *
+from data_processing.MUSE.STD_dataset.STD_dataset_utils import *
 from PSF_models.NFM_wrapper import PSFModelNFM
 from managers.config_manager import ConfigManager
 from tools.utils import SR, GradientLoss, FWHM_fitter
 from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
-from project_settings import device
+# from project_settings import device
 import warnings
-
 
 MUSE_FITTING_FOLDER = STD_FOLDER / 'fitted/'
 
 warnings.filterwarnings("ignore")
 
-default_device = device
+device = default_device
 
 start_id, end_id = -1, -1
 
@@ -54,11 +54,10 @@ for arg in input_args:
         device = torch.device(arg)
         print(f"Using device: {arg}")
         device_specified = True
+        
     elif arg.lstrip('-').isdigit(): # Simple check for integer IDs
-        if start_id == -1:
-            start_id = int(arg)
-        elif end_id == -1:
-            end_id = int(arg)
+        if start_id == -1:  start_id = int(arg)
+        elif end_id == -1:  end_id   = int(arg)
     else:
         # Assume it is a path
         MUSE_FITTING_FOLDER = Path(arg)
@@ -76,7 +75,7 @@ if not MUSE_FITTING_FOLDER.exists():
 # Example: python fitter_MUSE.py cpu 50 150
 
 #% Initialize data sample
-with open(MUSE_DATA_FOLDER / 'standart_stars' / 'muse_df.pickle', 'rb') as handle:
+with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
 
 psf_df = psf_df[psf_df['Corrupted']   == False]
@@ -136,9 +135,9 @@ def load_and_fit_sample(id):
         multiple_obs    = True,
         LO_NCPAs        = True,
         chrom_defocus   = False,
-        use_splines     = True,
         Moffat_absorber = False,
         Z_mode_max      = 9,
+        N_spline_nodes  = 5,
         device          = device
     )
 

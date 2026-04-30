@@ -1,7 +1,7 @@
 import pickle
 import torch
 from torch.distributions.normal import Normal
-from project_settings import device
+from project_settings import default_device
 import numpy as np
 from scipy import stats
 # from scipy.stats import boxcox, yeojohnson, norm
@@ -108,7 +108,7 @@ class BoxCox(DataTransform):
 class Gaussify(DataTransform):
     def __init__(self, data=None) -> None:
         # Initialize a normal distribution (assumes device and Normal are defined)
-        self.normal_distribution = Normal(torch.tensor([0.0]).to(device), torch.tensor([1.0]).to(device))
+        self.normal_distribution = Normal(torch.tensor([0.0]).to(default_device), torch.tensor([1.0]).to(default_device))
     
     def fit(self, data):
         pass
@@ -117,7 +117,7 @@ class Gaussify(DataTransform):
         return self.normal_distribution.cdf(x) if isinstance(x, torch.Tensor) else stats.norm.cdf(x)
     
     def ppf(self, q):
-        return (torch.sqrt(torch.tensor([2.]).to(device)) * torch.erfinv(2 * q - 1) 
+        return (torch.sqrt(torch.tensor([2.]).to(default_device)) * torch.erfinv(2 * q - 1) 
                 if isinstance(q, torch.Tensor) else stats.norm.ppf(q))
     
     def forward(self, x):

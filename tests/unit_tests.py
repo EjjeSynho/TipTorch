@@ -13,14 +13,14 @@ from matplotlib.colors import LogNorm
 from project_settings import DATA_FOLDER, DATA_FOLDER
 from PSF_models.TipTorch import TipTorch
 from managers.config_manager import ConfigManager
-from project_settings import device, DATA_FOLDER, default_torch_type
+from project_settings import default_device, DATA_FOLDER, default_torch_type
 
 
 #%%
 config_manager = ConfigManager()
 config = config_manager.Load(DATA_FOLDER / "parameter_files/muse_ltao.ini")
-config = config_manager.Convert(config, framework='pytorch', device=device, dtype=default_torch_type)
-config['sources_science']['Wavelength'] = torch.tensor([300e-9, 500e-9, 700e-9, 900e-9], dtype=default_torch_type, device=device)  # [m]
+config = config_manager.Convert(config, framework='pytorch', device=default_device, dtype=default_torch_type)
+config['sources_science']['Wavelength'] = torch.tensor([300e-9, 500e-9, 700e-9, 900e-9], dtype=default_torch_type, device=default_device)  # [m]
 # config['sources_science']['Wavelength'] = torch.tensor([300e-9], dtype=default_torch_type, device=device)  # [m]
 
 # Initialize TipTorch model
@@ -28,7 +28,7 @@ model = TipTorch(
     AO_config=config,
     AO_type='LTAO',
     norm_regime=None,
-    device=device,
+    device=default_device,
     oversampling=1
 )
 

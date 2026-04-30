@@ -1,7 +1,7 @@
-from data_processing.MUSE_data_utils import *
+from data_processing.MUSE.data_utils import *
 
 
-STD_FOLDER     = MUSE_DATA_FOLDER / 'standart_stars/'
+STD_FOLDER     = Path(project_settings["STD_data_folder"])
 CUBES_FOLDER   = STD_FOLDER / 'cubes/'
 RAW_FOLDER     = STD_FOLDER / 'raw/'
 CUBES_CACHE    = STD_FOLDER / 'cached_cubes/'
@@ -29,7 +29,7 @@ def LoadSTDStarCache(
     subtract_background = False,
     wvl_ids = None,
     ensure_odd_pixels = False,
-    device = device
+    device = default_device
 ):
     """ Loads data associated with provided list of STD star by their ID """
     

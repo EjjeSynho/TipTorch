@@ -1,5 +1,5 @@
 #%%
-from SPHERE_data_utils import SPHERE_DATA_FOLDER, InitIRDISConfig, device
+from data_processing.SPHERE.data_utils import SPHERE_DATA_FOLDER, InitIRDISConfig, default_device
 
 import numpy as np
 import torch
@@ -201,7 +201,7 @@ def LoadSTDStarCache(
     normalize = True,
     subtract_background = True,
     ensure_odd_pixels = True,
-    device = device
+    device = default_device
 ):    
     """
     Preprocess SPHERE data, i.e., PSFs and configs for TipTorch.

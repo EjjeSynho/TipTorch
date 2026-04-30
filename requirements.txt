@@ -12,6 +12,7 @@ scikit-learn
 tabulate
 tqdm
 gdown
+pooch
 photutils
 
 # PyTorch & friends

@@ -11,8 +11,8 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
-from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarCache, STD_FOLDER
-from project_settings import device
+from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache, STD_FOLDER
+from project_settings import default_device
 from tools.utils import rad2mas, GradientLoss
 from torchmin import minimize
 
@@ -44,7 +44,7 @@ PSF_data, data_sample, model_config = LoadSTDStarCache(
     normalize=True,
     subtract_background=True,
     ensure_odd_pixels=True,
-    device=device
+    device=default_device
 )
 
 PSF_0    = PSF_data[0]['PSF (mean)']
@@ -66,7 +66,7 @@ PSF_model = PSFModelIRDIS(
     use_Zernike=True,
     N_modes=9,
     LO_map_size=31,
-    device=device
+    device=default_device
 )
 
 #%%
@@ -99,7 +99,7 @@ if LWE_flag:
         [-1,1,1,-1,  0,0,0,0,  0,0,0,0], # pattern_piston_horiz
         [1,-1,-1,1,  0,0,0,0,  0,0,0,0]  # pattern_piston_vert
     ]
-    patterns = [torch.tensor([p]).to(device).float() * LWE_gauss_penalty_weight for p in patterns]
+    patterns = [torch.tensor([p]).to(default_device).float() * LWE_gauss_penalty_weight for p in patterns]
     
     gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
     Gauss_err = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, LWE_gauss_penalty_weight/2)).flatten().abs().sum()

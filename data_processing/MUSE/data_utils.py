@@ -2,7 +2,7 @@
 import sys, os
 sys.path.insert(0, '..')
 
-from project_settings import device, xp, use_cupy, default_torch_type, PROJECT_PATH, TELEMETRY_CACHE, DATA_FOLDER
+from project_settings import default_device, xp, use_cupy, default_torch_type, TELEMETRY_CACHE, DATA_FOLDER, project_settings
 
 import pickle
 import os
@@ -24,11 +24,11 @@ from astropy.io import fits
 from scipy.ndimage import binary_dilation
 from pathlib import Path
 from tools.utils import GetROIaroundMax, GetJmag, check_framework, recompute_Cn2_Kmeans, rad2arc
-from tools.network import fetch_reduced_telemetry_cache
 from tools.plotting import wavelength_to_rgb
 from managers.config_manager import ConfigManager
 from scipy.ndimage import rotate
 import logging
+
 
 from typing import Optional, Tuple, Callable
 
@@ -61,17 +61,12 @@ wvl_bins = np.array([
     880.125, 893.875, 907.625, 921.25 , 935.
 ], dtype='float32')
 
-# If current installatino doesn't have a local copy of the reduced telemetry, fetch it from online
-fetch_reduced_telemetry_cache(verbose=True)
-
+# If current installation doesn't have a local copy of the reduced telemetry, fetch it from online
+# fetch_all_resource_packs()
 
 find_closest_λ   = lambda λ, λs: check_framework(λs).argmin(check_framework(λs).abs(λs-λ)).astype('int')
 pupil_angle_func = lambda par_ang: (45.0 - par_ang) % 360 # where par_ang is the parallactic angle
 
-with open(PROJECT_PATH / Path("project_config.json"), "r") as f:
-    project_settings = json.load(f)
-
-MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
 default_IRLOS_config = '20x20_SmallScale_500Hz_HighGain'
 
@@ -1644,7 +1639,7 @@ def ProcessMUSEcube(
     return data_store, cube_name
 
 
-def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=False):
+def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=default_device, verbose=False):
     """
     This function prepares the data to be understandable by the PSF model. It bins the NFM cube and
     associates the necessary reduced telemetry data.
@@ -1769,7 +1764,7 @@ def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
     return Cn2_alt, Cn2_frac
 
 
-def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=device, convert_config=True, plotting=True):
+def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, convert_config=True, plotting=True):
     """
     Spcialized routine for loading configs for the cached MUSE NFM data samples.
     It largely overloads the standart config creation routine from the ConfigManager class and tailors it to MUSE NFM PSF data format.

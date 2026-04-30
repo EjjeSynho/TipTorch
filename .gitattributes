@@ -1,0 +1,24 @@
+# Auto-detect text files and normalise line endings to LF in the repo
+* text=auto eol=lf
+
+# Force shell scripts to always use LF
+*.sh text eol=lf
+
+# Force Windows scripts to always use CRLF
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files — don't touch
+*.fits binary
+*.npy binary
+*.npz binary
+*.pkl binary
+*.zip binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.mat binary
+*.xls binary
+*.predictor binary

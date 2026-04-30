@@ -16,9 +16,9 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 from tools.plotting import plot_radial_PSF_profiles, LWE_basis, cropper, draw_PSF_stack
 from PSF_models.TipToy_SPHERE_multisrc import TipTorch
-from data_processing.SPHERE_STD_dataset_utils import SPHERE_preprocess, SamplesByIds
+from data_processing.SPHERE.STD_dataset.STD_dataset_utils import SPHERE_preprocess, SamplesByIds
 from managers.config_manager import GetSPHEREonsky, ConfigManager
-from project_settings import SPHERE_DATASET_FOLDER, SPHERE_DATA_FOLDER, device
+from project_settings import SPHERE_DATASET_FOLDER, SPHERE_DATA_FOLDER, default_device
 from tools.normalizers import CreateTransformSequenceFromFile
 from copy import copy, deepcopy
 from managers.input_manager import InputsTransformer
@@ -89,9 +89,9 @@ PSF_data, _, init_config = SPHERE_preprocess(
     PSF_loader    = lambda x: SamplesByIds(x, synth=False),
     config_loader = GetSPHEREonsky,
     framework     = 'pytorch',
-    device        = device)
+    device        = default_device)
 
-toy = TipTorch(init_config, None, device)
+toy = TipTorch(init_config, None, default_device)
 _ = toy()
 
 basis = LWE_basis(toy)
@@ -138,13 +138,13 @@ class Gnosis(nn.Module):
     
 # Initialize the network, loss function and optimizer
 net = Gnosis(batch_data['NN input'].shape[1], transformer.get_stacked_size(), 200, 0.1)#0.25)
-net.to(device)
+net.to(default_device)
 net.float()
 
 # net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_v3.dict'))
 net.load_state_dict(torch.load('../data/weights/gnosis_new_weights_noLWE_v1.dict'))
 
-x0 = x0.float().repeat(len(batch_data['IDs']), 1).to(device)
+x0 = x0.float().repeat(len(batch_data['IDs']), 1).to(default_device)
 # x0.requires_grad = True
 
 # I = batch_data['NN input'].to(device).float()
@@ -168,23 +168,23 @@ def get_fixed_inputs(batch, entries=[]):
             entry_ = entry.replace(' L', '')
             
             dict_to_add[entry_] = torch.stack([
-                torch.tensor(np.array(fixed_inputs[entry_+' L'])).float().to(device),
-                torch.tensor(np.array(fixed_inputs[entry_+' R'])).float().to(device)
+                torch.tensor(np.array(fixed_inputs[entry_+' L'])).float().to(default_device),
+                torch.tensor(np.array(fixed_inputs[entry_+' R'])).float().to(default_device)
             ], axis=1)
             
             entries_to_remove.append(entry_+' L')
             entries_to_remove.append(entry_+' R')
 
         elif entry == 'LWE coefs':
-            dict_to_add['basis_coefs'] = torch.tensor(np.array(fixed_inputs[entry])).float().to(device)
+            dict_to_add['basis_coefs'] = torch.tensor(np.array(fixed_inputs[entry])).float().to(default_device)
             entries_to_remove.append('LWE coefs')
             
         elif entry == 'Wind dir':
-            dict_to_add['wind_dir'] = torch.tensor(np.array(fixed_inputs[entry])).float().to(device)
+            dict_to_add['wind_dir'] = torch.tensor(np.array(fixed_inputs[entry])).float().to(default_device)
             entries_to_remove.append('Wind dir')   
                     
         else:
-            fixed_inputs[entry] = torch.tensor(np.array(value)).float().to(device)
+            fixed_inputs[entry] = torch.tensor(np.array(value)).float().to(default_device)
             
     for entry in entries_to_remove: _ = fixed_inputs.pop(entry)
     
@@ -193,7 +193,7 @@ def get_fixed_inputs(batch, entries=[]):
 
 def run_model(model, batch, predicted_inputs, fixed_inputs={}):
     current_configs = batch['configs']
-    config_manager.Convert(current_configs, framework='pytorch', device=device)
+    config_manager.Convert(current_configs, framework='pytorch', device=default_device)
 
     model.config = current_configs
     model.Update(regrids=False, repupils=False)
@@ -206,11 +206,11 @@ def run_model(model, batch, predicted_inputs, fixed_inputs={}):
 
 
 def get_data(batch, fixed_entries):
-    x_0    = batch['NN input'].float().to(device)
-    PSF_0  = batch['PSF_0'].float().to(device)
+    x_0    = batch['NN input'].float().to(default_device)
+    PSF_0  = batch['PSF_0'].float().to(default_device)
     config = batch['configs']
     fixed_inputs = get_fixed_inputs(batch, fixed_entries)
-    config_manager.Convert(config, framework='pytorch', device=device)
+    config_manager.Convert(config, framework='pytorch', device=default_device)
     return x_0, fixed_inputs, PSF_0, config
 
 
@@ -333,12 +333,12 @@ wvls_R_all = np.array(wvls_R_all)
 #%% =============================== Monochromatic training ==================================
 A = 50
 
-pattern_pos = torch.tensor([[0,0,0,0,  0,-1,1,0,  1,0,0,-1]]).to(device).float() * A
-pattern_neg = torch.tensor([[0,0,0,0,  0,1,-1,0, -1,0,0, 1]]).to(device).float() * A
-pattern_1   = torch.tensor([[0,0,0,0,  0,-1,1,0, -1,0,0, 1]]).to(device).float() * A
-pattern_2   = torch.tensor([[0,0,0,0,  0,1,-1,0,  1,0,0,-1]]).to(device).float() * A
-pattern_3   = torch.tensor([[0,0,0,0,  1,0,0,-1,  0,1,-1,0]]).to(device).float() * A
-pattern_4   = torch.tensor([[0,0,0,0,  -1,0,0,1,  0,-1,1,0]]).to(device).float() * A
+pattern_pos = torch.tensor([[0,0,0,0,  0,-1,1,0,  1,0,0,-1]]).to(default_device).float() * A
+pattern_neg = torch.tensor([[0,0,0,0,  0,1,-1,0, -1,0,0, 1]]).to(default_device).float() * A
+pattern_1   = torch.tensor([[0,0,0,0,  0,-1,1,0, -1,0,0, 1]]).to(default_device).float() * A
+pattern_2   = torch.tensor([[0,0,0,0,  0,1,-1,0,  1,0,0,-1]]).to(default_device).float() * A
+pattern_3   = torch.tensor([[0,0,0,0,  1,0,0,-1,  0,1,-1,0]]).to(default_device).float() * A
+pattern_4   = torch.tensor([[0,0,0,0,  -1,0,0,1,  0,-1,1,0]]).to(default_device).float() * A
 
 gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
 img_punish    = lambda A, B: (A-B)[crop_all].flatten().abs().sum()
@@ -573,7 +573,7 @@ def predict_LWE(IDs):
     
     LWE_coefs_pred /= np.linalg.norm(LWE_coefs_pred, ord=2, axis=1)[:, np.newaxis]
     LWE_coefs_pred *= LWE_WFE_pred[:, np.newaxis]
-    return torch.tensor(LWE_coefs_pred, device=device).float()
+    return torch.tensor(LWE_coefs_pred, device=default_device).float()
 
 # coefs = predict_LWE(batch_data['IDs'])
 
@@ -637,7 +637,7 @@ with torch.no_grad():
             current_batch_size = len(batch_data['IDs'])
 
             for key, value in inputs.items():
-                inputs[key] = value.float().to(device).repeat(current_batch_size, 1).squeeze()
+                inputs[key] = value.float().to(default_device).repeat(current_batch_size, 1).squeeze()
             
             PSFs_2_val.append(run_model(toy, batch_data, inputs).cpu())
 
@@ -792,7 +792,7 @@ for entry in fitted_dict:
 #     device        = device)
 
 # toy = TipTorch(merged_config, None, device)
-toy = TipTorch(init_config, None, device)
+toy = TipTorch(init_config, None, default_device)
 
 new_dict = fitted_dict
 
@@ -932,7 +932,7 @@ def save_PSF_img_calib(id, wvl_render, save=True):
 
     coefs_fitted = fitted_df_norm.loc[batches_ids[id], 'LWE coefs']
     coefs_fitted = df_transforms_fitted['LWE coefs'].inverse(coefs_fitted)
-    coefs_fitted = torch.tensor(coefs_fitted, device=device).float().unsqueeze(0)
+    coefs_fitted = torch.tensor(coefs_fitted, device=default_device).float().unsqueeze(0)
 
     coefs_pred = predict_LWE([batches_ids[id]])
 

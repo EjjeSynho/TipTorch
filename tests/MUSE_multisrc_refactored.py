@@ -5,7 +5,7 @@
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from project_settings import device
+from project_settings import default_device
 
 import torch
 import torch.nn as nn
@@ -25,7 +25,7 @@ from tools.utils import mask_circle, rad2mas
 from managers.config_manager import MultipleTargetsInOneObservation
 from tools.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
-from data_processing.MUSE_data_utils import *
+from data_processing.MUSE.data_utils import *
 
 from tools.multisources import select_sources
 
@@ -37,14 +37,14 @@ raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.
 cube_path  = MUSE_DATA_FOLDER / "omega_cluster/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
-spectral_cubes, spectral_info, TELEMETRY_CACHE, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, TELEMETRY_CACHE, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=default_device, verbose=True)   
 cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
 
 λ_full,   λ_sparse = spectral_info['λ_full'],  spectral_info['λ_sparse']
 Δλ_full, Δλ_binned = spectral_info['Δλ_full'], spectral_info['Δλ_binned']
 
 #TODO: fix binned and sparse consistency
-flux_λ_norm = torch.tensor(Δλ_full / Δλ_binned, device=device, dtype=torch.float32)
+flux_λ_norm = torch.tensor(Δλ_full / Δλ_binned, device=default_device, dtype=torch.float32)
 cube_sparse *= flux_λ_norm[:, None, None]
 
 #%%
@@ -161,7 +161,7 @@ from PSF_models.TipTorch import TipTorch
 
 LO_map_size = 31
 
-pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
+pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=default_device )
 PSD_include = {
     'fitting':         True,
     'WFS noise':       True,
@@ -172,11 +172,11 @@ PSD_include = {
     'Moffat':          predict_Moffat
 }
 
-model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', default_device, oversampling=1)
 # model_single.apodizer = model_single.make_tensor(1.0)
 
 model.to_float()
-model.to(device)
+model.to(default_device)
 model.on_axis = False
 
 # PSF_1 = model()
@@ -238,7 +238,7 @@ individual_inputs.add('src_dirs_y', torch.tensor(sources_coords[:,1]), df_transf
 
 model_inputs = InputsManagersUnion({ 'shared': shared_inputs,'individual': individual_inputs })
 model_inputs.to_float()
-model_inputs.to(device)
+model_inputs.to(default_device)
 
 model_inputs.set_optimizable(['F_norm'], False)
 model_inputs.set_optimizable(['src_dirs_x'], False)
@@ -254,7 +254,7 @@ from deprecated.calibrator import Calibrator, Gnosis
 calibrator = Calibrator(
     inputs_manager=shared_inputs,
     predicted_values = ['r0', 'F', 'dn', 'Jx', 'Jy', 's_pow', 'amp', 'b', 'alpha'],
-    device=device,
+    device=default_device,
     calibrator_network = {
         'artichitecture': Gnosis,
         'inputs_size': len(selected_entries_input),
@@ -287,8 +287,8 @@ with torch.no_grad():
 # How much flux is cropped by assuming the finite size of the PSF box (PSF_predbif is assumed to be quasi-infinite)
 crop_ratio = (PSF_pred_big.amax(dim=(-2,-1)) / PSF_pred_small.amax(dim=(-2,-1))).squeeze()
 
-core_mask     = torch.tensor(mask_circle(PSF_size, flux_core_radius+1)[None,None,...]).to(device).float()
-core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...]).to(device).float()
+core_mask     = torch.tensor(mask_circle(PSF_size, flux_core_radius+1)[None,None,...]).to(default_device).float()
+core_mask_big = torch.tensor(mask_circle(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...]).to(default_device).float()
 
 # How much flux is spread out of the PSF core because PSF is not a single pixel but rather "a blob"
 core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
@@ -399,7 +399,7 @@ plot_radial_PSF_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='
 
 #%% ---------------------------
 model_sparse = add_ROIs(
-    torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device),
+    torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=default_device),
     [PSFs_fitted[i,...]*norm_factors[i] for i in range(N_src)],
     srcs_image_data["img_crops"],
     srcs_image_data["img_slices"]
@@ -428,7 +428,7 @@ PlotSourcesProfiles(cube_sparse, model_sparse, sources, radius=16, title='Predic
 
 #%%
 # merged_config = MultipleTargetsInOneObservation(config_file, N_batch := 16)
-merged_config = MultipleTargetsInOneObservation(config_file, N_src, device)
+merged_config = MultipleTargetsInOneObservation(config_file, N_src, default_device)
 
 # for key, value in sources_inputs.items():
 #     print(f'{key}: {value.shape}')
@@ -452,8 +452,8 @@ print(model_inputs)
 
 #%%
 x0 = model_inputs.stack()
-empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) #* 0 + 1
+empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=default_device)
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(default_device).view(1, N_wvl, 1, 1) #* 0 + 1
 
 #%%
 def func_fit(x_):
@@ -855,7 +855,7 @@ def simulate_tile(model_inputs, tile, proximity_table, sources, max_sources):
     )
 
     if len(source_indices) == 0:
-        return torch.zeros([N_wvl, tile['y_range']-tile['y_range'], tile['x_range']-tile['x_range']], device=device)
+        return torch.zeros([N_wvl, tile['y_range']-tile['y_range'], tile['x_range']-tile['x_range']], device=default_device)
 
     # Create model for this tile using the selected sources
     # model_tile = add_ROIs(
@@ -869,7 +869,7 @@ def simulate_tile(model_inputs, tile, proximity_table, sources, max_sources):
     PSF_1 = model(batch_inputs)
 
     model_tile = add_ROIs(
-        torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device),
+        torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=default_device),
         [PSF_1[i,...]*norm_factors[src_id] for i, src_id in enumerate(source_indices)],
         [local_coords [src_id] for src_id in source_indices],
         [global_coords[src_id] for src_id in source_indices]
@@ -883,7 +883,7 @@ with torch.no_grad():
     tiles_model = [simulate_tile(sources_inputs, tile, proximity_table, sources, max_sources=N_batch) for tile in tqdm(tiles)]
 
 # Concatenate tiles back into image based on their positions
-model_sparse_tiled = torch.zeros_like(cube_sparse, device=device)
+model_sparse_tiled = torch.zeros_like(cube_sparse, device=default_device)
 for tile, model_tile in zip(tiles, tiles_model):
     x_min, x_max = tile['x_range']
     y_min, y_max = tile['y_range']
@@ -937,7 +937,7 @@ for epoch in range(num_epochs):
         tile_data = cube_sparse[:, y_range[0]:y_range[1], x_range[0]:x_range[1]]
 
         # Prepare empty image for this tile
-        tile_empty = torch.zeros([N_wvl, y_range[1]-y_range[0], x_range[1]-x_range[0]], device=device)
+        tile_empty = torch.zeros([N_wvl, y_range[1]-y_range[0], x_range[1]-x_range[0]], device=default_device)
 
         # Forward pass - create model for this batch of sources
         PSFs_fit = []
@@ -962,7 +962,7 @@ for epoch in range(num_epochs):
             PSFs_fit.append(psf.squeeze() * flux_norm)
 
         # Add all PSFs to the tile
-        local_tile_coords = [local_coords[idx] - torch.tensor([x_range[0], y_range[0]], device=device) for idx in source_indices]
+        local_tile_coords = [local_coords[idx] - torch.tensor([x_range[0], y_range[0]], device=default_device) for idx in source_indices]
         model_tile = add_ROIs(tile_empty, PSFs_fit, local_tile_coords, [global_coords[idx] for idx in source_indices])
 
         # Calculate loss for this tile
@@ -1016,7 +1016,7 @@ plt.show()
 # Generate final model with optimized parameters
 with torch.no_grad():
     # Use the tiled approach for the final model to save memory
-    model_sparse_optimized = torch.zeros_like(cube_sparse, device=device)
+    model_sparse_optimized = torch.zeros_like(cube_sparse, device=default_device)
 
     for tile in tqdm(tiles, desc="Generating final model"):
         x_range, y_range = tile['x_range'], tile['y_range']
@@ -1027,7 +1027,7 @@ with torch.no_grad():
         if len(source_indices) == 0:
             continue
 
-        tile_empty = torch.zeros([N_wvl, y_range[1]-y_range[0], x_range[1]-x_range[0]], device=device)
+        tile_empty = torch.zeros([N_wvl, y_range[1]-y_range[0], x_range[1]-x_range[0]], device=default_device)
         PSFs_fit = []
 
         for src_idx in source_indices:
@@ -1044,7 +1044,7 @@ with torch.no_grad():
             PSFs_fit.append(psf.squeeze() * flux_norm)
 
         # Add all PSFs to the tile
-        local_tile_coords = [local_coords[idx] - torch.tensor([x_range[0], y_range[0]], device=device) for idx in source_indices]
+        local_tile_coords = [local_coords[idx] - torch.tensor([x_range[0], y_range[0]], device=default_device) for idx in source_indices]
         model_tile = add_ROIs(tile_empty, PSFs_fit, local_tile_coords, [global_coords[idx] for idx in source_indices])
 
         # Add to final model
@@ -1088,8 +1088,8 @@ x0 = torch.cat([
 ])
 x_size = shared_inputs.get_stacked_size()
 
-empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) * 0 + 1
+empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=default_device)
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(default_device).view(1, N_wvl, 1, 1) * 0 + 1
 
 #%%
 torch.cuda.empty_cache()
@@ -1188,7 +1188,7 @@ curve_inputs.add('norm_C', torch.tensor([params_norm[2]]), Uniform(a=2e4, b=4e4)
 curve_inputs.set_optimizable(['norm_A', 'norm_B', 'norm_C'], False)
 
 curve_inputs.to_float()
-curve_inputs.to(device)
+curve_inputs.to(default_device)
 
 x_0_curve = curve_inputs.stack()
 # print(x_0_curve.shape)
@@ -1257,7 +1257,7 @@ x2 = torch.cat([
     individual_inputs.stack().flatten(),
 ])
 
-empty_img = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
+empty_img = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=default_device)
 
 #%%
 def func_fit_curve(x):
@@ -1311,8 +1311,8 @@ PlotSourcesProfiles(cube_sparse, model_fit_curves, sources, radius=16, title='Fi
 
 #%%
 torch.cuda.empty_cache()
-model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ, device=device), x_curve_fit_dict, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
-norms_new_full_λ = curve_sample(torch.as_tensor(λ, device=device), x_curve_fit_dict, 'norm')
+model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ, device=default_device), x_curve_fit_dict, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
+norms_new_full_λ = curve_sample(torch.as_tensor(λ, device=default_device), x_curve_fit_dict, 'norm')
 
 λ_split_size = 100
 # Split λ array into batches
@@ -1322,10 +1322,10 @@ model_full = []
 
 for batch_id in tqdm(range(len(λ_batches))):
     batch_size = len(λ_batches[batch_id])
-    config_file['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
+    config_file['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=default_device).unsqueeze(0)
     model.Update(grids=True, pupils=True, tomography=True)
 
-    empty_img = torch.zeros([batch_size, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
+    empty_img = torch.zeros([batch_size, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=default_device)
     PSF_batch = []
 
     for i in range(N_src):
@@ -1342,13 +1342,13 @@ for batch_id in tqdm(range(len(λ_batches))):
         }
 
         dict_selected = x_fit_dict | dict_selected | dxdy_dict
-        dict_selected['bg'] = torch.zeros([1, batch_size], device=device)
+        dict_selected['bg'] = torch.zeros([1, batch_size], device=default_device)
 
         del dict_selected['LO_coefs']
 
         flux_norm = norms_new_full_λ[batch_ids]\
             * flux_corrections[i]\
-            * torch.as_tensor(src_spectra_full[i][batch_ids], device=device) \
+            * torch.as_tensor(src_spectra_full[i][batch_ids], device=default_device) \
             * flux_λ_norm
 
         PSF_batch.append( (model(dict_selected).squeeze() * flux_norm[:,None,None]).detach() )

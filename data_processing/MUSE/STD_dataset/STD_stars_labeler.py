@@ -8,9 +8,9 @@ from tkinter import messagebox, ttk, font
 import os
 from PIL import Image, ImageTk
 
-from MUSE_data_utils import MUSE_DATA_FOLDER
+from project_settings import project_settings
 
-STD_FOLDER = MUSE_DATA_FOLDER / 'standart_stars/'
+STD_FOLDER = project_settings["STD_data_folder"]
 
 #%%
 # from MUSE_STD_dataset_utils import update_label_IDs

@@ -17,7 +17,9 @@ from copy import deepcopy
 from functools import reduce
 import operator
 
-from managers.parameter_parser import ParameterParser, default_torch_type
+from managers.parameter_parser import ParameterParser
+
+
 
 """
 This module is used to manage the configuration files of TipTorch. Configuration files are used to set the up
@@ -275,8 +277,11 @@ class ConfigManager():
         return split_configs
 
 
-    def Convert(self, config, framework='pytorch', device=torch.device('cpu'), dtype=default_torch_type):
+    def Convert(self, config, framework='pytorch', device=torch.device('cpu'), dtype=None):
         """Converts all values in a config file to a specified framework"""
+        if dtype is None:
+            from project_settings import default_torch_type
+            dtype = default_torch_type
         
         if framework.lower() == 'pytorch' or framework.lower() == 'torch':
             def convert_value(x):

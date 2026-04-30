@@ -13,19 +13,21 @@ import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from project_settings import PROJECT_PATH, WEIGHTS_FOLDER, device, default_torch_type
+from project_settings import WEIGHTS_FOLDER, default_device, default_torch_type, project_settings
 
 import torch
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
 from pathlib import Path
 
 from tools.utils import mask_square
-from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
+from data_processing.MUSE.data_utils import GetSpectrum, LoadCachedDataMUSE
 
+MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
+
+device = default_device
 
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
@@ -218,33 +220,37 @@ PlotSourceSpectra(λ_full, src_spectra_full, λ_sparse=λ_sparse, src_spectra_sp
 from PSF_models.NFM_wrapper import PSFModelNFM
 from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
 
-#  The model config is also updated to simulate only sparse λs
-model_config['sources_science']['Wavelength'] = torch.tensor(λ_sparse, device=device, dtype=torch.float32) * 1e-9 #[m]
-model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']['PupilAngle'], device=device) # Assuming the pupil angle is 0 for simplicity, it can be updated if known
+def InitPSFModel():
+    # The model config is also updated to simulate only sparse λs
+    model_config['sources_science']['Wavelength'] = torch.tensor(λ_sparse, device=device, dtype=torch.float32) * 1e-9 #[m]
+    model_config['telescope']['PupilAngle']       = torch.tensor(model_config['telescope']['PupilAngle'], device=device)
 
-AddSourcesToModelConfig(model_config, sources)
+    AddSourcesToModelConfig(model_config, sources)
 
-PSF_model = PSFModelNFM(
-    model_config,
-    multiple_obs    = False,
-    LO_NCPAs        = True,
-    chrom_defocus   = False,
-    Moffat_absorber = False,
-    N_spline_nodes  = 5,
-    Z_mode_max      = 9,
-    device          = device
-)
+    PSF_model = PSFModelNFM(
+        model_config,
+        multiple_obs    = False,
+        LO_NCPAs        = True,
+        chrom_defocus   = False,
+        Moffat_absorber = False,
+        N_spline_nodes  = 5,
+        Z_mode_max      = 9,
+        device          = device
+    )
+    #  Get the initial guess for the PSF model parameters
+    calibrator = NFMCalibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth', device=device)
+    _ = calibrator.check_compatibility(PSF_model)
 
-#  Get the initial guess for the PSF model parameters
-calibrator = NFMCalibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth', device=device)
-_ = calibrator.check_compatibility(PSF_model)
+    calibrator.calibrate(reduced_telemetry, PSF_model)
 
-calibrator.calibrate(reduced_telemetry, PSF_model)
+    # Disable optimization of some variables
+    PSF_model.inputs_manager.set_optimizable('bg_ctrl', False)
+    PSF_model.inputs_manager.set_optimizable('wind_dir', False)
+    
+    return PSF_model
 
-# Disable optimization of some variables
-PSF_model.inputs_manager.set_optimizable('bg_ctrl', False)
-PSF_model.inputs_manager.set_optimizable('wind_dir', False)
 
+PSF_model = InitPSFModel()
 
 #%%
 @torch.no_grad()
@@ -304,7 +310,7 @@ def EvaluateCoreFluxFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size=511) -> 
 @torch.no_grad()
 def UpdateFluxNormalization(PSF_model) -> None:
     PSF_norm_factor_old = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
-    
+
     EvaluateCoreFluxFactor(PSF_model, N_core_pixels) # update the core flux normalization factor based on the current PSF morphology
     PSF_norm_factor_new = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
 
@@ -342,13 +348,14 @@ w_spectral = w_spectral.view(N_src, N_wvl, 1, 1) # reshape for broadcasting
 w_spectral *= 0
 w_spectral += 1.0 # for now, use uniform spectral weighting, but this can be easily changed to give more importance to certain wavelengths if needed
 
+
 def simulate_sparse(x):
     x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True) # update model inputs with the values from the stacked vector
     PSFs_  = PSF_model(x_dict) # simulate PSFs normalized to ΣPSF≈1 per wavelength, but not yet scaled to the actual sources spectra
     PSF_norm_factor = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_sim_normed)
     flux_normalization = x_dict['F_norm'].unsqueeze(-1) * PSF_norm_factor * src_spectra_sparse
     PSFs_ *= flux_normalization.view(N_src, N_wvl, 1, 1)
-    
+
     return add_ROIs( canvas*0.0, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
 
 
@@ -368,7 +375,7 @@ def loss_PSF(PSF_data, PSF_pred, weights_λ, weight_total, w_MSE, w_MAE):
 suppress_bump_flag = False
 suppress_LO_flag   = False
 
-# LO fitting weights        
+# LO fitting weights
 w_suppress_bump = 1e3 if suppress_bump_flag else 1
 w_suppress_LO   = 1e3 if suppress_LO_flag   else 1
 
@@ -462,13 +469,12 @@ _, src_diff_full, _ = ExtractSpectraFromCore(sources, diff_img_full, cube_sparse
 PlotSourceSpectra(λ_full, src_diff_full)
 
 #%% Plot multispectral cubes as RGB images
-from tools.plotting import plot_wavelength_rgb_log, plot_wavelength_rgb_linear
-from photutils.aperture import RectangularAperture
+from tools.plotting import PlotSpetralCubeInRGB
 
-# Mapping MUSE λs range to visible spectrum range for RGB conversion
+# Mapping MUSE spectral range to visible spectrum range for RGB conversion
 λ_vis = np.linspace(440, 750, diff_img_full.shape[0])
 
-diff_rgb = plot_wavelength_rgb_log(
+_ = PlotSpetralCubeInRGB(
     diff_img_full[ROI_plot],
     wavelengths=λ_vis,
     title="Difference",
@@ -476,7 +482,7 @@ diff_rgb = plot_wavelength_rgb_log(
     show=False
 )
 
-diff_rgb = plot_wavelength_rgb_log(
+_ = PlotSpetralCubeInRGB(
     cube_full[ROI_plot],
     wavelengths=λ_vis,
     title=f"Data",
@@ -484,7 +490,7 @@ diff_rgb = plot_wavelength_rgb_log(
     show=True
 )
 
-diff_rgb = plot_wavelength_rgb_log(
+_ = PlotSpetralCubeInRGB(
     model_full[ROI_plot],
     wavelengths=λ_vis,
     title=f"Model",

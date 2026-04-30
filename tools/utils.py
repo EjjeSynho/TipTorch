@@ -8,14 +8,15 @@ from astropy.modeling import models, fitting
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from project_settings import xp, use_cupy
+from project_settings import xp
 
 try:
     from graphviz import Digraph
 except:
+    import warnings
     class Digraph:
         def __init__(self, *args, **kwargs):
-            warnings.warn("Graphviz package is not installed. Graph visualization will not be available.")
+            warnings.warn("Graphviz package is not installed. Autograd. graph visualization will not be available.")
             pass   
         def node(self, *args, **kwargs): pass
         def edge(self, *args, **kwargs): pass
@@ -275,19 +276,6 @@ def GetROIaroundMax(image, win=200):
 
     return roi, ids, max_id
 
-
-'''
-def GetROIaroundMax(im, win=200):
-    im[np.isinf(im)] = np.nan
-    # determine the position of maximum intensity, so the image is centered around the brightest star
-    max_id = np.unravel_index(np.nanargmax(im), im.shape)
-    # make it more correct with the center of mass
-    max_crop = CroppedROI(im, max_id, 20)
-    CoG_id = np.array(center_of_mass(np.nan_to_num(im[max_crop]))).round().astype(np.int32)
-    max_id = (max_crop[0].start + CoG_id[0], max_crop[1].start + CoG_id[1])
-    ids = CroppedROI(im, max_id, win)
-    return im[ids], ids, max_id
-'''
 
 def GetJmag(N_ph):
     J_zero_point = 1.9e12

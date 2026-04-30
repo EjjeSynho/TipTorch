@@ -11,7 +11,7 @@ import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from project_settings import PROJECT_PATH, device, default_torch_type
+from project_settings import CACHE_PATH, default_device, default_torch_type
 
 import torch
 import numpy as np
@@ -23,7 +23,7 @@ from tqdm import tqdm
 from pathlib import Path
 
 from tools.utils import mask_circle, mask_square
-from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
+from data_processing.MUSE.data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
 from tools.normalizers import CreateTransformSequenceFromFile_legacy
 
 
@@ -117,7 +117,7 @@ cache_path = data_folder / "J0259/J0259-0901_all.pickle"
 
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
 # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
-spectral_cubes, spectral_info, _, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=device, verbose=True)   
+spectral_cubes, spectral_info, _, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=default_device, verbose=True)   
 # Extract full and binned spectral cubes. Sparse cube selects a set of 7 binned wavelengths ranges
 cube_full, cube_binned, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_binned"], spectral_cubes["mask"]
 
@@ -133,21 +133,21 @@ ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
 Δλ_sparse = Δλ_binned[..., ids_λ_sparse]
 
 #  The model config is also updated to simulate only sparse λs
-model_config['sources_science']['Wavelength'] = torch.tensor(λ_sparse, device=device, dtype=torch.float32) * 1e-9 #[m]
+model_config['sources_science']['Wavelength'] = torch.tensor(λ_sparse, device=default_device, dtype=torch.float32) * 1e-9 #[m]
 cube_sparse = cube_binned[ids_λ_sparse, ...] # Select the sparse subset ofspectral slices
 N_wvl = cube_sparse.shape[0]
 
 # Since spectral bins are the sum, they need to be re-normalized to averages to be compatible with the full spectrum
 # Δλ_sparse ≡ Δλ_binned
-flux_λ_norm = torch.tensor(Δλ_full / Δλ_sparse, device=device, dtype=torch.float32)
+flux_λ_norm = torch.tensor(Δλ_full / Δλ_sparse, device=default_device, dtype=torch.float32)
 cube_sparse *= flux_λ_norm[:, None, None]
 
-model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0, 1e4]], device=device)
-model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=device)
+model_config['atmosphere']['Cn2Heights'] = torch.tensor([[0.0, 1e4]], device=default_device)
+model_config['atmosphere']['Cn2Weights'] = torch.tensor([[0.99, 0.01]], device=default_device)
 model_config['atmosphere']['WindDirection'] = model_config['atmosphere']['WindDirection'][0,:2].unsqueeze(0)
 model_config['atmosphere']['WindSpeed']     = model_config['atmosphere']['WindSpeed'][0,:2].unsqueeze(0)
 
-model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']['PupilAngle'], device=device) # Rotate the pupil to align with the data (if needed)
+model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']['PupilAngle'], device=default_device) # Rotate the pupil to align with the data (if needed)
 model_config['NumberSources'] = 1
 
 #%%
@@ -201,7 +201,7 @@ from PSF_models.TipTorch import TipTorch
 LO_map_size = 31
 
 # Initialize the PSF model
-pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device, dtype=default_torch_type)
+pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=default_device, dtype=default_torch_type)
 PSD_include = {
     'fitting':         True,
     'WFS noise':       True,
@@ -211,9 +211,9 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          False
 }
-model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1, dtype=default_torch_type)
+model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', default_device, oversampling=1, dtype=default_torch_type)
 model.to_float()
-model.to(device)
+model.to(default_device)
 
 _ = model()
 
@@ -224,7 +224,7 @@ from tools.static_phase import PixelmapBasis
 
 LO_basis = PixelmapBasis(model, ignore_pupil=False)
 
-df_transforms_fitted = CreateTransformSequenceFromFile_legacy(PROJECT_PATH / 'data/reduced_telemetry/MUSE/legacy/muse_df_fitted_transforms.pickle')
+df_transforms_fitted = CreateTransformSequenceFromFile_legacy(CACHE_PATH / 'data/reduced_telemetry/MUSE/legacy/muse_df_fitted_transforms.pickle')
 
 shared_inputs = InputsManager()
 
@@ -259,7 +259,7 @@ shared_inputs.delete('dx')
 shared_inputs.delete('dy')
 
 shared_inputs.to_float()
-shared_inputs.to(device)
+shared_inputs.to(default_device)
 
 
 individual_inputs = InputsManager()
@@ -270,7 +270,7 @@ individual_inputs.add('F_norm', torch.tensor([[1.0,]]*N_src), df_transforms_fitt
 individual_inputs.set_optimizable('F_norm', True)
 
 individual_inputs.to_float()
-individual_inputs.to(device)
+individual_inputs.to(default_device)
 
 
 print(shared_inputs)
@@ -298,8 +298,8 @@ def compute_flux_normalization_factor(x_dict, PSF_size, flux_core_radius):
         # the crop ratio is given by the ratio of the max pixel values in the small and quasi-infinite PSF images
         crop_ratio = (PSF_pred_big.amax(dim=(-2,-1)) / PSF_pred_small.amax(dim=(-2,-1))).squeeze()
 
-        core_mask     = torch.tensor(mask_square(PSF_size, flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
-        core_mask_big = torch.tensor(mask_square(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=device)
+        core_mask     = torch.tensor(mask_square(PSF_size, flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=default_device)
+        core_mask_big = torch.tensor(mask_square(PSF_pred_big.shape[-2], flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=default_device)
 
         # How much flux is spread out of the PSF core because PSF is not a single pixel but rather "a blob"
         core_flux_ratio = torch.squeeze((PSF_pred_big*core_mask_big).sum(dim=(-2,-1), keepdim=True) / PSF_pred_big.sum(dim=(-2,-1), keepdim=True))
@@ -313,7 +313,7 @@ _, _, PSF_norm_factor, _, _, _ = compute_flux_normalization_factor(predicted_mod
 # Extend to the number of current sources
 PSF_norm_factor = PSF_norm_factor.repeat([N_src, 1])
 
-shared_inputs.add('PSF_norm_factor', PSF_norm_factor.to(device), Identity(), False)
+shared_inputs.add('PSF_norm_factor', PSF_norm_factor.to(default_device), Identity(), False)
 
 
 #%%
@@ -323,8 +323,8 @@ x0 = x_stack()
 
 x_size = shared_inputs.get_stacked_size()
 
-empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
-wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1) + 1 #TODO: fix it
+empty_img   = torch.zeros([N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=default_device)
+wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(default_device).view(1, N_wvl, 1, 1) + 1 #TODO: fix it
 # wvl_weights = wvl_weights * 0 + 1
 #TODO: maybe, derive weigting factor from the averae spectrum of the soucres in the field or even per-source?
 
@@ -437,7 +437,7 @@ plt.show()
 #%% Interpolate PSF model parameters over the full wavelengths range assuming they change smooth
 from deprecated.curves import QuadraticModel
 
-λ_sparse_torch = torch.tensor(λ_sparse, device=device, dtype=torch.float32)
+λ_sparse_torch = torch.tensor(λ_sparse, device=default_device, dtype=torch.float32)
 
 F_model    = QuadraticModel(λ_sparse_torch)
 Jx_model   = QuadraticModel(λ_sparse_torch)
@@ -475,7 +475,7 @@ curve_inputs.add('norm_C', torch.tensor([params_norm[2]]), Uniform(a=2e4, b=4e4)
 curve_inputs.set_optimizable(['norm_A', 'norm_B', 'norm_C'], False)
 
 curve_inputs.to_float()
-curve_inputs.to(device)
+curve_inputs.to(default_device)
 
 
 curve_params_ = curve_inputs.unstack(curve_inputs.stack())
@@ -579,8 +579,8 @@ from tools.multisources import add_ROIs_separately
 print('Extending the prediction over the whole wavelengths range...')
 torch.cuda.empty_cache()
 
-model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
-norms_new_full_λ = curve_sample(torch.as_tensor(λ_full, device=device), x_curve_fit_dict, 'norm')
+model_inputs_full_λ = {p: curve_sample(torch.as_tensor(λ_full, device=default_device), x_curve_fit_dict, p).unsqueeze(0) for p in ['Jx', 'Jy', 'F']}
+norms_new_full_λ = curve_sample(torch.as_tensor(λ_full, device=default_device), x_curve_fit_dict, 'norm')
 
 # Split λ array into batches
 λ_split_size = 100
@@ -594,10 +594,10 @@ wvl_temp = model_config['sources_science']['Wavelength'].clone()
 with torch.no_grad():
     for batch_id in tqdm(range(len(λ_batches))):
         batch_size = len(λ_batches[batch_id])
-        model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
+        model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=default_device).unsqueeze(0)
         model.Update(grids=True, pupils=True, tomography=True)
 
-        empty_img = torch.zeros([batch_size, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
+        empty_img = torch.zeros([batch_size, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=default_device)
         PSF_batch = []
 
         for i in range(N_src):
@@ -614,13 +614,13 @@ with torch.no_grad():
             }
 
             dict_selected = x_fit_dict | dict_selected | dxdy_dict
-            dict_selected['bg'] = torch.zeros([1, batch_size], device=device)
+            dict_selected['bg'] = torch.zeros([1, batch_size], device=default_device)
 
             del dict_selected['LO_coefs']
 
             flux_norm = norms_new_full_λ[batch_ids]\
                 * flux_corrections[i]\
-                * torch.as_tensor(src_spectra_full[i][batch_ids], device=device)
+                * torch.as_tensor(src_spectra_full[i][batch_ids], device=default_device)
 
             PSF_batch.append( (model(dict_selected).squeeze() * flux_norm[:,None,None]).detach() )
 
@@ -628,7 +628,7 @@ with torch.no_grad():
         model_full_split.append( add_ROIs_separately( empty_img*0.0, PSF_batch, srcs_image_data["img_crops"], srcs_image_data["img_slices"] ).cpu().numpy() )
 
 
-model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=device).unsqueeze(0)
+model_config['sources_science']['Wavelength'] = torch.as_tensor(λ_batches[batch_id]*1e-9, device=default_device).unsqueeze(0)
 model.Update(grids=True, pupils=True, tomography=True)
 
 model_full = np.vstack(model_full)
@@ -740,13 +740,13 @@ plt.xlabel('Wavelength, [nm]')
 plt.show()
     
 #%% Plot multispectral cubes as RGB images
-from tools.plotting import plot_wavelength_rgb_log, plot_wavelength_rgb_linear
+from tools.plotting import PlotSpetralCubeInRGB_log, plot_wavelength_rgb_linear
 from photutils.aperture import RectangularAperture
 
 # Mapping MUSE λs range to visible spectrum range for RGB conversion
 λ_vis = np.linspace(440, 750, diff_img_full.shape[0])
 
-diff_rgb = plot_wavelength_rgb_log(
+diff_rgb = PlotSpetralCubeInRGB_log(
     diff_img_full[ROI_plot],
     wavelengths=λ_vis,
     title="Difference",
@@ -760,14 +760,14 @@ diff_rgb = plot_wavelength_rgb_log(
 # plt.legend()
 # plt.show()
 
-diff_rgb = plot_wavelength_rgb_log(
+diff_rgb = PlotSpetralCubeInRGB_log(
     cube_full[ROI_plot],
     wavelengths=λ_vis,
     title=f"Data",
     min_val=500, max_val=200000, show=True
 )
 
-diff_rgb = plot_wavelength_rgb_log(
+diff_rgb = PlotSpetralCubeInRGB_log(
     model_full[ROI_plot],
     wavelengths=λ_vis,
     title=f"Model",

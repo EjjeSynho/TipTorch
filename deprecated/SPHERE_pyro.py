@@ -24,10 +24,10 @@ except Exception:
 
 
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
-from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarCache
+from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache
 from PSF_models.IRDIS_wrapper import PSFModelIRDIS
 
-from project_settings import device
+from project_settings import default_device
 
 pyro.set_rng_seed(0)
 pyro.enable_validation(False)
@@ -51,7 +51,7 @@ PSF_data, data_sample, configs = LoadSTDStarCache(
     normalize=True,
     subtract_background=True,
     ensure_odd_pixels=True,
-    device=device
+    device=default_device
 )
 
 PSF_0    = PSF_data[0]['PSF (mean)']
@@ -79,7 +79,7 @@ PSF_model = PSFModelIRDIS(
     use_Zernike=use_Zernike,
     N_modes=9,
     LO_map_size=31,
-    device=device
+    device=default_device
 )
 
 PSF_model.inputs_manager.to_float()
@@ -160,7 +160,7 @@ def loglike_torch(theta: torch.Tensor) -> torch.Tensor:
     pred_valid = PSF_batch.reshape(B, -1)[:, mask_bool.view(-1)]  # (B, N_valid)
     sigma = torch.exp(log_sigma).unsqueeze(1).clamp_min(1e-6)     # (B, 1)
 
-    resid = target_valid.to(device) - pred_valid                  # (B, N_valid)
+    resid = target_valid.to(default_device) - pred_valid                  # (B, N_valid)
     chi2 = (resid / sigma).pow(2).sum(dim=1)                      # (B,)
 
     log_norm = N_valid_pix * (math.log(2.0 * math.pi) + 2.0 * log_sigma)  # (B,)
@@ -174,8 +174,8 @@ def loglike_torch(theta: torch.Tensor) -> torch.Tensor:
 # -------------------------
 init_scale = 1.0
 prior = dist.Normal(
-    torch.tensor(0.0, device=device, dtype=torch_dtype),
-    torch.tensor(init_scale, device=device, dtype=torch_dtype)
+    torch.tensor(0.0, device=default_device, dtype=torch_dtype),
+    torch.tensor(init_scale, device=default_device, dtype=torch_dtype)
 ).expand([ndim]).to_event(1)
 
 # -------------------------
@@ -196,20 +196,20 @@ pyro_model()
 
 #%%
 vals_dict = {
-    'r0': torch.tensor([0.0290], device=device),
-    'F': torch.tensor([[1.5756, 1.5762]], device=device),
-    'dx': torch.tensor([[-0.4894, -0.5194]], device=device),
-    'dy': torch.tensor([[0.1962, 0.1548]], device=device),
-    'bg': torch.tensor([[-4.9721e-05, -5.2300e-05]], device=device),
-    'dn': torch.tensor([0.0010], device=device),
-    'Jx': torch.tensor([16.7010], device=device),
-    'Jy': torch.tensor([15.9819], device=device),
-    'Jxy': torch.tensor([0.], device=device),
-    'wind_dir': torch.tensor([[-404.8192,    8.0000]], device=device),
+    'r0': torch.tensor([0.0290], device=default_device),
+    'F': torch.tensor([[1.5756, 1.5762]], device=default_device),
+    'dx': torch.tensor([[-0.4894, -0.5194]], device=default_device),
+    'dy': torch.tensor([[0.1962, 0.1548]], device=default_device),
+    'bg': torch.tensor([[-4.9721e-05, -5.2300e-05]], device=default_device),
+    'dn': torch.tensor([0.0010], device=default_device),
+    'Jx': torch.tensor([16.7010], device=default_device),
+    'Jy': torch.tensor([15.9819], device=default_device),
+    'Jxy': torch.tensor([0.], device=default_device),
+    'wind_dir': torch.tensor([[-404.8192,    8.0000]], device=default_device),
     'LWE_coefs': torch.tensor([[
         -4.9881, -10.5176,   7.6777,   5.7780,  27.6069,   3.5581,
          8.6913,   3.8902, -22.8046,  -1.0048,  13.8456, -25.7376
-    ]], device=device)
+    ]], device=default_device)
 }
 
 for name, val in vals_dict.items():
@@ -265,7 +265,7 @@ mcmc.run()
 # Convert samples to theta-space and summarize
 # -------------------------
 samples = mcmc.get_samples()           # dict: {"z": (S, ndim)}
-z_samps = samples["z"].to(device)
+z_samps = samples["z"].to(default_device)
 theta_samps = z_to_theta(z_samps).detach().cpu().numpy()  # (S, ndim)
 
 print("Posterior samples shape:", theta_samps.shape)
@@ -290,7 +290,7 @@ else:
 # -------------------------
 K = 8
 idx = np.random.choice(theta_samps.shape[0], size=K, replace=False)
-theta_k = torch.from_numpy(theta_samps[idx]).to(device=device, dtype=torch_dtype)
+theta_k = torch.from_numpy(theta_samps[idx]).to(device=default_device, dtype=torch_dtype)
 
 # Pad to fixed BATCH_SIZE for a single batched call
 params_latent_k = theta_k[:, :-1]

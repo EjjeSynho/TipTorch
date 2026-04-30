@@ -30,7 +30,7 @@ from torch.utils.data import Dataset
 from managers.config_manager import MultipleTargetsInDifferentObservations
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
-STD_FOLDER       = MUSE_DATA_FOLDER / 'standart_stars/'
+STD_FOLDER       = Path(project_settings["STD_data_folder"])
 DATASET_CACHE    = STD_FOLDER / 'dataset_cache'
 BEST_CALIB_PATH  = WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth'
 DEBUG            = True # TODO: make it an argument
@@ -174,7 +174,7 @@ train_loader = DataLoader(
     shuffle=True,
     num_workers=0,
     # pin_memory=True if torch.cuda.is_available() else False,
-    collate_fn=lambda batch: collate_batch(batch, device=device),
+    collate_fn=lambda batch: collate_batch(batch, device=default_device),
     drop_last=False
 )
 
@@ -184,7 +184,7 @@ val_loader = DataLoader(
     shuffle=False,
     num_workers=0,
     # pin_memory=True if torch.cuda.is_available() else False,
-    collate_fn=lambda batch: collate_batch(batch, device=device),
+    collate_fn=lambda batch: collate_batch(batch, device=default_device),
     drop_last=False
 )
 
@@ -197,7 +197,7 @@ logger.info(f"Batch size: {BATCH_SIZE}")
 #%%
 random_idxs = np.random.randint(0, len(dataset), size=BATCH_SIZE)
 test_batch = tuple([dataset[random_idx] for random_idx in random_idxs])
-PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs = collate_batch(test_batch, device=device)
+PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs = collate_batch(test_batch, device=default_device)
 
 #%% ==============================================================================
 # Initialize the PSF model
@@ -216,7 +216,7 @@ with torch.no_grad():
         Moffat_absorber = False,
         N_spline_nodes  = 5,
         Z_mode_max      = 9,
-        device          = device
+        device          = default_device
     )
 
 # Initialization batch is no longer needed and can hold a large GPU allocation.
@@ -290,7 +290,7 @@ calibrator = SmallCalibratorNet(
     n_outputs=N_outputs,
     hidden_dim=32,
     dropout_rate=0.3
-).to(device)
+).to(default_device)
 
 default_lr = 1e-2
 
@@ -320,13 +320,13 @@ def load_checkpoint(calibrator, optimizer, path):
     """ Load a training checkpoint and restore model state."""
     global dx, dy
     if os.path.exists(path):
-        checkpoint = torch.load(path, map_location=device)
+        checkpoint = torch.load(path, map_location=default_device)
         calibrator.load_state_dict(checkpoint['calibrator_state_dict'])
         
         # Load astrometry parameters if they were saved
         if optimize_astrometry and 'dx' in checkpoint and 'dy' in checkpoint:
-            dx = checkpoint['dx'].to(device)
-            dy = checkpoint['dy'].to(device)
+            dx = checkpoint['dx'].to(default_device)
+            dy = checkpoint['dy'].to(default_device)
             logger.info("✅ Astrometry parameters (dx/dy) loaded from checkpoint")
             
         elif dx is None or dy is None:
@@ -460,7 +460,7 @@ if should_run_pretraining:
     logger.info(f"Saved best pre-training weights to {pretrain_weights_path}")
 else:
     # Load best pre-training weights if continue_training flag is set
-    best_pretrain_state = torch.load(pretrain_weights_path, map_location=device)
+    best_pretrain_state = torch.load(pretrain_weights_path, map_location=default_device)
     calibrator.load_state_dict(best_pretrain_state)
     logger.info(f"🔄 Loaded pre-training weights from {pretrain_weights_path}")
 
@@ -488,8 +488,8 @@ def initialize_astrometry():
         dx_data = np.zeros((len(dataset), len(dataset.fitted_vals[0]['dx_ctrl'])), dtype=np.float32)
         dy_data = np.zeros((len(dataset), len(dataset.fitted_vals[0]['dy_ctrl'])), dtype=np.float32)
     
-    dx = torch.tensor(dx_data, device=device, dtype=torch.float32, requires_grad=optimize_astrometry)
-    dy = torch.tensor(dy_data, device=device, dtype=torch.float32, requires_grad=optimize_astrometry)
+    dx = torch.tensor(dx_data, device=default_device, dtype=torch.float32, requires_grad=optimize_astrometry)
+    dy = torch.tensor(dy_data, device=default_device, dtype=torch.float32, requires_grad=optimize_astrometry)
 
 
 if args.continue_training:
@@ -501,14 +501,14 @@ if args.continue_training:
         
 # Initialize NCPAs with fitted values if available, otherwise with median values from the fitting dataset (same for all samples).
 LO_dataset = fill_from_fitted('LO_coefs')
-phase_bump = torch.tensor(LO_dataset[:, 0], device=device, dtype=torch.float32)  # Extract phase bump values separately
+phase_bump = torch.tensor(LO_dataset[:, 0], device=default_device, dtype=torch.float32)  # Extract phase bump values separately
 LO_dataset = LO_dataset[:, 1:] # Remove phase bump from the dataset, leaving only Zernike coefficients
 
 if predict_LO_NCPAs:
     logger.info(f"ℹ️ Prediction of modes Z3-Z{PSF_model.Z_mode_max} is enabled")
 else:
     logger.info(f"ℹ️ Initializing NCPAs with median values from fitting (same for all samples)")
-    NCPAs_median = torch.tensor(np.median(LO_dataset, axis=0)[None,...], device=device, dtype=torch.float32)
+    NCPAs_median = torch.tensor(np.median(LO_dataset, axis=0)[None,...], device=default_device, dtype=torch.float32)
 
 
 # %%
@@ -551,7 +551,7 @@ def run_model(x_dict_NN, config, idx, λ_ids):
     x_dict['LO_coefs'] = torch.hstack( (phase_bump[idx].unsqueeze(-1), x_dict['LO_coefs']) ) if predict_LO_NCPAs \
                     else torch.hstack( (phase_bump[idx].unsqueeze(-1), NCPAs_median.repeat(len(idx),1))
     )
-    current_wavelengths = λ_full[λ_ids].to(device=device)
+    current_wavelengths = λ_full[λ_ids].to(device=default_device)
     
     config['sources_science']['Wavelength'] = current_wavelengths.view(1,-1) # [1, N_wvl_selected]
     PSF_model.model.config = config
@@ -566,10 +566,10 @@ def run_model(x_dict_NN, config, idx, λ_ids):
 λ_weighting = False # no weighting of PSFs at different wavelengths, as it may bias the fit towards the redder wavelengths with higher SNR
 
 if λ_weighting:
-    wvl_weights = torch.linspace(0.5, 1.0, N_wvl_total).to(device).view(1, N_wvl_total, 1, 1)
+    wvl_weights = torch.linspace(0.5, 1.0, N_wvl_total).to(default_device).view(1, N_wvl_total, 1, 1)
     wvl_weights = N_wvl_total / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 else:
-    wvl_weights = torch.ones((1, N_wvl_total, 1, 1), device=device)
+    wvl_weights = torch.ones((1, N_wvl_total, 1, 1), device=default_device)
 
 # Enforce positive values for modal coefficients to mitigate sign ambiguity and improve convergence
 force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
@@ -1050,7 +1050,7 @@ def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num
     
     # Create mask for tuned parameters
     tuned_slices = [calibrator_outputs_transformer.slices[param] for param in tuned_params]
-    tuned_idx_mask = torch.zeros(N_outputs, dtype=torch.bool, device=device)
+    tuned_idx_mask = torch.zeros(N_outputs, dtype=torch.bool, device=default_device)
     for slc in tuned_slices:
         tuned_idx_mask[slc] = True
     tuned_idx_mask = tuned_idx_mask.unsqueeze(0)  # [1, N_outputs] for broadcasting
@@ -1101,7 +1101,7 @@ def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num
                 anchor_loss = (x_pred_tuned[:, mask_fixed] - x_pred_ref[:, mask_fixed]).pow(2).mean() * 100.0
                 anchor_loss.backward() # Compute gradients for anchor loss AND FREE GRAPH
             else:
-                 anchor_loss = torch.tensor(0.0, device=device)
+                 anchor_loss = torch.tensor(0.0, device=default_device)
 
             # Free memory from initial pass
             del x_pred_tuned, x_pred_ref, x_pred_combined
@@ -1122,7 +1122,7 @@ def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num
                  x_pred_combined_loop = torch.where(tuned_idx_mask, x_pred_tuned_loop, x_pred_ref_loop)
                  x_dict_pred_loop = calibrator_outputs_transformer.unstack(x_pred_combined_loop)
                  
-                 PSF_model.SetWavelengths(λ_full[λ_id_set].to(device))
+                 PSF_model.SetWavelengths(λ_full[λ_id_set].to(default_device))
                  PSF_pred = run_model(x_dict_pred_loop, batch_config, idxs, λ_id_set)
                  
                  loss = loss_fn(PSF_pred, PSF_data[:, λ_id_set, ...], x_dict_pred_loop)
@@ -1166,7 +1166,7 @@ def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num
                 
                 batch_val_loss = 0
                 for λ_id_set in λ_id_sets:
-                     PSF_model.SetWavelengths(λ_full[λ_id_set].to(device))
+                     PSF_model.SetWavelengths(λ_full[λ_id_set].to(default_device))
                      PSF_pred = run_model(x_dict_pred, batch_config, idxs, λ_id_set)
                      batch_val_loss += loss_fn(PSF_pred, PSF_data[:, λ_id_set, ...], x_dict_pred)
                 
@@ -1364,7 +1364,7 @@ def debug_dummy_optimization(num_iters=100, criterion, initial_guess=None):
     
     # Use single wavelength set for faster debugging
     current_λ_set_id = 0
-    PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=device))
+    PSF_model.SetWavelengths(λ_sets[current_λ_set_id].to(device=default_device))
     λ_id_set = λ_id_sets[current_λ_set_id]
     
     logger.info(f"Using wavelength set {current_λ_set_id}: {len(λ_id_set)} wavelengths")
@@ -1372,12 +1372,12 @@ def debug_dummy_optimization(num_iters=100, criterion, initial_guess=None):
     if initial_guess is not None:
         # Start with calibrator prediction and add noise
         with torch.no_grad():
-            dummy_vec = initial_guess.detach().clone().to(device=device)
+            dummy_vec = initial_guess.detach().clone().to(device=default_device)
             dummy_vec.requires_grad_(True)
         logger.info("Using initial guess")
     else:
         # Random initialization
-        dummy_vec = torch.randn((PSF_cubes.shape[0], N_outputs), device=device, requires_grad=True)
+        dummy_vec = torch.randn((PSF_cubes.shape[0], N_outputs), device=default_device, requires_grad=True)
         logger.info("Using random initialization")
     
     # Setup optimizer and scheduler

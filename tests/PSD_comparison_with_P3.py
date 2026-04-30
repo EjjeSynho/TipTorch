@@ -14,9 +14,9 @@ from tools.utils import pdims
 
 sys.path.append('..')
 
-from project_settings import DATA_FOLDER, PROJECT_PATH, DATA_FOLDER
+from project_settings import DATA_FOLDER, CACHE_PATH, DATA_FOLDER
 
-TIPTOP_PATH = PROJECT_PATH / '../astro-tiptop'
+TIPTOP_PATH = CACHE_PATH / '../astro-tiptop'
 
 # import TIPTOP dependencies
 for module in ['MASTSEL', 'P3', 'SEEING', 'SYMAO', 'TIPTOP']:
@@ -34,7 +34,7 @@ with open(path_ini, 'r') as f:
     ini_content = f.read()
 
 # Replace the calibration path to the one understandable by P3
-modified_content = ini_content.replace('$PROJECT_PATH$/data/calibrations/', '/aoSystem/data/')
+modified_content = ini_content.replace('$CALIBRATIONS_PATH$', '/aoSystem/data/')
 temp_dir = os.path.dirname(path_ini)
 temp_fd, temp_path_ini = tempfile.mkstemp(suffix='.ini', dir=temp_dir)
 
@@ -106,20 +106,20 @@ freq_t_P3 = cp.stack(freq_t, axis=2).get()
 #%%
 from PSF_models.TipTorch import TipTorch
 from managers.config_manager import ConfigManager
-from project_settings import device, DATA_FOLDER, default_torch_type
+from project_settings import default_device, DATA_FOLDER, default_torch_type
 import torch
 
 #%%
 config_manager = ConfigManager()
 config_dict = config_manager.Load(path_ini)
-config_dict = config_manager.Convert(config_dict, framework='pytorch', device=device, dtype=default_torch_type)
+config_dict = config_manager.Convert(config_dict, framework='pytorch', device=default_device, dtype=default_torch_type)
 
 # Initialize TipTorch model
 tiptorch_model = TipTorch(
     AO_config=config_dict,
     AO_type='LTAO',
     norm_regime=None,
-    device=device,
+    device=default_device,
     oversampling=1
 )
 

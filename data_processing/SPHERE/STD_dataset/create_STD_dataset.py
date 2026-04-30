@@ -6,7 +6,7 @@ import sys
 sys.path.append('..')
 
 import pickle
-from data_processing.SPHERE_STD_dataset_utils import STD_FOLDER
+from data_processing.SPHERE.STD_dataset.STD_dataset_utils import STD_FOLDER
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt

@@ -9,7 +9,7 @@ from tools.static_phase import LWEBasis, PixelmapBasis, ZernikeBasis
 from managers.input_manager import InputsManager
 from tools.normalizers import Uniform
 from tools.utils import rad2mas
-from project_settings import device
+from project_settings import default_device
 
 from managers.config_manager import MultipleTargetsInDifferentObservations
 
@@ -24,7 +24,7 @@ class PSFModelIRDIS:
         use_Zernike     = True,
         N_modes         = 9,
         LO_map_size     = 31,
-        device          = device
+        device          = default_device
     ):
         
         self.multiple_obs    = multiple_obs # Do we simulate several sources within multiple observations or not

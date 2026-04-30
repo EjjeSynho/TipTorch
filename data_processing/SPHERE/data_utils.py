@@ -2,8 +2,8 @@
 import sys, os
 sys.path.insert(0, '..')
 
-from project_settings import device, xp, use_cupy, default_torch_type
-from project_settings import PROJECT_PATH
+from project_settings import default_device, xp, use_cupy, default_torch_type
+from project_settings import CACHE_PATH
 
 import re
 import json
@@ -29,9 +29,6 @@ try:
 except:
     pass
 
-# with open(PROJECT_PATH / Path("project_config.json"), "r") as f:
-#     project_settings = json.load(f)
-
 from project_settings import project_settings, DATA_FOLDER
 
 SPHERE_DATA_FOLDER = Path(project_settings["SPHERE_data_folder"])
@@ -48,7 +45,7 @@ h = 'HIERARCH ESO '
 
 #%%
 
-def InitIRDISConfig(data_sample, device=device, convert_config=True):
+def InitIRDISConfig(data_sample, device=default_device, convert_config=True):
     
     def _fill_config(sample, config):
         entries_mapping_table = [

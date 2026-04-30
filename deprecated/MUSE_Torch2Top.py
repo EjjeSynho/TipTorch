@@ -12,7 +12,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.plotting import plot_radial_PSF_profiles, plot_radial_PSF_profiles_relative, SR, draw_PSF_stack, rad2mas, mask_circle
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
-from project_settings import MUSE_DATA_FOLDER, device
+from project_settings import MUSE_DATA_FOLDER, default_device
 from torchmin import minimize
 from tools.normalizers import CreateTransformSequenceFromFile
 from managers.input_manager import InputsTransformer
@@ -70,7 +70,7 @@ from PSF_models.TipTorch import TipTorch
 from tools.utils import SausageFeature
 from tools.utils import PupilVLT
 
-pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
+pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=default_device )
 PSD_include = {
     'fitting':         True,
     'WFS noise':       True,
@@ -80,7 +80,7 @@ PSD_include = {
     'diff. refract':   True,
     'Moffat':          True
 }
-PSF_model = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+PSF_model = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', default_device, oversampling=1)
 PSF_model.to_float()
 
 sausage_absorber = SausageFeature(PSF_model)
@@ -117,7 +117,7 @@ else:
 
 
 #%%
-NN_inp = torch.as_tensor(muse_df_norm.loc[sample_id].to_numpy(), device=device, dtype=torch.float32).unsqueeze(0)
+NN_inp = torch.as_tensor(muse_df_norm.loc[sample_id].to_numpy(), device=default_device, dtype=torch.float32).unsqueeze(0)
 
 #%%
 transforms = {
@@ -178,7 +178,7 @@ class Gnosis(nn.Module):
     
 # Initialize the network, loss function and optimizer
 net = Gnosis(NN_inp.shape[-1], normalizer.get_stacked_size(), 200, 0.1)
-net.to(device)
+net.to(default_device)
 net.float()
 
 net.load_state_dict(torch.load('../data/weights/gnosis_MUSE_v3_7wvl_yes_Mof_no_ssg.dict', map_location=torch.device('cpu')))
@@ -212,7 +212,7 @@ from copy import deepcopy
 config_list = deepcopy(config_file)
 
 config_manager = ConfigManager()
-config_manager.Convert(config_list, framework='list', device=device)
+config_manager.Convert(config_list, framework='list', device=default_device)
 
 del config_list['NumberSources']
 del config_list['sensor_science']['Saturation']

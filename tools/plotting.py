@@ -78,15 +78,10 @@ def render_spectral_PSF(spectral_cube, λs):
         plt.title(f'λ = {λs[id]:.2f} nm')
 
 
-def plot_wavelength_rgb_linear(image,
-                               wavelengths=None,
-                               min_val=0.0,
-                               max_val=1.0,
-                               title=None,
-                               show=True):
+def PlotSpetralCubeInRGB(image, wavelengths, min_val=1e-6, max_val=1e2, scale='log', title=None, show=True):
     """
-    Map a multi-wavelength image into RGB by linearly scaling.
-    
+    Map a multi-wavelength image into RGB.
+
     Parameters
     ----------
     image : array-like, shape (N_waves, H, W) or torch.Tensor
@@ -94,18 +89,22 @@ def plot_wavelength_rgb_linear(image,
     wavelengths : sequence of length N_waves
         Physical wavelengths corresponding to each image slice.
     min_val : float
-        Minimum intensity (below this is clipped to 0).
+        Minimum intensity for clipping. Default suits log scale (1e-6).
+        For linear scale, use 0.0.
     max_val : float
-        Maximum intensity (above this is clipped to 1).
+        Maximum intensity for clipping. Default suits log scale (1e2).
+        For linear scale, use 1.0.
+    scale : {'log', 'linear'}
+        Normalisation strategy. 'log' applies log10 before clipping (default).
     title : str, optional
         Plot title.
     show : bool
         Whether to call plt.show() or not.
-    
+
     Returns
     -------
     image_RGB : ndarray, shape (H, W, 3)
-        The raw RGB array (before normalization).
+        The raw (pre-normalisation) RGB array.
     """
     if wavelengths is None:
         raise ValueError("wavelengths must be provided")
@@ -114,82 +113,42 @@ def plot_wavelength_rgb_linear(image,
     if image_t.ndim != 3:
         raise ValueError(f"Expected image with shape (N_waves, H, W), got {tuple(image_t.shape)}")
 
-    wavelengths = np.asarray(wavelengths)
-    rgb_weights_np = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths], dtype=np.float32).T
+    wavelengths    = np.asarray(wavelengths)
+    RGB_weights_np = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths], dtype=np.float32).T
 
     use_cuda = False
     if torch.cuda.is_available():
         n_waves, h, w = image_t.shape
         elem_size = torch.finfo(torch.float32).bits // 8
-        # image + output + temporary margin
         est_bytes = (n_waves * h * w + 3 * h * w) * elem_size
         free_mem, _ = torch.cuda.mem_get_info()
         use_cuda = free_mem > est_bytes * 3
 
     device = torch.device("cuda") if use_cuda else image_t.device
-    image_work = image_t.to(device=device, dtype=torch.float32, copy=False)
-    rgb_weights = torch.as_tensor(rgb_weights_np, device=device, dtype=torch.float32)
+    image_work  = image_t.to(device=device, dtype=torch.float32, copy=False)
+    rgb_weights = torch.as_tensor(RGB_weights_np, device=device, dtype=torch.float32)
 
     # Memory-efficient channel mixing: (3, N_waves) x (N_waves, H, W) -> (3, H, W)
     image_RGB_t = torch.einsum("cn,nhw->chw", rgb_weights, image_work).abs()
-    image_RGB = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
-    
-    torch.cuda.empty_cache() if use_cuda else None
-    
-    # linear clipping + normalization
-    image_clipped = np.clip(image_RGB, min_val, max_val)
-    norm_image    = (image_clipped - min_val) / (max_val - min_val)
-    
-    # display
-    plt.figure()
-    plt.imshow(norm_image, origin="lower")
-    if title:
-        plt.title(title)
-    plt.axis('off')
-    
-    if show:
-        plt.show()
-    
-    return image_RGB
-
-
-def plot_wavelength_rgb_log(image, wavelengths, min_val=1e-6, max_val=1e2, title=None, show=True):
-    image_t = image if torch.is_tensor(image) else torch.as_tensor(image)
-    if image_t.ndim != 3:
-        raise ValueError(f"Expected image with shape (N_waves, H, W), got {tuple(image_t.shape)}")
-
-    wavelengths = np.asarray(wavelengths)
-    rgb_weights_np = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths], dtype=np.float32).T
-
-    use_cuda = False
-    if torch.cuda.is_available():
-        n_waves, h, w = image_t.shape
-        elem_size = torch.finfo(torch.float32).bits // 8
-        est_bytes = (n_waves * h * w + 3 * h * w) * elem_size
-        free_mem, _ = torch.cuda.mem_get_info()
-        use_cuda = free_mem > est_bytes * 3
-
-    device = torch.device("cuda") if use_cuda else image_t.device
-    image_work = image_t.to(device=device, dtype=torch.float32, copy=False)
-    rgb_weights = torch.as_tensor(rgb_weights_np, device=device, dtype=torch.float32)
-
-    image_RGB_t = torch.einsum("cn,nhw->chw", rgb_weights, image_work).abs()
-    image_RGB = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
+    image_RGB   = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
 
     torch.cuda.empty_cache() if use_cuda else None
 
-    log_min, log_max = np.log10(min_val), np.log10(max_val)
-    image_log = np.log10(image_RGB + 1e-10)
+    if scale == 'log':
+        lo, hi = np.log10(min_val), np.log10(max_val)
+        image_scaled = np.log10(image_RGB + 1e-10)
+    else:
+        lo, hi = min_val, max_val
+        image_scaled = image_RGB
 
-    image_clipped = np.clip(image_log, log_min, log_max)
-    norm_image = (image_clipped - log_min) / (log_max - log_min)
+    norm_image = (np.clip(image_scaled, lo, hi) - lo) / (hi - lo)
 
     plt.figure()
     plt.imshow(norm_image, origin="lower")
     if title:
         plt.title(title)
     plt.axis('off')
-    
+
     if show:
         plt.show()
 

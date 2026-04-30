@@ -14,9 +14,9 @@ import matplotlib as mpl
 from torchmin import minimize
 from matplotlib.colors import LogNorm
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
-from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, LoadSTDStarCache
+from data_processing.MUSE.STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache
 from PSF_models.NFM_wrapper import PSFModelNFM
-from project_settings import device
+from project_settings import default_device
 
 
 #%%
@@ -90,7 +90,7 @@ PSF_0, norms, bgs, configs = LoadSTDStarCache(
     subtract_background = True,
     wvl_ids             = wvl_ids,
     ensure_odd_pixels   = True,
-    device              = device
+    device              = default_device
 )
 
 #%%
@@ -102,7 +102,7 @@ PSF_model = PSFModelNFM(
     Moffat_absorber = False, 
     Z_mode_max      = 9,
     N_spline_nodes  = 5,
-    device          = device
+    device          = default_device
 )
 
 func = lambda x_: PSF_model( PSF_model.inputs_manager.unstack(x_, include_all=False, update=True) )
@@ -162,7 +162,7 @@ MAP_regularization = False # Enforce priors on parameters to mitigate degeneraci
 
 if λ_weighting:
     # wvl_weights = torch.linspace(1.0, 0.5, N_wvl).to(device).view(1, N_wvl, 1, 1)
-    wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(device).view(1, N_wvl, 1, 1)
+    wvl_weights = torch.linspace(0.5, 1.0, N_wvl).to(default_device).view(1, N_wvl, 1, 1)
     wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 else:
     wvl_weights = 1.0
@@ -475,7 +475,7 @@ plt.show()
 
 
 #%%
-from data_processing.MUSE_STD_dataset_utils import GetROIaroundMax, GetSpectrum
+from data_processing.MUSE.STD_dataset.STD_dataset_utils import GetROIaroundMax, GetSpectrum
 
 diff_im = (PSF_1-PSF_0).abs()[0,...].squeeze().cpu().numpy()
 
@@ -498,7 +498,7 @@ if PSF_model.use_splines:
     x_ctrl = PSF_model.inputs_manager['F_x_ctrl'].squeeze()
     λ_ctrl = x_ctrl * (λ_max - λ_min) + λ_min
         
-    A = PSF_model.evaluate_splines('F', torch.linspace(0, 1, N_HD_bins).to(device)).squeeze(-1)
+    A = PSF_model.evaluate_splines('F', torch.linspace(0, 1, N_HD_bins).to(default_device)).squeeze(-1)
     C = PSF_model.evaluate_splines('F', x_ctrl).squeeze(-1)
     
     plt.plot(np.linspace(λ_min, λ_max, N_HD_bins), A.squeeze().detach().cpu().numpy())
@@ -535,7 +535,7 @@ for j in range(N_src):
 F_copy = PSF_model.F.detach().clone()
 
 #%%
-PSF_model.inputs_manager['F'] = torch.tensor([[1.0]*N_wvl], device=device)
+PSF_model.inputs_manager['F'] = torch.tensor([[1.0]*N_wvl], device=default_device)
 
 x_tmp = PSF_model.inputs_manager.stack()
 

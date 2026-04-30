@@ -10,10 +10,10 @@ import torch
 from torch.utils.data import DataLoader, Subset, random_split
 from sklearn.model_selection import train_test_split, KFold
 
-from data_processing.MUSE_STD_dataset_utils import *
+from data_processing.MUSE.STD_dataset.STD_dataset_utils import *
 
 # Define device
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+default_device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
 N_wvl_total = 30
@@ -132,7 +132,7 @@ def create_fold_data_loaders(cv_split, batch_size=16, num_workers=0):
         shuffle=True,
         num_workers=num_workers,
         # pin_memory=True if torch.cuda.is_available() else False,
-        collate_fn=lambda batch: collate_batch(batch, device=device),
+        collate_fn=lambda batch: collate_batch(batch, device=default_device),
         drop_last=True
     )
     
@@ -142,7 +142,7 @@ def create_fold_data_loaders(cv_split, batch_size=16, num_workers=0):
         shuffle=False,
         num_workers=num_workers,
         # pin_memory=True if torch.cuda.is_available() else False,
-        collate_fn=lambda batch: collate_batch(batch, device=device),
+        collate_fn=lambda batch: collate_batch(batch, device=default_device),
         drop_last=False
     )
     
@@ -155,7 +155,7 @@ test_loader = DataLoader(
     shuffle=False,
     num_workers=0,
     # pin_memory=True if torch.cuda.is_available() else False,
-    collate_fn=lambda batch: collate_batch(batch, device=device),
+    collate_fn=lambda batch: collate_batch(batch, device=default_device),
     drop_last=False
 )
 
@@ -272,9 +272,9 @@ for batch in train_loader_test:
 print("Initializing learnable parameters...")
 
 # Create parameter tensors for each sample in the dataset
-dx = torch.zeros((len(NFM_dataset), N_wvl_total), dtype=torch.float32, requires_grad=True, device=device)
-dy = torch.zeros((len(NFM_dataset), N_wvl_total), dtype=torch.float32, requires_grad=True, device=device)
-b  = torch.zeros((len(NFM_dataset), N_wvl_total), dtype=torch.float32, requires_grad=True, device=device)
+dx = torch.zeros((len(NFM_dataset), N_wvl_total), dtype=torch.float32, requires_grad=True, device=default_device)
+dy = torch.zeros((len(NFM_dataset), N_wvl_total), dtype=torch.float32, requires_grad=True, device=default_device)
+b  = torch.zeros((len(NFM_dataset), N_wvl_total), dtype=torch.float32, requires_grad=True, device=default_device)
 
 print(f"Parameter shapes: dx={dx.shape}, dy={dy.shape}, b={b.shape}")
 
@@ -374,5 +374,5 @@ PSF_model = PSFModelNFM(
     chrom_defocus   = False,
     use_splines     = True,
     Moffat_absorber = False,
-    device          = device
+    device          = default_device
 )

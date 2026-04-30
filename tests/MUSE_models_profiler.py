@@ -6,12 +6,12 @@ import sys
 sys.path.insert(0, '..')
 
 import torch
-from project_settings import device
+from project_settings import default_device
 from PSF_models.TipTorch import TipTorch
 
 
 with torch.no_grad():
-    pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=device )
+    pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=default_device )
 
     PSD_include = {
         'fitting':         True,
@@ -23,7 +23,7 @@ with torch.no_grad():
         'Moffat':          True
     }
     
-    tiptorch_half = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', device, oversampling=1)
+    tiptorch_half = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', default_device, oversampling=1)
     tiptorch_half.to_float()
     
 #%%

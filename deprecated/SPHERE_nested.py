@@ -12,10 +12,10 @@ import matplotlib.pyplot as plt
 import ultranest
 
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
-from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarCache
+from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache
 from PSF_models.IRDIS_wrapper import PSFModelIRDIS
 
-from project_settings import device
+from project_settings import default_device
 
 BATCH_SIZE = 128 # Adjust based on GPU memory
 
@@ -31,7 +31,7 @@ PSF_data, data_sample, configs = LoadSTDStarCache(
     normalize=True,
     subtract_background=True,
     ensure_odd_pixels=True,
-    device=device
+    device=default_device
 )
 
 PSF_0    = PSF_data[0]['PSF (mean)']
@@ -59,7 +59,7 @@ PSF_model = PSFModelIRDIS(
     use_Zernike=use_Zernike,
     N_modes=9,
     LO_map_size=31,
-    device=device
+    device=default_device
 )
 
 _ = PSF_model()
@@ -151,8 +151,8 @@ def loglike(theta):
         current_batch_size = theta_chunk.shape[0]
                 
         # Convert to Tensor
-        params_latent = torch.from_numpy(theta_chunk[:, :-1]).to(device, dtype=torch.float32)
-        log_sigma     = torch.from_numpy(theta_chunk[:, -1] ).to(device, dtype=torch.float32)
+        params_latent = torch.from_numpy(theta_chunk[:, :-1]).to(default_device, dtype=torch.float32)
+        log_sigma     = torch.from_numpy(theta_chunk[:, -1] ).to(default_device, dtype=torch.float32)
         
         # 2. Pad to fixed BATCH_SIZE if necessary
         # This prevents GPU memory reallocation by ensuring input size is always BATCH_SIZE
@@ -178,7 +178,7 @@ def loglike(theta):
             pred_valid = PSF_batch.reshape(current_batch_size, -1)[:, mask_bool.view(-1)]
             
             sigma = torch.exp(log_sigma).unsqueeze(1) # (B, 1)
-            resid = target_valid.to(device) - pred_valid # Ensure target is strictly on device
+            resid = target_valid.to(default_device) - pred_valid # Ensure target is strictly on device
             
             # Chi2 Calculation
             chi2 = (resid / sigma).pow(2).sum(dim=1)
@@ -198,20 +198,20 @@ def loglike(theta):
 #%%
 # Manually assign known values to the manager for initialization or fixing
 vals_dict = {
-    'r0': torch.tensor([0.0290], device=device),
-    'F': torch.tensor([[1.5756, 1.5762]], device=device),
-    'dx': torch.tensor([[-0.4894, -0.5194]], device=device),
-    'dy': torch.tensor([[0.1962, 0.1548]], device=device),
-    'bg': torch.tensor([[-4.9721e-05, -5.2300e-05]], device=device),
-    'dn': torch.tensor([0.0010], device=device),
-    'Jx': torch.tensor([16.7010], device=device),
-    'Jy': torch.tensor([15.9819], device=device),
-    'Jxy': torch.tensor([0.], device=device),
-    'wind_dir': torch.tensor([[-404.8192,    8.0000]], device=device),
+    'r0': torch.tensor([0.0290], device=default_device),
+    'F': torch.tensor([[1.5756, 1.5762]], device=default_device),
+    'dx': torch.tensor([[-0.4894, -0.5194]], device=default_device),
+    'dy': torch.tensor([[0.1962, 0.1548]], device=default_device),
+    'bg': torch.tensor([[-4.9721e-05, -5.2300e-05]], device=default_device),
+    'dn': torch.tensor([0.0010], device=default_device),
+    'Jx': torch.tensor([16.7010], device=default_device),
+    'Jy': torch.tensor([15.9819], device=default_device),
+    'Jxy': torch.tensor([0.], device=default_device),
+    'wind_dir': torch.tensor([[-404.8192,    8.0000]], device=default_device),
     'LWE_coefs': torch.tensor([[
         -4.9881, -10.5176,   7.6777,   5.7780,  27.6069,   3.5581,
          8.6913,   3.8902, -22.8046,  -1.0048,  13.8456, -25.7376
-    ]], device=device)
+    ]], device=default_device)
 }
 
 for name, val in vals_dict.items():
@@ -325,10 +325,10 @@ best_theta = result['weighted_samples']['points'][idx_max]
 
 #%%
 best_dict = PSF_model.inputs_manager.unstack(
-    torch.from_numpy(best_theta[:-1]).to(device, dtype=torch.float32).unsqueeze(0),
+    torch.from_numpy(best_theta[:-1]).to(default_device, dtype=torch.float32).unsqueeze(0),
     include_all=True
 )
-x_out = torch.from_numpy(best_theta[:-1]).to(device, dtype=torch.float32).unsqueeze(0).repeat(BATCH_SIZE, 1)
+x_out = torch.from_numpy(best_theta[:-1]).to(default_device, dtype=torch.float32).unsqueeze(0).repeat(BATCH_SIZE, 1)
 PSF_2 = compute_PSF_batch(x_out)[0, ...].unsqueeze(0)  # (1, H, W)
 
 #%%

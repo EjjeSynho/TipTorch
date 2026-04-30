@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from tqdm import tqdm
 from collections import defaultdict
-from project_settings import SPHERE_DATA_FOLDER, device
+from project_settings import SPHERE_DATA_FOLDER, default_device
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 
@@ -312,7 +312,7 @@ transform = transforms.Compose([
 
 #%%
 # Initialize the model, loss function, and optimizer.
-model = SimpleCNN(num_classes, input_size=input_size).to(device)
+model = SimpleCNN(num_classes, input_size=input_size).to(default_device)
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(model.parameters(), lr=learning_rate)
 
@@ -328,8 +328,8 @@ for epoch in range(num_epochs):
         if images.ndim == 3:
             images = images.unsqueeze(1)
     
-        images = images.to(device)
-        labels = labels.float().to(device)
+        images = images.to(default_device)
+        labels = labels.float().to(default_device)
         
         optimizer.zero_grad()
         outputs = model(images)
@@ -355,8 +355,8 @@ with torch.no_grad():
         # Add a channel dimension if not already present. Images should be of shape (B, 1, H, W)
         if images.ndim == 3:
             images = images.unsqueeze(1)
-        images = images.to(device)
-        labels = labels.float().to(device)
+        images = images.to(default_device)
+        labels = labels.float().to(default_device)
         
         # Forward pass
         outputs = model(images)

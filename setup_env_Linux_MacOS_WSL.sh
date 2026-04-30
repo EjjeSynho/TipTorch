@@ -174,6 +174,7 @@ cat >> "$ENV_YML" <<EOF
   - tabulate
   - tqdm
   - gdown
+  - pooch
   - astropy
   - astroquery
   - photutils

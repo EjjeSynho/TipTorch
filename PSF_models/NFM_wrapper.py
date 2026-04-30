@@ -16,7 +16,7 @@ from managers.input_manager  import InputsManager, InputsManagersUnion
 from tools.normalizers import DataTransform, Uniform, Uniform0_1, SoftmaxInv, Identity, SafeLog10
 
 from warnings import warn
-from project_settings import device
+from project_settings import default_device
 import gc
 
 
@@ -30,7 +30,7 @@ class PSFModelNFM:
         Moffat_absorber = False,
         Z_mode_max      = 9,
         N_spline_nodes  = 5,
-        device          = device
+        device          = default_device
     ):
         self.Z_mode_max  = Z_mode_max
         self.LO_N_params = None

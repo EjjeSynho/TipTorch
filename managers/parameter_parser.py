@@ -1,4 +1,4 @@
-from project_settings import PROJECT_PATH, default_torch_type
+from project_settings import CALIBRATIONS_PATH
 
 import os.path as ospath
 import warnings
@@ -14,8 +14,8 @@ class ParameterParser():
     # Check for the existance of the file in the directory. If it is not found, initializes top-down search for it
     def find_file(self, path_input):       
         path_check = str(path_input)
-        if path_check.startswith('$PROJECT_PATH$'):
-            path_check = str(PROJECT_PATH / path_check.replace('$PROJECT_PATH$/', ''))
+        if path_check.startswith('$CALIBRATIONS_PATH$'):
+            path_check = str(CALIBRATIONS_PATH / path_check.replace('$CALIBRATIONS_PATH$/', ''))
                     
         if os.path.isfile(path_check):
             return path_check
@@ -25,7 +25,7 @@ class ParameterParser():
             warnings.warn(f'Warning: file "{file}" is not found! Initializing the search...')
 
             # Walking top-down from the root
-            for root, _, files in os.walk(PROJECT_PATH):
+            for root, _, files in os.walk(CALIBRATIONS_PATH):
                 if file in files:
                     return os.path.join(root, file)
                 

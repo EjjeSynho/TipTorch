@@ -11,8 +11,8 @@ from tqdm import tqdm
 from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
 from tools.normalizers import Uniform0_1
 
-from data_processing.MUSE_STD_dataset_utils import STD_FOLDER, CUBES_CACHE
-from data_processing.MUSE_data_utils import wvl_bins
+from data_processing.MUSE.STD_dataset.STD_dataset_utils import STD_FOLDER, CUBES_CACHE
+from data_processing.MUSE.data_utils import wvl_bins
 
 # Select every 2nd wvl
 wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1)
@@ -39,9 +39,6 @@ else:
 
 
 #%%
-# experiment = '~old/fitted_λw_0,5_1,0'
-# experiment = '~old/fitted_λw_1,0_0,5' #-> seems to be better
-# experiment = '~old/fitted_λw_all_1,0'
 experiment = 'fitted'
 
 fitted_samples_folder = STD_FOLDER / experiment

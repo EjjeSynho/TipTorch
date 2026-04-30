@@ -29,12 +29,12 @@ import numpy as np
 from torch.autograd.functional import hessian
 from torchmin import minimize
 
-from data_processing.SPHERE_STD_dataset_utils import LoadSTDStarCache, erode_mask, STD_FOLDER
+from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache, erode_mask, STD_FOLDER
 from PSF_models.IRDIS_wrapper import PSFModelIRDIS
 from managers.config_manager import ConfigManager
 from tools.utils import SR, GradientLoss, mask_circle, FWHM_fitter
 
-from project_settings import device
+from project_settings import default_device
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -44,20 +44,20 @@ SPHERE_FITTING_FOLDER = STD_FOLDER / 'fitted'
 # Create directory if it doesn't exist
 SPHERE_FITTING_FOLDER.mkdir(parents=True, exist_ok=True)
 
-default_device = device
+default_device = default_device
 start_id, end_id = -1, -1
 
 if len(sys.argv) > 1:
     param1 = sys.argv[1]
 else:
-    device = default_device
+    default_device = default_device
     print("No device specified, using default device.")
 
 if len(sys.argv) > 1 and (param1.startswith("cuda:") or param1.startswith("cpu")):
-    device = torch.device(device_choice:=param1)
+    default_device = torch.device(device_choice:=param1)
     print(f"Using device: {device_choice}")
 else:
-    device = default_device
+    default_device = default_device
     print("No device specified, using default device.")
 
 if len(sys.argv) > 2:
@@ -91,7 +91,7 @@ else:
 good_ids = good_ids[good_ids.index(start_id):good_ids.index(end_id)+1]
 
 print(
-    f"Device:   {device}\n"
+    f"Device:   {default_device}\n"
     f"Start ID: {start_id}\n"
     f"End ID:   {end_id}"
 )
@@ -136,7 +136,7 @@ def load_and_fit_sample(id):
             normalize=True,
             subtract_background=True,
             ensure_odd_pixels=True,
-            device=device
+            device=default_device
         )
 
         PSF_0 = PSF_data[0]['PSF (mean)']
@@ -151,7 +151,7 @@ def load_and_fit_sample(id):
         # Handle central hole if present
         if psf_df.loc[id]['Central hole'] == True:
             circ_mask = 1-mask_circle(PSF_0.shape[-1], 3, centered=True)
-            PSF_mask *= torch.tensor(circ_mask[None, None, ...]).to(device)
+            PSF_mask *= torch.tensor(circ_mask[None, None, ...]).to(default_device)
 
     except Exception as e:
         print(f"Failed to load sample {id}: {e}")
@@ -167,7 +167,7 @@ def load_and_fit_sample(id):
             use_Zernike=True,
             N_modes=9,
             LO_map_size=31,
-            device=device
+            device=default_device
         )
 
         func = lambda x_: PSF_model(PSF_model.inputs_manager.unstack(x_))
@@ -187,7 +187,7 @@ def load_and_fit_sample(id):
                 [-1,1,1,-1,  0,0,0,0,  0,0,0,0], # pattern_piston_horiz
                 [1,-1,-1,1,  0,0,0,0,  0,0,0,0]  # pattern_piston_vert
             ]
-            patterns = [torch.tensor([p]).to(device).float() * A for p in patterns]
+            patterns = [torch.tensor([p]).to(default_device).float() * A for p in patterns]
             
             gauss_penalty = lambda A, x, x_0, sigma: A * torch.exp(-torch.sum((x - x_0) ** 2) / (2 * sigma ** 2))
             Gauss_err = lambda pattern, coefs: (pattern * gauss_penalty(5, coefs, pattern, A/2)).flatten().abs().sum()

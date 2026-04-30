@@ -7,7 +7,7 @@ sys.path.append('..')
 
 import os
 import pickle
-from data_processing.SPHERE_STD_dataset_utils import STD_FOLDER
+from data_processing.SPHERE.STD_dataset.STD_dataset_utils import STD_FOLDER
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
