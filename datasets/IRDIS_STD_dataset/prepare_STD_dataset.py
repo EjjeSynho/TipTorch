@@ -9,7 +9,7 @@ import torch
 import numpy as np
 from STD_dataset_utils import SPHERE_preprocess, SamplesByIds
 from tiptorch.managers.config_manager import GetSPHEREonsky
-from project_settings import SPHERE_DATA_FOLDER
+from tiptorch._config import SPHERE_DATA_FOLDER
 import pandas as pd
 from tqdm import tqdm
 

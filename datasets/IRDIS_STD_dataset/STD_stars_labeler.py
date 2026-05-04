@@ -6,7 +6,7 @@ from tkinter import messagebox, ttk, font
 import os
 from PIL import Image, ImageTk
 
-from project_settings import SPHERE_DATA_FOLDER
+from tiptorch._config import SPHERE_DATA_FOLDER
 
 class ImageLabeller:
     def __init__(self, master, image_paths, labels_file):

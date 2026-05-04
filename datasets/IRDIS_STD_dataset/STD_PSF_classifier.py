@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 from tqdm import tqdm
 from collections import defaultdict
-from project_settings import SPHERE_DATA_FOLDER, default_device
+from tiptorch._config import SPHERE_DATA_FOLDER, default_device
 from torch.utils.data import DataLoader, Dataset
 from PIL import Image
 

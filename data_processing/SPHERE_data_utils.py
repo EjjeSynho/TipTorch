@@ -1,8 +1,8 @@
 #%%
 import sys, os
 
-from project_settings import default_device, xp, use_cupy, default_torch_type
-from project_settings import CACHE_PATH
+from tiptorch._config import default_device, xp, use_cupy, default_torch_type
+from tiptorch._config import CACHE_PATH
 
 import re
 import json
@@ -28,7 +28,7 @@ try:
 except:
     pass
 
-from project_settings import project_settings, DATA_FOLDER
+from tiptorch._config import project_settings, DATA_FOLDER
 
 SPHERE_DATA_FOLDER = Path(project_settings["SPHERE_data_folder"])
 

@@ -22,7 +22,7 @@ from astropy.io import fits
 from astropy.nddata import Cutout2D
 from pathlib import Path
 
-from project_settings import project_settings
+from tiptorch._config import project_settings
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
@@ -221,7 +221,7 @@ except Exception as e:
 
 #%% ========================= Load MUSE data to detect and match sources =========================
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
-from project_settings import default_device
+from tiptorch._config import default_device
 
 raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.fits.fz"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"

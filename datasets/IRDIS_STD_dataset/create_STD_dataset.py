@@ -10,7 +10,7 @@ from data_processing.SPHERE.STD_dataset.STD_dataset_utils import STD_FOLDER
 import numpy as np
 import seaborn as sns
 import matplotlib.pyplot as plt
-from project_settings import DATA_FOLDER
+from tiptorch._config import DATA_FOLDER
 
 
 #%% Initialize data sample

@@ -12,7 +12,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from project_settings import DATA_FOLDER
+from tiptorch._config import DATA_FOLDER
 
 #%%
 fitted_samples_folder = STD_FOLDER / 'fitted/'

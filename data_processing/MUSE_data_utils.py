@@ -1,7 +1,7 @@
 #%%
 import sys, os
 
-from project_settings import default_device, xp, use_cupy, default_torch_type, TELEMETRY_CACHE, DATA_FOLDER, project_settings
+from tiptorch._config import default_device, xp, use_cupy, default_torch_type, TELEMETRY_CACHE, DATA_FOLDER, project_settings
 
 import pickle
 import os

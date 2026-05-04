@@ -11,12 +11,12 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.plotting import plot_radial_PSF_profiles, plot_radial_PSF_profiles_relative, SR, draw_PSF_stack, rad2mas, mask_circle
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
-from project_settings import MUSE_DATA_FOLDER, default_device
+from tiptorch._config import MUSE_DATA_FOLDER, default_device
 from torchmin import minimize
 from tiptorch.tools.normalizers import CreateTransformSequenceFromFile
 from tiptorch.managers.input_manager import InputsTransformer
 from tqdm import tqdm
-from project_settings import MUSE_DATA_FOLDER
+from tiptorch._config import MUSE_DATA_FOLDER
 from machine_learning.MUSE_onsky_df import *
 
 # Load auxiliary data

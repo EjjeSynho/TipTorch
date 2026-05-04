@@ -21,7 +21,7 @@ from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.svm import SVR
 from sklearn.metrics import mean_squared_error
-from project_settings import DATA_FOLDER
+from tiptorch._config import DATA_FOLDER
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import STD_FOLDER
 import pandas as pd
 import seaborn as sns

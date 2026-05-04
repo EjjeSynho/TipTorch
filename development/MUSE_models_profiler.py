@@ -5,7 +5,7 @@
 import sys
 
 import torch
-from project_settings import default_device
+from tiptorch._config import default_device
 from tiptorch.PSF_models.TipTorch import TipTorch
 
 

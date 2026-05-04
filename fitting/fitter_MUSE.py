@@ -35,7 +35,7 @@ from tiptorch.managers.config_manager import ConfigManager
 from tiptorch.tools.utils import SR, GradientLoss, FWHM_fitter
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
-# from project_settings import device
+# from tiptorch._config import device
 import warnings
 
 MUSE_FITTING_FOLDER = STD_FOLDER / 'fitted/'

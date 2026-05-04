@@ -28,7 +28,7 @@ from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, mask_circle
 from tiptorch.managers.config_manager import ConfigManager
 from tiptorch.tools.normalizers import CreateTransformSequenceFromFile, InputsTransformer
 from tqdm import tqdm
-from project_settings import MUSE_DATA_FOLDER, default_device
+from tiptorch._config import MUSE_DATA_FOLDER, default_device
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 from astropy.wcs import WCS

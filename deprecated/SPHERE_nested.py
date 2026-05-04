@@ -14,7 +14,7 @@ from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache
 from tiptorch.PSF_models.IRDIS_wrapper import PSFModelIRDIS
 
-from project_settings import default_device
+from tiptorch._config import default_device
 
 BATCH_SIZE = 128 # Adjust based on GPU memory
 

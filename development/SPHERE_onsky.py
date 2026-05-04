@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache, STD_FOLDER
-from project_settings import default_device
+from tiptorch._config import default_device
 from tiptorch.tools.utils import rad2mas, GradientLoss
 from torchmin import minimize
 

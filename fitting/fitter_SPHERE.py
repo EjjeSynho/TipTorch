@@ -35,7 +35,7 @@ from tiptorch.PSF_models.IRDIS_wrapper import PSFModelIRDIS
 from tiptorch.managers.config_manager import ConfigManager
 from tiptorch.tools.utils import SR, GradientLoss, mask_circle, FWHM_fitter
 
-from project_settings import default_device
+from tiptorch._config import default_device
 import warnings
 
 warnings.filterwarnings("ignore")

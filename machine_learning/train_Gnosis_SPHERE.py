@@ -17,7 +17,7 @@ from tools.plotting import plot_radial_PSF_profiles, LWE_basis, cropper, draw_PS
 from tiptorch.PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import SPHERE_preprocess, SamplesByIds
 from tiptorch.managers.config_manager import GetSPHEREonsky, ConfigManager
-from project_settings import SPHERE_DATASET_FOLDER, SPHERE_DATA_FOLDER, default_device
+from tiptorch._config import SPHERE_DATASET_FOLDER, SPHERE_DATA_FOLDER, default_device
 from tiptorch.tools.normalizers import CreateTransformSequenceFromFile
 from copy import copy, deepcopy
 from tiptorch.managers.input_manager import InputsTransformer

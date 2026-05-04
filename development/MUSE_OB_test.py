@@ -13,7 +13,7 @@ import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from project_settings import WEIGHTS_FOLDER, default_device, default_torch_type, project_settings
+from tiptorch._config import WEIGHTS_FOLDER, default_device, default_torch_type, project_settings
 
 import torch
 import numpy as np

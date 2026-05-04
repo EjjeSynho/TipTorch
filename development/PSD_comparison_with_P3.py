@@ -14,7 +14,7 @@ from tiptorch.tools.utils import pdims
 
 sys.path.append('..')
 
-from project_settings import DATA_FOLDER, CACHE_PATH, DATA_FOLDER
+from tiptorch._config import DATA_FOLDER, CACHE_PATH, DATA_FOLDER
 
 TIPTOP_PATH = CACHE_PATH / '../astro-tiptop'
 
@@ -106,7 +106,7 @@ freq_t_P3 = cp.stack(freq_t, axis=2).get()
 #%%
 from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.managers.config_manager import ConfigManager
-from project_settings import default_device, DATA_FOLDER, default_torch_type
+from tiptorch._config import default_device, DATA_FOLDER, default_torch_type
 import torch
 
 #%%

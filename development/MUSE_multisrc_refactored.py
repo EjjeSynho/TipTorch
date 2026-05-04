@@ -5,7 +5,7 @@
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from project_settings import default_device
+from tiptorch._config import default_device
 
 import torch
 import torch.nn as nn

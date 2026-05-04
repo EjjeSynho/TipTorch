@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from datetime import datetime
-from project_settings import *
+from tiptorch._config import *
 from torch.utils.data import Dataset
 
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations

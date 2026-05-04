@@ -7,7 +7,7 @@ from tkinter import messagebox, ttk, font
 import os
 from PIL import Image, ImageTk
 
-from project_settings import project_settings
+from tiptorch._config import project_settings
 
 STD_FOLDER = project_settings["STD_data_folder"]
 
