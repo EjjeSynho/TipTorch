@@ -1,7 +1,7 @@
 import torch
 import gc
 
-from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.tools.static_phase import LWEBasis, PixelmapBasis, ZernikeBasis
 from tiptorch.managers.input_manager import InputsManager
 from tiptorch.tools.normalizers import Uniform

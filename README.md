@@ -60,7 +60,7 @@ pip install .
 
 ```
 src/tiptorch/            # Installable package (core library)
-├── psf_models/          #   PSF engine and instrument wrappers (TipTorch, IRDIS, MUSE NFM)
+├── PSF_models/          #   PSF engine and instrument wrappers (TipTorch, IRDIS, MUSE NFM)
 ├── managers/            #   Configuration parsing, input management, resource sync
 ├── tools/               #   Utilities, normalizers, Zernike/static-phase bases, cubic splines
 ├── _config.py           #   Project-wide settings, device selection, paths
@@ -136,7 +136,7 @@ The basic instrument and telescope parameters are defined in `.ini` files under 
 
 ```python
 import tiptorch
-from tiptorch.psf_models.IRDIS_wrapper import PSFModelIRDIS
+from tiptorch.PSF_models.IRDIS_wrapper import PSFModelIRDIS
 from tiptorch.managers.config_manager import ConfigManager
 ```
 

@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
 
-from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis, MUSEPhaseBump
 from tiptorch.tools.utils import PupilVLT
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations

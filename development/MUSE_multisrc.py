@@ -323,8 +323,8 @@ selected_entries_input = muse_df_norm.columns.values.tolist()
 NN_inp = torch.tensor(df_norm[selected_entries_input].loc[0].to_numpy()).to(default_device).float().unsqueeze(0)
 
 #%%
-from tiptorch.psf_models.TipTorch import TipTorch
-# from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.PSF_models.TipTorch import TipTorch
+# from tiptorch.PSF_models.TipTorch import TipTorch
 # from tiptorch.tools.utils import SausageFeature
 
 config_file, data_onsky = GetConfig(data_sample, data_onsky)

@@ -157,7 +157,7 @@ selected_entries_input = muse_df_norm.columns.values.tolist()
 
 #%%
 from tiptorch.tools.utils import PupilVLT
-from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.PSF_models.TipTorch import TipTorch
 
 LO_map_size = 31
 

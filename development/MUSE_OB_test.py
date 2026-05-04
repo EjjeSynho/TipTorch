@@ -217,7 +217,7 @@ def PlotSourceSpectra(
 PlotSourceSpectra(λ_full, src_spectra_full, λ_sparse=λ_sparse, src_spectra_sparse=src_spectra_sparse)
 
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
-from tiptorch.psf_models.NFM_wrapper import PSFModelNFM
+from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
 
 def InitPSFModel():

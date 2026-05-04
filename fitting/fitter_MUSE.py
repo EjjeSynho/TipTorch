@@ -30,7 +30,7 @@ import numpy as np
 from torchmin import minimize
 
 from datasets.MUSE_STD_dataset.STD_dataset_utils import *
-from tiptorch.psf_models.NFM_wrapper import PSFModelNFM
+from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import ConfigManager
 from tiptorch.tools.utils import SR, GradientLoss, FWHM_fitter
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis

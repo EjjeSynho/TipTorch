@@ -14,7 +14,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from tools.plotting import plot_radial_PSF_profiles, LWE_basis, cropper, draw_PSF_stack
-from tiptorch.psf_models.TipToy_SPHERE_multisrc import TipTorch
+from tiptorch.PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import SPHERE_preprocess, SamplesByIds
 from tiptorch.managers.config_manager import GetSPHEREonsky, ConfigManager
 from project_settings import SPHERE_DATASET_FOLDER, SPHERE_DATA_FOLDER, default_device

@@ -64,8 +64,8 @@ var_mask  =  var_mask[..., ids_wavelength_selected, :, :]
 
 
 #%% Initialize the model
-# from tiptorch.psf_models.TipToy_MUSE_multisrc import TipTorch
-from tiptorch.psf_models.TipTorch import TipTorch
+# from tiptorch.PSF_models.TipToy_MUSE_multisrc import TipTorch
+from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.tools.utils import SausageFeature
 from tiptorch.tools.utils import PupilVLT
 

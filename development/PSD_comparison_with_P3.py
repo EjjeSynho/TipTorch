@@ -104,7 +104,7 @@ P_beta_L_P3 = PbetaL.get()
 freq_t_P3 = cp.stack(freq_t, axis=2).get()
 
 #%%
-from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.managers.config_manager import ConfigManager
 from project_settings import default_device, DATA_FOLDER, default_torch_type
 import torch

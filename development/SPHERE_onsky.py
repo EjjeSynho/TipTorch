@@ -15,7 +15,7 @@ from project_settings import default_device
 from tiptorch.tools.utils import rad2mas, GradientLoss
 from torchmin import minimize
 
-from tiptorch.psf_models.IRDIS_wrapper import PSFModelIRDIS
+from tiptorch.PSF_models.IRDIS_wrapper import PSFModelIRDIS
 
 
 #%% Initialize data sample

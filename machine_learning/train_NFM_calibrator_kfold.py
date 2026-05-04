@@ -364,7 +364,7 @@ def evaluate_kfold_results(fold_results, test_loader=None):
 # Example model class placeholder (replace with your actual model)
 # ==============================================================================
 
-from tiptorch.psf_models.NFM_wrapper import PSFModelNFM
+from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
 PSF_model = PSFModelNFM(
     configs,

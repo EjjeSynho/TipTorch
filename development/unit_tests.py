@@ -11,7 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from project_settings import DATA_FOLDER, DATA_FOLDER
-from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.managers.config_manager import ConfigManager
 from project_settings import default_device, DATA_FOLDER, default_torch_type
 

@@ -201,7 +201,7 @@ PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs = collate_batch(test_
 #%% ==============================================================================
 # Initialize the PSF model
 # ==============================================================================
-from tiptorch.psf_models.NFM_wrapper import PSFModelNFM
+from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
 if 'PSF_model' in locals():
     del PSF_model

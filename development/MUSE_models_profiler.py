@@ -6,7 +6,7 @@ import sys
 
 import torch
 from project_settings import default_device
-from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.PSF_models.TipTorch import TipTorch
 
 
 with torch.no_grad():

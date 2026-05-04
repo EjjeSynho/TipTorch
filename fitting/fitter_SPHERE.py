@@ -31,7 +31,7 @@ from torch.autograd.functional import hessian
 from torchmin import minimize
 
 from datasets.IRDIS_STD_dataset.STD_dataset_utils import LoadSTDStarCache, erode_mask, STD_FOLDER
-from tiptorch.psf_models.IRDIS_wrapper import PSFModelIRDIS
+from tiptorch.PSF_models.IRDIS_wrapper import PSFModelIRDIS
 from tiptorch.managers.config_manager import ConfigManager
 from tiptorch.tools.utils import SR, GradientLoss, mask_circle, FWHM_fitter
 
