@@ -1,4 +1,4 @@
-from project_settings import CALIBRATIONS_PATH
+from tiptorch._config import CALIBRATIONS_PATH
 
 import os.path as ospath
 import warnings

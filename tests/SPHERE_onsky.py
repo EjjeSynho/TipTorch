@@ -4,7 +4,6 @@
 
 import sys
 
-sys.path.insert(0, '..')
 
 import pickle
 import torch
@@ -13,10 +12,10 @@ import matplotlib.pyplot as plt
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache, STD_FOLDER
 from project_settings import default_device
-from tools.utils import rad2mas, GradientLoss
+from tiptorch.tools.utils import rad2mas, GradientLoss
 from torchmin import minimize
 
-from PSF_models.IRDIS_wrapper import PSFModelIRDIS
+from tiptorch.psf_models.IRDIS_wrapper import PSFModelIRDIS
 
 
 #%% Initialize data sample

@@ -28,9 +28,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import numpy as np
 from tqdm import tqdm
-from tools.utils import seeing, corr_plot
+from tiptorch.tools.utils import seeing, corr_plot
 from astropy.io import fits
-from tools.normalizers import CreateTransformSequenceFromFile
+from tiptorch.tools.normalizers import CreateTransformSequenceFromFile
 from sklearn.inspection import permutation_importance
 from matplotlib.colors import LogNorm
 
@@ -503,7 +503,7 @@ test_df_2 = test_df_2[ (test_df_2['Photons (fitted)'] > 200) ]
 test_df_2 = test_df_2[ (test_df_2['Photons (fitted)'] < 500) ]
 
 #%%
-from tools.utils import draw_PSF_stack
+from tiptorch.tools.utils import draw_PSF_stack
 
 ids_strange_low = [1265, 1418, 1425, 1914, 2857, 2859, 2873, 3661, 3722, 3732, 3733, 3734, 3979]
 

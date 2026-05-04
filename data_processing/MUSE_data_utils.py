@@ -1,6 +1,5 @@
 #%%
 import sys, os
-sys.path.insert(0, '..')
 
 from project_settings import default_device, xp, use_cupy, default_torch_type, TELEMETRY_CACHE, DATA_FOLDER, project_settings
 
@@ -23,9 +22,9 @@ from photutils.background import Background2D, MedianBackground
 from astropy.io import fits
 from scipy.ndimage import binary_dilation
 from pathlib import Path
-from tools.utils import GetROIaroundMax, GetJmag, check_framework, recompute_Cn2_Kmeans, rad2arc
+from tiptorch.tools.utils import GetROIaroundMax, GetJmag, check_framework, recompute_Cn2_Kmeans, rad2arc
 from tools.plotting import wavelength_to_rgb
-from managers.config_manager import ConfigManager
+from tiptorch.managers.config_manager import ConfigManager
 from scipy.ndimage import rotate
 import logging
 
@@ -2232,7 +2231,7 @@ def reduce_dataframe(df):
 
 
 def create_normalizing_transforms(df):
-    from tools.normalizers import Invert, Gauss, Logify, YeoJohnson, Uniform, CreateTransformSequence, TransformSequence
+    from tiptorch.tools.normalizers import Invert, Gauss, Logify, YeoJohnson, Uniform, CreateTransformSequence, TransformSequence
 
     entry_data = [
         ('name', []),

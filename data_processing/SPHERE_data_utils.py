@@ -1,6 +1,5 @@
 #%%
 import sys, os
-sys.path.insert(0, '..')
 
 from project_settings import default_device, xp, use_cupy, default_torch_type
 from project_settings import CACHE_PATH
@@ -19,10 +18,10 @@ from astropy import units as u
 from tqdm import tqdm
 from copy import deepcopy
 from pathlib import Path
-from tools.utils import GetROIaroundMax, mask_circle
+from tiptorch.tools.utils import GetROIaroundMax, mask_circle
 from scipy.ndimage import center_of_mass
 
-from managers.config_manager import ConfigManager, ParameterParser
+from tiptorch.managers.config_manager import ConfigManager, ParameterParser
 
 try:
     from query_eso_archive import query_simbad

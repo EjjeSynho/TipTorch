@@ -8,7 +8,7 @@ from pathlib import Path, PurePosixPath
 
 import pooch
 
-from project_settings import CACHE_PATH, RESOURCE_PACKS_DIR, TEMP_DIR, REGISTRY_URL
+from tiptorch._config import CACHE_PATH, RESOURCE_PACKS_DIR, TEMP_DIR, REGISTRY_URL
 
 #%%
 # ──────────────────────────────────────────────────────────────

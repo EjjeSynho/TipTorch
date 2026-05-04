@@ -3,13 +3,12 @@
 # %autoreload 2
 
 import sys
-sys.path.insert(0, '..')
 
 import pickle
 import torch
 import numpy as np
-from data_processing.SPHERE.STD_dataset.STD_dataset_utils import SPHERE_preprocess, SamplesByIds
-from managers.config_manager import GetSPHEREonsky
+from STD_dataset_utils import SPHERE_preprocess, SamplesByIds
+from tiptorch.managers.config_manager import GetSPHEREonsky
 from project_settings import SPHERE_DATA_FOLDER
 import pandas as pd
 from tqdm import tqdm

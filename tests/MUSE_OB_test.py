@@ -22,7 +22,7 @@ from matplotlib.colors import LogNorm
 
 from pathlib import Path
 
-from tools.utils import mask_square
+from tiptorch.tools.utils import mask_square
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
@@ -99,7 +99,7 @@ cube_sparse *= flux_λ_norm[:, None, None]
 
 #%%
 def AddSourcesToModelConfig(model_config, sources):
-    from tools.utils import rad2mas, rad2arc
+    from tiptorch.tools.utils import rad2mas, rad2arc
 
     pixel_scale = model_config['sensor_science']['PixelScale'] # [mas/pix]
     
@@ -160,7 +160,7 @@ sources = srcs_image_data["coords"]
 ROIs    = srcs_image_data["images"]
 
 #%%
-from tools.utils import generate_random_colors
+from tiptorch.tools.utils import generate_random_colors
 
 flux_core_radius = 2  # [pix]
 
@@ -217,7 +217,7 @@ def PlotSourceSpectra(
 PlotSourceSpectra(λ_full, src_spectra_full, λ_sparse=λ_sparse, src_spectra_sparse=src_spectra_sparse)
 
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
-from PSF_models.NFM_wrapper import PSFModelNFM
+from tiptorch.psf_models.NFM_wrapper import PSFModelNFM
 from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
 
 def InitPSFModel():

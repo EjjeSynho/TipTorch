@@ -35,7 +35,7 @@ def LoadSTDStarCache(
     
     def get_radial_backround(img):
         ''' Computed STD star background as a minimum of radial profile '''
-        from tools.utils import safe_centroid
+        from tiptorch.tools.utils import safe_centroid
         from photutils.profiles import RadialProfile
         
         xycen = safe_centroid(img)

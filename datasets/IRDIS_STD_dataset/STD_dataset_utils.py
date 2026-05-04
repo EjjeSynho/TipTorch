@@ -5,9 +5,9 @@ import numpy as np
 import torch
 import re
 import pickle
-from tools.utils import mask_circle
+from tiptorch.tools.utils import mask_circle
 from copy import deepcopy
-from tools.utils import rad2mas, cropper#, gaussian_centroid
+from tiptorch.tools.utils import rad2mas, cropper#, gaussian_centroid
 from astropy.stats import sigma_clipped_stats
 from photutils.background import Background2D, MedianBackground
 import warnings

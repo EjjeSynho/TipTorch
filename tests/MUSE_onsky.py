@@ -3,7 +3,6 @@
 %autoreload 2
 
 import sys
-sys.path.insert(0, '..')
 
 import torch
 import pickle
@@ -15,7 +14,7 @@ from torchmin import minimize
 from matplotlib.colors import LogNorm
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
 from data_processing.MUSE.STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache
-from PSF_models.NFM_wrapper import PSFModelNFM
+from tiptorch.psf_models.NFM_wrapper import PSFModelNFM
 from project_settings import default_device
 
 
@@ -133,8 +132,8 @@ for j in range(N_src):
 # plot_chromatic_PSF_slice(PSF_0, wavelengths, window_size=100, slices=['horizontal'])
 
 #%%
-from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
-from tools.utils import RadialProfileLossSimple
+from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
+from tiptorch.tools.utils import RadialProfileLossSimple
 
 blurry_PSF_flag = muse_df.loc[ids]['Bad quality'].item()
 

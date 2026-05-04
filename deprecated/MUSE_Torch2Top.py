@@ -3,7 +3,6 @@
 %autoreload 2
 
 import sys
-sys.path.insert(0, '..')
 
 import pickle
 import torch
@@ -14,8 +13,8 @@ from tools.plotting import plot_radial_PSF_profiles, plot_radial_PSF_profiles_re
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages, LoadMUSEsampleByID, rotate_PSF
 from project_settings import MUSE_DATA_FOLDER, default_device
 from torchmin import minimize
-from tools.normalizers import CreateTransformSequenceFromFile
-from managers.input_manager import InputsTransformer
+from tiptorch.tools.normalizers import CreateTransformSequenceFromFile
+from tiptorch.managers.input_manager import InputsTransformer
 from tqdm import tqdm
 from project_settings import MUSE_DATA_FOLDER
 from machine_learning.MUSE_onsky_df import *
@@ -65,10 +64,10 @@ var_mask  =  var_mask[..., ids_wavelength_selected, :, :]
 
 
 #%% Initialize the model
-# from PSF_models.TipToy_MUSE_multisrc import TipTorch
-from PSF_models.TipTorch import TipTorch
-from tools.utils import SausageFeature
-from tools.utils import PupilVLT
+# from tiptorch.psf_models.TipToy_MUSE_multisrc import TipTorch
+from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.tools.utils import SausageFeature
+from tiptorch.tools.utils import PupilVLT
 
 pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=0), device=default_device )
 PSD_include = {
@@ -206,7 +205,7 @@ plt.imshow(PSF_pred[0,...].mean(dim=0).log10().cpu().numpy(), vmin=0, vmax=0.01)
 plt.show()
 
 # %%
-from managers.config_manager import ConfigManager
+from tiptorch.managers.config_manager import ConfigManager
 from copy import deepcopy
 
 config_list = deepcopy(config_file)

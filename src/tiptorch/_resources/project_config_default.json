@@ -1,0 +1,11 @@
+{
+    "device":            "cuda:0",
+    "data":              "./",
+    "model_weights":     "./weights/",
+    "calibrations":      "./calibrations/",
+    "reduced_telemetry": "./reduced_telemetry/",
+    "parameter_files":   "./parameter_files/",
+    "resource_packs":    "./resource_packs/",
+    "temp_folder":       "./temp/",
+    "registry_url":      "https://drive.google.com/file/d/15xUS4pSqS1Ppm8Gp22sRue4NGaNf1Br4/view?usp=drive_link"
+}

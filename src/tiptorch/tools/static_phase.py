@@ -4,8 +4,8 @@ import torchvision.transforms.functional as TF
 import numpy as np
 import torch
 from scipy.io import loadmat
-from utils import mask_circle, rad2mas, pdims
-from project_settings import default_torch_type, DATA_FOLDER
+from tiptorch.tools.utils import mask_circle, rad2mas, pdims
+from tiptorch._config import default_torch_type, DATA_FOLDER
 
 decompose_WF = lambda WF, basis, pupil: WF[:, pupil > 0] @ basis[:, pupil > 0].T / pupil.sum()
 project_WF   = lambda WF, basis, pupil: torch.einsum('mn,nwh->mwh', decompose_WF(WF, basis, pupil), basis)

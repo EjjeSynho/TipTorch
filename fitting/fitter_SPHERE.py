@@ -20,6 +20,7 @@ else:
 
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'data_processing'))
+# NOTE: sys.path entries above are kept for data_processing.SPHERE imports
 
 
 import gc
@@ -29,10 +30,10 @@ import numpy as np
 from torch.autograd.functional import hessian
 from torchmin import minimize
 
-from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache, erode_mask, STD_FOLDER
-from PSF_models.IRDIS_wrapper import PSFModelIRDIS
-from managers.config_manager import ConfigManager
-from tools.utils import SR, GradientLoss, mask_circle, FWHM_fitter
+from datasets.IRDIS_STD_dataset.STD_dataset_utils import LoadSTDStarCache, erode_mask, STD_FOLDER
+from tiptorch.psf_models.IRDIS_wrapper import PSFModelIRDIS
+from tiptorch.managers.config_manager import ConfigManager
+from tiptorch.tools.utils import SR, GradientLoss, mask_circle, FWHM_fitter
 
 from project_settings import default_device
 import warnings

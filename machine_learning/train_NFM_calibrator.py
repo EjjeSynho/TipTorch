@@ -8,7 +8,6 @@ except NameError:
     pass
 
 import sys
-sys.path.insert(0, '..')
 
 import gc
 import logging
@@ -27,7 +26,7 @@ from datetime import datetime
 from project_settings import *
 from torch.utils.data import Dataset
 
-from managers.config_manager import MultipleTargetsInDifferentObservations
+from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 STD_FOLDER       = Path(project_settings["STD_data_folder"])
@@ -202,7 +201,7 @@ PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs = collate_batch(test_
 #%% ==============================================================================
 # Initialize the PSF model
 # ==============================================================================
-from PSF_models.NFM_wrapper import PSFModelNFM
+from tiptorch.psf_models.NFM_wrapper import PSFModelNFM
 
 if 'PSF_model' in locals():
     del PSF_model

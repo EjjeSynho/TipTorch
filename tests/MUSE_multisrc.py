@@ -3,7 +3,6 @@
 %autoreload 2
 
 import sys
-sys.path.insert(0, '..')
 
 import torch
 import torch.nn as nn
@@ -24,10 +23,10 @@ from photutils.detection import find_peaks
 from photutils.aperture import CircularAperture, RectangularAperture
 from sklearn.cluster import DBSCAN
 from data_processing.MUSE_preproc_utils import GetConfig, LoadImages
-from managers.parameter_parser import ParameterParser
+from tiptorch.managers.parameter_parser import ParameterParser
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, mask_circle
-from managers.config_manager import ConfigManager
-from tools.normalizers import CreateTransformSequenceFromFile, InputsTransformer
+from tiptorch.managers.config_manager import ConfigManager
+from tiptorch.tools.normalizers import CreateTransformSequenceFromFile, InputsTransformer
 from tqdm import tqdm
 from project_settings import MUSE_DATA_FOLDER, default_device
 from astropy.io import fits
@@ -324,9 +323,9 @@ selected_entries_input = muse_df_norm.columns.values.tolist()
 NN_inp = torch.tensor(df_norm[selected_entries_input].loc[0].to_numpy()).to(default_device).float().unsqueeze(0)
 
 #%%
-from PSF_models.TipTorch import TipTorch
-# from PSF_models.TipTorch import TipTorch
-# from tools.utils import SausageFeature
+from tiptorch.psf_models.TipTorch import TipTorch
+# from tiptorch.psf_models.TipTorch import TipTorch
+# from tiptorch.tools.utils import SausageFeature
 
 config_file, data_onsky = GetConfig(data_sample, data_onsky)
 data_onsky = data_onsky.squeeze()
@@ -576,7 +575,7 @@ plot_radial_PSF_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'TipTorch', title='
 
 
 #%%
-from tools.utils import FWHM_fitter, FitMoffat2D_astropy, FitGauss2D_astropy
+from tiptorch.tools.utils import FWHM_fitter, FitMoffat2D_astropy, FitGauss2D_astropy
 
 FWHM_data = FWHM_fitter(PSFs_0_white[:,None,...], verbose=True)
 FWHM_pred = FWHM_fitter(PSFs_1_white[:,None,...], verbose=True)

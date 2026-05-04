@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "packs": {
+    "calibrations": {
+      "file": "calibrations.zip",
+      "sha256": "sha256:02174f0d5201c7aa1315b94ba12e8dc90b1952a30004c9ac55cbb03ed2be6845",
+      "url": "https://drive.google.com/file/d/1YRs4WWmBY9EoGoAQqRCEdW1nKYU26Jwo/view?usp=drive_link"
+    },
+    "parameter_files": {
+      "file": "parameter_files.zip",
+      "sha256": "sha256:91c0371061e0a00e438e6f01f76d3d62acf1ac6cc574e2308e79d9da75be149b",
+      "url": "https://drive.google.com/file/d/16DLtn71aaNkjZ4aRR1Q3vprp4lwtrDdb/view?usp=drive_link"
+    },
+    "MUSE_NFM_cailbrator": {
+      "file": "MUSE_NFM_cailbrator.zip",
+      "sha256": "sha256:ae1987d8bddc692a13dcdca2ed460a77197dc4f6f9b412a99e632d5567a1bbaa",
+      "url": "https://drive.google.com/file/d/137TLu0vhdvbGm9gCeqBoTHbX5uC0aWIk/view?usp=drive_link"
+    }
+  }
+}

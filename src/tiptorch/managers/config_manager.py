@@ -1,7 +1,4 @@
 from ast import Dict, Tuple
-import sys
-sys.path.insert(0, '..')
-
 import math
 import torch
 import numpy as np
@@ -12,12 +9,12 @@ try:
     import cupy as cp
 except ImportError:
     cp = np
-    
+
 from copy import deepcopy
 from functools import reduce
 import operator
 
-from managers.parameter_parser import ParameterParser
+from tiptorch.managers.parameter_parser import ParameterParser
 
 
 
@@ -91,7 +88,7 @@ SCALAR_VALUES = [
 class ConfigManager():
     def __init__(self):
         # Load required fields specification
-        required_fields_path = Path(__file__).parent.parent / 'data' / 'parameter_files' / 'required_fields.yaml'
+        required_fields_path = Path(__file__).resolve().parent.parent / '_resources' / 'required_fields.yaml'
         
         with open(required_fields_path, 'r') as f:
             self.required_fields = yaml.safe_load(f)
@@ -280,7 +277,7 @@ class ConfigManager():
     def Convert(self, config, framework='pytorch', device=torch.device('cpu'), dtype=None):
         """Converts all values in a config file to a specified framework"""
         if dtype is None:
-            from project_settings import default_torch_type
+            from tiptorch._config import default_torch_type
             dtype = default_torch_type
         
         if framework.lower() == 'pytorch' or framework.lower() == 'torch':

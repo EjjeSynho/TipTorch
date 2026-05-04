@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tiptorch"
+dynamic = ["version"]
+description = "A PyTorch-based adaptive optics PSF simulator for astronomical instruments"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [
+    { name = "Arseniy Kuznetsov" },
+]
+keywords = ["adaptive-optics", "PSF", "astronomy", "pytorch", "simulation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Physics",
+]
+
+dependencies = [
+    "torch",
+    "torchvision",
+    "numpy>=1.26",
+    "scipy",
+    "astropy",
+    "pyyaml",
+    "tabulate",
+    "pooch",
+    "gdown",
+    "torchcubicspline",
+    "pillow",
+]
+
+[project.optional-dependencies]
+cupy = ["cupy"]
+dev = [
+    "matplotlib",
+    "seaborn",
+    "scikit-learn",
+    "scikit-image",
+    "photutils",
+    "astroquery",
+    "pandas",
+    "tqdm",
+    "torchaudio",
+    "pytorch-minimize",
+    "build",
+]
+
+[project.urls]
+Repository = "https://github.com/EjjeSynworworsta/TipTorch"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"tiptorch._resources" = ["*.json", "*.yaml"]
+
+[tool.setuptools-scm]
+version_file = "src/tiptorch/_version.py"
+fallback_version = "0.0.1.dev0"

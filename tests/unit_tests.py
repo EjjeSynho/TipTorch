@@ -11,8 +11,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 from project_settings import DATA_FOLDER, DATA_FOLDER
-from PSF_models.TipTorch import TipTorch
-from managers.config_manager import ConfigManager
+from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.managers.config_manager import ConfigManager
 from project_settings import default_device, DATA_FOLDER, default_torch_type
 
 
@@ -47,7 +47,7 @@ x_dict = {
 
 
 #%%
-from tools.utils import mask_circle
+from tiptorch.tools.utils import mask_circle
 
 PSF_size = 111
 
@@ -142,7 +142,7 @@ with torch.no_grad():
     PSD_big = model.ComputePSD()
     OTF_static_big = model.ComputeStaticOTF()
     # Build the combined OTF manually (same as PSD2PSF but without the final OTF2PSF call)
-    from tools.utils import pdims, min_2d
+    from tiptorch.tools.utils import pdims, min_2d
     cov_big = model._rfft2_to_full(torch.fft.fftshift(torch.fft.rfft2(torch.fft.ifftshift(PSD_big.abs(), dim=(-2,-1)), dim=(-2,-1)), dim=-2).real)
     SF_big = 2*(cov_big.abs().amax(dim=(-2,-1), keepdim=True) - cov_big).real
     OTF_turb_big = torch.exp(-0.5 * SF_big * pdims(2*torch.pi*1e-9/model.wvl, 2)**2)

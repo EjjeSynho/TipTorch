@@ -21,9 +21,9 @@ from matplotlib.colors import LogNorm
 from torchmin import minimize
 
 from tools.plotting import plot_radial_PSF_profiles
-from tools.utils import mask_circle, rad2mas
-from managers.config_manager import MultipleTargetsInOneObservation
-from tools.normalizers import CreateTransformSequenceFromFile
+from tiptorch.tools.utils import mask_circle, rad2mas
+from tiptorch.managers.config_manager import MultipleTargetsInOneObservation
+from tiptorch.tools.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
 from data_processing.MUSE_data_utils import *
 
@@ -156,8 +156,8 @@ df_norm = df_norm.fillna(0)
 selected_entries_input = muse_df_norm.columns.values.tolist()
 
 #%%
-from tools.utils import PupilVLT
-from PSF_models.TipTorch import TipTorch
+from tiptorch.tools.utils import PupilVLT
+from tiptorch.psf_models.TipTorch import TipTorch
 
 LO_map_size = 31
 
@@ -182,8 +182,8 @@ model.on_axis = False
 # PSF_1 = model()
 
 #%%
-from tools.normalizers import Uniform, Atanh
-from managers.input_manager import InputsManager, InputsManagersUnion
+from tiptorch.tools.normalizers import Uniform, Atanh
+from tiptorch.managers.input_manager import InputsManager, InputsManagersUnion
 
 
 df_transforms_onsky  = CreateTransformSequenceFromFile('../data/reduced_telemetry/MUSE/muse_df_norm_transforms.pickle')
@@ -1059,7 +1059,7 @@ PlotSourcesProfiles(cube_sparse, model_sparse_optimized, sources, radius=16, tit
 
 
 #%% ====================================================== Fitting =======================================================
-from tools.utils import OptimizableLO
+from tiptorch.tools.utils import OptimizableLO
 
 LO_basis = OptimizableLO(model, ignore_pupil=False)
 
@@ -1437,7 +1437,7 @@ with open(MUSE_DATA_FOLDER+f'quasars/spectra/{reduced_name}.pkl', 'wb') as f:
     pickle.dump(dict_store, f)
     
 #%%
-from tools.utils import wavelength_to_rgb
+from tiptorch.tools.utils import wavelength_to_rgb
 
 λ_vis = np.linspace(440, 750, diff_img_full.shape[0])
 

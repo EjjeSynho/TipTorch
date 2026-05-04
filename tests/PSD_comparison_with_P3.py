@@ -10,7 +10,7 @@ import cupy as cp
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
 
-from tools.utils import pdims
+from tiptorch.tools.utils import pdims
 
 sys.path.append('..')
 
@@ -104,8 +104,8 @@ P_beta_L_P3 = PbetaL.get()
 freq_t_P3 = cp.stack(freq_t, axis=2).get()
 
 #%%
-from PSF_models.TipTorch import TipTorch
-from managers.config_manager import ConfigManager
+from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.managers.config_manager import ConfigManager
 from project_settings import default_device, DATA_FOLDER, default_torch_type
 import torch
 

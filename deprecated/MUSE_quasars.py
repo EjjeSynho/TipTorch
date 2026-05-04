@@ -22,9 +22,9 @@ from torchmin import minimize
 from tqdm import tqdm
 from pathlib import Path
 
-from tools.utils import mask_circle, mask_square
+from tiptorch.tools.utils import mask_circle, mask_square
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
-from tools.normalizers import CreateTransformSequenceFromFile_legacy
+from tiptorch.tools.normalizers import CreateTransformSequenceFromFile_legacy
 
 
 '''
@@ -195,8 +195,8 @@ plt.tight_layout()
 plt.show()
 
 #%%
-from tools.utils import PupilVLT
-from PSF_models.TipTorch import TipTorch
+from tiptorch.tools.utils import PupilVLT
+from tiptorch.psf_models.TipTorch import TipTorch
 
 LO_map_size = 31
 
@@ -218,9 +218,9 @@ model.to(default_device)
 _ = model()
 
 #%% For predicted and fitted model inputs, it is convenient to organize them using inputs_manager
-from tools.normalizers import Uniform, Identity
-from managers.input_manager import InputsManager
-from tools.static_phase import PixelmapBasis
+from tiptorch.tools.normalizers import Uniform, Identity
+from tiptorch.managers.input_manager import InputsManager
+from tiptorch.tools.static_phase import PixelmapBasis
 
 LO_basis = PixelmapBasis(model, ignore_pupil=False)
 

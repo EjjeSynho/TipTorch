@@ -9,7 +9,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
-from tools.normalizers import Uniform0_1
+from tiptorch.tools.normalizers import Uniform0_1
 
 from data_processing.MUSE.STD_dataset.STD_dataset_utils import STD_FOLDER, CUBES_CACHE
 from data_processing.MUSE_data_utils import wvl_bins
@@ -345,7 +345,7 @@ print("LO NCPAs coefs stats:")
 print(LO_df.describe().T)
 
 #%%
-from tools.utils import r0, seeing
+from tiptorch.tools.utils import r0, seeing
 
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)

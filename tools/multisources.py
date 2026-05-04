@@ -10,7 +10,7 @@ from astropy.stats import sigma_clipped_stats
 from photutils.detection import find_peaks
 from photutils.aperture import RectangularAperture
 from matplotlib.colors import LogNorm
-from tools.plotting import plot_radial_PSF_profiles
+from tools.plotting import plot_radial_PSF_profiles  # local tools/ dir, not tiptorch
 from scipy import ndimage
 
 

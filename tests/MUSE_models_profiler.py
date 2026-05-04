@@ -3,11 +3,10 @@
 %autoreload 2
 
 import sys
-sys.path.insert(0, '..')
 
 import torch
 from project_settings import default_device
-from PSF_models.TipTorch import TipTorch
+from tiptorch.psf_models.TipTorch import TipTorch
 
 
 with torch.no_grad():

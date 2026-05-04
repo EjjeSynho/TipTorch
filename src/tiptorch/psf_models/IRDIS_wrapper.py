@@ -1,17 +1,14 @@
-import sys
-sys.path.insert(0, '..')
-
 import torch
 import gc
 
-from PSF_models.TipTorch import TipTorch
-from tools.static_phase import LWEBasis, PixelmapBasis, ZernikeBasis
-from managers.input_manager import InputsManager
-from tools.normalizers import Uniform
-from tools.utils import rad2mas
-from project_settings import default_device
+from tiptorch.psf_models.TipTorch import TipTorch
+from tiptorch.tools.static_phase import LWEBasis, PixelmapBasis, ZernikeBasis
+from tiptorch.managers.input_manager import InputsManager
+from tiptorch.tools.normalizers import Uniform
+from tiptorch.tools.utils import rad2mas
+from tiptorch._config import default_device
 
-from managers.config_manager import MultipleTargetsInDifferentObservations
+from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 
 class PSFModelIRDIS:
     def __init__(
@@ -117,8 +114,8 @@ class PSFModelIRDIS:
                 self.NCPAs_basis = PixelmapBasis(self.model, ignore_pupil=False)
             
     def store_transforms(self):
-        from tools.normalizers import TransformSequence, Uniform
-        from project_settings import DATA_FOLDER
+        from tiptorch.tools.normalizers import TransformSequence, Uniform
+        from tiptorch._config import DATA_FOLDER
         import pickle
         
         norm_FWHM = TransformSequence(transforms=[Uniform(a=0,     b=5)])
@@ -279,7 +276,7 @@ class PSFModelIRDIS:
 
     def compensate_PTT_coupling(self):
         """Compensate for PTT coupling in LWE modes"""
-        from tools.static_phase import BuildPTTBasis, decompose_WF, project_WF
+        from tiptorch.tools.static_phase import BuildPTTBasis, decompose_WF, project_WF
         
         if not self.LWE_flag or not hasattr(self, 'LWE_basis'):
             return None, None, None
@@ -321,7 +318,7 @@ class PSFModelIRDIS:
             LWE_OPD = self.LWE_basis.compute_OPD(self.inputs_manager['LWE_coefs']) * 1e9  # [nm]
             
             # Compensate for PTT if needed
-            from tools.static_phase import BuildPTTBasis, project_WF
+            from tiptorch.tools.static_phase import BuildPTTBasis, project_WF
             # PTT Basis shape: [3, H, W]
             PTT_basis = BuildPTTBasis(self.model.pupil.cpu().numpy(), True).to(self.device).float()
             

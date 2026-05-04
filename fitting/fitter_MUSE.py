@@ -20,6 +20,7 @@ else:
 
 sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / 'data_processing'))
+# NOTE: sys.path entries above are kept for data_processing.MUSE imports
 
 import gc
 import pickle
@@ -28,11 +29,11 @@ import numpy as np
 
 from torchmin import minimize
 
-from data_processing.MUSE.STD_dataset.STD_dataset_utils import *
-from PSF_models.NFM_wrapper import PSFModelNFM
-from managers.config_manager import ConfigManager
-from tools.utils import SR, GradientLoss, FWHM_fitter
-from tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
+from datasets.MUSE_STD_dataset.STD_dataset_utils import *
+from tiptorch.psf_models.NFM_wrapper import PSFModelNFM
+from tiptorch.managers.config_manager import ConfigManager
+from tiptorch.tools.utils import SR, GradientLoss, FWHM_fitter
+from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
 # from project_settings import device
 import warnings

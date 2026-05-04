@@ -12,14 +12,14 @@ import torch.nn as nn
 from sklearn.neural_network import MLPRegressor
 from sklearn.metrics import mean_squared_error
 import matplotlib.pyplot as plt
-from tools.utils import mask_circle
-from tools.normalizers import Uniform
-from managers.input_manager import InputsManager
+from tiptorch.tools.utils import mask_circle
+from tiptorch.tools.normalizers import Uniform
+from tiptorch.managers.input_manager import InputsManager
 from deprecated.calibrator import Calibrator, Gnosis
-from tools.normalizers import CreateTransformSequenceFromFile
+from tiptorch.tools.normalizers import CreateTransformSequenceFromFile
 from data_processing.project_settings import MUSE_DATA_FOLDER, DATASET_FOLDER
 from data_processing.MUSE_onsky_df import *
-from tools.utils import rad2mas
+from tiptorch.tools.utils import rad2mas
 
 device = torch.device('cpu')
 

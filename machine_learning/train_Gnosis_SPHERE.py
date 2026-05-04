@@ -4,7 +4,6 @@
 
 import os
 import sys
-sys.path.insert(0, '..')
 
 import pickle
 import torch
@@ -15,13 +14,13 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 from tools.plotting import plot_radial_PSF_profiles, LWE_basis, cropper, draw_PSF_stack
-from PSF_models.TipToy_SPHERE_multisrc import TipTorch
+from tiptorch.psf_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import SPHERE_preprocess, SamplesByIds
-from managers.config_manager import GetSPHEREonsky, ConfigManager
+from tiptorch.managers.config_manager import GetSPHEREonsky, ConfigManager
 from project_settings import SPHERE_DATASET_FOLDER, SPHERE_DATA_FOLDER, default_device
-from tools.normalizers import CreateTransformSequenceFromFile
+from tiptorch.tools.normalizers import CreateTransformSequenceFromFile
 from copy import copy, deepcopy
-from managers.input_manager import InputsTransformer
+from tiptorch.managers.input_manager import InputsTransformer
 
 
 df_transforms_onsky  = CreateTransformSequenceFromFile('../data/temp/psf_df_norm_transforms.pickle')
@@ -250,7 +249,7 @@ p_0, p_1, p_err = plot_radial_PSF_profiles(
 )    
 
 #%%
-from tools.utils import render_profile
+from tiptorch.tools.utils import render_profile
 
 fig = plt.figure(figsize=(6, 4), dpi=300)
 ax  = fig.gca()
@@ -1120,7 +1119,7 @@ for id in tqdm(ids_example):
 
 
 #%%
-from tools.utils import save_GIF_RGB
+from tiptorch.tools.utils import save_GIF_RGB
 from matplotlib import cm
 from PIL import Image
 from PIL.Image import Resampling
@@ -1180,7 +1179,7 @@ print(f"Calib.: {dPSF_1:.2f} \nDirect: {dPSF_2:.2f} \nFitted: {dPSF_3:.2f} \n")
 
 
 #%%
-from tools.utils import FWHM_fitter, FitMoffat2D_astropy, FitGauss2D_astropy, hist_thresholded
+from tiptorch.tools.utils import FWHM_fitter, FitMoffat2D_astropy, FitGauss2D_astropy, hist_thresholded
 
 PSF_0_data   = np.concatenate([PSFs_0_val_all[wvl] for wvl in PSFs_0_val_all.keys()], axis=0)[:,None,...]
 PSF_1_calib  = np.concatenate([PSFs_1_val_all[wvl] for wvl in PSFs_1_val_all.keys()], axis=0)[:,None,...]
@@ -1276,7 +1275,7 @@ print(np.median(FVU) * 100)
 
 #%%
 import seaborn as sns
-from tools.utils import r0
+from tiptorch.tools.utils import r0
 from matplotlib.ticker import MaxNLocator
 
 seeings = np.array( [seeing for config in configs for seeing in config['atmosphere']['Seeing'].tolist()] )

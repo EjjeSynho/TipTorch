@@ -4,7 +4,6 @@
 
 import sys
 
-sys.path.insert(0, '..')
 
 import math
 import numpy as np
@@ -25,7 +24,7 @@ except Exception:
 
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache
-from PSF_models.IRDIS_wrapper import PSFModelIRDIS
+from tiptorch.psf_models.IRDIS_wrapper import PSFModelIRDIS
 
 from project_settings import default_device
 

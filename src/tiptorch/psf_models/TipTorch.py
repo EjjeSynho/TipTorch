@@ -1,7 +1,4 @@
 #%%
-import sys
-sys.path.insert(0, '..')
-
 import warnings
 import torch
 import numpy as np
@@ -10,8 +7,8 @@ import torchvision.transforms as transforms
 from torch import fft, nn
 from torch.nn.functional import interpolate, grid_sample
 from astropy.io import fits
-from tools.utils import pdims, min_2d, to_little_endian
-from tools.air_refraction import AirRefractiveIndexCalculator
+from tiptorch.tools.utils import pdims, min_2d, to_little_endian
+from tiptorch.tools.air_refraction import AirRefractiveIndexCalculator
 from pathlib import Path
 
 

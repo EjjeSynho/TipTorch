@@ -113,7 +113,7 @@ with open(STD_FOLDER / 'sphere_fitted_df.pickle', 'wb') as handle:
     pickle.dump(fitted_df_filtered, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 #%%
-from tools.normalizers import CreateTransformSequenceFromFile
+from tiptorch.tools.normalizers import CreateTransformSequenceFromFile
 
 df_transforms = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/SPHERE/IRDIS_model_norm_transforms.pickle')
 

@@ -4,7 +4,6 @@
 
 import sys
 
-sys.path.insert(0, '..')
 
 import torch
 import numpy as np
@@ -13,7 +12,7 @@ import ultranest
 
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import LoadSTDStarCache
-from PSF_models.IRDIS_wrapper import PSFModelIRDIS
+from tiptorch.psf_models.IRDIS_wrapper import PSFModelIRDIS
 
 from project_settings import default_device
 
@@ -80,7 +79,7 @@ print(f"UltraNest Parameters ({len(param_names)}): {param_names}")
 
 
 #%% --------------------------------------------------------------------------
-from tools.normalizers import Uniform0_1
+from tiptorch.tools.normalizers import Uniform0_1
 
 span = 2.0
 to_manager_space = Uniform0_1(a = -span, b = span)

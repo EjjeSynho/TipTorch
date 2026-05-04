@@ -9,7 +9,6 @@ except NameError:
 
 import sys
 
-sys.path.insert(0, '..')
 
 import pickle
 import os

@@ -8,7 +8,7 @@ from astropy.modeling import models, fitting
 import matplotlib.pyplot as plt
 import seaborn as sns
 
-from project_settings import xp
+from tiptorch._config import xp
 
 try:
     from graphviz import Digraph

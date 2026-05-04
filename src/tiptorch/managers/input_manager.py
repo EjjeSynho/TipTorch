@@ -5,7 +5,7 @@ from copy import deepcopy
 import torch
 import pickle
 import numpy as np
-from tools.normalizers import TransformSequence, DataTransform, Identity, LoadTransforms
+from tiptorch.tools.normalizers import TransformSequence, DataTransform, Identity, LoadTransforms
 
 """
 This module contains classes to manage the input data for the TipTorch PSF model. 

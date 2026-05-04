@@ -3,7 +3,6 @@
 %autoreload 2
 
 import sys
-sys.path.insert(0, '..')
 
 import numpy as np
 import torch
@@ -365,7 +364,7 @@ def evaluate_kfold_results(fold_results, test_loader=None):
 # Example model class placeholder (replace with your actual model)
 # ==============================================================================
 
-from PSF_models.NFM_wrapper import PSFModelNFM
+from tiptorch.psf_models.NFM_wrapper import PSFModelNFM
 
 PSF_model = PSFModelNFM(
     configs,

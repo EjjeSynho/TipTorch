@@ -1,7 +1,6 @@
 
 #%%
 import sys
-sys.path.insert(0, '..')
 
 import tkinter as tk
 from tkinter import messagebox, ttk, font

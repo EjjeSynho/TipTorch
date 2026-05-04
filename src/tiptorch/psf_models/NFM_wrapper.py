@@ -1,8 +1,3 @@
-# %reload_ext autoreload
-# %autoreload 2
-
-import sys
-
 import torch
 import numpy as np
 from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
@@ -15,7 +10,7 @@ from tiptorch.managers.input_manager  import InputsManager, InputsManagersUnion
 from tiptorch.tools.normalizers import DataTransform, Uniform, Uniform0_1, SoftmaxInv, Identity, SafeLog10
 
 from warnings import warn
-from project_settings import default_device
+from tiptorch._config import default_device
 import gc
 
 
