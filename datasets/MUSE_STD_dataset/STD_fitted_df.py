@@ -8,7 +8,7 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
+from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
 from tiptorch.tools.normalizers import Uniform0_1
 
 from data_processing.MUSE.STD_dataset.STD_dataset_utils import STD_FOLDER, CUBES_CACHE

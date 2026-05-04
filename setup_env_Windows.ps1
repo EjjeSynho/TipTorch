@@ -9,7 +9,7 @@
   • Generates an environment.yml with:
       – nodefaults, conda-forge, astropy channels  
       – python + generic NumPy/SciPy/Sklearn  
-      – common libs + pip requirements (torch*, pytorch-minimize, torchcubicspline, photutils, etc.)  
+      – common libs + pip requirements (torch*, pytorch-minimize, photutils, etc.)  
   • Invokes mamba (or conda) to build the env verbosely.
   • Attempts to install pytorch-minimize from PyPI first; if that fails, falls back to GitHub.
   
@@ -272,23 +272,14 @@ if ($LASTEXITCODE -eq 0) {
     }
 }
 
-# ─── 8) Install torchcubicspline from GitHub (not available on PyPI) ─────────
-Write-Host "`n→ Installing 'torchcubicspline' from GitHub (not available on PyPI)…" -ForegroundColor Cyan
-
-if (-not (Test-Path "../torchcubicspline")) {
-    Write-Host "→ Cloning torchcubicspline to ../torchcubicspline…" -ForegroundColor Cyan
-    git clone https://github.com/patrick-kidger/torchcubicspline.git ../torchcubicspline
-} else {
-    Write-Host "→ Found existing torchcubicspline at ../torchcubicspline" -ForegroundColor Green
-}
-
-Write-Host "→ Installing 'torchcubicspline' from local Git repository at ../torchcubicspline…" -ForegroundColor Cyan
-& conda run -n $EnvName pip install -e ../torchcubicspline
+# ─── 8) Install tiptorch package in editable mode ────────────────────────────
+Write-Host "`n→ Installing tiptorch package in editable (development) mode…" -ForegroundColor Cyan
+& conda run -n $EnvName pip install -e .
 
 if ($LASTEXITCODE -eq 0) {
-    Write-Host "✅ Successfully installed 'torchcubicspline' from GitHub." -ForegroundColor Green
+    Write-Host "✅ Successfully installed tiptorch in editable mode." -ForegroundColor Green
 } else {
-    Write-Host "❌ Failed to install 'torchcubicspline' from GitHub." -ForegroundColor Red
+    Write-Host "❌ Failed to install tiptorch." -ForegroundColor Red
     exit 1
 }
 

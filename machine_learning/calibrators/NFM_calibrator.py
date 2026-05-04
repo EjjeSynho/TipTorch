@@ -7,7 +7,7 @@ import torch.nn as nn
 import pandas as pd
 from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe, TELEMETRY_CACHE
 from tiptorch.managers.input_manager import InputsTransformer
-from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
+from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
 import pickle
 
 

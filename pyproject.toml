@@ -34,7 +34,6 @@ dependencies = [
     "tabulate",
     "pooch",
     "gdown",
-    "torchcubicspline",
     "pillow",
 ]
 

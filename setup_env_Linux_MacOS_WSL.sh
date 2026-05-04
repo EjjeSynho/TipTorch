@@ -315,24 +315,15 @@ else
   fi
 fi
 
-# ─── 7) Install torchcubicspline from GitHub (not available on PyPI) ─────────
+# ─── 7) Install tiptorch package in editable mode ────────────────────────────
 echo
-echo "→ Installing 'torchcubicspline' from GitHub (not available on PyPI)…"
-
-if [[ ! -d "../torchcubicspline" ]]; then
-  echo "→ Cloning torchcubicspline to ../torchcubicspline…"
-  git clone https://github.com/patrick-kidger/torchcubicspline.git ../torchcubicspline
-else
-  echo "→ Found existing torchcubicspline at ../torchcubicspline"
-fi
-
-echo "→ Installing 'torchcubicspline' from local Git repository at ../torchcubicspline…"
-conda run -n "$ENV_NAME" pip install -e ../torchcubicspline
+echo "→ Installing tiptorch package in editable (development) mode…"
+conda run -n "$ENV_NAME" pip install -e .
 
 if [[ $? -eq 0 ]]; then
-  echo "✅ Successfully installed 'torchcubicspline' from GitHub."
+  echo "✅ Successfully installed tiptorch in editable mode."
 else
-  echo "❌ Failed to install 'torchcubicspline' from GitHub."
+  echo "❌ Failed to install tiptorch."
   exit 1
 fi
 

@@ -1,6 +1,6 @@
 import torch
 import numpy as np
-from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
+from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
 
 from tiptorch.psf_models.TipTorch import TipTorch
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis, MUSEPhaseBump
