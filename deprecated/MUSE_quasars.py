@@ -23,7 +23,7 @@ from tqdm import tqdm
 from pathlib import Path
 
 from tools.utils import mask_circle, mask_square
-from data_processing.MUSE.data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
+from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, MUSE_DATA_FOLDER
 from tools.normalizers import CreateTransformSequenceFromFile_legacy
 
 

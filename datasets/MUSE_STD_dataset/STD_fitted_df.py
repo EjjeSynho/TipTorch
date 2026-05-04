@@ -12,7 +12,7 @@ from torchcubicspline import natural_cubic_spline_coeffs, NaturalCubicSpline
 from tools.normalizers import Uniform0_1
 
 from data_processing.MUSE.STD_dataset.STD_dataset_utils import STD_FOLDER, CUBES_CACHE
-from data_processing.MUSE.data_utils import wvl_bins
+from data_processing.MUSE_data_utils import wvl_bins
 
 # Select every 2nd wvl
 wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1)

@@ -25,7 +25,7 @@ from tools.utils import mask_circle, rad2mas
 from managers.config_manager import MultipleTargetsInOneObservation
 from tools.normalizers import CreateTransformSequenceFromFile
 from tqdm import tqdm
-from data_processing.MUSE.data_utils import *
+from data_processing.MUSE_data_utils import *
 
 from tools.multisources import select_sources
 

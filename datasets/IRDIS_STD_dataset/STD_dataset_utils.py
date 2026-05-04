@@ -1,5 +1,5 @@
 #%%
-from data_processing.SPHERE.data_utils import SPHERE_DATA_FOLDER, InitIRDISConfig, default_device
+from data_processing.SPHERE_data_utils import SPHERE_DATA_FOLDER, InitIRDISConfig, default_device
 
 import numpy as np
 import torch

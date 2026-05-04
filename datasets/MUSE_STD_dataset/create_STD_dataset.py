@@ -215,7 +215,7 @@ from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import SimpleImputer, IterativeImputer
 from sklearn.preprocessing import StandardScaler
 from data_analysis_utils import *
-from data_processing.MUSE.data_utils import filter_dataframe, reduce_dataframe
+from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe
 
 verbose = True
 

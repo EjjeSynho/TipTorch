@@ -1,4 +1,4 @@
-from data_processing.MUSE.data_utils import *
+from data_processing.MUSE_data_utils import *
 
 
 STD_FOLDER     = Path(project_settings["STD_data_folder"])

@@ -220,7 +220,7 @@ except Exception as e:
 
 
 #%% ========================= Load MUSE data to detect and match sources =========================
-from data_processing.MUSE.data_utils import GetSpectrum, LoadCachedDataMUSE
+from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 from project_settings import default_device
 
 raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.fits.fz"

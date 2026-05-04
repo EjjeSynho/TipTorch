@@ -23,7 +23,7 @@ from matplotlib.colors import LogNorm
 from pathlib import Path
 
 from tools.utils import mask_square
-from data_processing.MUSE.data_utils import GetSpectrum, LoadCachedDataMUSE
+from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
