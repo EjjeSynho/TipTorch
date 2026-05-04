@@ -148,7 +148,7 @@ cat >> "$ENV_YML" <<EOF
 
 dependencies:
   - python=$PYTHON_VERSION
-  - numpy
+  - numpy>=2.0
   - scipy
   - scikit-learn
 EOF

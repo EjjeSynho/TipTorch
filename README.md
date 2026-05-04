@@ -55,6 +55,21 @@ pip install -e .
 pip install .
 ```
 
+### Option 3 — Build and install as a conda package
+
+```bash
+# Build the conda package from the recipe
+conda build conda/
+
+# Install the locally built package
+conda install --use-local tiptorch
+```
+
+You can set the version at build time via the `TIPTORCH_VERSION` environment variable:
+```bash
+TIPTORCH_VERSION=0.1.0 conda build conda/
+```
+
 
 ## Project Structure
 

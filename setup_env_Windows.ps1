@@ -105,7 +105,7 @@ $Yml += 'dependencies:'
 $Yml += "  - python=$PythonVersion"
 
 # Core scientific packages with Intel MKL support if Intel CPU detected
-$Yml += '  - numpy'
+$Yml += '  - numpy>=2.0'
 $Yml += '  - scipy'
 $Yml += '  - scikit-learn'
 

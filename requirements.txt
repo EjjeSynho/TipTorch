@@ -1,7 +1,7 @@
 # Core libraries
 pillow
 astropy
-numpy>=1.26
+numpy>=2.0
 scipy
 astroquery
 pandas

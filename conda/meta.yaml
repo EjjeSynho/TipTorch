@@ -1,0 +1,61 @@
+{% set name = "tiptorch" %}
+{% set version = environ.get("TIPTORCH_VERSION", "0.0.1.dev0") %}
+
+package:
+  name: {{ name }}
+  version: {{ version }}
+
+source:
+  path: ..
+
+build:
+  number: 0
+  noarch: python
+  script: {{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vv
+
+requirements:
+  host:
+    - python >=3.10
+    - pip
+    - setuptools >=64
+    - setuptools-scm >=8
+  run:
+    - python >=3.10
+    - pytorch
+    - torchvision
+    - numpy >=2.0
+    - scipy
+    - astropy
+    - pyyaml
+    - tabulate
+    - pooch
+    - gdown
+    - pillow
+
+test:
+  imports:
+    - tiptorch
+    - tiptorch._config
+    - tiptorch.psf_models.TipTorch
+    - tiptorch.psf_models.IRDIS_wrapper
+    - tiptorch.psf_models.NFM_wrapper
+    - tiptorch.managers.config_manager
+    - tiptorch.managers.input_manager
+    - tiptorch.tools.utils
+    - tiptorch.tools.normalizers
+    - tiptorch.tools.cubic_splines
+  requires:
+    - pip
+  commands:
+    - pip check
+
+about:
+  home: https://github.com/EjjeSynworworsta/TipTorch
+  summary: A PyTorch-based adaptive optics PSF simulator for astronomical instruments
+  license: MIT
+  license_file: LICENSE
+  dev_url: https://github.com/EjjeSynworworsta/TipTorch
+
+extra:
+  recipe-maintainers:
+    - EjjeSynho
