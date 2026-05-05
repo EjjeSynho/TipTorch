@@ -25,6 +25,7 @@ from pathlib import Path
 from tiptorch.tools.utils import mask_square
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 
+# Define the location of your NFM data. It can be whenever. One option is to add it to the project config file 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
 device = default_device
@@ -146,7 +147,7 @@ model_config['sensor_science']['FieldOfView'] = PSF_size
 # This function also defines the order in which sources are indexed ad processed later, so it's important to use it before extracting the source images
 # and spectra. The order is defined by the brightness of the sources, so the brightest source will be indexed as 0, the second brightest as 1, and so on
 sources = DetectSources(cube_sparse, threshold='auto', nsigma=35, box_size=11, sort_by_brightness=True, weight_from_flux=False)
-# sources = AddSources(cube_sparse, [[100, 200]], sources, weights=0.0, weight_from_flux=False)
+sources = AddSources(cube_sparse, [[100, 200]], sources, weights=0.0, weight_from_flux=False)
 
 DisplaySources(cube_sparse, sources, draw_box_size=20, vmin=10, vmax=sources['peak_value'].max()*0.85)
 
@@ -349,19 +350,66 @@ w_spectral *= 0
 w_spectral += 1.0 # for now, use uniform spectral weighting, but this can be easily changed to give more importance to certain wavelengths if needed
 
 
+# ---------- Source selection for fitting ----------
+# Select which sources to include in the fit. None = all sources (original behavior using field-uniform PSF from source 0).
+# When a subset is specified (e.g., [0, 2, 5]), only those sources are simulated via NFM_wrapper's src_ids mechanism
+# (each getting its own field-position-dependent PSF), and only their ROI regions contribute to the loss and backpropagation.
+# fit_src_ids = None  # e.g., [0, 2, 5] or a single int like 0
+
+fit_src_ids = 0
+
+if fit_src_ids is not None:
+    _fit_ids = [fit_src_ids] if isinstance(fit_src_ids, (int, np.integer)) else list(fit_src_ids)
+    N_fit = len(_fit_ids)
+    fit_spectra_sparse = src_spectra_sparse[_fit_ids]
+    fit_img_crops  = [srcs_image_data["img_crops"][i]  for i in _fit_ids]
+    fit_img_slices = [srcs_image_data["img_slices"][i] for i in _fit_ids]
+    fit_src_mask   = src_mask[_fit_ids]
+
+    # Recompute loss normalization weights for the selected subset
+    fit_src_fluxes = src_fluxes[_fit_ids]
+    fit_max_flux   = fit_src_fluxes.max().item()
+    fit_relative_weights = torch.clamp(fit_src_fluxes / fit_max_flux, min=0.2, max=1.0) * fit_src_mask
+    fit_w_total = fit_relative_weights.sum() / (fit_src_fluxes * fit_relative_weights).sum()
+    fit_w_spectral = w_spectral[_fit_ids]
+
+    # Spatial mask covering only selected source ROIs to exclude unmodeled source regions from the loss
+    fit_spatial_mask = torch.zeros([1, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
+    for i in _fit_ids:
+        (y_min_img, y_max_img), (x_min_img, x_max_img) = srcs_image_data["img_slices"][i]
+        fit_spatial_mask[:, y_min_img:y_max_img, x_min_img:x_max_img] = 1.0
+else:
+    _fit_ids = None  # signals "all sources" mode
+    N_fit = N_src
+    fit_spectra_sparse = src_spectra_sparse
+    fit_img_crops  = srcs_image_data["img_crops"]
+    fit_img_slices = srcs_image_data["img_slices"]
+    fit_src_mask   = src_mask
+    fit_w_total    = w_total
+    fit_w_spectral = w_spectral
+    fit_spatial_mask = None  # no spatial masking needed when all sources are fitted
+
+
 def simulate_sparse(x):
     x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True) # update model inputs with the values from the stacked vector
-    PSFs_  = PSF_model(x_dict) # simulate PSFs normalized to ΣPSF≈1 per wavelength, but not yet scaled to the actual sources spectra
+    # Save F_norm for the fitted sources before forward() modifies x_dict in-place (it selects only src_ids entries)
+    F_norm_fit = x_dict['F_norm'][_fit_ids] if _fit_ids is not None else x_dict['F_norm']
+    # When _fit_ids is set, NFM_wrapper computes per-source PSFs only for the selected sources (field-varying PSF morphology).
+    # When _fit_ids is None, the original field-uniform approximation is used (PSF shape from source 0 applied to all).
+    PSFs_  = PSF_model(x_dict, src_ids=(_fit_ids if _fit_ids is not None else 0))
     PSF_norm_factor = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_sim_normed)
-    flux_normalization = x_dict['F_norm'].unsqueeze(-1) * PSF_norm_factor * src_spectra_sparse
-    PSFs_ *= flux_normalization.view(N_src, N_wvl, 1, 1)
+    flux_normalization = F_norm_fit.unsqueeze(-1) * PSF_norm_factor * fit_spectra_sparse
+    # Use regular multiplication (not *=) so that PSFs_ shape [1, N_wvl, H, W] can broadcast to [N_fit, N_wvl, H, W]
+    PSFs_ = PSFs_ * flux_normalization.view(N_fit, N_wvl, 1, 1)
 
-    return add_ROIs( canvas*0.0, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"] )
+    return add_ROIs( canvas*0.0, PSFs_, fit_img_crops, fit_img_slices )
 
 
 def loss_PSF(PSF_data, PSF_pred, weights_λ, weight_total, w_MSE, w_MAE):
     residuals = PSF_data - PSF_pred
-    diff = residuals * weights_λ * src_mask.view(-1, 1, 1, 1) # apply both spectral and source weights to the residuals
+    if fit_spatial_mask is not None:
+        residuals = residuals * fit_spatial_mask  # zero out regions outside selected source ROIs
+    diff = residuals * weights_λ * fit_src_mask.view(-1, 1, 1, 1) # apply both spectral and source weights to the residuals
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean()  * w_MAE
     # Since x input in simulate_sparse() updates the internal values for the PSF_model (inluding F_norm),
@@ -396,9 +444,10 @@ def loss_LO(w_bump, w_LO):
 def loss(x_, data, func):
     model = func(x_)
     LO_loss  = loss_LO(w_bump=5e-5, w_LO=1e-7)
-    PSF_loss = loss_PSF(data, model, weights_λ=w_spectral, weight_total=w_total, w_MSE=900.0, w_MAE=2.6)
+    PSF_loss = loss_PSF(data, model, weights_λ=fit_w_spectral, weight_total=fit_w_total, w_MSE=900.0, w_MAE=2.6)
     
     return LO_loss + PSF_loss
+
 
 #%%
 from fitting.PSF_optimizer import OptimizePSFModel

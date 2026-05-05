@@ -5,14 +5,15 @@ import numpy as np
 import scipy.special as spc
 import torchvision.transforms as transforms
 from torch import fft, nn
-from torch.nn.functional import interpolate, grid_sample
+from torch.nn.functional import interpolate#, grid_sample
 from astropy.io import fits
 from tiptorch.tools.utils import pdims, min_2d, to_little_endian
 from tiptorch.tools.air_refraction import AirRefractiveIndexCalculator
 from pathlib import Path
 
 
-class TipTorch(torch.nn.Module): 
+class TipTorch(torch.nn.Module):
+    
     def InitPupils(self):       
         # If not provided externally, TipTorch tries to load pupil and apodizer from the config file
         if self.pupil is None:
@@ -40,7 +41,7 @@ class TipTorch(torch.nn.Module):
         
         self.pupil_angle = self.config['telescope']['PupilAngle'] if 'PupilAngle' in self.config['telescope'] else 0.0
 
-        self.wvl = self.config['sources_science']['Wavelength'].view(1, -1) # must be [1 x N_wvl]
+        self.wvl = self.config['sources_science']['Wavelength'].view(1, -1) # must be [1, N_wvl]
         self.N_wvl = self.wvl.shape[-1]
         self.wvl_atm = self.config['atmosphere']['Wavelength']
 
@@ -93,11 +94,11 @@ class TipTorch(torch.nn.Module):
         self.h_DM  = self.config['DM']['DmHeights'] # [m]
         self.N_DM  = self.h_DM.shape[0]
         
-        self.DM_opt_angle   = self.config['DM']['OptimizationZenith' ].view(self.N_obs, self.N_DM) / self.rad2arc # [N_obs x N_optdir]
-        self.DM_opt_azimuth = torch.deg2rad(self.config['DM']['OptimizationAzimuth'].view(self.N_obs, self.N_DM)) # [N_obs x N_optdir]
+        self.DM_opt_angle   = self.config['DM']['OptimizationZenith' ].view(self.N_obs, self.N_DM) / self.rad2arc # [N_obs, N_optdir]
+        self.DM_opt_azimuth = torch.deg2rad(self.config['DM']['OptimizationAzimuth'].view(self.N_obs, self.N_DM)) # [N_obs, N_optdir]
 
-        self.DM_opt_dir_x  = torch.tan(self.DM_opt_angle) * torch.cos(self.DM_opt_azimuth) # [N_obs x N_optdir]
-        self.DM_opt_dir_y  = torch.tan(self.DM_opt_angle) * torch.sin(self.DM_opt_azimuth) # [N_obs x N_optdir]
+        self.DM_opt_dir_x  = torch.tan(self.DM_opt_angle) * torch.cos(self.DM_opt_azimuth) # [N_obs, N_optdir]
+        self.DM_opt_dir_y  = torch.tan(self.DM_opt_angle) * torch.sin(self.DM_opt_azimuth) # [N_obs, N_optdir]
         self.DM_opt_weight = self.config['DM']['OptimizationWeight'].view(self.N_obs, -1)  # [N_obs, N_optdir]
         self.N_optdir = self.DM_opt_weight.shape[-1]
 
@@ -132,7 +133,7 @@ class TipTorch(torch.nn.Module):
         self.L0 = self.config['atmosphere']['L0'].flatten() # [m]
         
         self.r0_ = lambda : self.r0.abs().flatten() * self.airmass.flatten()**(-3.0/5.0)# [N_obs]
-        self.h_  = lambda: (self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height))) # [N_obs x N_layers]
+        self.h_  = lambda: (self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height))) # [N_obs, N_layers]
     
         self.F   = torch.ones (self.N_src, self.N_wvl, device=self.device)
         self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
@@ -165,22 +166,22 @@ class TipTorch(torch.nn.Module):
         self.IOR_GS_wvl  = self.n_air(self.GS_wvl) # GS_wvl may depend on the filter for SCAO or on LGS wavelength
  
 
-    def _FFTAutoCorr(self, x):
+    def _FFTAutoCorr(self, x: torch.Tensor) -> torch.Tensor:
         return fft.fftshift( fft.ifft2(fft.fft2(x, dim=(-2,-1)).abs()**2, dim=(-2,-1)), dim=(-2,-1) ) / x.shape[-2] / x.shape[-1]
 
     
-    def _gen_grid(self, N):
+    def _gen_grid(self, N: int) -> tuple[torch.Tensor, torch.Tensor]:
         factor = 0.5*(1-N%2)
         return torch.meshgrid(*[torch.linspace(-N//2+N%2+factor, N//2-factor, N, device=self.device)]*2, indexing = 'ij')
     
 
-    def _stabilize(self, tensor, eps=1e-9):
+    def _stabilize(self, tensor: torch.Tensor, eps: float = 1e-9) -> torch.Tensor:
         ''' Increases the numerical stability by replacing near-zero values with eps '''
         tensor[tensor.abs() < eps] = eps
         return tensor
 
 
-    def to_double(self):
+    def to_double(self) -> None:
         self.is_float = False
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
@@ -191,7 +192,7 @@ class TipTorch(torch.nn.Module):
                 setattr(self, attr_name, attr.to(new_dtype))
 
 
-    def to_float(self):
+    def to_float(self) -> None:
         self.is_float = True
         for attr_name in dir(self):
             attr = getattr(self, attr_name)
@@ -202,7 +203,7 @@ class TipTorch(torch.nn.Module):
                 setattr(self, attr_name, attr.to(new_dtype))
 
 
-    def PistonFilter(self, f):
+    def PistonFilter(self, f: torch.Tensor) -> torch.Tensor:
         ''' Piston mode filter for PSD '''
         x = torch.pi * self.D * f
         R = self.bessel_j1(x) / x
@@ -211,19 +212,17 @@ class TipTorch(torch.nn.Module):
         return self._stabilize(piston_filter)
 
         
-    def _to_odd(self, x):
+    def _to_odd(self, x: float) -> int:
         odd = int(np.round(x))
         if odd % 2 == 0:
             odd += 1 if x > odd else -1
         return odd
         
         
-    def InitGrids(self):
-        # Initialize grids
+    def InitGrids(self) -> None:
+        # Initialize grids and frequency masks for PSD and OTF computations.
         # for all generated PSDs and OTFs within one PSF batch the sampling must be the same
-       
         pixels_per_l_D = self.wvl * self.rad2mas / (self.psInMas * self.D)
-        # self.sampling_factor = torch.maximum(2./pixels_per_l_D, self.one_gpu) * self.oversampling
         self.sampling_factor = 2./pixels_per_l_D * self.oversampling
         self.sampling_factor /= torch.clamp(self.sampling_factor, 0, 1).min()
         
@@ -235,7 +234,7 @@ class TipTorch(torch.nn.Module):
         self.dk    = 1.0 / self.D / self.sampling.min() # PSD spatial frequency step
                 
         # Initialize PSD spatial frequencies
-        # This assumes thaat pupil rotation is the same for all simulated PSFs in the batch
+        # This assumes that pupil rotation is the same for all simulated PSFs in the batch
         if self.pupil_angle != 0.0:
             kx, ky = self._gen_grid(self.nOtf)
             rot_ang = torch.deg2rad(self.pupil_angle)
@@ -331,7 +330,7 @@ class TipTorch(torch.nn.Module):
             ids = np.array( [[i, j] for i in range(-n_times_y+1, n_times_y) for j in range(-n_times_x+1, n_times_x) if i != 0 or j != 0] )
             
             # The 0-th dimension is used to store the shifted spatial frequency
-            # This is thing is 4D: [N_combs x N_L x kx x ky]
+            # This is thing is 4D: [N_combs, N_L, kx, ky]
             m = self.make_tensor(ids[:,0])
             n = self.make_tensor(ids[:,1])
             self.N_combs = m.shape[0]
@@ -357,8 +356,8 @@ class TipTorch(torch.nn.Module):
         if self.PSD_include['aliasing']:
             self.PR = self.PistonFilter(torch.hypot(self.km, self.kn)) # piston filter for aliased spatial frequencies
 
-    
-    def Phase2OTF(self, phase):
+
+    def Phase2OTF(self, phase: torch.Tensor | None) -> torch.Tensor:
         '''
         Compute OTF from a phase screen.
         All phase screens are sampled equally for all wavelengths (re-scaling happens later when PSFs are computed)
@@ -377,18 +376,19 @@ class TipTorch(torch.nn.Module):
         return OTF_ / OTF_.abs().amax(dim=(-2,-1), keepdim=True) # normalize OTF
     
     
-    def ComputeStaticOTF(self, phase=None):
+    def ComputeStaticOTF(self, phase: torch.Tensor | None = None) -> torch.Tensor:
         if phase is not None:
             self.OTF_static = self.Phase2OTF(phase)
         # When phase is None, just keep the current OTF_static as-is
         return self.OTF_static
 
 
-    def Update(self, config=None, grids=False, pupils=False, tomography=False):
+    def Update(self, config: dict | None = None, grids: bool = False, pupils: bool = False, tomography: bool = False) -> None:
         # Update the model with a new configuration. To ensure optimal performance, different
         # components can be updated independently when needed. By default, only values are updated
         
-        if config is not None: self.config = config
+        if config is not None:
+            self.config = config
         
         self.InitValues()
 
@@ -408,7 +408,7 @@ class TipTorch(torch.nn.Module):
                 self.DMProjector()
 
 
-    def _initialize_PSDs_settings(self, PSD_include):
+    def _initialize_PSDs_settings(self, PSD_include: dict | None = None) -> None:
         # The full list of all PSD components supported by the model
         PSD_entries_all = [
             'fitting',
@@ -440,7 +440,16 @@ class TipTorch(torch.nn.Module):
         #TODO: an open-loop case
 
 
-    def __init__(self, AO_config, AO_type, pupil=None, PSD_include=None, norm_regime='sum', device=torch.device('cpu'), oversampling=1, dtype=torch.float32):
+    def __init__(self,
+                 AO_config: dict,
+                 AO_type: str,
+                 pupil = None,
+                 PSD_include: dict | None = None,
+                 norm_regime: str = 'sum',
+                 device: torch.device = torch.device('cpu'),
+                 oversampling: int = 1,
+                 dtype: torch.dtype = torch.float32):
+        
         super().__init__()
         
         self.device = device
@@ -468,12 +477,7 @@ class TipTorch(torch.nn.Module):
             self.bessel_j1 = lambda x: torch.special.bessel_j1(x)
 
         # Initialize constants
-        # self.var_RON_const  = self.make_tensor(torch.pi**2/3)
-        # self.var_Shot_const = self.make_tensor(torch.pi**2)
-
         self.mas2arc  = self.make_tensor(1e-3) #TODO: do we need it, though?
-        self.zero_gpu = self.make_tensor(0.)
-        self.one_gpu  = self.make_tensor(1.)
         self.rad2mas  = self.make_tensor(3600 * 180 * 1000 / torch.pi)
         self.rad2arc  = self.make_tensor(self.rad2mas / 1000)
         self.cte = self.make_tensor( (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3))) )
@@ -507,7 +511,7 @@ class TipTorch(torch.nn.Module):
         self.apodizer = None
         self.PR = None # piston mode filter in aliased freqs domain
  
-        # Read data and initialize AO system
+        # Read the config data and initialize the AO system
         self.Update(
             config = AO_config,
             grids  = True,
@@ -521,9 +525,9 @@ class TipTorch(torch.nn.Module):
     def DMProjector(self):
         """ Projects correction in the direction of science target(s). Must be updated only when target coordinates were changed """
         
-        kx = pdims(self.kx_AO, 1) # [1 x nOtf_AO x nOtf_AO x 1]
-        ky = pdims(self.ky_AO, 1) # [1 x nOtf_AO x nOtf_AO x 1]
-        h_DM = self.h_DM.view(1, 1, 1, self.N_DM) # [N_obs x 1 x 1 x N_DM]
+        kx = pdims(self.kx_AO, 1) # [1, nOtf_AO, nOtf_AO, 1]
+        ky = pdims(self.ky_AO, 1) # [1, nOtf_AO, nOtf_AO, 1]
+        h_DM = self.h_DM.view(1, 1, 1, self.N_DM) # [N_obs, 1, 1, N_DM]
         
         N_src_ = len(self.src_dirs_x.flatten())
         
@@ -532,7 +536,7 @@ class TipTorch(torch.nn.Module):
     
         f = (beta_x*kx + beta_y*ky) * self.mask_corrected_AO.unsqueeze(-1)
 
-        self.P_beta_DM = torch.exp( 2j*torch.pi*h_DM * f ).unsqueeze(-2) # [N_src x nOtf_AO x nOtf_AO x 1 x N_L]
+        self.P_beta_DM = torch.exp( 2j*torch.pi*h_DM * f ).unsqueeze(-2) # [N_src, nOtf_AO, nOtf_AO, 1, N_L]
         # TODO: support multiple DMs?
 
 
@@ -546,18 +550,18 @@ class TipTorch(torch.nn.Module):
         theta_y = self.DM_opt_dir_y.view(self.N_obs, 1, 1, self.N_optdir)
 
         f = theta_x * pdims(self.kx_AO, 1) + theta_y * pdims(self.ky_AO, 1)
-        P_L = torch.exp( 2j*torch.pi*h * pdims(f,1) ).unsqueeze(-2) # [N_obs x nOtf_AO x nOtf_AO x N_optdir x 1 x N_L]
+        P_L = torch.exp( 2j*torch.pi*h * pdims(f,1) ).unsqueeze(-2) # [N_obs, nOtf_AO, nOtf_AO, N_optdir, 1, N_L]
         
         if self.AO_type == 'LTAO':
-            self.P_opt = (P_L * opt_w).sum(dim=3) # [N_obs x nOtf_AO x nOtf_AO x 1 x N_L]
+            self.P_opt = (P_L * opt_w).sum(dim=3) # [N_obs, nOtf_AO, nOtf_AO, 1, N_L]
             return
         
         mask = self.mask_corrected_AO.view(1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
-        P_DM   = torch.exp( 2j*torch.pi*h_dm * pdims(f*mask,1) ).unsqueeze(-2) # [N_obs x nOtf_AO x nOtf_AO x N_optdir x 1 x N_DM]
-        P_DM_t = torch.conj( P_DM.permute(0, 1, 2, 3, 4, 5) )    # [N_obs x nOtf_AO x nOtf_AO x N_optdir x N_DM x 1]
+        P_DM   = torch.exp( 2j*torch.pi*h_dm * pdims(f*mask,1) ).unsqueeze(-2) # [N_obs, nOtf_AO, nOtf_AO, N_optdir, 1, N_DM]
+        P_DM_t = torch.conj( P_DM.permute(0, 1, 2, 3, 4, 5) )    # [N_obs, nOtf_AO, nOtf_AO, N_optdir, N_DM, 1]
 
-        mat1   = ((P_DM_t @ P_L)  * opt_w).sum(dim=3)  # [N_obs x nOtf_AO x nOtf_AO x N_DM x N_L]
-        to_inv = ((P_DM_t @ P_DM) * opt_w).sum(dim=3)  # [N_obs x nOtf_AO x nOtf_AO x N_DM x N_DM]
+        mat1   = ((P_DM_t @ P_L)  * opt_w).sum(dim=3)  # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
+        to_inv = ((P_DM_t @ P_DM) * opt_w).sum(dim=3)  # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_DM]
         
         if inv_method == 'lstsq':
             # Solve using least squares: mat2 * to_inv = mat1
@@ -569,10 +573,10 @@ class TipTorch(torch.nn.Module):
         elif inv_method == 'pinv':
             mat2 = torch.linalg.pinv(to_inv, rcond=1e-2) # Last 2 dimensions are inverted
             
-        self.P_opt = mat2 @ mat1 # [N_obs x nOtf_AO x nOtf_AO x 1 x N_L]
+        self.P_opt = mat2 @ mat1 # [N_obs, nOtf_AO, nOtf_AO, 1, N_L]
 
 
-    def TransferFunctions(self, freq, Ts, delay, loop_gain):
+    def TransferFunctions(self, freq: torch.Tensor, Ts: torch.Tensor, delay: torch.Tensor, loop_gain: torch.Tensor):
         # z = torch.exp(2j*torch.pi*freq*Ts) # no minus according to Sanchit
         # hInt = loopGain / self._stabilize(1.0 - 1.0/z, 1e-12)
         # rtfInt = 1. / self._stabilize(1+hInt*z**(-delay), 1e-12) # Rejection transfer function
@@ -591,7 +595,7 @@ class TipTorch(torch.nn.Module):
 
 
     # TODO: accelerate this function
-    def NoiseGain(self, nF = 1000):
+    def NoiseGain(self, nF: int = 1000):
         if not self.approx_noise_gain:
             Ts = 1.0 / self.HOloop_rate  # sampling time
             delay    = self.HOloop_delay # latency between the measurement and the correction
@@ -613,7 +617,7 @@ class TipTorch(torch.nn.Module):
             self.noise_gain = torch.trapz(ntfInt.abs().pow(2), f, dim=1).view(self.N_obs, 1, 1) * 2*Ts
         else:
             # An average value of the noise transfer function as a function of the delay in frames for an integrator gain of 0.5
-            self.noise_gain = torch.min(self.one_gpu*0.8, 0.4 + 0.1333 * self.HOloop_delay).pow(2).view(self.N_obs, 1, 1)
+            self.noise_gain = torch.min(torch.tensor(0.8, device=self.device), 0.4 + 0.1333 * self.HOloop_delay).pow(2).view(self.N_obs, 1, 1)
     
      
     def Controller(self):
@@ -622,18 +626,18 @@ class TipTorch(torch.nn.Module):
         
         vy = idim(self.vy)
         vx = idim(self.vx)
-        kx = self.kx_AO.unsqueeze(-1) # add atmo. layers dimension: [N_src x nOtf_AO x nOtf_AO x nL]
-        ky = self.ky_AO.unsqueeze(-1) # add atmo. layers dimension: [N_src x nOtf_AO x nOtf_AO x nL]
+        kx = self.kx_AO.unsqueeze(-1) # add atmo. layers dimension: [N_src, nOtf_AO, nOtf_AO, nL]
+        ky = self.ky_AO.unsqueeze(-1) # add atmo. layers dimension: [N_src, nOtf_AO, nOtf_AO, nL]
         
         Ts = 1.0 / self.HOloop_rate   # sampling time
         delay     = self.HOloop_delay # latency between the measurement and the correction
         loop_gain = self.HOloop_gain
         
         #TODO: implement nTh to incorparate the uncertainty in wind direction
-        thetaWind = self.zero_gpu #torch.linspace(0, 2*torch.pi-2*torch.pi/nTh, nTh) TODO: remove GPU initialization of 0
+        thetaWind = torch.zeros(1, device=self.device) #torch.linspace(0, 2*torch.pi-2*torch.pi/nTh, nTh) TODO: remove GPU initialization of 0
         costh = torch.cos(thetaWind) # stays for the uncertainty in the wind diirection
 
-        fi = -(vx*kx + vy*ky)*costh # [N_src x nOtf_AO x nOtf_AO x nL]
+        fi = -(vx*kx + vy*ky)*costh # [N_src, nOtf_AO, nOtf_AO, nL]
 
         _, _, atfInt, ntfInt = self.TransferFunctions(fi, pdims(Ts,3), pdims(delay,3), pdims(loop_gain,3))
         
@@ -647,7 +651,7 @@ class TipTorch(torch.nn.Module):
         self.hn = self.hn.sum(dim=-1) 
 
 
-    def ReconstructionFilter(self, WFS_noise_var, MV=0): # TODO: make MV switchable
+    def ReconstructionFilter(self, WFS_noise_var: torch.Tensor, MV: int = 0): # TODO: make MV switchable
         Av = torch.sinc(self.WFS_d_sub*self.kx_AO) * torch.sinc(self.WFS_d_sub*self.ky_AO) * torch.exp(1j*torch.pi*self.WFS_d_sub*(self.kx_AO+self.ky_AO))
         self.SxAv = ( 2j*torch.pi*self.kx_AO*self.WFS_d_sub*Av ).view(1, self.nOtf_AO_y, self.nOtf_AO_x) # Same for a given AO regime
         self.SyAv = ( 2j*torch.pi*self.ky_AO*self.WFS_d_sub*Av ).view(1, self.nOtf_AO_y, self.nOtf_AO_x)
@@ -693,7 +697,7 @@ class TipTorch(torch.nn.Module):
         return PSD_ST
 
 
-    def NoisePSD(self, WFS_noise_var):
+    def NoisePSD(self, WFS_noise_var: torch.Tensor):
         if not self.tomography:
             noisePSD = torch.abs(self.Rx**2 + self.Ry**2) / (2*self.kc)**2
             noisePSD = noisePSD * self.piston_filter * self.noise_gain * WFS_noise_var.view(self.N_obs, 1, 1) * self.mask_corrected_AO
@@ -713,7 +717,7 @@ class TipTorch(torch.nn.Module):
 
     def AliasingPSD(self):
         T  = self.WFS_det_clock_rate / self.HOloop_rate
-        td = pdims(T * self.HOloop_delay, [-1,3]) # [N_combs x N_src x nOtf_AO x n_Otf_AO x nL]
+        td = pdims(T * self.HOloop_delay, [-1,3]) # [N_combs, N_src, nOtf_AO, n_Otf_AO, nL]
         T  = pdims(T, [-1,3])
 
         # Adding 0th dimension for shifted grid pieces
@@ -724,7 +728,7 @@ class TipTorch(torch.nn.Module):
         W_mn = self.VonKarmanSpectrum(self.r0_().view(1, self.N_obs), self.L0.abs().view(1, self.N_obs), self.km**2 + self.kn**2) * self.PR
         
         Q = (Rx1*self.km + Ry1*self.kn) * torch.sinc(self.WFS_d_sub*self.km) * torch.sinc(self.WFS_d_sub*self.kn)
-        tf = self.h1.unsqueeze(0).unsqueeze(-1) # [N_combs x N_src x nOtf_AO x n_Otf_AO x nL]
+        tf = self.h1.unsqueeze(0).unsqueeze(-1) # [N_combs, N_src, nOtf_AO, n_Otf_AO, nL]
 
         # Add aliasing dimension and more
         vx = self.vx.view(1, self.N_obs, 1, 1, self.N_L)
@@ -742,7 +746,7 @@ class TipTorch(torch.nn.Module):
         return aliasing_PSD
 
 
-    def VonKarmanSpectrum(self, r0, L0, freq2):
+    def VonKarmanSpectrum(self, r0: torch.Tensor, L0: torch.Tensor, freq2: torch.Tensor):
         return self.cte*pdims(r0,2)**(-5/3) * (freq2 + 1/pdims(L0,2)**2)**(-11/6)
 
 
@@ -765,15 +769,15 @@ class TipTorch(torch.nn.Module):
         w = self.Cn2_weights.view(self.N_obs, 1, 1, 1, self.N_L)
         k = self.k_AO.view(1, 1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
 
-        src_azimuth = pdims(torch.arctan2(self.src_dirs_y, self.src_dirs_x), 2) # [N_src]
+        src_azimuth = pdims(torch.arctan2(self.src_dirs_y, self.src_dirs_x).flatten(), 2) # [1, 1, N_src]
 
-        cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - src_azimuth).unsqueeze(1) # [N_src x 1 x nOtf_AO_y x nOtf_AO_x]
-        tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle)) # [N_obs x N_wvl]
+        cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - src_azimuth).unsqueeze(1) # [N_src, 1, nOtf_AO_y, nOtf_AO_x]
+        tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle)) # [N_obs, N_wvl]
         
         return self.W_atm.unsqueeze(1) * ( 2*w*(1.0 - torch.cos(2*torch.pi*h*k * pdims(tan_theta, 3) * pdims(cos_ang, 1))) ).sum(dim=-1) * self.mask_corrected_AO
     
 
-    def JitterKernel(self, Jx, Jy, Jxy):
+    def JitterKernel(self, Jx: torch.Tensor, Jy: torch.Tensor, Jxy: torch.Tensor):
         # Assuming Jxy is in [deg], convert it to [rad]
         cos_theta = torch.cos( torch.deg2rad(Jxy) )
         sin_theta = torch.sin( torch.deg2rad(Jxy) )
@@ -798,7 +802,7 @@ class TipTorch(torch.nn.Module):
         Also support pyramid WFS.
         
         Returns:
-            sigma_noise_sqr: [N_obs x N_GS] noise variance tensor
+            sigma_noise_sqr: [N_obs, N_GS] noise variance tensor
         """
         
         # Parse WFS parameters
@@ -814,26 +818,27 @@ class TipTorch(torch.nn.Module):
             # nD: spot FWHM in pixels without turbulence (diffraction-limited), for DL: nT = nD = 2
             nD = torch.maximum(
                 self.rad2arc * WFS_wvl / self.WFS_d_sub / WFS_pixelScale, 
-                self.one_gpu
+                torch.tensor(1.0, device=self.device)
             ).view(-1,1)
-            spot_FWHM_turb = 0.98 * self.rad2arc * WFS_wvl / r0_WFS / torch.sqrt(self.one_gpu*2.0)  # [arcsec]
+            
+            spot_FWHM_turb = 0.98 * self.rad2arc * WFS_wvl / r0_WFS / torch.sqrt(torch.tensor(2.0, device=self.device))  # [arcsec]
             
             # nT: spot FWHM in pixels with turbulence and TT removed according to [Thomas et al. 2006]
             nT = torch.maximum(
                 torch.hypot(self.WFS_spot_FWHM.max() * self.mas2arc, spot_FWHM_turb) / WFS_pixelScale,
-                self.one_gpu
+                torch.tensor(1.0, device=self.device)
             ).view(-1,1)
             
             # Center of gravity
             if self.WFS_algorithm == 'cog':
                 sigma_sqr_RON  = (torch.pi**2 / 3) * (WFS_RON / WFS_Nph)**2 * (WFS_nPix**2 / nD).unsqueeze(-1)**2
-                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * (nT / nD)
+                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0, device=self.device)))) / WFS_Nph * (nT / nD)
             
             # Truncated CoG algorithm
             elif self.WFS_algorithm == 'tcog':
                 nPix_eff = torch.ceil(nT**2 * torch.pi / 4)
                 sigma_sqr_RON  = (torch.pi**2 / 3) * (WFS_RON / WFS_Nph)**2 * (nPix_eff / nD).unsqueeze(-1)**2
-                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0)))) / WFS_Nph * (nT / nD)
+                sigma_sqr_shot = (torch.pi**2 / (2 * torch.log(torch.tensor(2.0, device=self.device)))) / WFS_Nph * (nT / nD)
             
             # Weighted CoG algorithm
             elif self.WFS_algorithm == 'wcog':
@@ -851,8 +856,8 @@ class TipTorch(torch.nn.Module):
             # Quad Cell algorithm
             elif self.WFS_algorithm == 'qc':
                 k = torch.where(nT > nD,
-                    torch.sqrt(2 * torch.pi) * nT / (2 * torch.sqrt(2 * torch.log(torch.tensor(2.0)))) / nD,
-                    self.one_gpu
+                    torch.sqrt(2.0 * torch.pi) * nT / (2.0 * torch.sqrt(2.0 * torch.log(torch.tensor(2.0, device=self.device)))) / nD,
+                    torch.tensor(1.0, device=self.device)
                 ).unsqueeze(-1)
                 
                 sigma_sqr_RON  = k * 4 * torch.pi**2 * (WFS_RON / WFS_Nph)**2
@@ -893,9 +898,9 @@ class TipTorch(torch.nn.Module):
         diag_mask = lambda N: torch.eye(N, device=self.device).view(1,1,1,N,N).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, -1, -1)
         
         M = 2j*torch.pi*self.k_AO * torch.sinc(self.WFS_d_sub*self.kx_AO) * torch.sinc(self.WFS_d_sub*self.ky_AO)
-        M = pdims(M, 2).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, self.N_GS, self.N_GS) * diag_mask(self.N_GS) # [N_obs x nOtf_y x nOtf_x x nGS x nGS]
-        P = torch.exp( 2j*torch.pi*h * (kx*GS_dirs_x + ky*GS_dirs_y) ) # [N_obs x nOtf_y x nOtf_x x nGS x nL]
-        MP   = torch.einsum('nwhik,nwhkj->nwhij', M, P)  # [N_obs x nOtf_y x nOtf_x x nGS x nL]
+        M = pdims(M, 2).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, self.N_GS, self.N_GS) * diag_mask(self.N_GS) # [N_obs, nOtf_y, nOtf_x, nGS, nGS]
+        P = torch.exp( 2j*torch.pi*h * (kx*GS_dirs_x + ky*GS_dirs_y) ) # [N_obs, nOtf_y, nOtf_x, nGS, nL]
+        MP   = torch.einsum('nwhik,nwhkj->nwhij', M, P)  # [N_obs, nOtf_y, nOtf_x, nGS, nL]
         MP_t = torch.conj(MP.permute(0,1,2,4,3))
 
         expand_dims = lambda x_, N: torch.diag_embed(x_).view(self.N_obs, 1, 1, N, N).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, N, N)
@@ -919,13 +924,13 @@ class TipTorch(torch.nn.Module):
         else:
             raise ValueError('Unknown inversion method specified.') 
          
-        self.W = self.P_opt @ self.W_tomo # [N_obs x nOtf_AO_y x nOtf_AO_x x N_GS x N_L]
+        self.W = self.P_opt @ self.W_tomo # [N_obs, nOtf_AO_y, nOtf_AO_x, N_GS, N_L]
         
         # NOTE that size of HOloop_rate == N_obs (wait, why?)
         samp_time = 1.0 / self.HOloop_rate
         www = 2j * torch.pi * pdims(self.k_AO, 1) * torch.sinc((samp_time * self.WFS_det_clock_rate).view(self.N_obs,1,1,1) * self.freq_t)
-        self.MP_alpha_L = www.unsqueeze(-2) * P * (torch.sinc(self.WFS_d_sub*kx) * torch.sinc(self.WFS_d_sub*ky)) # [N_obs x nOtf_AO_y x nOtf_AO_x x 1 x N_L]
-        self.W_alpha = self.W @ self.MP_alpha_L # [N_obs x nOtf_AO_y x nOtf_AO_x x 1 x N_L]
+        self.MP_alpha_L = www.unsqueeze(-2) * P * (torch.sinc(self.WFS_d_sub*kx) * torch.sinc(self.WFS_d_sub*ky)) # [N_obs, nOtf_AO_y, nOtf_AO_x, 1, N_L]
+        self.W_alpha = self.W @ self.MP_alpha_L # [N_obs, nOtf_AO_y, nOtf_AO_x, 1, N_L]
 
 
     def MoffatPSD(self, amp, b, alpha, beta, ratio, theta):
@@ -955,10 +960,10 @@ class TipTorch(torch.nn.Module):
         F = 1 / (Fin-Fout)
 
         MoffatPSD = (amp * V*E*F + b) * self.mask_corrected_AO * self.piston_filter
-              
+
         return MoffatPSD
 
-    
+
     def DLPSF(self):
         ''' Computes a diffraction-limited PSF '''
         self.PSF_DL = self.OTF2PSF(self.OTF_static_default)
@@ -989,7 +994,7 @@ class TipTorch(torch.nn.Module):
             self.vy = self.wind_speed * torch.sin( torch.deg2rad(self.wind_dir) )
 
             self.freq_t = self.vx.view(self.N_obs, 1, 1, self.N_L) * pdims(self.kx_AO, 1) + \
-                          self.vy.view(self.N_obs, 1, 1, self.N_L) * pdims(self.ky_AO, 1) # [N_src x nOtf_AO x nOtf_AO x nL]
+                          self.vy.view(self.N_obs, 1, 1, self.N_L) * pdims(self.ky_AO, 1) # [N_src, nOtf_AO, nOtf_AO, nL]
 
             self.Controller()
             self.ReconstructionFilter(WFS_noise_var)
@@ -1000,7 +1005,7 @@ class TipTorch(torch.nn.Module):
                     self.DMProjector()
 
         # Put all contributiors together and sum up the resulting PSD
-        self.PSDs = {entry: self.zero_gpu for entry in self.PSD_include}
+        self.PSDs = {entry: torch.zeros(1, device=self.device) for entry in self.PSD_include}
 
         if self.PSD_include['fitting']:
             self.PSDs['fitting'] = self.VonKarmanPSD().unsqueeze(1)
@@ -1026,7 +1031,7 @@ class TipTorch(torch.nn.Module):
         #TODO: anisoplanatism for non-tomography!
         #TODO: SLAO support!
         
-        # Resulting dimensions are: [N_scr x N_wvl x nOtf_AO x nOtf_AO]
+        # Resulting dimensions are: [N_scr, N_wvl, nOtf_AO, nOtf_AO]
         PSD = self.PSDs['fitting'] + self.PSD_padder(
               self.PSDs['WFS noise'] + \
               self.PSDs['spatio-temporal'] + \

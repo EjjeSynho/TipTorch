@@ -30,7 +30,7 @@ from torch.utils.tensorboard import SummaryWriter
 import torch.profiler as profiler
 import torch.nn as nn
 
-writer = SummaryWriter(log_dir='./runs/tiptorch_half_inference_profiling')
+writer = SummaryWriter(log_dir='../.runs/tiptorch_half_inference_profiling')
 
 # model = nn.Linear(10, 5)
 # model.eval()  # Set the model to evaluation mode
@@ -46,7 +46,7 @@ with profiler.profile(
     activities=[
         profiler.ProfilerActivity.CPU,
         profiler.ProfilerActivity.CUDA],  # Use CUDA if available
-    on_trace_ready=profiler.tensorboard_trace_handler('./runs/tiptorch_half_inference_profiling'),
+    on_trace_ready=profiler.tensorboard_trace_handler('../.runs/tiptorch_half_inference_profiling'),
     record_shapes=True,
     with_stack=True  # Optional: Add stack tracing
     

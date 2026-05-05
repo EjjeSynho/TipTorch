@@ -3,6 +3,7 @@ __pycache__/
 _pycache_/
 .continue/
 .vscode
+.runs/
 data/
 runs/
 environment.yml
