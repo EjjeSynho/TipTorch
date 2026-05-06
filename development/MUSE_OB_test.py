@@ -58,7 +58,6 @@ cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
 # cache_path = data_folder / "reduced_telemetry/CUBE_0003.pickle"
 
-
 # cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
 # cache_path = data_folder / "reduced_telemetry/CUBE_0021.pickle"
@@ -310,6 +309,7 @@ def EvaluateCoreFluxFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size=511) -> 
 
 @torch.no_grad()
 def UpdateFluxNormalization(PSF_model) -> None:
+    #TODO: what about non-optimized sources?
     PSF_norm_factor_old = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
 
     EvaluateCoreFluxFactor(PSF_model, N_core_pixels) # update the core flux normalization factor based on the current PSF morphology
@@ -347,73 +347,67 @@ w_spectral = torch.clamp(w_spectral, min=0.2, max=2.0) # limit the loss influenc
 w_spectral = w_spectral.view(N_src, N_wvl, 1, 1) # reshape for broadcasting
 
 w_spectral *= 0
-w_spectral += 1.0 # for now, use uniform spectral weighting, but this can be easily changed to give more importance to certain wavelengths if needed
+w_spectral += 1.0 # for now, use uniform spectral weighting, but this can be changed to give more importance to certain wavelengths if needed
 
 
 # ---------- Source selection for fitting ----------
-# Select which sources to include in the fit. None = all sources (original behavior using field-uniform PSF from source 0).
-# When a subset is specified (e.g., [0, 2, 5]), only those sources are simulated via NFM_wrapper's src_ids mechanism
-# (each getting its own field-position-dependent PSF), and only their ROI regions contribute to the loss and backpropagation.
-# fit_src_ids = None  # e.g., [0, 2, 5] or a single int like 0
+# Select which sources to include in the fit. None = all sources
 
-fit_src_ids = 0
+# Exclude sources with weights approaching 0
+fit_src_ids = None
+fit_src_ids = torch.where(src_mask > 1e-6)[0].tolist()
+
 
 if fit_src_ids is not None:
-    _fit_ids = [fit_src_ids] if isinstance(fit_src_ids, (int, np.integer)) else list(fit_src_ids)
-    N_fit = len(_fit_ids)
-    fit_spectra_sparse = src_spectra_sparse[_fit_ids]
-    fit_img_crops  = [srcs_image_data["img_crops"][i]  for i in _fit_ids]
-    fit_img_slices = [srcs_image_data["img_slices"][i] for i in _fit_ids]
-    fit_src_mask   = src_mask[_fit_ids]
-
+    fit_src_ids = [fit_src_ids] if isinstance(fit_src_ids, (int, np.integer)) else list(fit_src_ids)
+    N_fit = len(fit_src_ids)
+    fit_src_mask = src_mask[fit_src_ids]
+    
     # Recompute loss normalization weights for the selected subset
-    fit_src_fluxes = src_fluxes[_fit_ids]
-    fit_max_flux   = fit_src_fluxes.max().item()
+    fit_src_fluxes = src_fluxes[fit_src_ids]
+    fit_max_flux = fit_src_fluxes.max().item()
     fit_relative_weights = torch.clamp(fit_src_fluxes / fit_max_flux, min=0.2, max=1.0) * fit_src_mask
     fit_w_total = fit_relative_weights.sum() / (fit_src_fluxes * fit_relative_weights).sum()
-    fit_w_spectral = w_spectral[_fit_ids]
+    fit_w_spectral = w_spectral[fit_src_ids]
 
-    # Spatial mask covering only selected source ROIs to exclude unmodeled source regions from the loss
-    fit_spatial_mask = torch.zeros([1, cube_sparse.shape[-2], cube_sparse.shape[-1]], device=device)
-    for i in _fit_ids:
-        (y_min_img, y_max_img), (x_min_img, x_max_img) = srcs_image_data["img_slices"][i]
-        fit_spatial_mask[:, y_min_img:y_max_img, x_min_img:x_max_img] = 1.0
 else:
-    _fit_ids = None  # signals "all sources" mode
+    fit_src_ids = None  # signals "fit and simulate all sources" mode
     N_fit = N_src
-    fit_spectra_sparse = src_spectra_sparse
-    fit_img_crops  = srcs_image_data["img_crops"]
-    fit_img_slices = srcs_image_data["img_slices"]
     fit_src_mask   = src_mask
     fit_w_total    = w_total
     fit_w_spectral = w_spectral
-    fit_spatial_mask = None  # no spatial masking needed when all sources are fitted
 
 
-def simulate_sparse(x):
-    x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True) # update model inputs with the values from the stacked vector
+def simulate_sparse(x, src_ids=None):
+    """
+    Simulates the field of PSFs, not just a cube, not separate PSFs per source, allowing them to overlap and be added together in the same image.
+    When src_ids is set, only the selected sources are simulated with their own field-dependent PSFs
+    """
+    # Update model inputs with the values from the stacked vector
+    x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True)
     # Save F_norm for the fitted sources before forward() modifies x_dict in-place (it selects only src_ids entries)
-    F_norm_fit = x_dict['F_norm'][_fit_ids] if _fit_ids is not None else x_dict['F_norm']
-    # When _fit_ids is set, NFM_wrapper computes per-source PSFs only for the selected sources (field-varying PSF morphology).
-    # When _fit_ids is None, the original field-uniform approximation is used (PSF shape from source 0 applied to all).
-    PSFs_  = PSF_model(x_dict, src_ids=(_fit_ids if _fit_ids is not None else 0))
+    F_norm = x_dict['F_norm'][src_ids] if src_ids is not None else x_dict['F_norm']
+    # When src_ids is set, NFM_wrapper computes PSFs only for the selected sources
+    PSFs_ = PSF_model(x_dict, src_ids=src_ids)
     PSF_norm_factor = PSF_model.evaluate_splines(PSF_model.inputs_manager['F_norm_λ_ctrl'], PSF_model.λ_sim_normed)
-    flux_normalization = F_norm_fit.unsqueeze(-1) * PSF_norm_factor * fit_spectra_sparse
-    # Use regular multiplication (not *=) so that PSFs_ shape [1, N_wvl, H, W] can broadcast to [N_fit, N_wvl, H, W]
-    PSFs_ = PSFs_ * flux_normalization.view(N_fit, N_wvl, 1, 1)
-
-    return add_ROIs( canvas*0.0, PSFs_, fit_img_crops, fit_img_slices )
+    # Select spectra only for the simulated sources
+    spectra_sparse = src_spectra_sparse[fit_src_ids] if src_ids is not None else src_spectra_sparse
+    # Select ROIs only for the simulated sources
+    img_crops  = [srcs_image_data["img_crops"][i]  for i in fit_src_ids] if src_ids is not None else srcs_image_data["img_crops"]
+    img_slices = [srcs_image_data["img_slices"][i] for i in fit_src_ids] if src_ids is not None else srcs_image_data["img_slices"]
+    
+    flux_normalization = F_norm.unsqueeze(-1) * PSF_norm_factor * spectra_sparse
+    # Use regular multiplication (not *=) so that PSFs_ shape [1, N_wvl, H, W] can broadcast to [N_src, N_wvl, H, W]
+    PSFs_ = PSFs_ * flux_normalization.view(-1, N_wvl, 1, 1)
+    return add_ROIs( canvas*0.0, PSFs_, img_crops, img_slices )
 
 
 def loss_PSF(PSF_data, PSF_pred, weights_λ, weight_total, w_MSE, w_MAE):
     residuals = PSF_data - PSF_pred
-    if fit_spatial_mask is not None:
-        residuals = residuals * fit_spatial_mask  # zero out regions outside selected source ROIs
     diff = residuals * weights_λ * fit_src_mask.view(-1, 1, 1, 1) # apply both spectral and source weights to the residuals
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean()  * w_MAE
-    # Since x input in simulate_sparse() updates the internal values for the PSF_model (inluding F_norm),
-    # they now can be used directly
+    # Since x input in simulate_sparse() updates the values inside the PSF_model (including F_norm), they now can be used directly here
     F_penalty = (PSF_model.inputs_manager['F_ctrl'] - 1.0).abs().mean()
     # Soft non-negativity penalty: penalize when residuals (data - model) are negative to prevent ouversubtracting simulated PSFs
     non_negativity_penalty = torch.nn.functional.relu(-residuals).mean()
@@ -467,13 +461,15 @@ def FitPSFModel(PSF_model, loss_fn, repeat=2, max_iter=200):
         )
     return x_params
 
-x_params = FitPSFModel(PSF_model, lambda x: loss(x, cube_sparse, simulate_sparse), repeat=3, max_iter=200)
+# Fit only selected sources
+x_params = FitPSFModel(PSF_model, lambda x: loss(x, cube_sparse, lambda y: simulate_sparse(y, src_ids=fit_src_ids)), repeat=3, max_iter=200)
 
 #%%
 from tools.multisources import VisualizeSources, PlotSourcesProfiles, ROI_from_valid_mask
 
+# Simulate all sources
 with torch.no_grad():
-    model_fit = simulate_sparse(x_params)
+    model_fit = simulate_sparse(x_params, src_ids=None)
 
 ROI_plot = ROI_from_valid_mask(valid_mask)["slice"]
 norm_field = LogNorm(vmin=1, vmax=cube_sparse.sum(dim=0).max()) # again, rather empirical values
@@ -512,7 +508,6 @@ diff_img_full = (cube_full - model_full.numpy()) * valid_mask.cpu().numpy()
 PlotSourcesProfiles(cube_full, model_full, sources, radius=16, title='Fitted PSFs')
 
 #%% Plotting the residual spectrum
-
 _, src_diff_full, _ = ExtractSpectraFromCore(sources, diff_img_full, cube_sparse=None, flux_core_radius=flux_core_radius)
 
 PlotSourceSpectra(λ_full, src_diff_full)

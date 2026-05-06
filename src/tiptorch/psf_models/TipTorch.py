@@ -345,14 +345,14 @@ class TipTorch(torch.nn.Module):
         
         self.u_max = (self.sampling * self.D / self.wvl / self.rad2mas)**2 # TODO: check 1/2 factor
         
-        self.center_aligner = torch.exp( 1j * torch.pi * (self.U + self.V) * (1 - self.N_pix%2))
+        # self.center_aligner = torch.exp( 1j * torch.pi * (self.U + self.V) * (1 - self.N_pix%2))
 
         # since only half of PSD is used, the padding of AO-corrected PSD component is done only on the left
         self.PSD_padder = torch.nn.ZeroPad2d( (a:=((self.nOtf-self.nOtf_AO)//2), 0, a, a) ) # pad_left, pad_right, pad_top, pad_bottom
 
         self.piston_filter = self.PistonFilter(self.k_AO)
         
-        # To avoid reinitializing it without a need
+        # To avoid re-initializing it without a need
         if self.PSD_include['aliasing']:
             self.PR = self.PistonFilter(torch.hypot(self.km, self.kn)) # piston filter for aliased spatial frequencies
 
@@ -445,6 +445,7 @@ class TipTorch(torch.nn.Module):
                  AO_type: str,
                  pupil = None,
                  PSD_include: dict | None = None,
+                 retain_PSDs: bool = False,
                  norm_regime: str = 'sum',
                  device: torch.device = torch.device('cpu'),
                  oversampling: int = 1,
@@ -455,6 +456,7 @@ class TipTorch(torch.nn.Module):
         self.device = device
         self.oversampling = oversampling
         self.pupil = pupil
+        self.retain_PSDs = retain_PSDs
         self.is_float = False
         self.dtype = dtype
                
@@ -519,8 +521,6 @@ class TipTorch(torch.nn.Module):
             tomography = self.tomography
         )
         
-        self.PSDs = {}
-
 
     def DMProjector(self):
         """ Projects correction in the direction of science target(s). Must be updated only when target coordinates were changed """
@@ -629,7 +629,7 @@ class TipTorch(torch.nn.Module):
         kx = self.kx_AO.unsqueeze(-1) # add atmo. layers dimension: [N_src, nOtf_AO, nOtf_AO, nL]
         ky = self.ky_AO.unsqueeze(-1) # add atmo. layers dimension: [N_src, nOtf_AO, nOtf_AO, nL]
         
-        Ts = 1.0 / self.HOloop_rate   # sampling time
+        Ts =  1.0 / self.HOloop_rate  # sampling time
         delay     = self.HOloop_delay # latency between the measurement and the correction
         loop_gain = self.HOloop_gain
         
@@ -705,11 +705,7 @@ class TipTorch(torch.nn.Module):
         else:
             PW = self.P_beta_DM @ self.W
             PW_t = torch.conj(torch.permute(PW, (0,1,2,4,3)))
-            noisePSD = (PW @ self.C_b @ PW_t).squeeze(-1).squeeze(-1)
-            
-            # Averaging over all GSs if there are several of them assumed to have the same noise variance
-            # varNoise = WFS_noise_var.mean(dim=1) if WFS_noise_var.shape[1] > 1 else WFS_noise_var
-            # noisePSD = noisePSD * self.noise_gain * pdims(varNoise,2) * self.mask_corrected_AO * self.piston_filter
+            noisePSD = (PW @ self.C_b @ PW_t).squeeze(-1).squeeze(-1)            
             noisePSD = noisePSD * self.noise_gain * self.mask_corrected_AO * self.piston_filter
             
         return noisePSD
@@ -929,11 +925,12 @@ class TipTorch(torch.nn.Module):
         # NOTE that size of HOloop_rate == N_obs (wait, why?)
         samp_time = 1.0 / self.HOloop_rate
         www = 2j * torch.pi * pdims(self.k_AO, 1) * torch.sinc((samp_time * self.WFS_det_clock_rate).view(self.N_obs,1,1,1) * self.freq_t)
-        self.MP_alpha_L = www.unsqueeze(-2) * P * (torch.sinc(self.WFS_d_sub*kx) * torch.sinc(self.WFS_d_sub*ky)) # [N_obs, nOtf_AO_y, nOtf_AO_x, 1, N_L]
-        self.W_alpha = self.W @ self.MP_alpha_L # [N_obs, nOtf_AO_y, nOtf_AO_x, 1, N_L]
+        MP_alpha_L = www.unsqueeze(-2) * P * (torch.sinc(self.WFS_d_sub*kx) * torch.sinc(self.WFS_d_sub*ky)) # [N_obs, nOtf_AO_y, nOtf_AO_x, 1, N_L]
+        self.W_alpha = self.W @ MP_alpha_L # [N_obs, nOtf_AO_y, nOtf_AO_x, 1, N_L]
 
 
-    def MoffatPSD(self, amp, b, alpha, beta, ratio, theta):
+    def MoffatPSD(self, amp: torch.Tensor, b: torch.Tensor, alpha: torch.Tensor, beta: torch.Tensor, ratio: torch.Tensor, theta: torch.Tensor):
+        """ Computes the PSF AO-style Moffat PSD as described in [Fétick et al. 2019] """
         ax = alpha * ratio
         ay = alpha / ratio
 
@@ -951,13 +948,13 @@ class TipTorch(torch.nn.Module):
 
         uu = rxx*uxx + rxy*uxy + ryy*uyy
 
-        V = (1.0+uu)**(-beta) # defines the shape of the Moffat
+        V = (1.0+uu)**(-beta)  # defines the shape of the Moffat
 
         removeInside = 0.0
-        E = (beta-1) / (torch.pi*ax*ay)
-        Fout = (1 +      (self.kc**2)/(ax*ay))**(1-beta)
-        Fin  = (1 + (removeInside**2)/(ax*ay))**(1-beta)
-        F = 1 / (Fin-Fout)
+        E = (beta-1.) / (torch.pi*ax*ay)
+        F_out = (1. +      (self.kc**2)/(ax*ay))**(1.-beta)
+        F_in  = (1. + (removeInside**2)/(ax*ay))**(1.-beta)
+        F = 1. / (F_in-F_out)
 
         MoffatPSD = (amp * V*E*F + b) * self.mask_corrected_AO * self.piston_filter
 
@@ -1005,40 +1002,41 @@ class TipTorch(torch.nn.Module):
                     self.DMProjector()
 
         # Put all contributiors together and sum up the resulting PSD
-        self.PSDs = {entry: torch.zeros(1, device=self.device) for entry in self.PSD_include}
+        PSDs = {entry: torch.zeros(1, device=self.device) for entry in self.PSD_include}
 
         if self.PSD_include['fitting']:
-            self.PSDs['fitting'] = self.VonKarmanPSD().unsqueeze(1)
+            PSDs['fitting'] = self.VonKarmanPSD().unsqueeze(1)
     
         if self.PSD_include['WFS noise']:
-            self.PSDs['WFS noise'] = self.NoisePSD(WFS_noise_var).unsqueeze(1)
+            PSDs['WFS noise'] = self.NoisePSD(WFS_noise_var).unsqueeze(1)
         
         if self.PSD_include['spatio-temporal']:
-            self.PSDs['spatio-temporal'] = self.SpatioTemporalPSD().unsqueeze(1)
+            PSDs['spatio-temporal'] = self.SpatioTemporalPSD().unsqueeze(1)
         
         if self.PSD_include['aliasing']:
-            self.PSDs['aliasing'] = self.AliasingPSD().unsqueeze(1)
+            PSDs['aliasing'] = self.AliasingPSD().unsqueeze(1)
         
         if self.PSD_include['chromatism']:
-            self.PSDs['chromatism'] = self.ChromatismPSD() # no need to add dimension since it's polychromatic already
+            PSDs['chromatism'] = self.ChromatismPSD() # no need to add dimension since it's polychromatic already
 
         if self.PSD_include['Moffat']:
-            self.PSDs['Moffat'] = self.MoffatPSD(amp.abs(), b, alpha, beta, ratio, theta).unsqueeze(1)
+            PSDs['Moffat'] = self.MoffatPSD(amp.abs(), b, alpha, beta, ratio, theta).unsqueeze(1)
 
         if self.PSD_include['diff. refract']:
-            self.PSDs['diff. refract'] = self.DifferentialRefractionPSD()
+            PSDs['diff. refract'] = self.DifferentialRefractionPSD()
 
         #TODO: anisoplanatism for non-tomography!
         #TODO: SLAO support!
         
         # Resulting dimensions are: [N_scr, N_wvl, nOtf_AO, nOtf_AO]
-        PSD = self.PSDs['fitting'] + self.PSD_padder(
-              self.PSDs['WFS noise'] + \
-              self.PSDs['spatio-temporal'] + \
-              self.PSDs['aliasing'] + \
-              self.PSDs['chromatism'] + \
-              self.PSDs['Moffat'] + \
-              self.PSDs['diff. refract'])
+        PSD = PSDs['fitting'] + self.PSD_padder(
+                PSDs['WFS noise'] + \
+                PSDs['spatio-temporal'] + \
+                PSDs['aliasing'] + \
+                PSDs['chromatism'] + \
+                PSDs['Moffat'] + \
+                PSDs['diff. refract']
+              )
       
         # Removing the DC component from half-PSD
         PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0
@@ -1047,6 +1045,9 @@ class TipTorch(torch.nn.Module):
         PSD_norm = (self.dk*self.wvl_atm*1e9/2/torch.pi)**2
         # Recover the full-size PSD from the half-sized one
         self.PSD = self.half_PSD_to_full(PSD * PSD_norm) # [nm^2]    
+        
+        if self.retain_PSDs:
+            self.PSDs = PSDs  # store all generated PSDs for debugging and visualization purposes
         
         return self.PSD
     
@@ -1235,8 +1236,14 @@ class TipTorch(torch.nn.Module):
 
 
     def ErrorBudget(self, verbose=False):
-        '''' Compute error budget over simulated PSD contributors in [nm RMS] assuming their statistical indipendence '''
+        '''' Computes error budget over simulated PSD contributors in [nm RMS] assuming their statistical indipendence '''
         error_budget = {}
+
+        if not self.retain_PSDs:
+            print("No PSDs stored. Recomputing PSDs with 'retain_PSDs = True'")
+            self.retain_PSDs = True
+            self.ComputePSD()
+            
 
         for entry in self.PSD_include:
             PSD = self.PSDs[entry]
@@ -1256,7 +1263,7 @@ class TipTorch(torch.nn.Module):
         if verbose:
             print(f"{'Total HO':15s}: {np.sqrt(error_budget['Total HO']):.2f} [nm RMS]")
             
-        #TODO: TT jitter error in [nm RMS] 
+        #TODO: TT jitter error in [nm RMS]
             
         return error_budget
 

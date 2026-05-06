@@ -9,16 +9,13 @@ import numpy as np
 import cupy as cp
 import matplotlib.pyplot as plt
 from matplotlib.colors import LogNorm
+from pathlib import Path
 
-from tiptorch.tools.utils import pdims
+from tiptorch._config import DATA_FOLDER, DATA_FOLDER, project_settings
 
-sys.path.append('..')
+TIPTOP_PATH =  Path(project_settings["TIPTOP_folder"])
 
-from tiptorch._config import DATA_FOLDER, CACHE_PATH, DATA_FOLDER
-
-TIPTOP_PATH = CACHE_PATH / '../astro-tiptop'
-
-# import TIPTOP dependencies
+# Import TIPTOP and dependencies
 for module in ['MASTSEL', 'P3', 'SEEING', 'SYMAO', 'TIPTOP']:
     sys.path.append(str(TIPTOP_PATH / f'{module}'))
     sys.path.append(str(TIPTOP_PATH / f'{module}/{module.lower()}'))
@@ -44,15 +41,15 @@ with os.fdopen(temp_fd, 'w') as temp_file:
 # Run P3 Fourier model
 P3_model = fourierModel(
     temp_path_ini,
-    path_root=None,
-    calcPSF=False,
-    verbose=False,
-    display=False,
-    getErrorBreakDown=False,
-    getFWHM=False,
-    getEncircledEnergy=False,
-    getEnsquaredEnergy=False,
-    displayContour=False
+    path_root = None,
+    calcPSF = False,
+    verbose = False,
+    display = False,
+    getErrorBreakDown = False,
+    getFWHM = False,
+    getEncircledEnergy = False,
+    getEnsquaredEnergy = False,
+    displayContour = False
 )
 
 W_tomo_P3    = P3_model.tomographicReconstructor().get() # extract tomographic reconstructor
@@ -120,7 +117,8 @@ tiptorch_model = TipTorch(
     AO_type='LTAO',
     norm_regime=None,
     device=default_device,
-    oversampling=1
+    oversampling=1,
+    retain_PSDs=True
 )
 
 # Update oversampling to match P3 model exactly
@@ -138,10 +136,6 @@ PSF_1 = tiptorch_model()
 
 
 #%%
-# tiptorch_model.IOR_src_wvl = n_air_P3(tiptorch_model.wvl)
-# tiptorch_model.IOR_wvl_atm = n_air_P3(tiptorch_model.wvl_atm)
-# tiptorch_model.IOR_GS_wvl  = n_air_P3(tiptorch_model.GS_wvl) # GS_wvl may depend on the filter for SCAO or on LGS wavelength
-
 # Restore from half to full size
 def half_to_full_reconstructor(W_half):
     """Convert half reconstructor matrix to full size by mirroring."""
@@ -156,14 +150,6 @@ P_beta_DM_torch = half_to_full_reconstructor(tiptorch_model.P_beta_DM * AO_mask)
 P_beta_L_torch  = half_to_full_reconstructor(tiptorch_model.P_beta_L * AO_mask)
 freq_t_torch    = half_to_full_reconstructor(tiptorch_model.freq_t / tiptorch_model.wind_speed.view(1,1,1,-1))
 
-#%
-# n2 =  23.7+6839.4/(130-(GS_wvl*1.e6)**(-2))+45.47/(38.9-(GS_wvl*1.e6)**(-2))
-# n1 =  23.7+6839.4/(130-(wvl_ref*1.e6)**(-2))+45.47/(38.9-(wvl_ref*1.e6)**(-2))
-
-def refractionIndex(wvl):
-    c = [64.328, 29498.1, 146.0, 255.4, 41.0]
-    wvlRef = wvl * 1e6  # Convert from [m] to [um]
-    return 1e-6 * (c[0] +  c[1]/(c[2]-1.0/wvlRef**2) + c[3]/(c[4] - 1.0/wvlRef**2) )
 
 #%%
 C = 1 / norm_factor
@@ -213,6 +199,8 @@ for j in range(P3_model.ao.src.nSrc):
 PSD_noise_P3 = PSD_noise_P3.squeeze().real.get()
 
 #%%
+from tiptorch.tools.utils import pdims
+
 noise_gain_torch = min(0.8, 0.4 + 0.1333 * tiptorch_model.HOloop_delay.item())**2
 PW_torch   = torch.matmul(tiptorch_model.P_beta_DM, tiptorch_model.W)
 PW_t_torch = torch.conj(PW_torch.transpose(-2, -1))
@@ -406,3 +394,5 @@ _ = compute_difference_stats(P_beta_L_torch_data, P_beta_L_P3_data, title='P_bet
 # display_map(freq_t_torch_data, scale='linear', colorbar=True)
 plot_side_by_side(freq_t_torch_data, freq_t_P3_data, title='freq_t')
 
+
+# %%
