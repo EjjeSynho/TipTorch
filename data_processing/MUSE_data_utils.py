@@ -328,7 +328,7 @@ def FetchIRLOSlogsFromDatalab(timestamp_start, timestamp_end):
 def ParseIRLOSregimes(IRLOS_regimes_df: pd.DataFrame) -> pd.DataFrame:
     '''Reads the timestamped IRLOS regimes list and returns a dataframe with the IRLOS regimes and their timestamps'''
     # Then extract the regimes parameters using the command pattern
-    cmd_pattern = r'(?P<window>\d+x\d+)(?:_(?P<scale>SmallScale))?(?:_(?P<frequency>\d+Hz))?(?:_(?P<gain>\w+Gain))?'
+    cmd_pattern = r'(?P<window>\d+x\d+)(?:_(?P<scale>(?:Small|Large)Scale))?(?:_(?P<frequency>\d+Hz))?(?:_(?P<gain>\w+Gain))?'
     IRLOS_df = IRLOS_regimes_df['command'].str.extract(cmd_pattern)
 
     IRLOS_df['window']    = IRLOS_df['window'].apply(lambda x: int(x.split('x')[0]))
@@ -337,7 +337,7 @@ def ParseIRLOSregimes(IRLOS_regimes_df: pd.DataFrame) -> pd.DataFrame:
     IRLOS_df['gain']      = IRLOS_df['gain'].apply(lambda x: 68 if x == 'HighGain' else 1 if x == 'LowGain' else x)
     IRLOS_df['gain']      = IRLOS_df['gain'].fillna(1).astype('int')
     IRLOS_df['scale']     = IRLOS_df['scale'].apply(lambda x: x.replace('Scale','') if pd.notna(x) else x)
-    IRLOS_df['scale']     = IRLOS_df['scale'].fillna('Small') # Large scale is not used for obs, so it's safe to assume it
+    IRLOS_df['scale']     = IRLOS_df['scale'].fillna('Small') # Large scale is rarely used for obs, so it's safe to assume it
 
     # Set plate scale accounting for the upgrade date
     IRLOS_df['plate scale, [mas/pix]'] = IRLOS_df.apply(
@@ -607,7 +607,8 @@ def GetLGSdata(hdul_cube, exposure_start, exposure_end, fill_missing=False, verb
     #     LGS_flux_df.index = pd.to_datetime(LGS_flux_df.index).tz_convert('UTC')
 
     # Compute LGS photons
-    HO_gains = np.array([hdul_cube[0].header[h+'AOS LGS'+str(i+1)+' DET GAIN'] for i in range(4)]) # must be the same value for all LGSs
+    HO_gains = np.array([hdul_cube[0].header.get(h+'AOS LGS'+str(i+1)+' DET GAIN', 100) for i in range(4)]) # must be the same value for all LGSs
+    
     for i in range(1,5):
         LGS_flux_df.loc[:,f'LGS{i} photons, [photons/m^2/s]'] = ComputeLGSphotons(LGS_flux_df[f'LGS{i} flux, [ADU/frame]'], HO_gains[i-1]).round().astype('uint32')
 

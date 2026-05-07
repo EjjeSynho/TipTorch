@@ -18,7 +18,7 @@ from tqdm import tqdm
 import subprocess
 
 import pandas as pd
-from data_processing.MUSE.STD_dataset.STD_dataset_utils import *
+from STD_dataset_utils import *
 
 
 #%%
@@ -78,16 +78,21 @@ else:
 #%% ================================ Cache MUSE NFM STD stars cubes ================================
 bad_ids = []
 
-rewrite = True
+rewrite = False
+# rewrite = True
+
+verbose = False
 
 ids_process = range(0, len(files_matches))
+# ids_process = range(556, len(files_matches))
+# ids_process = [569]
 
 for file_id in tqdm(ids_process):
     fname_new = files_matches.iloc[file_id]['cube'].replace('.fits','.pickle').replace(':','-')
     fname_new = f'{file_id}_{fname_new}'
 
     if fname_new in os.listdir(CUBES_CACHE) and not rewrite:
-        print(f'File {fname_new} already exists. Skipping...')
+        if verbose: print(f'File {fname_new} already exists. Skipping...')
         continue
 
     print(f'\n\n>>>>>>>>>>>>>> Processing file {file_id}...')
@@ -109,17 +114,18 @@ for file_id in tqdm(ids_process):
             pickle.dump(sample, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     except Exception as e:
-        print(f'Error with file {file_id}: {e}')
+        if verbose: print(f'Error with file {file_id}: {e}')
         bad_ids.append(file_id)
         continue
 
-print(f'Bad ids: {bad_ids}')
+print(f'Failed ids: {bad_ids}')
 
 
 #%% ================================ Render the STD stars dataset ================================
+
 for file in tqdm(os.listdir(CUBES_CACHE)):
-    if (fx:=file.replace(".pickle",".png")) in os.listdir(STD_FOLDER / f'MUSE_images/'):
-        print(f'File {fx} already exists. Skipping...')
+    if (fx:=file.replace(".pickle",".png")) in os.listdir(STD_FOLDER / f'MUSE_images/') and not rewrite:
+        if verbose: print(f'File {fx} already exists. Skipping...')
         continue
     try:
         with open(CUBES_CACHE / file, 'rb') as f:
@@ -129,16 +135,16 @@ for file in tqdm(os.listdir(CUBES_CACHE)):
         plt.close()
         
     except Exception as e:
-        print(f'{e}')
+        if verbose: print(f'{e}')
         continue
 
 
 #%% ================================ Label PSFs ================================
 # Execute the data labeler script
-result = subprocess.run([sys.executable, 'MUSE_STD_stars_labeler.py'],
+result = subprocess.run([sys.executable, 'STD_stars_labeler.py'],
                         capture_output=True,
                         text=True,
-                        cwd='.')
+                        cwd=os.path.dirname(os.path.abspath(__file__)))
 
 if result.returncode != 0:
     print(f"Error executing data_labeler.py: {result.stderr}")
@@ -213,7 +219,7 @@ _ = AOF_Cn2_profiles_stats(muse_df, store=True) # Update median AOF Cn2 profile
 from sklearn.experimental import enable_iterative_imputer
 from sklearn.impute import SimpleImputer, IterativeImputer
 from sklearn.preprocessing import StandardScaler
-from data_analysis_utils import *
+from data_processing.data_analysis_utils import *
 from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe
 
 verbose = True
@@ -319,6 +325,10 @@ with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'wb') as handl
 
 with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'wb') as handle:
     pickle.dump(telemetry_scaler, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+#%%
+
+# Now, one must run the fitting routine to get the fitted PSF parameters values for each PSF sample
 
 
 #%%

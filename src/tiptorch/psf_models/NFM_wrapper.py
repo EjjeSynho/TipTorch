@@ -325,7 +325,7 @@ class PSFModelNFM:
             add_input('bg', torch.tensor([[0.0,]*N_wvl]*N_obs),  norm_bg,  is_shared=True)
             add_input('dx', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_dxy, is_shared=False)
             add_input('dy', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_dxy, is_shared=False)
-            add_input('F_norm_λ', torch.tensor([[1.0,]*self.N_wvl_ctrl]*N_obs), norm=norm_F_λ_norm, optimizable=False, is_shared=True)
+            add_input('F_norm_λ', torch.tensor([[1.0,]*N_wvl]*N_obs), norm=norm_F_λ_norm, optimizable=False, is_shared=True)
 
         # Enabling chromatic defocus means that chromatic PSF bluriness is attributed to chromatic defocus aberration only.
         # Thus, TT jitter is considered monochromatic in this case. Otherwise, this bluriness is "absorbed" by the chromatic jitter parameters Jx and Jy

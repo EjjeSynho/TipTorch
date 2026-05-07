@@ -2,25 +2,11 @@
 # %reload_ext autoreload
 # %autoreload 2
 
-from email.policy import default
 import sys
 import os
 from pathlib import Path
 
-# Ensure the project root is in the Python path
-if __name__ == '__main__':
-    # When running as a script
-    project_root = Path(__file__).parent.parent.resolve()
-else:
-    # When running interactively (cell by cell)
-    project_root = Path(os.getcwd()).resolve()
-    # Try to find the project root by looking for project_config.json
-    while not (project_root / 'project_config.json').exists() and project_root != project_root.parent:
-        project_root = project_root.parent
-
-sys.path.insert(0, str(project_root))
-sys.path.insert(0, str(project_root / 'data_processing'))
-# NOTE: sys.path entries above are kept for data_processing.MUSE imports
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import gc
 import pickle
@@ -29,16 +15,28 @@ import numpy as np
 
 from torchmin import minimize
 
-from datasets.MUSE_STD_dataset.STD_dataset_utils import *
+from STD_dataset_utils import *
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import ConfigManager
 from tiptorch.tools.utils import SR, GradientLoss, FWHM_fitter
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
-# from tiptorch._config import device
+from tiptorch._config import project_settings, default_device
+
 import warnings
 
-MUSE_FITTING_FOLDER = STD_FOLDER / 'fitted/'
+"""
+Does the fitting of the PSF model parameters for MUSE_NFM STD stars dataset and saves the fitted parameters
+Arguments are be passed as:
+- Device specification: e.g., "cuda:0" or "cpu"
+- Start and end IDs for fitting a subset of the dataset: e.g., "50 150"
+- Output folder path for saving fitted parameters: e.g., "F:/ESO/Data/MUSE
+
+Example usage: python fitter_MUSE.py cpu 50 150
+"""
+
+# Default output folder for fitted parameters, can be overridden by passing a path as an argument
+MUSE_FITTING_FOLDER = Path(project_settings['MUSE_fitted_STD_folder'])
 
 warnings.filterwarnings("ignore")
 
@@ -72,8 +70,6 @@ if not MUSE_FITTING_FOLDER.exists():
         MUSE_FITTING_FOLDER.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         print(f"Warning: Could not create directory {MUSE_FITTING_FOLDER}: {e}")
-
-# Example: python fitter_MUSE.py cpu 50 150
 
 #% Initialize data sample
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
@@ -275,7 +271,8 @@ def load_and_fit_sample(id):
         x_backup = PSF_model.inputs_manager.stack().clone()
         
         lim_lambda = lambda method, tol: minimize(
-            loss_fn, PSF_model.inputs_manager.stack(), 
+            loss_fn,
+            PSF_model.inputs_manager.stack(), 
             max_iter=max_iter, tol=tol, method=method, 
             disp=2 if verbose else 0
         )
@@ -307,7 +304,7 @@ def load_and_fit_sample(id):
 
     include_general = ['r0', 'dn'] + \
                       (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
-                      ([x+'_ctrl' for x in PSF_model.polychromatic_params] if PSF_model.use_splines else PSF_model.polychromatic_params) + \
+                      ([x+'_ctrl' for x in PSF_model.polychromatic_params if x != 'F_norm_λ'] if PSF_model.use_splines else [x for x in PSF_model.polychromatic_params if x != 'F_norm_λ']) + \
                       (['L0'] if fit_outerscale else []) + \
                       (['wind_speed_single'] if fit_wind_speed else []) + \
                       (['wind_dir_single'] if fit_wind_dir else []) + \
@@ -345,8 +342,8 @@ def load_and_fit_sample(id):
         'input_vec':   to_store(x0),
         'config':      config_dict,
         'OPD_map':     OPD_map,
-        'FWHM fit':    FWHM_fitter(PSF_0.cpu().numpy(), verbose=False).squeeze(),
-        'FWHM data':   FWHM_fitter(PSF_1.cpu().numpy(), verbose=False).squeeze(),
+        'FWHM data':   FWHM_fitter(PSF_0.cpu().numpy(), verbose=False).squeeze(),
+        'FWHM fit':    FWHM_fitter(PSF_1.cpu().numpy(), verbose=False).squeeze(),
         'Nph WFS':     to_store(PSF_model.model.WFS_Nph),
         'SR data':     SR(PSF_0, PSF_DL).detach().cpu().numpy(),
         'SR fit':      SR(PSF_1, PSF_DL).detach().cpu().numpy(),
@@ -360,7 +357,8 @@ def load_and_fit_sample(id):
         'wavelengths': to_store(wavelengths),
         'is_Moffat':   PSF_model.Moffat_absorber,
         'is_LO_NCPAs': PSF_model.LO_NCPAs,
-        'is_splines':  PSF_model.use_splines
+        'use_splines': PSF_model.use_splines,
+        'N spline nodes': PSF_model.N_wvl_ctrl if hasattr(PSF_model, 'N_wvl_ctrl') else None
     }
         
     save_data = save_data | fitted_values

@@ -79,6 +79,7 @@ del yy, xx
 reduced_telemetry = data_cache['All data'] # this is the telemetry reduced to the format compatible with the model, it can be used to update the model config with the actual telemetry values
 del data_cache # free up memory, we won't need the rest of the data cache for now, but it can be useful for debugging and further analysis if needed
 
+
 #%%
 # To save memory and compute time, we don't need neither the full spectral cube, nor even the binned one. It's enough to have a sparse subset of spectral
 # slices that cover the whole wavelength range, which is enough to constrain the chromatic behavior of PSFs. It is referred to as "sparse" cube.
@@ -336,15 +337,15 @@ src_fluxes = torch.tensor(sources['peak_value'].to_numpy(), device=device, dtype
 src_mask   = torch.tensor(sources['weight'].to_numpy(), device=device, dtype=torch.float32) # sources importance in loss function computation
 
 max_flux = src_fluxes.max().item()
-src_relative_weights = torch.clamp(src_fluxes / max_flux, min=0.2, max=1.0) * src_mask# limit the loss influence limit
-# Compute weighted mean of the src_fluxes to get a more robust estimate of the typical source flux in the field, which can be used for normalization
-w_total = src_relative_weights.sum() / (src_fluxes * src_relative_weights).sum() # this normalization ensures that loss is ~10⁰-10¹
+src_relative_weights = torch.clamp(src_fluxes / max_flux, min=0.1, max=1.0) * src_mask # limit the loss influence limit
+# Compute weighted mean of the src_fluxes to get a more robust estimate of the typical source flux in the field
+w_total = src_relative_weights.sum() / (src_fluxes * src_relative_weights).sum() # this normalization ensures that loss stays in ~10⁰-10¹ range
 
 # Compute chromatic loss weighting factors per source based on it's spectrum
 w_spectral = src_spectra_sparse.amax(dim=-1, keepdim=True) / src_spectra_sparse
 w_spectral /= w_spectral.mean(dim=0, keepdim=True) # normalize to the mean to avoid changing the overall loss scale
 w_spectral = torch.clamp(w_spectral, min=0.2, max=2.0) # limit the loss influence of certain wavelengths
-w_spectral = w_spectral.view(N_src, N_wvl, 1, 1) # reshape for broadcasting
+w_spectral = w_spectral.view(N_src, N_wvl, 1, 1)
 
 w_spectral *= 0
 w_spectral += 1.0 # for now, use uniform spectral weighting, but this can be changed to give more importance to certain wavelengths if needed
@@ -356,7 +357,6 @@ w_spectral += 1.0 # for now, use uniform spectral weighting, but this can be cha
 # Exclude sources with weights approaching 0
 fit_src_ids = None
 fit_src_ids = torch.where(src_mask > 1e-6)[0].tolist()
-
 
 if fit_src_ids is not None:
     fit_src_ids = [fit_src_ids] if isinstance(fit_src_ids, (int, np.integer)) else list(fit_src_ids)
