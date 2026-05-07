@@ -36,9 +36,9 @@ test:
   imports:
     - tiptorch
     - tiptorch._config
-    - tiptorch.psf_models.TipTorch
-    - tiptorch.psf_models.IRDIS_wrapper
-    - tiptorch.psf_models.NFM_wrapper
+    - tiptorch.PSF_models.TipTorch
+    - tiptorch.PSF_models.IRDIS_wrapper
+    - tiptorch.PSF_models.NFM_wrapper
     - tiptorch.managers.config_manager
     - tiptorch.managers.input_manager
     - tiptorch.tools.utils

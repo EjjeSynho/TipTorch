@@ -4,6 +4,8 @@
 
 import sys
 
+sys.path.append('../')
+
 import torch
 import pickle
 import numpy as np
@@ -13,7 +15,7 @@ import matplotlib as mpl
 from torchmin import minimize
 from matplotlib.colors import LogNorm
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
-from data_processing.MUSE.STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache
+from datasets.MUSE_STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch._config import default_device
 
