@@ -11,7 +11,7 @@ from tqdm import tqdm
 from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
 from tiptorch.tools.normalizers import Uniform0_1
 
-from data_processing.MUSE.STD_dataset.STD_dataset_utils import STD_FOLDER, CUBES_CACHE
+from STD_dataset_utils import STD_FOLDER, CUBES_CACHE
 from data_processing.MUSE_data_utils import wvl_bins
 
 # Select every 2nd wvl
@@ -39,13 +39,11 @@ else:
 
 
 #%%
-experiment = 'fitted'
+experiment_folder = 'fitted'
 
-fitted_samples_folder = STD_FOLDER / experiment
-
+fitted_samples_folder = STD_FOLDER / experiment_folder
 
 files = os.listdir(fitted_samples_folder)
-
 with open(fitted_samples_folder / files[0], 'rb') as handle:
     data = pickle.load(handle)
     for x in data.keys():
@@ -316,7 +314,7 @@ def plot_param_histograms_singular(df):
         print(f'Suggested normalization parameters for {col}: a={med - std:.4f}, b={med + std:.4f}')
 
 
-def plot_spline_param_distribution(df, wavelengths, title='Strehl Ratio Distribution'):
+def plot_spline_param_distribution(df, wavelengths, title=''):
     x_ = df.to_numpy()
     x_median = np.median(x_, axis=0)
     x_le = np.percentile(x_, 15.87, axis=0)  # -1 std
@@ -339,7 +337,7 @@ plot_param_histograms_wvls(LO_df, 'LO_coefs')
 #%%
 plot_param_histograms_singular(singular_df)
 #%%
-plot_spline_param_distribution(J_df, norm_wvl.inverse(λ_ctrl)*1e9, title='J Strehl Ratio Distribution')
+plot_spline_param_distribution(J_df, norm_wvl.inverse(λ_ctrl)*1e9, title='J distribution')
 #%%
 print("LO NCPAs coefs stats:")
 print(LO_df.describe().T)
@@ -442,7 +440,7 @@ plt.xlim(0, 40)
 plt.ylim(0, 250)
 plt.xlabel('SR relative error, [%]')
 plt.ylabel('Number of samples')
-plt.title(f'Strehl Ratio Relative Error Distribution ({experiment})')
+plt.title(f'Strehl Ratio Relative Error Distribution ({experiment_folder})')
 plt.legend(title='Wavelength, [nm]')
 plt.xticks(np.arange(0, 45, 5), [str(x) if x < 40 else '>40' for x in np.arange(0, 45, 5)])
 plt.show()
@@ -454,7 +452,7 @@ data = SR_err_df.mean(axis=1).dropna().clip(upper=40)
 sns.histplot(data, bins=bins, alpha=0.5, element="step", fill=True, linewidth=2)
 plt.xlabel('Mean SR relative error, [%]')
 plt.ylabel('Number of samples')
-plt.title(f'Mean Strehl Ratio Relative Error Distribution ({experiment})')
+plt.title(f'Mean Strehl Ratio Relative Error Distribution ({experiment_folder})')
 plt.xticks(np.arange(0, 45, 5), [str(x) if x < 40 else '>40' for x in np.arange(0, 45, 5)])
 plt.show()
 
