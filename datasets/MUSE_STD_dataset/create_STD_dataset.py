@@ -23,13 +23,13 @@ from STD_dataset_utils import *
 
 #%%
 # Check the existence of all necessary folders and create them if they don't exist
-# std_stars_folders = [CUBES_FOLDER, RAW_FOLDER, STD_FOLDER, CUBES_CACHE, TELEMETRY_CACHE, STD_FOLDER / 'NFM_cubes_temp/']
-# for folder in std_stars_folders:
-#     if not os.path.exists(folder):
-#         os.makedirs(folder)
-#         print(f'Created folder: {folder}')
-#     else:
-#         print(f'Folder already exists: {folder}')
+std_stars_folders = [CUBES_FOLDER, RAW_FOLDER, STD_FOLDER, CUBES_CACHE, TELEMETRY_CACHE, STD_FOLDER / 'NFM_cubes_temp/']
+for folder in std_stars_folders:
+    if not os.path.exists(folder):
+        os.makedirs(folder)
+        print(f'Created folder: {folder}')
+    else:
+        print(f'Folder already exists: {folder}')
 
 #%%
 _ = RenameMUSECubes(CUBES_FOLDER, STD_FOLDER / 'NFM_cubes_temp/')
@@ -84,8 +84,6 @@ rewrite = False
 verbose = False
 
 ids_process = range(0, len(files_matches))
-# ids_process = range(556, len(files_matches))
-# ids_process = [569]
 
 for file_id in tqdm(ids_process):
     fname_new = files_matches.iloc[file_id]['cube'].replace('.fits','.pickle').replace(':','-')
@@ -329,7 +327,8 @@ with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'wb') as handle
 #%%
 
 # Now, one must run the fitting routine to get the fitted PSF parameters values for each PSF sample
-
+# 1. launch 'launch_fitting.py' to run the fitting jobs in parallel on multiple GPUs
+# 2. Run 'STD_fitted_df.py' to read the fitted parameters, analyze the fitting results and store the final fitted parameters dataframe
 
 #%%
 # ================================ Write MUSE-NFW STD stars dataset cache ================================
@@ -353,6 +352,8 @@ muse_df = muse_df.loc[muse_fitted_df.index.values]
 good_samples = muse_df.index.values
 
 #%%
+# Pack all data into a cogerent dataset, where reduced telemetry is associated with spectral cubes and fitted PSF model parameters for each sample
+
 for id in tqdm(good_samples):
     try:
         PSF_data, _, _, model_config = LoadSTDStarCache(
@@ -383,14 +384,20 @@ good_ids = np.array(good_ids) # N_samples
 PSF_cubes = np.stack(PSF_cubes, axis=0) # N_samples x H x W x N_wvl
 telemetry_records = np.stack(telemetry_records, axis=0) # N_samples x N_features
 
-# Store dataset caches
-torch.save({
-    'PSF_cubes': PSF_cubes,
-    'telemetry': telemetry_records,
-    'sample_ids': good_ids,
-    'model_configs': configs,
-    'fitted_param_values': fitted_values,
-}, DATASET_CACHE / 'muse_STD_stars_dataset.pt')
+try:
+    # Store dataset caches
+    torch.save({
+        'PSF_cubes': PSF_cubes,
+        'telemetry': telemetry_records,
+        'sample_ids': good_ids,
+        'model_configs': configs,
+        'fitted_param_values': fitted_values,
+    }, DATASET_CACHE / 'muse_STD_stars_dataset.pt')
+    
+    print('Dataset cache saved successfully.')
+    
+except Exception as e:
+    print(f'Error saving dataset cache: {e}')
 
 
 #%%
@@ -622,31 +629,34 @@ print( coord_targ.separation(coord_NGS).degree )
 #TEL PRESET NAME: Name of the target star. This action is logged when presetting to a new target star (asmws).
 
 
-#%% ------------------- Sausage predictor --------------------
+#%% ------------------- Phase bump predictor --------------------
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score, roc_auc_score, precision_recall_curve, auc
-from sklearn.inspection import plot_partial_dependence
 
 
-spot_df = df_new_new.copy()
+# Extract phase bump (Z1, first element of LO_coefs) from fitted dataset
+phase_bump = muse_fitted_df['LO_coefs'].apply(lambda x: x[0])
+phase_bump.name = 'Phase bump'
 
-spot_df['Non-point'] = (spot_df['Non-point'] > 0.5).astype(int)  # Binary target
+# Combine telemetry features with phase bump target
+bump_df = reduced_telemetry.join(phase_bump, how='inner')
 
-spot_df = spot_df.select_dtypes(exclude=['object'])
-spot_df = spot_df.select_dtypes(exclude=['bool'])
+# Binarize phase bump: above median => 1 (bump present)
+bump_threshold = bump_df['Phase bump'].median()
+bump_df['Phase bump'] = (bump_df['Phase bump'] > bump_threshold).astype(int)
 
-spot_df.drop(columns='time', inplace=True)
-spot_df.drop(columns='Strehl (header)', inplace=True)
+bump_df = bump_df.select_dtypes(exclude=['object'])
+bump_df = bump_df.select_dtypes(exclude=['bool'])
 
-spot_df.replace([np.inf, -np.inf], np.nan, inplace=True)
-spot_df = spot_df.map(lambda x: np.nan if pd.isna(x) or abs(x) > np.finfo(np.float64).max else x)
-spot_df.dropna(inplace=True)
+bump_df.replace([np.inf, -np.inf], np.nan, inplace=True)
+bump_df = bump_df.map(lambda x: np.nan if pd.isna(x) or abs(x) > np.finfo(np.float64).max else x)
+bump_df.dropna(inplace=True)
 
 
-X = spot_df.drop('Non-point', axis=1)
-y = spot_df['Non-point']
+X = bump_df.drop('Phase bump', axis=1)
+y = bump_df['Phase bump']
 
 # Split the data into training and testing sets
 X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.3, random_state=42)
@@ -685,7 +695,6 @@ print("\nPrecision-Recall AUC Score:")
 print(pr_auc)
 
 #%%
-
 from imblearn.over_sampling import SMOTE
 from sklearn.model_selection import GridSearchCV
 from sklearn.ensemble import RandomForestClassifier

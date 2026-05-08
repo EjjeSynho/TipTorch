@@ -348,25 +348,19 @@ from tiptorch.tools.utils import r0, seeing
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
 
-#%%
+#%
 
-'L0Tot',
-'r0Tot',
-'seeingTot'
-'Seeing (header)'
+# id_max = 224
+# time_before = muse_df.iloc[id_max].time
 
+# x = muse_df['r0Tot'].to_numpy()
+# y = r0(muse_df['seeingTot'], 500e-9).to_numpy()
+# y[:id_max] *= 1.17 # Ad hox corrective coefficient
 
-id_max = 224
-time_before = muse_df.iloc[id_max].time
+# plt.scatter(x, y)
+# plt.plot([0, 0.3], [0, 0.3], 'r--')
 
-x = muse_df['r0Tot'].to_numpy()
-y = r0(muse_df['seeingTot'], 500e-9).to_numpy()
-y[:id_max] *= 1.17 # Ad hox corrective coefficient
-
-plt.scatter(x, y)
-plt.plot([0, 0.3], [0, 0.3], 'r--')
-
-#%%
+#%
 r0_fitted = singular_df['r0']
 r0_data = r0(muse_df['Seeing (header)'], 500e-9)
 r0_data = r0_data.reindex(r0_fitted.index)
@@ -378,7 +372,6 @@ plt.ylabel('Fitted r0 [m]')
 plt.title('Fitted vs Seeing-derived r0')
 plt.show()
 
-#%%
 # Same but for L0
 L0_fitted = singular_df['L0']
 L0_data = muse_df['L0Tot']
@@ -390,7 +383,7 @@ plt.ylabel('Fitted L0 [m]')
 plt.title('Fitted vs Header L0')
 plt.show()
 
-#%% Same for the wind speed
+#% Same for the wind speed
 wind_fitted = singular_df['wind_speed_single']
 wind_data = muse_df['Wind speed (header)']
 wind_data = wind_data.reindex(wind_fitted.index)
@@ -402,23 +395,6 @@ plt.xlabel('Wind speed from header [m/s]')
 plt.ylabel('Fitted wind speed [m/s]')
 plt.title('Fitted vs Header wind speed')
 plt.show()
-
-#%%
-# from collections import Counter
-
-# # Check lengths of arrays in fitted_dict_raw['SR fit'])
-# # Check lengths of arrays in fitted_dict_raw['SR fit']
-# length_counter = Counter(len(arr) for arr in fitted_dict_raw['FWHM fit'])
-# print(f"Array length distribution in 'SR fit': {dict(length_counter)}")
-# print(f"Expected length: {len(wavelength)}")
-
-# for length, count in length_counter.items():
-#     if length != len(wavelength):
-#         print(f"Found {count} arrays with length {length} (expected {len(wavelength)})")
-#         # Optionally print the IDs with mismatched lengths
-#         mismatched_ids = [ids[i] for i, arr in enumerate(fitted_dict_raw['FWHM fit']) if len(arr) == length]
-#         print(f"  IDs: {mismatched_ids}")
-
 
 #%%
 from tools.plotting import wavelength_to_rgb
@@ -445,6 +421,7 @@ plt.legend(title='Wavelength, [nm]')
 plt.xticks(np.arange(0, 45, 5), [str(x) if x < 40 else '>40' for x in np.arange(0, 45, 5)])
 plt.show()
 
+
 #%%
 # Plot spectrally averaged SR error distribution
 plt.figure(figsize=(10, 6))
@@ -456,11 +433,11 @@ plt.title(f'Mean Strehl Ratio Relative Error Distribution ({experiment_folder})'
 plt.xticks(np.arange(0, 45, 5), [str(x) if x < 40 else '>40' for x in np.arange(0, 45, 5)])
 plt.show()
 
-# ID of a max SR error sample
-# id_max_SR_err = SR_err_df.mean(axis=1).idxmax()
-# print(f"ID of max SR error sample: {id_max_SR_err}")
-
-# images_dict['ID'].index(id_max_SR_err)
+# List samples with largest Strehl Ratio errors
+worst_SR_errors = SR_err_df.mean(axis=1).nlargest(10)
+print("Samples with largest Strehl Ratio errors:")
+for idx, error in worst_SR_errors.items():
+    print(f"  ID: {idx}, Mean SR Error: {error:.2f}%")
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles
@@ -496,4 +473,5 @@ plt.title('Polychromatic PSFs profile')
 PSF_avg = lambda x: np.mean(x, axis=1)
 plot_radial_PSF_profiles( PSF_avg(data_cube), PSF_avg(fitted_cube), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
 plt.show()
+
 # %%
