@@ -1,3 +1,4 @@
+#%%
 import os
 import sys
 import json
@@ -26,6 +27,7 @@ if not CACHE_PATH.exists():
         "environment variable pointing to your desired location."
     )
     CACHE_PATH.mkdir(parents=True, exist_ok=True)
+
 
 # Generate a default project config if not found — copy from bundled read-only template
 path_to_config = CACHE_PATH / "project_config.json"
@@ -154,16 +156,19 @@ _resources_synced = False
 
 def ensure_resources() -> None:
     """
-    Synchronize local resource packs with the remote registry.
+    Fetch all remote resource packs if they haven't been fetched yet.
 
-    This is called lazily (not at import time) so that ``import tiptorch``
-    never triggers network I/O.  Call it explicitly, or it will be invoked
-    automatically on first model instantiation.
+    Called automatically when ``_config`` is imported.
     """
     global _resources_synced
     if _resources_synced:
         return
     _resources_synced = True
 
-    from tiptorch.managers.resources_manager import sync_resource_packs
-    sync_resource_packs()
+    from tiptorch.managers.resources_manager import fetch_all_resource_packs
+    fetch_all_resource_packs()
+
+
+# Trigger resource synchronization on import
+ensure_resources()
+

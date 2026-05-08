@@ -10,7 +10,7 @@ from pathlib import Path
 
 from tiptorch._config import project_settings
 
-STD_FOLDER = Path(project_settings["STD_data_folder"])
+STD_FOLDER = Path(project_settings["MUSE_STD_data_folder"])
 
 #%%
 # from MUSE_STD_dataset_utils import update_label_IDs

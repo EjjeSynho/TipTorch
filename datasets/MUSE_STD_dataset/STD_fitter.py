@@ -133,6 +133,7 @@ def load_and_fit_sample(id):
         LO_NCPAs        = True,
         chrom_defocus   = False,
         Moffat_absorber = False,
+        retain_PSDs     = True,
         Z_mode_max      = 9,
         N_spline_nodes  = 5,
         device          = device

@@ -1,7 +1,7 @@
 from data_processing.MUSE_data_utils import *
 
 
-STD_FOLDER     = Path(project_settings["STD_data_folder"])
+STD_FOLDER     = Path(project_settings["MUSE_STD_data_folder"])
 CUBES_FOLDER   = STD_FOLDER / 'cubes/'
 RAW_FOLDER     = STD_FOLDER / 'raw/'
 CUBES_CACHE    = STD_FOLDER / 'cached_cubes/'

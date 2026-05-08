@@ -5,6 +5,7 @@ _pycache_/
 .vscode
 .runs/
 data/
+data
 runs/
 environment.yml
 project_config.json

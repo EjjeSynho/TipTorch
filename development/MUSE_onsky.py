@@ -17,7 +17,7 @@ from matplotlib.colors import LogNorm
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
 from datasets.MUSE_STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
-from tiptorch._config import default_device
+from tiptorch._config import default_device, project_settings
 
 
 #%%

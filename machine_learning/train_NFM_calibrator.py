@@ -29,7 +29,7 @@ from torch.utils.data import Dataset
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
-STD_FOLDER       = Path(project_settings["STD_data_folder"])
+STD_FOLDER       = Path(project_settings["MUSE_STD_data_folder"])
 DATASET_CACHE    = STD_FOLDER / 'dataset_cache'
 BEST_CALIB_PATH  = WEIGHTS_FOLDER / 'NFM_calibrator/best_calibrator_checkpoint.pth'
 DEBUG            = True # TODO: make it an argument

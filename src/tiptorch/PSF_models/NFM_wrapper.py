@@ -22,13 +22,14 @@ class PSFModelNFM:
         LO_NCPAs        = True,
         chrom_defocus   = False,
         Moffat_absorber = False,
+        retain_PSDs     = False,
         Z_mode_max      = 9,
         N_spline_nodes  = 5,
         device          = default_device
     ):
-        self.Z_mode_max  = Z_mode_max
-        self.LO_N_params = None
-        
+        self.Z_mode_max      = Z_mode_max
+        self.LO_N_params     = None
+        self.retain_PSDs     = retain_PSDs
         self.LO_NCPAs        = LO_NCPAs
         self.device          = device
         self.Moffat_absorber = Moffat_absorber
@@ -224,7 +225,8 @@ class PSFModelNFM:
             PSD_include = PSD_include,
             norm_regime = 'sum',
             device = self.device,
-            oversampling = 1
+            oversampling = 1,
+            retain_PSDs = self.retain_PSDs
         )
 
 

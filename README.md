@@ -26,42 +26,62 @@ So far, the code was tested on SPHERE/IRDIS (VLT) and MUSE Narrow-Field Mode (VL
 
 ### Prerequisites
 
-- Python 3.10+
-- (Recommended) NVIDIA GPU with CUDA
+- Python 3.11+
+- (Recommended) NVIDIA GPU with CUDA 12.x
 
-### Option 1 — Full development environment (recommended)
+### Option 1 — Install the package with pip
 
-The setup scripts create a Conda environment, detect your hardware (CPU vendor, CUDA availability), install all dependencies, and install `tiptorch` itself in editable mode.
-
-**Windows (PowerShell):**
-```powershell
-.\setup_env_Windows.ps1 -EnvName "TipTorch" -PythonVersion "3.12"
-```
-
-**Linux / macOS / WSL:**
-```bash
-./setup_env_Linux_MacOS_WSL.sh --env-name TipTorch
-```
-
-### Option 2 — Install the package only
-
-If you already have a Python environment with PyTorch, you can install `tiptorch` directly:
+If you already have a Python environment with PyTorch installed, you can add `tiptorch` directly:
 
 ```bash
-# Editable (development) install — changes to src/ are picked up immediately
-pip install -e .
-
-# Or a regular install
 pip install .
 ```
 
-### Option 3 — Build and install as a conda package
+> **Note:** PyTorch must be installed *before* `tiptorch`. For CUDA support, install PyTorch from the appropriate index first:
+> ```bash
+> pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+> ```
+
+### Option 2 — Editable (development) install
+
+For development or to modify the source code, install in editable mode so changes under `src/` are picked up immediately:
 
 ```bash
-# Build the conda package from the recipe
-conda build conda/
+pip install -e .
+```
 
-# Install the locally built package
+### Option 3 — Full managed environment (recommended for first-time setup)
+
+The setup scripts automatically create a Conda environment, detect your hardware (CPU vendor, CUDA availability), install all dependencies with optimized BLAS/LAPACK backends, and install `tiptorch` in editable mode.
+
+**Linux / macOS / WSL:**
+```bash
+./setup_env_Linux_MacOS_WSL.sh
+```
+
+**Windows (PowerShell):**
+```powershell
+.\setup_env_Windows.ps1
+```
+
+Both scripts accept options to customize the environment:
+
+| Flag | Description |
+|------|-------------|
+| `--env-name` / `-EnvName` | Environment name (default: `TipTorch`) |
+| `--python-version` / `-PythonVersion` | Python version (default: `3.12`) |
+| `--development` / `-Development` | Include Jupyter, profiling, and ML extras |
+| `--no-mamba` | Use plain conda instead of mamba |
+
+Example:
+```bash
+./setup_env_Linux_MacOS_WSL.sh --env-name TipTorch --python-version 3.12 --development
+```
+
+### Option 4 — Build and install as a conda package
+
+```bash
+conda build conda/
 conda install --use-local tiptorch
 ```
 
@@ -69,6 +89,31 @@ You can set the version at build time via the `TIPTORCH_VERSION` environment var
 ```bash
 TIPTORCH_VERSION=0.1.0 conda build conda/
 ```
+
+### AMD AOCL acceleration (advanced)
+
+On AMD Linux systems, the setup script can link NumPy/SciPy against AMD's optimized AOCL BLAS/LAPACK libraries. This is controlled by the `--amd-aocl` flag (Linux only):
+
+| Mode | Behavior |
+|------|----------|
+| `auto` (default) | Uses conda-forge AOCL packages automatically on AMD Linux |
+| `conda` | Force conda-forge AOCL BLAS/LAPACK |
+| `amd-wheels` | Install official AMD AOCL Python wheels from a local cache |
+| `off` | Disable AMD-specific packages entirely |
+
+For the `amd-wheels` mode, you must first manually download the wheels from AMD (they are EULA-gated) and place them in `./amd_aocl_wheels/`:
+
+```bash
+./setup_env_Linux_MacOS_WSL.sh --amd-aocl amd-wheels --amd-wheel-cache ./amd_aocl_wheels
+```
+
+Required wheels (for Python 3.12):
+- `numpy-2.1.3-cp312-cp312-linux_x86_64.whl`
+- `scipy-1.14.1-cp312-cp312-linux_x86_64.whl`
+
+Optional:
+- `numexpr-2.11.0-cp312-cp312-linux_x86_64.whl`
+- `aocl_sparse-0.1.0-cp312-cp312-linux_x86_64.whl`
 
 
 ## Project Structure

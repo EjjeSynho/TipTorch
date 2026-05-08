@@ -1,21 +1,51 @@
-# Core libraries
-pillow
-astropy
+# Core scientific stack
+# Note:
+#   This requirements.txt is the generic pip fallback for users who do not use
+#   the full conda installation script.
+#
+#   AMD AOCL acceleration is NOT configured here:
+#     - conda-forge AOCL packages such as aocl-blas/aocl-lapack are conda-only.
+#     - official AMD AOCL NumPy/SciPy wheels must be downloaded manually from AMD.
+#
+#   For AMD AOCL or fully managed CUDA setup, prefer the install script.
+
 numpy>=2.0
 scipy
-astroquery
+scikit-learn
 pandas
+
+# Astronomy / image processing
+astropy>=7.0
+astroquery
+photutils>=2.0
+scikit-image
+imageio
+gwcs
+asdf
+asdf-astropy
+
+# Plotting / visualization
 matplotlib
 seaborn
-scikit-image
-scikit-learn
+plotly
+mpl-scatter-density
+
+# Utilities
+pillow
 tabulate
 tqdm
 gdown
 pooch
-photutils
 
-# PyTorch & friends
+# IMPORTANT (!!!!!):
+#   Plain 'pip install -r requirements.txt' may install CPU PyTorch depending on the platform and pip configuration.
+#
+#  Therefore, the recommended installation procedure is:
+#
+# pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+# pip install -r requirements.txt
+# pip install -e .
+
 torch
 torchvision
 torchaudio

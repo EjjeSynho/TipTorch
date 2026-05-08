@@ -20,7 +20,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 
 def get_good_ids():
     """Load the list of valid sample IDs from the dataset."""
+    project_root = str(SCRIPT_DIR.parent.parent)
     sys.path.insert(0, str(SCRIPT_DIR))
+    sys.path.insert(0, project_root)
     from STD_dataset_utils import STD_FOLDER
 
     with open(STD_FOLDER / 'muse_df.pickle', 'rb') as f:
@@ -57,6 +59,12 @@ def main():
     fitter_script = str(SCRIPT_DIR / 'STD_fitter.py')
     processes = []
 
+    import os
+    env = os.environ.copy()
+    project_root = str(SCRIPT_DIR.parent.parent)
+    extra_paths = os.pathsep.join([str(SCRIPT_DIR), project_root])
+    env['PYTHONPATH'] = extra_paths + os.pathsep + env.get('PYTHONPATH', '')
+
     print(f"Launching {n_jobs} jobs across devices {args.devices} for {n_samples} samples\n")
 
     for i, chunk in enumerate(chunks):
@@ -69,7 +77,7 @@ def main():
             cmd.append(args.output_folder)
 
         print(f"  Job {i}: device={device}, IDs {start_id}..{end_id} ({len(chunk)} samples)")
-        proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr)
+        proc = subprocess.Popen(cmd, stdout=sys.stdout, stderr=sys.stderr, env=env)
         processes.append((i, proc))
 
     print(f"\nAll {n_jobs} jobs started. Waiting for completion...")

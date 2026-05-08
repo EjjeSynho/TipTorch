@@ -4,14 +4,17 @@
 
 .DESCRIPTION
   • Installs mamba in base if requested (for faster, low-memory solves).  
-  • Detects Intel CPU (no Intel channel on Windows).  
-  • Detects NVIDIA GPU via nvidia-smi → if present, adds PyTorch CUDA index.  
+  • Detects Intel CPU → adds Intel Python conda channel with priority.  
+  • Detects NVIDIA GPU via nvidia-smi → if present, installs PyTorch with CUDA support.  
   • Generates an environment.yml with:
-      – nodefaults, conda-forge, astropy channels  
-      – python + generic NumPy/SciPy/Sklearn  
-      – common libs + pip requirements (torch*, pytorch-minimize, photutils, etc.)  
+      – nodefaults, conda-forge channels (+ Intel channel on Intel CPUs)  
+      – python + NumPy/SciPy/Sklearn + Intel MKL on Intel systems  
+      – common libs + pip requirements (pytorch-minimize, photutils, etc.)  
   • Invokes mamba (or conda) to build the env verbosely.
+  • Installs PyTorch (CUDA or CPU) via pip after environment creation.
+  • Installs CuPy and cuda-python on CUDA systems.
   • Attempts to install pytorch-minimize from PyPI first; if that fails, falls back to GitHub.
+  • Installs tiptorch in editable mode.
   
 .PARAMETER InstallMamba
   If specified, attempts to install mamba into the base environment if it's not already present.  
@@ -33,7 +36,7 @@ if ($env:OS -ne 'Windows_NT') {
     exit 1
 }
 
-# ─── 1) Install mamba if not present (recommended for speed) ──────────────────
+# ─── 2) Install mamba if not present (recommended for speed) ──────────────────
 if (-not (Get-Command mamba -ErrorAction SilentlyContinue)) {
     if ($InstallMamba -or (-not $InstallMamba.IsPresent)) {
         Write-Host "→ mamba not found. Installing into base for faster solving…" -ForegroundColor Cyan
@@ -50,11 +53,11 @@ if (-not (Get-Command mamba -ErrorAction SilentlyContinue)) {
     Write-Host "→ mamba is already installed." -ForegroundColor Green
 }
 
-# ─── 2) Pick solver ─────────────────────────────────────────────────────────
+# ─── 3) Pick solver ─────────────────────────────────────────────────────────
 $Solver = if (Get-Command mamba -ErrorAction SilentlyContinue) { 'mamba' } else { 'conda' }
 Write-Host "→ Using solver: $Solver" -ForegroundColor Cyan
 
-# ─── 3) Detect CPU vendor & CUDA ────────────────────────────────────────────
+# ─── 4) Detect CPU vendor & CUDA ────────────────────────────────────────────
 $CpuVendor = (Get-CimInstance Win32_Processor).Manufacturer
 $IntelCPU  = $CpuVendor -match 'Intel'
 
@@ -83,7 +86,7 @@ if (-not $CudaPresent -and (Test-Path "$env:CUDA_PATH\bin\nvcc.exe")) {
 
 Write-Host "→ Detected: PLATFORM=windows, INTEL_CPU=$IntelCPU, CUDA_AVAILABLE=$CudaPresent" -ForegroundColor Cyan
 
-# ─── 4) Build environment.yml ──────────────────────────────────────────────
+# ─── 5) Build environment.yml ──────────────────────────────────────────────
 $Yml = @()
 $Yml += "name: $EnvName"
 $Yml += 'channels:'
@@ -128,9 +131,9 @@ $Yml += '  - tabulate'
 $Yml += '  - tqdm'
 $Yml += '  - gdown'
 $Yml += '  - pooch'
-$Yml += '  - astropy'
+$Yml += '  - astropy>=7.0'
 $Yml += '  - astroquery'
-$Yml += '  - photutils'
+$Yml += '  - photutils>=2.0'
 $Yml += '  - imageio'
 $Yml += '  - gwcs'
 $Yml += '  - asdf'
@@ -143,7 +146,6 @@ if ($Development) {
     $Yml += '  - jupyterlab'
     $Yml += '  - torchmetrics'
     $Yml += '  - pytorch-model-summary'
-    $Yml += '  - sympy'
     $Yml += '  - imbalanced-learn'
     $Yml += '  - shap'
     $Yml += '  - networkx'
@@ -157,23 +159,15 @@ if ($Development) {
 $Yml += '  - pip'
 
 # PyTorch will be installed via pip after environment creation
-# (conda packages removed to use pip with CUDA 13.0 index)
-
-# Add Intel MKL via pip for Intel systems to prevent dependency conflicts
-if ($IntelCPU) {
-    $PipPackages += 'mkl'
-    Write-Host "→ Adding Intel MKL via pip to satisfy pip dependency resolver" -ForegroundColor Green
-}
 
 # Add pip packages
 $PipPackages = @(
-    'pillow'
+    'pillow',
+    'xgboost'
 )
 
 # Add development pip packages if Development flag is set
 if ($Development) {
-    # Add any development-specific pip packages here if needed
-    $PipPackages += 'xgboost'
     $PipPackages += 'elasticsearch==6.8.2'
     $PipPackages += 'elasticsearch-dsl==6.4.0'
 }
@@ -189,13 +183,13 @@ if ($PipPackages.Count -gt 0) {
 $Yml | Set-Content -Path environment.yml -Encoding UTF8
 Write-Host "→ Generated environment.yml" -ForegroundColor Green
 
-# ─── 5) Create the environment ───────────────────────────────────────────────
+# ─── 6) Create the environment ───────────────────────────────────────────────
 Write-Host "`n▶ Creating environment '$EnvName' with $Solver (this may take a while)…" -ForegroundColor Cyan
 & $Solver env create -f environment.yml -v
 
 Write-Host "`n✅ Environment '$EnvName' created." -ForegroundColor Green
 
-# ─── 6) Install PyTorch via pip with CUDA support ──────────────────────────
+# ─── 7) Install PyTorch via pip with CUDA support ──────────────────────────
 if ($CudaPresent) {
     Write-Host "`n→ Installing PyTorch with CUDA 12.8 support…" -ForegroundColor Cyan
     Write-Host "→ Using CUDA index: https://download.pytorch.org/whl/cu128" -ForegroundColor Cyan
@@ -208,8 +202,10 @@ if ($CudaPresent) {
         Write-Host "✅ PyTorch CUDA verification successful." -ForegroundColor Green
         Write-Host "   $CudaCheck" -ForegroundColor Gray
     } else {
-        Write-Host "⚠️  PyTorch installed but CUDA not available. Output:" -ForegroundColor Yellow
+        Write-Host "❌ PyTorch was installed, but CUDA is not available. Output:" -ForegroundColor Red
         Write-Host "   $CudaCheck" -ForegroundColor Gray
+        Write-Host "   Refusing to silently continue with CPU PyTorch on a CUDA machine." -ForegroundColor Red
+        exit 1
     }
 } else {
     Write-Host "`n→ Installing PyTorch CPU-only version…" -ForegroundColor Cyan
@@ -223,7 +219,7 @@ if ($LASTEXITCODE -eq 0) {
     exit 1
 }
 
-# ─── 6.5) Install CUDA development toolkit and CuPy via conda ──────────────
+# ─── 7.5) Install CUDA development toolkit and CuPy ────────────────────────
 Write-Host "`n" -NoNewline
 if ($CudaPresent) {
     Write-Host "→ Installing CUDA development headers for CuPy…" -ForegroundColor Cyan
@@ -241,7 +237,7 @@ if ($LASTEXITCODE -eq 0 -and $CudaPresent) {
     Write-Host "⚠️ Failed to install CuPy, but continuing…" -ForegroundColor Yellow
 }
 
-# ─── 7) Install pytorch-minimize, prefer pip then fallback to GitHub ────────
+# ─── 8) Install pytorch-minimize, prefer pip then fallback to GitHub ────────
 if (-not (conda info --envs | Select-String "$EnvName")) {
     Write-Host "❌ Environment $EnvName not found. Something went wrong." -ForegroundColor Red
     exit 1
@@ -272,7 +268,7 @@ if ($LASTEXITCODE -eq 0) {
     }
 }
 
-# ─── 8) Install tiptorch package in editable mode ────────────────────────────
+# ─── 8.5) Install tiptorch package in editable mode ─────────────────────────
 Write-Host "`n→ Installing tiptorch package in editable (development) mode…" -ForegroundColor Cyan
 & conda run -n $EnvName pip install -e .
 
@@ -282,6 +278,46 @@ if ($LASTEXITCODE -eq 0) {
     Write-Host "❌ Failed to install tiptorch." -ForegroundColor Red
     exit 1
 }
+
+# ─── 9) Verification ─────────────────────────────────────────────────────────
+Write-Host "`n→ Verifying numerical libraries…" -ForegroundColor Cyan
+& conda run -n $EnvName python -c @"
+import sys
+print('Python:', sys.version)
+
+try:
+    import numpy as np
+    print('NumPy:', np.__version__)
+    try:
+        np.show_config()
+    except Exception as exc:
+        print('NumPy show_config failed:', exc)
+except Exception as exc:
+    print('NumPy import failed:', exc)
+
+try:
+    import scipy
+    print('SciPy:', scipy.__version__)
+except Exception as exc:
+    print('SciPy import failed:', exc)
+
+try:
+    import sklearn
+    print('scikit-learn:', sklearn.__version__)
+except Exception as exc:
+    print('scikit-learn import failed:', exc)
+
+try:
+    import torch
+    print('PyTorch:', torch.__version__)
+    print('Torch CUDA available:', torch.cuda.is_available())
+    print('Torch CUDA version:', torch.version.cuda)
+    print('Torch CUDA device count:', torch.cuda.device_count())
+    if torch.cuda.is_available():
+        print('Torch CUDA device 0:', torch.cuda.get_device_name(0))
+except Exception as exc:
+    print('PyTorch import failed:', exc)
+"@
 
 Write-Host "`n🎉 Environment setup complete!" -ForegroundColor Green
 Write-Host "   To start using it, run: `n     conda activate $EnvName" -ForegroundColor Green
