@@ -196,9 +196,9 @@ logger.info(f"Batch size: {BATCH_SIZE}")
 #%%
 random_idxs = np.random.randint(0, len(dataset), size=BATCH_SIZE)
 test_batch = tuple([dataset[random_idx] for random_idx in random_idxs])
-PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs = collate_batch(test_batch, device=default_device)
+_, _, _, batch_config, _ = collate_batch(test_batch, device=default_device)
 
-#%% ==============================================================================
+# ==============================================================================
 # Initialize the PSF model
 # ==============================================================================
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
@@ -213,15 +213,16 @@ with torch.no_grad():
         LO_NCPAs        = True,
         chrom_defocus   = False,
         Moffat_absorber = False,
+        retain_PSDs     = False,
         N_spline_nodes  = 5,
         Z_mode_max      = 9,
         device          = default_device
     )
 
 # Initialization batch is no longer needed and can hold a large GPU allocation.
-del test_batch, PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs, random_idxs
+del test_batch, batch_config, random_idxs
 release_gpu_memory(sync=True)
-    
+
 # Delete extra parameters that are pre-defined and thus don't need to be treated my the manager
 # Could be just disabled but instead deleted to save a bit of memory
 PSF_model.inputs_manager.delete('Jxy')     # Always zero inside
