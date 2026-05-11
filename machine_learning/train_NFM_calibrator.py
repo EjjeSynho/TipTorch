@@ -7,7 +7,6 @@ try:
 except NameError:
     pass
 
-import sys
 
 import gc
 import logging
@@ -23,6 +22,7 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from datetime import datetime
+from deprecated.SPHERE_pyro import PSF_pred
 from tiptorch._config import *
 from torch.utils.data import Dataset
 
@@ -45,14 +45,15 @@ log_dir = Path('../data/logs')
 log_dir.mkdir(parents=True, exist_ok=True)
 log_filename = log_dir / f'training_NFM_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 
-# Configure logging
+# Configure logging (force=True so it works even when IPython has already set up the root logger)
 logging.basicConfig(
     level=logging.DEBUG if DEBUG else logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
     handlers=[
         logging.FileHandler(log_filename),
-        logging.StreamHandler()  # Also log to console
-    ]
+        logging.StreamHandler(sys.stdout)  # Also log to console
+    ],
+    force=True
 )
 
 # Silence noisy libraries
@@ -288,8 +289,8 @@ from calibrators.NFM_calibrator import SmallCalibratorNet
 calibrator = SmallCalibratorNet(
     n_features=N_features,
     n_outputs=N_outputs,
-    hidden_dim=32,
-    dropout_rate=0.3
+    hidden_dim=48,
+    dropout_rate=0.2
 ).to(default_device)
 
 default_lr = 1e-2
@@ -617,8 +618,10 @@ def validate(loader=None, return_cubes=True, verbose=False):
     
     PSFs_pred_cube = None
     PSFs_data_cube = None
-    validation_ids = []
     NN_predictions = None
+    telemetry_vecs = None
+    
+    validation_ids = []
 
     if return_cubes:
         N_samples = len(loader.dataset)
@@ -626,15 +629,18 @@ def validate(loader=None, return_cubes=True, verbose=False):
         PSFs_pred_cube = torch.zeros((N_samples, N_wvl_total, H, W), dtype=torch.float32, device='cpu')
         PSFs_data_cube = torch.zeros((N_samples, N_wvl_total, H, W), dtype=torch.float32, device='cpu')
         NN_predictions = torch.zeros((N_samples, N_outputs), dtype=torch.float32, device='cpu')
+        telemetry_vecs = torch.zeros((N_samples, N_features), dtype=torch.float32, device='cpu')
 
         # Map global dataset IDs to local positions within this loader's dataset split.
         if isinstance(loader.dataset, Subset):
             local_to_global = torch.tensor(loader.dataset.indices, dtype=torch.long)
         else:
             local_to_global = torch.arange(N_samples, dtype=torch.long)
-        global_to_local = {int(global_id): local_pos for local_pos, global_id in enumerate(local_to_global.tolist())}
+        
+        global_to_local = { int(global_id): local_pos for local_pos, global_id in enumerate(local_to_global.tolist()) }
 
-        if verbose: logger.info(f"Validation dataset size: {N_samples}, batches: {len(loader)}")
+        if verbose:
+            logger.info(f"Validation dataset size: {N_samples}, batches: {len(loader)}")
     
     with torch.no_grad():
         # Outer loop: iterate through batches
@@ -655,6 +661,7 @@ def validate(loader=None, return_cubes=True, verbose=False):
             
             if return_cubes:
                 NN_predictions[local_positions, :] = x_pred.cpu()
+                telemetry_vecs[local_positions, :] = telemetry_inputs.cpu()
             
             if verbose: logger.info(f"Processed batch {batch_idx + 1}/{len(loader)}")
             
@@ -685,7 +692,7 @@ def validate(loader=None, return_cubes=True, verbose=False):
     if return_cubes:
         # Return global dataset IDs matching the row order in returned cubes/predictions.
         validation_ids = local_to_global
-        return PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, total_loss / total_simulated_batches if total_simulated_batches > 0 else 0.0
+        return PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, telemetry_vecs, total_loss / total_simulated_batches if total_simulated_batches > 0 else 0.0
     else:
         return total_loss / total_simulated_batches if total_simulated_batches > 0 else 0.0
 
@@ -711,12 +718,12 @@ else:
 scheduler = optim.lr_scheduler.ReduceLROnPlateau(
     optimizer,
     mode     = 'min',
-    factor   = 0.2,
-    patience = 3,
+    factor   = 0.5,
+    patience = 7,
     min_lr   = 1e-6
 )
 
-logger.info(f"Scheduler: ReduceLROnPlateau with patience={3}, factor={0.7}, min_lr={1e-5}")
+logger.info(f"Scheduler: ReduceLROnPlateau with patience={7}, factor={0.5}, min_lr={1e-6}")
 
 
 # L1 regularization of NN parameters TODO: use it
@@ -1040,7 +1047,7 @@ def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num
     logger.info("="*60)
     
     if tuned_params is None:
-        ValueError("tuned_params list must be specified for tuning")
+        raise ValueError("tuned_params list must be specified for tuning")
     
     # Create reference model (frozen)
     calibrator_ref = deepcopy(calibrator)
@@ -1122,10 +1129,9 @@ def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num
                  x_pred_combined_loop = torch.where(tuned_idx_mask, x_pred_tuned_loop, x_pred_ref_loop)
                  x_dict_pred_loop = calibrator_outputs_transformer.unstack(x_pred_combined_loop)
                  
-                 PSF_model.SetWavelengths(λ_full[λ_id_set].to(default_device))
                  PSF_pred = run_model(x_dict_pred_loop, batch_config, idxs, λ_id_set)
                  
-                 loss = loss_fn(PSF_pred, PSF_data[:, λ_id_set, ...], x_dict_pred_loop)
+                 loss = loss_fn(PSF_data[:, λ_id_set, ...], PSF_pred, x_dict_pred_loop)
                  loss_item = loss.item() # Save item before backward
 
                  # Backward without retaining graph!
@@ -1166,9 +1172,8 @@ def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num
                 
                 batch_val_loss = 0
                 for λ_id_set in λ_id_sets:
-                     PSF_model.SetWavelengths(λ_full[λ_id_set].to(default_device))
                      PSF_pred = run_model(x_dict_pred, batch_config, idxs, λ_id_set)
-                     batch_val_loss += loss_fn(PSF_pred, PSF_data[:, λ_id_set, ...], x_dict_pred)
+                     batch_val_loss += loss_fn(PSF_data[:, λ_id_set, ...], PSF_pred, x_dict_pred)
                 
                 val_loss += batch_val_loss.item()
                 
@@ -1186,10 +1191,8 @@ def tune_calibrator(calibrator, train_loader, val_loader, tuned_params=None, num
         logger.info(f"Tuning complete. Best val loss: {best_loss:.6f}")
 
 
-
 #%%
-tune_calibrator(calibrator, train_loader, val_loader, tuned_params=['F_ctrl'])
-
+tune_calibrator(calibrator, train_loader, val_loader, tuned_params=['F_ctrl', 'dn'], num_epochs=20, lr=1e-3)
 
 # %%
 # if __name__ == "__main__":
@@ -1200,6 +1203,8 @@ logger.info("Loading best model...")
 print("\nLoading best model...")
 
 epoch, train_loss, val_loss = load_checkpoint(calibrator, optimizer, BEST_CALIB_PATH)
+
+#%%
 calibrator.eval()
 logger.info(f"Best validation loss: {val_loss:.6f} at epoch {epoch}")
 
@@ -1339,6 +1344,59 @@ def save_calibrator(path):
 
 
 save_calibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth')
+
+#%%
+all_loader = DataLoader(
+    dataset=dataset,
+    batch_size=BATCH_SIZE,
+    shuffle=True,
+    num_workers=0,
+    # pin_memory=True if torch.cuda.is_available() else False,
+    collate_fn=lambda batch: collate_batch(batch, device=default_device),
+    drop_last=False
+)
+
+with torch.no_grad():
+    PSFs_pred_cube, PSFs_data_cube, _, telemetry_vecs, NN_predictions, _ = validate(loader=all_loader, return_cubes=True, verbose=False)
+
+loss_all = torch.amax((PSFs_data_cube - PSFs_pred_cube).abs().mean(dim=1), dim=[-2,-1]) / torch.amax(PSFs_data_cube.abs().mean(dim=1), dim=[-2,-1])
+    
+#%%
+# IDs of the best predicted samples (lowest loss)
+num_best_samples = 20
+best_sample_ids = torch.topk(loss_all, k=num_best_samples, largest=False).indices
+print(f"Best predicted sample IDs (lowest loss): {best_sample_ids.cpu().numpy()}")
+
+#%%
+cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+
+output = cos(input1, input2)
+
+#%%
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+
+X_np = telemetry_vecs
+
+tsne = TSNE(
+    n_components=2,
+    metric="cosine",
+    perplexity=30,
+    init="pca",
+    learning_rate="auto",
+    random_state=0,
+)
+
+X_tsne = tsne.fit_transform(X_np)
+
+plt.figure(figsize=(7, 6))
+plt.scatter(X_tsne[:, 0], X_tsne[:, 1], s=12)
+plt.xlabel("t-SNE 1")
+plt.ylabel("t-SNE 2")
+plt.title("t-SNE projection, cosine metric")
+plt.grid(True, alpha=0.3)
+plt.show()
+
 
 #%% ============================================================================================================================================================================================
 # Dummy optimization routine for debugging loss function and optimization behavior
@@ -1532,64 +1590,12 @@ def debug_dummy_optimization(num_iters=100, criterion, initial_guess=None):
 # results = debug_dummy_optimization(num_iters=100, initial_guess=dummy_vec)
 results = debug_dummy_optimization(num_iters=1000)
 
-#%%
-with torch.no_grad():
-    PSFs_data_cube = results['PSF_cubes'].cpu()
-    PSFs_pred_cube = results['PSF_pred'].cpu()
+PSFs_data_cube = results['PSF_cubes'].cpu()
+PSFs_pred_cube = results['PSF_pred'].cpu()
 
-    x_pred = results['final_x_pred']
-    N_wvl_temp = PSFs_data_cube.shape[1]
+x_pred = results['final_x_pred']
+N_wvl_temp = PSFs_data_cube.shape[1]
 
-    dummy_vec = results['dummy_vec'].cpu()
-    x_test = calibrator_outputs_transformer.unstack(dummy_vec)
+dummy_vec = results['dummy_vec'].cpu()
+x_test = calibrator_outputs_transformer.unstack(dummy_vec)
 
-
-#%%
-from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
-
-id_src = np.random.randint(0, PSFs_data_cube.shape[0])
-
-PSF_0 = PSFs_data_cube[id_src]
-PSF_1 = PSFs_pred_cube[id_src]
-
-vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
-vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
-wvl_select = np.s_[0, N_wvl_total//2, -1]
-
-draw_PSF_stack(
-    PSF_0.numpy()[np.s_[0, 16, 28], ...],
-    PSF_1.numpy()[np.s_[0,  4,  7], ...],
-    average=True,
-    min_val=vmin,
-    max_val=vmax,
-    crop=100
-)
-
-#%%
-centers_test = []
-# centers_new = np.stack(centers_test).transpose((1,0,2)) - np.array(PSF_0.shape[-1])//2
-_,_,_,idx = list(val_loader)[0]
-
-# dx_new = dx[idx][:, [0, 16, 28]].detach().cpu().numpy()
-# dy_new = dy[idx][:, [0, 16, 28]].detach().cpu().numpy()
-
-# dx_dy = np.stack((dx_new, dy_new), axis=-1)
-
-fig, ax = plt.subplots(1, 3, figsize=(10, 3))
-for ax_idx, (i, j) in enumerate(zip([0, 16, 28], [0, 4, 7])):
-    p_0, p_1, p_err, centers = plot_radial_PSF_profiles(
-        PSFs_data_cube[:,i,...].cpu().numpy(),
-        PSFs_pred_cube[:,j,...].cpu().numpy(),
-        'Data',
-        'TipTorch',
-        cutoff=40,
-        y_min=3e-2,
-        linthresh=1e-2,
-        return_profiles=True,
-        ax=ax[ax_idx],
-    )
-    centers_test.append(centers)
-
-plt.show()
-
-# %%
