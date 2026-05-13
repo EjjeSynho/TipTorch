@@ -22,7 +22,6 @@ from torch.utils.data import DataLoader, Subset
 from sklearn.model_selection import train_test_split
 from pathlib import Path
 from datetime import datetime
-from deprecated.SPHERE_pyro import PSF_pred
 from tiptorch._config import *
 from torch.utils.data import Dataset
 
@@ -601,8 +600,9 @@ def loss_fn(PSF_data, PSF_pred, x_dict_pred):
     LO_loss  = loss_LO(x_dict_pred['LO_coefs'], w_bump=5e-5, w_LO=1e-7) if predict_LO_NCPAs else 0.0
     return PSF_loss + LO_loss
 
+
 #%%
-def validate(loader=None, return_cubes=True, verbose=False):
+def validate(loader=None, return_cubes=False, verbose=False):
     """
     Validaion function to evaluate the calibrator on the validation dataset.
     It can return either just the average loss, or the full predicted and data PSF cubes for all samples and wavelengths in addition.
@@ -1202,14 +1202,14 @@ tune_calibrator(calibrator, train_loader, val_loader, tuned_params=['F_ctrl', 'd
 logger.info("Loading best model...")
 print("\nLoading best model...")
 
-epoch, train_loss, val_loss = load_checkpoint(calibrator, optimizer, BEST_CALIB_PATH)
+epoch, train_loss, val_loss = load_checkpoint(calibrator, None, BEST_CALIB_PATH)
 
 #%%
 calibrator.eval()
 logger.info(f"Best validation loss: {val_loss:.6f} at epoch {epoch}")
 
 # Validate and collect all PSF predictions and data
-PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, final_val_loss = validate()
+PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, telemetry_vecs, final_val_loss = validate(return_cubes=True)
 
 print(f"\n{'='*60}")
 print(f"Validation Results:")
@@ -1227,14 +1227,16 @@ logger.info(f"PSF data collected: {PSFs_data_cube.shape}")
 logger.info(f"Validation sample IDs collected: {validation_ids.shape}")
 
 # Optionally save the cubes for later analysis
-# torch.save(PSF_pred_cube, WEIGHTS_FOLDER / 'NFM_calibrator/validation_PSFs_predicted.pt')
-# torch.save(PSF_data_cube, WEIGHTS_FOLDER / 'NFM_calibrator/validation_PSFs_data.pt')
+# torch.save(PSF_pred_cube,  WEIGHTS_FOLDER / 'NFM_calibrator/validation_PSFs_predicted.pt')
+# torch.save(PSF_data_cube,  WEIGHTS_FOLDER / 'NFM_calibrator/validation_PSFs_data.pt')
 # torch.save(validation_ids, WEIGHTS_FOLDER / 'NFM_calibrator/validation_sample_ids.pt')
-# torch.save(PSF_data_cube, WEIGHTS_FOLDER / 'NFM_calibrator/validation_PSFs_data.pt')
+# torch.save(PSF_data_cube,  WEIGHTS_FOLDER / 'NFM_calibrator/validation_PSFs_data.pt')
 
 PSFs_pred_cube = PSFs_pred_cube.cpu()
 PSFs_data_cube = PSFs_data_cube.cpu()
 validation_ids = validation_ids.cpu()
+
+release_gpu_memory()
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
@@ -1351,37 +1353,232 @@ all_loader = DataLoader(
     batch_size=BATCH_SIZE,
     shuffle=True,
     num_workers=0,
-    # pin_memory=True if torch.cuda.is_available() else False,
     collate_fn=lambda batch: collate_batch(batch, device=default_device),
     drop_last=False
 )
 
-with torch.no_grad():
-    PSFs_pred_cube, PSFs_data_cube, _, telemetry_vecs, NN_predictions, _ = validate(loader=all_loader, return_cubes=True, verbose=False)
+PSFs_pred_cube, PSFs_data_cube, _, NN_predictions, telemetry_vecs, _ = validate(loader=all_loader, return_cubes=True, verbose=False)
 
-loss_all = torch.amax((PSFs_data_cube - PSFs_pred_cube).abs().mean(dim=1), dim=[-2,-1]) / torch.amax(PSFs_data_cube.abs().mean(dim=1), dim=[-2,-1])
+#%%
+def loss_fn_per_sample(PSF_data, PSF_pred, x_dict_pred):
+    """Per-sample version of loss_fn. Returns a 1-D tensor of shape [B] instead of a scalar.
+    x_dict_pred may be a stacked [B, N_outputs] tensor or an already-unstacked dict."""
+    if isinstance(x_dict_pred, torch.Tensor):
+        x_dict_pred = calibrator_outputs_transformer.unstack(x_dict_pred)
     
+    diff = PSF_pred - PSF_data                          # [B, C, H, W]
+    w = 2e4
+    # Reduce over all dims except the batch dim
+    MSE_loss = diff.pow(2).mean(dim=(1, 2, 3)) * 1200.0
+    MAE_loss = diff.abs() .mean(dim=(1, 2, 3)) * 1.6
+    PSF_loss = w * (MSE_loss + MAE_loss)               # [B]
+
+    if predict_LO_NCPAs:
+        coefs_vec = x_dict_pred['LO_coefs']            # [B, N_modes]
+        LO_loss              = coefs_vec.pow(2).sum(-1)              * 1e-7
+        phase_bump_positive  = torch.clamp(-coefs_vec[:, 0], min=0).pow(2) * 5e-5
+        first_defocus_pen    = torch.clamp(-coefs_vec[:, 2], min=0).pow(2) * 1e-7
+        LO_loss_per          = LO_loss + phase_bump_positive + first_defocus_pen  # [B]
+    else:
+        LO_loss_per = torch.zeros(PSF_data.shape[0], device=PSF_data.device)
+
+    return PSF_loss + LO_loss_per  # [B]
+
+
+loss_SR = loss_fn_per_sample(PSFs_data_cube, PSFs_pred_cube, NN_predictions)
+
+release_gpu_memory()
+
+# loss_SR = torch.amax((PSFs_data_cube - PSFs_pred_cube).abs().mean(dim=1), dim=[-2,-1]) / torch.amax(PSFs_data_cube.abs().mean(dim=1), dim=[-2,-1])
+
 #%%
-# IDs of the best predicted samples (lowest loss)
-num_best_samples = 20
-best_sample_ids = torch.topk(loss_all, k=num_best_samples, largest=False).indices
+num_best_samples  = 50
+num_worst_samples = 15
+
+best_sample_ids  = torch.topk(loss_SR, k=num_best_samples, largest=False).indices
+worst_sample_ids = torch.topk(loss_SR, k=num_worst_samples, largest=True).indices
+
+bad_border_start  = loss_SR[worst_sample_ids].min().item()
+sus_boarder_start = 0.41
+
+sus_ids = torch.where((loss_SR >= sus_boarder_start) & (loss_SR < bad_border_start))[0]
+
+_ = plt.hist(loss_SR.cpu().numpy(), bins=50, log=True)
+plt.axvline(loss_SR[best_sample_ids].max().item(), color='g', linestyle='--', label='Best samples (low loss)')
+plt.axvline(bad_border_start, color='r', linestyle='--', label='Bad samples (high loss)')
+plt.axvline(sus_boarder_start, color='y', linestyle='--', label='Suspicious samples (medium loss)')
+
 print(f"Best predicted sample IDs (lowest loss): {best_sample_ids.cpu().numpy()}")
+print(f"Worst predicted sample IDs (highest loss): {worst_sample_ids.cpu().numpy()}")
+print(f"Suspicious sample IDs (medium loss): {sus_ids.cpu().numpy()}")
+
 
 #%%
-cos = nn.CosineSimilarity(dim=1, eps=1e-6)
+tel_vecs_best  = telemetry_vecs[best_sample_ids]
+tel_vecs_worst = telemetry_vecs[worst_sample_ids]
+tel_vecs_sus   = telemetry_vecs[sus_ids]
 
-output = cos(input1, input2)
+# Single summary plot: median ± 1-sigma quantiles per feature for best / sus / worst samples
+def feature_stats(vecs):
+    arr = vecs.cpu().numpy()
+    med = np.median(arr, axis=0)
+    q16 = np.percentile(arr, 16, axis=0)
+    q84 = np.percentile(arr, 84, axis=0)
+    return med, q16, q84
+
+med_best,  q16_best,  q84_best  = feature_stats(tel_vecs_best)
+med_worst, q16_worst, q84_worst = feature_stats(tel_vecs_worst)
+med_sus,   q16_sus,   q84_sus   = feature_stats(tel_vecs_sus)
+
+x = np.arange(len(input_features))
+width = 0.125
+
+groups = [
+    (med_best,  q16_best,  q84_best,  'Best (low loss)',    'tab:green'),
+    (med_sus,   q16_sus,   q84_sus,   'Suspicious',         'tab:orange'),
+    (med_worst, q16_worst, q84_worst, 'Worst (high loss)',  'tab:red'),
+]
+
+fig, ax = plt.subplots(figsize=(max(12, len(input_features) * 0.5), 5))
+for offset, (med, q16, q84, label, color) in enumerate(groups):
+    pos = x + (offset - 1) * width
+    ax.errorbar(pos, med,
+                yerr=[med - q16, q84 - med],
+                fmt='o', capsize=4, markersize=5,
+                color=color, label=label, linestyle='none')
+
+ax.set_xticks(x)
+ax.set_xticklabels(input_features, rotation=45, ha='right')
+ax.set_ylabel('Feature value')
+ax.set_title('Feature distributions: median ± 1σ quantile (best / suspicious / worst samples)')
+ax.legend()
+ax.grid(True, axis='y', alpha=0.4)
+plt.tight_layout()
+plt.show()
+
+#%%
+# Scatter plot: selected feature value vs loss
+# feature_to_plot = 'Derot. angle'  # Change to any feature name in input_features
+feature_to_plot = 'theta0'  # Change to any feature name in input_features
+
+if feature_to_plot in input_features:
+    feat_idx = input_features.index(feature_to_plot)
+    feat_vals = telemetry_vecs[:, feat_idx].cpu().numpy()
+    loss_vals = loss_SR.cpu().numpy()
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    sc = ax.scatter(feat_vals, loss_vals, s=12, alpha=0.6, c=loss_vals, cmap='viridis')
+    plt.colorbar(sc, ax=ax, label='Loss')
+    ax.set_xlabel(feature_to_plot)
+    ax.set_ylabel('Loss')
+    ax.set_title(f"Loss vs '{feature_to_plot}'")
+    ax.grid(True, alpha=0.4)
+    plt.tight_layout()
+    plt.show()
+else:
+    print(f"Feature '{feature_to_plot}' not found. Available features: {input_features}")
+
+#%%
+# Correlation of each feature with loss
+from scipy.stats import pearsonr, spearmanr
+
+loss_vals = loss_SR.cpu().numpy()
+tel_np    = telemetry_vecs.cpu().numpy()
+
+pearson_r  = []
+spearman_r = []
+
+for i in range(len(input_features)):
+    pr, _ = pearsonr(tel_np[:, i],  loss_vals)
+    sr, _ = spearmanr(tel_np[:, i], loss_vals)
+    pearson_r.append(pr)
+    spearman_r.append(sr)
+
+pearson_r  = np.array(pearson_r)
+spearman_r = np.array(spearman_r)
+
+sort_idx = np.argsort(np.abs(spearman_r))[::-1]
+x_corr   = np.arange(len(input_features))
+
+fig, ax = plt.subplots(figsize=(max(12, len(input_features) * 0.9), 5))
+ax.bar(x_corr - 0.2, pearson_r[sort_idx],  width=0.4, label='Pearson r',  alpha=0.8, color='tab:blue')
+ax.bar(x_corr + 0.2, spearman_r[sort_idx], width=0.4, label='Spearman ρ', alpha=0.8, color='tab:orange')
+ax.axhline(0, color='black', linewidth=0.8)
+ax.set_xticks(x_corr)
+ax.set_xticklabels([input_features[i] for i in sort_idx], rotation=45, ha='right')
+ax.set_ylabel('Correlation with loss')
+ax.set_title('Feature–loss correlation (sorted by |Spearman ρ|)')
+ax.legend()
+ax.grid(True, axis='y', alpha=0.4)
+plt.tight_layout()
+plt.show()
+
+# Print ranked table
+print(f"{'Feature':<30} {'Pearson r':>10} {'Spearman ρ':>12}")
+print("-" * 54)
+for i in sort_idx:
+    print(f"{input_features[i]:<30} {pearson_r[i]:>10.3f} {spearman_r[i]:>12.3f}")
+
+
+#%%
+# Example diagnostic
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import cross_val_score
+
+# X_tel: [N, D] reduced telemetry
+# losses: [N] validation/per-sample loss from current model
+reg = RandomForestRegressor(n_estimators=300, random_state=0)
+scores = cross_val_score(reg, telemetry_vecs.cpu().numpy(), np.log10(loss_SR.cpu().numpy() + 1e-12), cv=5, scoring="r2")
+
+print("CV R2 predicting log-loss from telemetry:", scores.mean(), scores.std())
+
 
 #%%
 from sklearn.manifold import TSNE
 import matplotlib.pyplot as plt
 
+# X_np = NN_predictions
 X_np = telemetry_vecs
 
 tsne = TSNE(
     n_components=2,
     metric="cosine",
-    perplexity=30,
+    perplexity=50,
+    init="pca",
+    learning_rate="auto",
+    random_state=0,
+)
+
+
+X_tsne = tsne.fit_transform(X_np)
+
+# Color scatter by loss values using colormap
+loss_values = loss_SR.log().cpu().numpy()
+
+plt.figure(figsize=(7, 6))
+scatter = plt.scatter(X_tsne[:, 0], X_tsne[:, 1], s=12, c=loss_values, cmap='viridis')
+plt.xlabel("t-SNE 1")
+plt.ylabel("t-SNE 2")
+plt.title("t-SNE projection, cosine metric")
+plt.colorbar(scatter, label='Loss')
+plt.grid(True, alpha=0.3)
+plt.show()
+
+
+#%%
+from sklearn.manifold import TSNE
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
+
+X_np = telemetry_vecs
+X_np = NN_predictions
+
+tsne = TSNE(
+    n_components=3,
+    metric="euclidean",
+    perplexity=50,
     init="pca",
     learning_rate="auto",
     random_state=0,
@@ -1389,13 +1586,19 @@ tsne = TSNE(
 
 X_tsne = tsne.fit_transform(X_np)
 
-plt.figure(figsize=(7, 6))
-plt.scatter(X_tsne[:, 0], X_tsne[:, 1], s=12)
-plt.xlabel("t-SNE 1")
-plt.ylabel("t-SNE 2")
-plt.title("t-SNE projection, cosine metric")
-plt.grid(True, alpha=0.3)
+loss_values = loss_SR.log().cpu().numpy()
+
+fig = plt.figure(figsize=(10, 8))
+ax = fig.add_subplot(111, projection='3d')
+
+scatter = ax.scatter(X_tsne[:, 0], X_tsne[:, 1], X_tsne[:, 2], s=16, c=loss_values, cmap='viridis')
+ax.set_xlabel("t-SNE 1")
+ax.set_ylabel("t-SNE 2")
+ax.set_zlabel("t-SNE 3")
+ax.set_title("t-SNE projection (3D), euclidean metric")
+plt.colorbar(scatter, label='Loss', ax=ax, pad=0.1)
 plt.show()
+
 
 
 #%% ============================================================================================================================================================================================
