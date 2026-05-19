@@ -212,7 +212,7 @@ PSD_include = {
     'Moffat':          False
 }
 model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', default_device, oversampling=1, dtype=default_torch_type)
-model.to_float()
+model._to_float()
 model.to(default_device)
 
 _ = model()

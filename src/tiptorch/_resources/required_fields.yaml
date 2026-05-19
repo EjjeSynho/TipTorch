@@ -61,6 +61,7 @@ DM:
 - OptimizationZenith
 - OptimizationAzimuth
 - OptimizationWeight
+- NumberReconstructedLayers
 
 RTC:
 - SensorFrameRate_HO

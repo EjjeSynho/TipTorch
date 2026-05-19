@@ -82,7 +82,7 @@ PSF_model = PSFModelIRDIS(
 )
 
 PSF_model.inputs_manager.to_float()
-PSF_model.model.to_float()
+PSF_model.model._to_float()
 
 #%%
 manager = PSF_model.inputs_manager

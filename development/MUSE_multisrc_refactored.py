@@ -175,7 +175,7 @@ PSD_include = {
 model = TipTorch(model_config, 'LTAO', pupil, PSD_include, 'sum', default_device, oversampling=1)
 # model_single.apodizer = model_single.make_tensor(1.0)
 
-model.to_float()
+model._to_float()
 model.to(default_device)
 model.on_axis = False
 

@@ -80,7 +80,7 @@ PSD_include = {
     'Moffat':          True
 }
 PSF_model = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', default_device, oversampling=1)
-PSF_model.to_float()
+PSF_model._to_float()
 
 sausage_absorber = SausageFeature(PSF_model)
 sausage_absorber.OPD_map = sausage_absorber.OPD_map.flip(dims=(-1,-2))

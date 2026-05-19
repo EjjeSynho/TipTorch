@@ -79,7 +79,6 @@ del yy, xx
 reduced_telemetry = data_cache['All data'] # this is the telemetry reduced to the format compatible with the model, it can be used to update the model config with the actual telemetry values
 del data_cache # free up memory, we won't need the rest of the data cache for now, but it can be useful for debugging and further analysis if needed
 
-
 #%%
 # To save memory and compute time, we don't need neither the full spectral cube, nor even the binned one. It's enough to have a sparse subset of spectral
 # slices that cover the whole wavelength range, which is enough to constrain the chromatic behavior of PSFs. It is referred to as "sparse" cube.

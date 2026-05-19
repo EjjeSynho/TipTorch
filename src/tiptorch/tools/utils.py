@@ -605,6 +605,66 @@ def FWHM_fitter(PSF_stack, function='Moffat', verbose=False):
     return FWHMs
 
 
+def cov_to_jitter_params(Sigma):
+    """
+    Convert covariance matrix back to Jx, Jy, Jxy_deg.
+
+    Returns major-axis sigma first.
+    
+    Parameters
+    ----------
+    Sigma : torch.Tensor
+        Covariance matrix of shape (..., 2, 2) where ... represents
+        arbitrary batch dimensions. Can be a single matrix (2, 2),
+        a batch (N, 2, 2), or higher dimensional batches.
+    
+    Returns
+    -------
+    Jx : torch.Tensor
+        Major axis sigma, shape (...,)
+    Jy : torch.Tensor
+        Minor axis sigma, shape (...,)
+    Jxy_deg : torch.Tensor
+        Rotation angle in degrees, shape (...,)
+    """
+    # Ensure input is at least 2D (single covariance matrix case)
+    input_shape = Sigma.shape
+    if Sigma.ndim == 2:
+        Sigma = Sigma.unsqueeze(0)
+    
+    # Compute eigendecomposition (batched operation)
+    eigvals, eigvecs = torch.linalg.eigh(Sigma)
+
+    # Sort eigenvalues and eigenvectors in descending order
+    order = torch.argsort(eigvals, dim=-1, descending=True)
+
+    # Reorder eigenvalues
+    eigvals = torch.gather(eigvals, -1, order)
+
+    # Reorder eigenvectors (columns)
+    # order shape: (..., 2) -> expand to (..., 2, 2) for gathering along dim=-1
+    batch_shape = Sigma.shape[:-2]
+    index = order[..., None, :].expand(*batch_shape, 2, 2)
+    eigvecs = torch.gather(eigvecs, -1, index)
+
+    # Extract principal axis widths
+    Jx = torch.sqrt(torch.clamp(eigvals[..., 0], min=0.0))
+    Jy = torch.sqrt(torch.clamp(eigvals[..., 1], min=0.0))
+
+    # Extract rotation angle from the major axis eigenvector
+    vx = eigvecs[..., 0, 0]
+    vy = eigvecs[..., 1, 0]
+    Jxy_deg = torch.rad2deg(torch.atan2(vy, vx))
+
+    # Squeeze back if input was a single matrix
+    if len(input_shape) == 2:
+        Jx = Jx.squeeze(0)
+        Jy = Jy.squeeze(0)
+        Jxy_deg = Jxy_deg.squeeze(0)
+
+    return Jx, Jy, Jxy_deg
+
+
 def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pixel_pad=True):
     secondary_diameter = 1.12
     pupil_diameter = 8.0

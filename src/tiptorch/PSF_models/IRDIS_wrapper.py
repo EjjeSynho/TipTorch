@@ -97,7 +97,7 @@ class PSFModelIRDIS:
             'Moffat':          False
         }
         self.model = TipTorch(config, 'SCAO', None, PSD_include, 'sum', self.device, oversampling=1)
-        self.model.to_float()
+        self.model._to_float()
 
 
     def init_NCPAs(self):

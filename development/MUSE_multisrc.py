@@ -358,7 +358,7 @@ toy.PSD_include['chromatism'] = True
 # toy.PSD_include['diff. refract'] = False
 toy.PSD_include['Moffat'] = Moffat_absorber
 
-toy.to_float()
+toy._to_float()
 
 inputs_tiptorch = {
     # 'r0':  torch.tensor([0.09561153075597545], device=toy.device),

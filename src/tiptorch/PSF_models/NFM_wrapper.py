@@ -139,7 +139,8 @@ class PSFModelNFM:
             N_spline_nodes  = self.N_wvl_ctrl,
             Moffat_absorber = self.Moffat_absorber,
             Z_mode_max      = self.Z_mode_max,
-            device          = self.device
+            device          = self.device,
+            dtype           = self.model.dtype
         )
         # Deep copy the TipTorch model state
         if hasattr(self.model, 'state_dict'):
@@ -226,7 +227,8 @@ class PSFModelNFM:
             norm_regime = 'sum',
             device = self.device,
             oversampling = 1,
-            retain_PSDs = self.retain_PSDs
+            retain_PSDs = self.retain_PSDs,
+            dtype = torch.float32
         )
 
 

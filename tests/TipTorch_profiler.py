@@ -22,9 +22,8 @@ with torch.no_grad():
         'Moffat':          True
     }
     
-    tiptorch_half = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', default_device, oversampling=1)
-    tiptorch_half.to_float()
-    
+    tiptorch_half = TipTorch(config_file, 'LTAO', pupil, PSD_include, 'sum', default_device, dtype=torch.float32, oversampling=1)
+
 #%%
 from torch.utils.tensorboard import SummaryWriter
 import torch.profiler as profiler

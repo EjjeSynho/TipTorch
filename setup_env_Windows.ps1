@@ -193,11 +193,12 @@ Write-Host "`n✅ Environment '$EnvName' created." -ForegroundColor Green
 if ($CudaPresent) {
     Write-Host "`n→ Installing PyTorch with CUDA 12.8 support…" -ForegroundColor Cyan
     Write-Host "→ Using CUDA index: https://download.pytorch.org/whl/cu128" -ForegroundColor Cyan
-    & conda run -n $EnvName pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+    conda run -n $EnvName pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
     
     # Verify CUDA installation
     Write-Host "→ Verifying PyTorch CUDA installation…" -ForegroundColor Cyan
-    $CudaCheck = & conda run -n $EnvName python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}'); print(f'Device count: {torch.cuda.device_count()}')" 2>&1
+    $env:KMP_DUPLICATE_LIB_OK = "TRUE"
+    $CudaCheck = conda run -n $EnvName python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}'); print(f'Device count: {torch.cuda.device_count()}')" 2>&1
     if ($CudaCheck -match "CUDA available: True") {
         Write-Host "✅ PyTorch CUDA verification successful." -ForegroundColor Green
         Write-Host "   $CudaCheck" -ForegroundColor Gray
@@ -209,7 +210,7 @@ if ($CudaPresent) {
     }
 } else {
     Write-Host "`n→ Installing PyTorch CPU-only version…" -ForegroundColor Cyan
-    & conda run -n $EnvName pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    conda run -n $EnvName pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 }
 
 if ($LASTEXITCODE -eq 0) {
@@ -223,10 +224,10 @@ if ($LASTEXITCODE -eq 0) {
 Write-Host "`n" -NoNewline
 if ($CudaPresent) {
     Write-Host "→ Installing CUDA development headers for CuPy…" -ForegroundColor Cyan
-    & conda run -n $EnvName pip install cuda-python
+    conda run -n $EnvName pip install cuda-python
     
     Write-Host "→ Installing CuPy for CUDA 12.x…" -ForegroundColor Cyan
-    & conda run -n $EnvName pip install cupy-cuda12x
+    conda run -n $EnvName pip install cupy-cuda12x
 } else {
     Write-Host "→ CUDA not available, skipping CuPy installation" -ForegroundColor Yellow
 }
@@ -244,7 +245,7 @@ if (-not (conda info --envs | Select-String "$EnvName")) {
 }
 
 Write-Host "`n→ Attempting to install 'pytorch-minimize' from PyPI…" -ForegroundColor Cyan
-& conda run -n $EnvName pip install pytorch-minimize
+conda run -n $EnvName pip install pytorch-minimize
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "✅ Successfully installed 'pytorch-minimize' from PyPI." -ForegroundColor Green
@@ -258,7 +259,7 @@ if ($LASTEXITCODE -eq 0) {
         Write-Host "→ Found existing pytorch-minimize at ../pytorch-minimize" -ForegroundColor Green
     }
     Write-Host "→ Installing 'pytorch-minimize' from local Git repository at ../pytorch-minimize…" -ForegroundColor Cyan
-    & conda run -n $EnvName pip install -e ../pytorch-minimize
+    conda run -n $EnvName pip install -e ../pytorch-minimize
 
     if ($LASTEXITCODE -eq 0) {
         Write-Host "✅ Successfully installed 'pytorch-minimize' from GitHub." -ForegroundColor Green
@@ -270,7 +271,7 @@ if ($LASTEXITCODE -eq 0) {
 
 # ─── 8.5) Install tiptorch package in editable mode ─────────────────────────
 Write-Host "`n→ Installing tiptorch package in editable (development) mode…" -ForegroundColor Cyan
-& conda run -n $EnvName pip install -e .
+conda run -n $EnvName pip install -e .
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "✅ Successfully installed tiptorch in editable mode." -ForegroundColor Green
@@ -279,9 +280,17 @@ if ($LASTEXITCODE -eq 0) {
     exit 1
 }
 
+# ─── 8.6) Set KMP_DUPLICATE_LIB_OK for Intel MKL + PyTorch compatibility ────
+if ($IntelCPU) {
+    Write-Host "`n→ Setting KMP_DUPLICATE_LIB_OK=TRUE to prevent OpenMP conflicts…" -ForegroundColor Cyan
+    conda env config vars set -n $EnvName KMP_DUPLICATE_LIB_OK=TRUE
+    Write-Host "✅ Environment variable configured (will take effect on next activation)." -ForegroundColor Green
+}
+
 # ─── 9) Verification ─────────────────────────────────────────────────────────
 Write-Host "`n→ Verifying numerical libraries…" -ForegroundColor Cyan
-& conda run -n $EnvName python -c @"
+$env:KMP_DUPLICATE_LIB_OK = "TRUE"
+conda run -n $EnvName python -c @"
 import sys
 print('Python:', sys.version)
 

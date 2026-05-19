@@ -21,7 +21,7 @@ from tiptorch.managers.parameter_parser import ParameterParser
 """
 This module is used to manage the configuration files of TipTorch. Configuration files are used to set the up
 the initial state of the TipTorch simulation. This module is used to parse the configuration files and manipulate
-the configs, i.e., splitting and merging them, converting to different frameworks (NumPy, PyTorch, CuPy), etc.
+the configs, i.e., splitting and merging them, converting to different frameworks (NumPy, PyTorch, CuPy, lists), etc.
 Since TipTorch configs support for multiple targets, splitting and joining different configs is necessary.
 """
 
@@ -35,6 +35,7 @@ SINGLETON_VALUES = [
     ['DM', 'InfModel'],
     ['DM', 'NumberActuators'],
     ['DM', 'OptimizationConditioning'],
+    ['DM', 'NumberReconstructedLayers'],
     # ['DM', 'OptimizationAzimuth'],
     # ['DM', 'OptimizationWeight'],
     ['sensor_HO', 'Algorithm'],

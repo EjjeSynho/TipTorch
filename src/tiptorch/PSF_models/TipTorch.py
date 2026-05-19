@@ -5,7 +5,7 @@ import numpy as np
 import scipy.special as spc
 import torchvision.transforms as transforms
 from torch import fft, nn
-from torch.nn.functional import interpolate#, grid_sample
+from torch.nn.functional import interpolate
 from astropy.io import fits
 from tiptorch.tools.utils import pdims, min_2d, to_little_endian
 from tiptorch.tools.air_refraction import AirRefractiveIndexCalculator
@@ -62,12 +62,12 @@ class TipTorch(torch.nn.Module):
         self.airmass      = 1.0 / torch.cos(self.zenith_angle) # [N_obs, 1]
 
         # Guide stars parameters
-        self.GS_wvl      = self.config['sources_HO']['Wavelength'] #[m]
-        self.GS_height   = min_2d(self.config['sources_HO']['Height']) * self.airmass #[m]
+        self.GS_wvl    = self.config['sources_HO']['Wavelength'] #[m]
+        self.GS_height = min_2d(self.config['sources_HO']['Height']) * self.airmass #[m]
         GS_angles   = self.config['sources_HO']['Zenith'] / self.rad2arc # [arcsec] from on-axis
         GS_azimuths = torch.deg2rad(self.config['sources_HO']['Azimuth']) # [deg] from on-axis
-        self.GS_dirs_x   = torch.tan(GS_angles) * torch.cos(GS_azimuths) # [N_obs, N_GS]
-        self.GS_dirs_y   = torch.tan(GS_angles) * torch.sin(GS_azimuths) # [N_obs, N_GS]
+        self.GS_dirs_x = torch.tan(GS_angles) * torch.cos(GS_azimuths) # [N_obs, N_GS]
+        self.GS_dirs_y = torch.tan(GS_angles) * torch.sin(GS_azimuths) # [N_obs, N_GS]
         
         self.N_GS = self.GS_dirs_y.size(-1)
      
@@ -77,12 +77,12 @@ class TipTorch(torch.nn.Module):
         self.Cn2_weights = self.config['atmosphere']['Cn2Weights']
         self.Cn2_heights = self.config['atmosphere']['Cn2Heights'] * self.airmass # [m]
         
-        self.N_L = self.Cn2_heights.shape[-1]
+        self.N_L = self.Cn2_heights.shape[-1] # number of atmospheric layers simulated in the model
         
         # N_obs is very important! It must = 1 if all simulated targets share the same observational conditions.
         # Doing so can dramatically reduce the computational cost. Otherwise, for multiple targets in multiple conditions,
-        # it must be equal to the number of simulated targets
-        # self.N_obs = self.h.shape[0]
+        # it must be equal to the number of simulated targets / pointings, since each target can be assigned to its own observational conditions
+
         self.N_obs = self.Cn2_heights.shape[0]
         
         assert self.N_obs == 1 or self.N_obs == self.N_src
@@ -101,6 +101,7 @@ class TipTorch(torch.nn.Module):
         self.DM_opt_dir_y  = torch.tan(self.DM_opt_angle) * torch.sin(self.DM_opt_azimuth) # [N_obs, N_optdir]
         self.DM_opt_weight = self.config['DM']['OptimizationWeight'].view(self.N_obs, -1)  # [N_obs, N_optdir]
         self.N_optdir = self.DM_opt_weight.shape[-1]
+        self.DM_rec_layers = self.config['DM']['NumberReconstructedLayers'].item() # [N_rec_layers]
 
         # HO WFS(s) parameters
         self.WFS_d_sub = self.config['sensor_HO']['SizeLenslets']
@@ -145,26 +146,44 @@ class TipTorch(torch.nn.Module):
         
         if self.PSD_include['Moffat']:
             self.amp   = torch.ones (self.N_src, device=self.device)*0.01 # Moffat amplitude [rad²]
-            self.b     = torch.zeros (self.N_src, device=self.device)     # background [rad²/m²]
             self.alpha = torch.ones (self.N_src, device=self.device)*0.1  # Moffat alpha [1/m]
             self.beta  = torch.ones (self.N_src, device=self.device)*2    # Moffat beta power law
             self.ratio = torch.ones (self.N_src, device=self.device)      # Moffat ellipticity
+            self.b     = torch.zeros(self.N_src, device=self.device)      # background [rad²/m²]
             self.theta = torch.zeros(self.N_src, device=self.device)      # Moffat angle
 
         # if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
         self.dn  = torch.zeros(self.N_obs, device=self.device)
 
-        # An easier initialization for the MUSE NFM
-        if self.AO_type == 'LTAO':
-            self.N_DM = 1
+        if self.AO_type is None:
+            self._select_AO_correction()
+        
+        self.tomography = self.AO_type in ['LTAO', 'MCAO', 'GLAO']
+        self.approx_noise_gain = self.tomography # Enable simplified noise gain computation for tomographic systems
 
-        self.NoiseGain()
+        self.NoiseGain() # Compute the noise gain
               
         # Initialize index of refraction values
         self.IOR_src_wvl = self.n_air(self.wvl)
         self.IOR_wvl_atm = self.n_air(self.wvl_atm)
         self.IOR_GS_wvl  = self.n_air(self.GS_wvl) # GS_wvl may depend on the filter for SCAO or on LGS wavelength
  
+ 
+    def _select_AO_correction(self):   
+        use_LGS = torch.all(self.GS_height > 0) and torch.all(self.GS_height.isfinite()) # LGS stars must be at finite altitude
+        multiple_GS = self.GS_dirs_x.size(-1) > 1
+        multiple_DM = self.N_DM > 1
+        
+        if not use_LGS:
+            self.AO_type = 'SCAO'
+        elif multiple_GS:
+            self.AO_type = 'MCAO' if multiple_DM else ('LTAO' if self.DM_rec_layers > 1 else 'GLAO')
+        else:
+            self.AO_type = 'SLAO'
+            
+        if not multiple_DM:
+            self.N_DM = 1 # Just to make sure
+            
 
     def _FFTAutoCorr(self, x: torch.Tensor) -> torch.Tensor:
         return fft.fftshift( fft.ifft2(fft.fft2(x, dim=(-2,-1)).abs()**2, dim=(-2,-1)), dim=(-2,-1) ) / x.shape[-2] / x.shape[-1]
@@ -181,44 +200,78 @@ class TipTorch(torch.nn.Module):
         return tensor
 
 
-    def to_double(self) -> None:
+    def _convert_tensors_dtype(self, target_float: torch.dtype, target_complex: torch.dtype) -> None:
+        ''' Helper to convert all tensor attributes to specified dtypes '''
+        for attr_name, attr in self.__dict__.items():
+            if torch.is_tensor(attr):
+                if torch.is_floating_point(attr):
+                    setattr(self, attr_name, attr.to(target_float))
+                elif torch.is_complex(attr):
+                    setattr(self, attr_name, attr.to(target_complex))
+
+
+    def _to_double(self) -> None:
         self.is_float = False
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if torch.is_tensor(attr):
-                current_dtype = attr.dtype
-                if   'float'   in str(current_dtype): new_dtype = torch.float64
-                elif 'complex' in str(current_dtype): new_dtype = torch.complex128
-                setattr(self, attr_name, attr.to(new_dtype))
+        self._convert_tensors_dtype(torch.float64, torch.complex128)
 
 
-    def to_float(self) -> None:
+    def _to_float(self) -> None:
         self.is_float = True
-        for attr_name in dir(self):
-            attr = getattr(self, attr_name)
-            if torch.is_tensor(attr):
-                current_dtype = attr.dtype
-                if   'float'   in str(current_dtype): new_dtype = torch.float32
-                elif 'complex' in str(current_dtype): new_dtype = torch.complex64
-                setattr(self, attr_name, attr.to(new_dtype))
+        self._convert_tensors_dtype(torch.float32, torch.complex64)
 
 
     def PistonFilter(self, f: torch.Tensor) -> torch.Tensor:
         ''' Piston mode filter for PSD '''
         x = torch.pi * self.D * f
-        R = self.bessel_j1(x) / x
-        piston_filter = 1.0 - 4*R.pow(2)
+        R = torch.special.bessel_j1(x) / x
+        piston_filter = 1.0 - 4.0 * R.pow(2)
         piston_filter[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 1-self.nOtf_AO % 2
         return self._stabilize(piston_filter)
 
+
+    def FocusFilter(self, f: torch.Tensor) -> torch.Tensor:
+        ''' Spatial filter to remove focus related errors '''
+        # Compute x = π * D * √(k²)
+        x = torch.pi * self.D * torch.sqrt(f)
         
+        # Compute j3_term = 2*J₃(x)/x using PyTorch Bessel functions
+        j3_term = self._bessel_j3(x)
+        
+        # Focus filter: 1 - 3 * (2*J₃(x)/x)²
+        focus_filter = 1.0 - 3.0 * j3_term.pow(2)
+        focus_filter[..., self.nOtf_AO//2, self.nOtf_AO//2] *= 1 - self.nOtf_AO % 2
+        
+        return self._stabilize(focus_filter)
+        
+
+    def _bessel_j3(self, x: torch.Tensor) -> torch.Tensor:
+        ''' Compute 2*J₃(x)/x using Bessel recurrence relations '''
+        # Use recurrence: J_{n+1}(x) = (2n/x)*J_n(x) - J_{n-1}(x)
+        # For numerical stability near x=0, use analytical limits
+        
+        # Protect against division by zero
+        x_safe = self._stabilize(x.clone(), eps=1e-6)        
+
+        j0 = torch.special.bessel_j0(x_safe)
+        j1 = torch.special.bessel_j1(x_safe)
+        j2 = (2.0 / x_safe) * j1 - j0 # Compute J₂(x) using recurrence: J₂(x) = (2/x)*J₁(x) - J₀(x)
+        j3 = (4.0 / x_safe) * j2 - j1 # Compute J₃(x) using recurrence: J₃(x) = (4/x)*J₂(x) - J₁(x)
+        
+        # Compute 2*J₃(x)/x
+        result = 2.0 * j3 / x_safe
+        
+        # Apply analytical limit: 2*J₃(x)/x → 0 as x → 0
+        result = torch.where(x < 1e-6, torch.zeros_like(result), result)
+        return result
+    
+    
     def _to_odd(self, x: float) -> int:
         odd = int(np.round(x))
         if odd % 2 == 0:
             odd += 1 if x > odd else -1
         return odd
         
-        
+    
     def InitGrids(self) -> None:
         # Initialize grids and frequency masks for PSD and OTF computations.
         # for all generated PSDs and OTFs within one PSF batch the sampling must be the same
@@ -308,7 +361,6 @@ class TipTorch(torch.nn.Module):
         self.k2 = self.k2[..., :self.nOtf_y, :self.nOtf_x]
         self.mask = self.mask[..., :self.nOtf_y, :self.nOtf_x]
 
-
         if self.PSD_include['Moffat']:
             self.kx2_AO = pdims( self.kx2[corrected_ROI], -1 )[..., :self.nOtf_AO_y, :self.nOtf_AO_x]
             self.ky2_AO = pdims( self.ky2[corrected_ROI], -1 )[..., :self.nOtf_AO_y, :self.nOtf_AO_x]
@@ -390,9 +442,10 @@ class TipTorch(torch.nn.Module):
         if config is not None:
             self.config = config
         
-        self.InitValues()
+        self.InitValues() # Fill up the values of the internal variables from the config file
 
-        if self.is_float: self.to_float()
+        if self.is_float: self._to_float()
+        
         if grids:  self.InitGrids()
         if pupils: self.InitPupils()
         
@@ -442,7 +495,7 @@ class TipTorch(torch.nn.Module):
 
     def __init__(self,
                  AO_config: dict,
-                 AO_type: str,
+                 AO_type: str | None = None,
                  pupil = None,
                  PSD_include: dict | None = None,
                  retain_PSDs: bool = False,
@@ -457,12 +510,11 @@ class TipTorch(torch.nn.Module):
         self.oversampling = oversampling
         self.pupil = pupil
         self.retain_PSDs = retain_PSDs
-        self.is_float = False
         self.dtype = dtype
+        self.is_float = dtype in (torch.float32, torch.complex64)
                
         # TODO: automatic AO correction type selection
         self.AO_type = AO_type
-        self.tomography = True if self.AO_type in ['LTAO', 'MCAO', 'GLAO'] else False
 
         # Useful lambda functions
         self.r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0).pow(6/5)
@@ -471,12 +523,6 @@ class TipTorch(torch.nn.Module):
         self._to_odd_arr = lambda arr: np.vectorize(self._to_odd)(arr)
 
         self._initialize_PSDs_settings(PSD_include)
-
-        # Define Bessel J1 function depending on the platform, torch.special.bessel_j1 is not supported on MPS
-        if self.device.type == "mps":
-            self.bessel_j1 = lambda x: torch.special.bessel_j1(x.to("cpu")).to(x.device, dtype=x.dtype)
-        else:
-            self.bessel_j1 = lambda x: torch.special.bessel_j1(x)
 
         # Initialize constants
         self.mas2arc  = self.make_tensor(1e-3) #TODO: do we need it, though?
@@ -502,12 +548,6 @@ class TipTorch(torch.nn.Module):
         # Default inversion method for tomographic reconstruction
         self.inversion_method = 'lstsq'
         
-        # Enable simplified noise gain computation
-        if self.tomography:
-            self.approx_noise_gain = True
-        else:
-            self.approx_noise_gain = False
-        
         # Piston filters           
         self.piston_filter = None # piston mode filter in the AO-corrected freqs domain
         self.apodizer = None
@@ -518,7 +558,7 @@ class TipTorch(torch.nn.Module):
             config = AO_config,
             grids  = True,
             pupils = True,
-            tomography = self.tomography
+            tomography = True # Try updating the tomographic reconstructors. If AO is not tomographic, the model will figure it out and skip the update
         )
         
 
@@ -1305,17 +1345,74 @@ class TipTorch(torch.nn.Module):
         return obj
 
 
-    def to(self, device):
-        if isinstance(device, str):
-            device = torch.device(device)
-        if self.device == device:
-            return self
-        self.device = device
+    def to(self, *args, **kwargs):
+        '''
+        Moves and/or casts the parameters and buffers (PyTorch-style).
         
-        for name, attr in self.__dict__.items():
-            new_attr = self._to_device_recursive(attr, device)
-            if new_attr is not attr:
-                setattr(self, name, new_attr)
+        Signature variations:
+            to(device=None, dtype=None, non_blocking=False)
+            to(dtype, non_blocking=False)
+            to(tensor, non_blocking=False)
+            
+        Args:
+            device (torch.device or str): the desired device
+            dtype (torch.dtype): the desired floating point or complex dtype
+            tensor (torch.Tensor): Tensor whose dtype and device are the desired dtype and device
+            non_blocking (bool): if True and source is in pinned memory, the copy will be asynchronous
+            
+        Returns:
+            self
+        '''
+        device = None
+        dtype = None
+        non_blocking = False
+        
+        # Parse positional arguments
+        if len(args) == 1:
+            arg = args[0]
+            if isinstance(arg, torch.Tensor):
+                # Extract device and dtype from tensor
+                device = arg.device
+                dtype = arg.dtype
+            elif isinstance(arg, (torch.device, str)):
+                device = arg
+            elif isinstance(arg, torch.dtype):
+                dtype = arg
+            elif isinstance(arg, dict):
+                # Handle dict with device/dtype keys
+                device = arg.get('device', device)
+                dtype = arg.get('dtype', dtype)
+                non_blocking = arg.get('non_blocking', non_blocking)
+        elif len(args) == 2:
+            device, dtype = args
+        elif len(args) > 2:
+            raise TypeError(f'to() received too many arguments ({len(args)})')
+        
+        # Parse keyword arguments (override positional if both provided)
+        device = kwargs.get('device', device)
+        dtype = kwargs.get('dtype', dtype)
+        non_blocking = kwargs.get('non_blocking', non_blocking)
+        
+        # Handle dtype conversion using our optimized methods
+        if dtype is not None:
+            if dtype in (torch.float32, torch.complex64):
+                self._to_float()
+            elif dtype in (torch.float64, torch.complex128):
+                self._to_double()
+            else:
+                raise TypeError(f'Unsupported dtype: {dtype}. Use float32, float64, complex64, or complex128.')
+        
+        # Handle device conversion
+        if device is not None:
+            if isinstance(device, str):
+                device = torch.device(device)
+            if self.device != device:
+                self.device = device
+                for name, attr in self.__dict__.items():
+                    new_attr = self._to_device_recursive(attr, device)
+                    if new_attr is not attr:
+                        setattr(self, name, new_attr)
+        
         return self
 
 
