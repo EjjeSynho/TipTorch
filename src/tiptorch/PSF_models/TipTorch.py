@@ -1010,6 +1010,54 @@ class TipTorch(torch.nn.Module):
         return self.PSF_DL
 
 
+    def OLPSD(self):
+        ''' Compute open-loop PSD, i.e. the atmospheric PSD without any AO correction. '''
+        PSD_half = self.VonKarmanSpectrum(self.r0_(), self.L0.abs(), self.k2)  # [N_obs, nOtf_y, nOtf_x]
+
+        # Remove DC explicitly. Piston cancels in the structure function anyway, but this avoids a huge useless covariance offset.
+        PSD_half[..., self.nOtf_y // 2, self.nOtf_x - 1] = 0.0
+        PSD_half = PSD_half.unsqueeze(1) #[N_obs, 1, nOtf_y, nOtf_x]
+        # Match the convention used by ComputePSD(), PSD is converted from rad^2 to nm^2 OPD at λ_atm
+        PSD_norm = (self.dk * self.wvl_atm * 1e9 / (2.0 * torch.pi)) ** 2
+        # Recover full centered PSD from the stored half-plane representation.
+        self.PSD_open_loop = self.half_PSD_to_full(PSD_half * PSD_norm)
+        
+        return self.PSD_open_loop # [N_obs, 1, nOtf, nOtf]
+
+
+    def OLPSF(self, include_static: bool = True, include_jitter: bool = False):
+        '''
+        Computes the open-loop / seeing-limited PSF.
+
+        include_static: If True, use static telescope aberrations.
+        include_jitter: If False, disables the jitter kernel. AO-only jitter must be zero because the von Karman PSD already contains atmospheric tip/tilt.
+        '''
+
+        PSD = self.OLPSD()
+
+        if include_static:
+            OTF_static = self.OTF_static
+        else:
+            OTF_static = torch.ones( (1, 1, self.nOtf, self.nOtf), device=self.device, dtype=torch.complex64 if self.is_float else torch.complex128 )
+
+        if include_jitter:
+            self.PSF_open_loop = self.PSD2PSF(PSD, OTF_static)
+            return self.PSF_open_loop
+        
+        # Otherwise, jitter must be muted since PSD2PSF always applies JitterKernel()
+        Jx_old, Jy_old, Jxy_old = self.Jx.clone(), self.Jy.clone(), self.Jxy.clone()
+
+        self.Jx  = torch.zeros_like(Jx_old)
+        self.Jy  = torch.zeros_like(Jy_old)
+        self.Jxy = torch.zeros_like(Jxy_old)
+
+        self.PSF_open_loop = self.PSD2PSF(PSD, OTF_static)
+
+        self.Jx, self.Jy, self.Jxy = Jx_old, Jy_old, Jxy_old
+
+        return self.PSF_open_loop # [N_obs, N_wvl, N_pix, N_pix]
+
+
     def ComputePSD(self):
         if all(not value for value in self.PSD_include.values()):
             self.PSD = torch.zeros([self.N_src, self.N_wvl, self.nOtf, self.nOtf], device=self.device)
@@ -1238,7 +1286,7 @@ class TipTorch(torch.nn.Module):
     #     return torch.hstack(PSF)
 
 
-    def PSD2PSF(self, PSD, OTF_static):
+    def PSD2PSF(self, PSD: torch.Tensor, OTF_static: torch.Tensor):
         # Ensure that wavelength dimension is present
         F   = pdims(min_2d(self.F),  2)
         bg  = pdims(min_2d(self.bg), 2)

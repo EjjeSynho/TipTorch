@@ -22,10 +22,11 @@ except:
         def edge(self, *args, **kwargs): pass
 
 
-rad2mas  = 3600 * 180 * 1000 / np.pi
-rad2arc  = rad2mas / 1000
-deg2rad  = np.pi / 180
-asec2rad = np.pi / 180 / 3600
+rad2mas  = 3600.0 * 180.0 * 1000.0 / np.pi
+mas2rad  = 1.0 / rad2mas
+rad2arc  = rad2mas / 1000.0
+deg2rad  = np.pi / 180.0
+asec2rad = np.pi / 180.0 / 3600.0
 
 seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
 r0_new = lambda r0, lmbd, lmbd0: r0*(lmbd/lmbd0)**1.2 # [m]
@@ -607,7 +608,7 @@ def FWHM_fitter(PSF_stack, function='Moffat', verbose=False):
 
 def cov_to_jitter_params(Sigma):
     """
-    Convert covariance matrix back to Jx, Jy, Jxy_deg.
+    Converts covariance matrix to Jx, Jy, Jxy_deg.
 
     Returns major-axis sigma first.
     
@@ -663,6 +664,34 @@ def cov_to_jitter_params(Sigma):
         Jxy_deg = Jxy_deg.squeeze(0)
 
     return Jx, Jy, Jxy_deg
+
+
+def scale_TT_jitter_to_mas(Jx, Jy, telescope_D):
+    '''Scale jitter parameters from [nm RMS] to [mas]'''
+    scale = mas2rad * telescope_D / (4.0e-9)
+    return Jx / scale, Jy / scale
+
+
+def cov_to_jitter_mas(Sigma: torch.Tensor, telescope_diameter):
+    """
+    Convert 2x2 TT covariance matrix in [nm RMS] to scaled jitter ellipse parameters in [mas]
+
+    Parameters
+    ----------
+    Sigma : Covariance matrix of shape (..., 2, 2)
+    telescope_diameter : Telescope diameter in [m]
+
+    Returns
+    -------
+    Jx_mas : Major-axis jitter sigma in mas.
+    Jy_mas : Minor-axis jitter sigma in mas.
+    Jxy_deg : Rotation angle in degrees.
+    """
+
+    Jx, Jy, Jxy_deg = cov_to_jitter_params(Sigma)
+    Jx_mas, Jy_mas  = scale_TT_jitter_to_mas(Jx, Jy, telescope_D=telescope_diameter)
+
+    return Jx_mas, Jy_mas, Jxy_deg
 
 
 def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pixel_pad=True):

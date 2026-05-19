@@ -441,66 +441,6 @@ def jitter_params_to_cov(Jx, Jy, Jxy_deg):
     return R @ D @ R.transpose(-1, -2)
 
 
-def cov_to_jitter_params(Sigma):
-    """
-    Convert covariance matrix back to Jx, Jy, Jxy_deg.
-
-    Returns major-axis sigma first.
-    
-    Parameters
-    ----------
-    Sigma : torch.Tensor
-        Covariance matrix of shape (..., 2, 2) where ... represents
-        arbitrary batch dimensions. Can be a single matrix (2, 2),
-        a batch (N, 2, 2), or higher dimensional batches.
-    
-    Returns
-    -------
-    Jx : torch.Tensor
-        Major axis sigma, shape (...,)
-    Jy : torch.Tensor
-        Minor axis sigma, shape (...,)
-    Jxy_deg : torch.Tensor
-        Rotation angle in degrees, shape (...,)
-    """
-    # Ensure input is at least 2D (single covariance matrix case)
-    input_shape = Sigma.shape
-    if Sigma.ndim == 2:
-        Sigma = Sigma.unsqueeze(0)
-    
-    # Compute eigendecomposition (batched operation)
-    eigvals, eigvecs = torch.linalg.eigh(Sigma)
-
-    # Sort eigenvalues and eigenvectors in descending order
-    order = torch.argsort(eigvals, dim=-1, descending=True)
-
-    # Reorder eigenvalues
-    eigvals = torch.gather(eigvals, -1, order)
-
-    # Reorder eigenvectors (columns)
-    # order shape: (..., 2) -> expand to (..., 2, 2) for gathering along dim=-1
-    batch_shape = Sigma.shape[:-2]
-    index = order[..., None, :].expand(*batch_shape, 2, 2)
-    eigvecs = torch.gather(eigvecs, -1, index)
-
-    # Extract principal axis widths
-    Jx = torch.sqrt(torch.clamp(eigvals[..., 0], min=0.0))
-    Jy = torch.sqrt(torch.clamp(eigvals[..., 1], min=0.0))
-
-    # Extract rotation angle from the major axis eigenvector
-    vx = eigvecs[..., 0, 0]
-    vy = eigvecs[..., 1, 0]
-    Jxy_deg = torch.rad2deg(torch.atan2(vy, vx))
-
-    # Squeeze back if input was a single matrix
-    if len(input_shape) == 2:
-        Jx = Jx.squeeze(0)
-        Jy = Jy.squeeze(0)
-        Jxy_deg = Jxy_deg.squeeze(0)
-
-    return Jx, Jy, Jxy_deg
-
-
 def combine_zero_centered_jitters(Jx1, Jy1, Jxy1, Jx2, Jy2, Jxy2):
     """
     Combine two zero-centered jitter distributions by adding their covariance matrices.
@@ -545,6 +485,11 @@ def combine_zero_centered_jitters(Jx1, Jy1, Jxy1, Jx2, Jy2, Jxy2):
 
 
 
+
+
+sigmaToFWHM = (2 * np.sqrt(2.0 * np.log(2.0))).item()
+
+#%%
 Jx_total, Jy_total, Jxy_total = combine_zero_centered_jitters(
     Jx1=torch.tensor(4.0),
     Jy1=torch.tensor(2.0),
@@ -556,86 +501,3 @@ Jx_total, Jy_total, Jxy_total = combine_zero_centered_jitters(
 )
 
 print(Jx_total, Jy_total, Jxy_total)
-
-
-#%%
-
-import torch
-
-
-def scale_jitter_to_mas(Jx, Jy, telescope_diameter):
-    """
-    Scale jitter ellipse axes like the original ellipsesFromCovMats function.
-
-    The original code did:
-
-        scale = mas_to_rad * D / (4e-9)
-        Jx_scaled = Jx / scale
-        Jy_scaled = Jy / scale
-
-    which is equivalent to:
-
-        Jx_scaled = Jx * (4e-9 / D) / mas_to_rad
-
-    Parameters
-    ----------
-    Jx, Jy : torch.Tensor
-        Major/minor jitter sigmas in the internal covariance units.
-        If the old interpretation is correct, these are RMS TT coefficients in nm.
-
-    telescope_diameter : float or torch.Tensor
-        Telescope diameter in meters.
-
-    Returns
-    -------
-    Jx_mas, Jy_mas : torch.Tensor
-        Major/minor jitter sigmas in mas.
-    """
-
-    mas_to_rad = torch.pi / (180.0 * 3600.0 * 1000.0)
-
-    scale = mas_to_rad * telescope_diameter / (4.0e-9)
-
-    Jx_mas = Jx / scale
-    Jy_mas = Jy / scale
-
-    return Jx_mas, Jy_mas
-
-
-#%%
-
-def cov_to_scaled_jitter_params(Sigma, telescope_diameter):
-    """
-    Convert 2x2 TT covariance matrix to scaled jitter ellipse parameters.
-
-    Parameters
-    ----------
-    Sigma : torch.Tensor
-        Covariance matrix of shape (..., 2, 2).
-
-    telescope_diameter : float or torch.Tensor
-        Telescope diameter in meters.
-
-    Returns
-    -------
-    Jx_mas : torch.Tensor
-        Major-axis jitter sigma in mas.
-
-    Jy_mas : torch.Tensor
-        Minor-axis jitter sigma in mas.
-
-    Jxy_deg : torch.Tensor
-        Rotation angle in degrees.
-    """
-
-    Jx, Jy, Jxy_deg = cov_to_jitter_params(Sigma)
-
-    Jx_mas, Jy_mas = scale_jitter_to_mas(
-        Jx,
-        Jy,
-        telescope_diameter=telescope_diameter,
-    )
-
-    return Jx_mas, Jy_mas, Jxy_deg
-
-sigmaToFWHM = 2 * np.sqrt(2.0 * np.log(2.0))
