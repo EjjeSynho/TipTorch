@@ -10,13 +10,10 @@ except NameError:
     pass
 
 import sys, os
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tiptorch._config import default_device, project_settings
-
 import matplotlib.pyplot as plt
-
 from tools.observations import MUSEObservation
 
 from pathlib import Path
@@ -25,7 +22,6 @@ from pathlib import Path
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
 device = default_device
-
 
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
@@ -74,7 +70,10 @@ ob.PlotSourceSpectra()
 ob.InitSimulation()
 
 #%%
+# ob.FitPSFModel(repeat=3, max_iter=200)
+ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
 ob.FitPSFModel(repeat=3, max_iter=200)
+# ob.FitPSFModel(repeat=3, max_iter=200)
 
 #%%
 ob.SimulateField()

@@ -134,9 +134,6 @@ class MUSEObservation:
         self.sources_table = None
         self.sources = None
         self.N_src = 0
-
-        # Vector to store the encoded PSF model parameters
-        self.x_params = None
         
         # Define the half-width of the region for spectrum extraction = ~size of the PSF core
         self.flux_core_radius = 2 # [pix]
@@ -252,7 +249,7 @@ class MUSEObservation:
 
     def InitSimulation(self) -> None:
         if self.sources is None:
-             raise ValueError("Sources must be initialized before initializing the PSF model. Please run InitSources() first.")
+             raise ValueError("Sources must be initialized before initializing the PSF model. Please run ExtractSources() first.")
         
         # The model config is also updated to simulate only sparse λs
         self.model_config['sources_science']['Wavelength'] = torch.tensor(self.λ_sparse, device=self.device, dtype=torch.float32) * 1e-9 #[m]
@@ -429,29 +426,25 @@ class MUSEObservation:
         )
 
     
-    def simulate_sparse(self, x, src_subset: Optional[SourcesSubset] = None) -> torch.Tensor:
+    def simulate_sparse(self, x=None, src_subset: Optional[SourcesSubset] = None) -> torch.Tensor:
         """
         Simulates the full-field PSF canvas for the given source subset (all sources by default).
         Accepts a pre-built SourcesSubset so spectra and ROI lists are already indexed,
         avoiding per-call list comprehensions in the fitting hot-path.
         """
         if src_subset is None:
-            src_subset = self.sources.select(None)  # all sources
+            src_subset = self.sources.select(None) # None here = select all sources
             
-        # Update model inputs from the stacked parameter vector
-        x_dict = self.PSF_model.inputs_manager.unstack(x, include_all=True, update=True)
+        # Update model inputs from the stacked parameter vector. If None provided, use the current model parameters as they are
+        x_dict = self.PSF_model.inputs_manager.unstack(x, include_all=True, update=True) if x is not None else self.PSF_model.inputs_manager.to_dict()
         # Pass None to NFM_wrapper when all sources are selected to avoid unnecessary indexing inside the model
         all_selected = len(src_subset.ids) == self.N_src
-        model_src_ids = None if all_selected else src_subset.ids
         # Index F_norm before forward() may modify x_dict in-place
         F_norm = x_dict['F_norm'] if all_selected else x_dict['F_norm'][src_subset.ids]
-        PSFs_ = self.PSF_model(x_dict, src_ids=model_src_ids)
+        PSFs_  = self.PSF_model(x_dict, src_ids=None if all_selected else src_subset.ids)
+        PSF_norm_factor = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_sim_normed)
         
-        PSF_norm_factor = self.PSF_model.evaluate_splines(
-            self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_sim_normed
-        )
-        # spectra and ROIs come directly from the pre-indexed subset — no extra indexing here
-        flux_normalization = F_norm.unsqueeze(-1) * PSF_norm_factor * src_subset.spectra_sparse
+        flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor * src_subset.spectra_sparse
         PSFs_ = PSFs_ * flux_normalization.view(-1, self.N_wvl, 1, 1)
         return add_ROIs(self.canvas_sparse * 0.0, PSFs_, src_subset.slices_local, src_subset.slices_global)
 
@@ -486,27 +479,58 @@ class MUSEObservation:
         PSF_loss = self._loss_PSF(data, model, fit_weights=fit_weights) # loss related to PSF morphology
         return LO_loss + PSF_loss
 
-    
-    def FitPSFModel(self, repeat=2, max_iter=200) -> Optional[torch.Tensor]:
-        weights_ = self._compute_fitting_weights()
-        fit_subset = weights_.subset  # pre-built once; reused every iteration
+
+    def _select_optimizable_variables(self, fit_params):
         
-        run_fn  = lambda x: self.simulate_sparse(x, fit_subset) # model inference function for the optimizer
-        loss_fn = lambda x: self.loss(x, self.cube_sparse, run_fn, weights_) # composite loss function for the optimizer
+        if isinstance(fit_params, str):
+            fit_params = [fit_params]
+        
+        # Determine which parameters must be fitted
+        PSF_params        = ['r0', 'dn', 'LO_coefs', 'F_ctrl', 'J_ctrl', 'L0', 'wind_speed_single', 'wind_dir_single', 'Cn2_weights']
+        astrometry_params = ['dx_ctrl', 'dy_ctrl']
+        photometry_params = ['bg_ctrl', 'F_norm_λ_ctrl', 'F_norm']
+
+        if 'PSF' in fit_params and 'astrometry' in fit_params and 'photometry' in fit_params:
+            fitable_set = None # all PSF model parameters are optimized
+        else:
+            fitable_set = (PSF_params        if 'PSF'        in fit_params else []) + \
+                          (astrometry_params if 'astrometry' in fit_params else []) + \
+                          (photometry_params if 'photometry' in fit_params else [])
+            # Check if selected parameters are fittable within the PSF model
+            fitable_set = [param for param in fitable_set if self.PSF_model.inputs_manager.is_optimizable(param)]
+        return fitable_set
+
+
+    # TODO: provide sources selection from outside
+    def FitPSFModel(self, fit=['PSF', 'astrometry', 'photometry'], repeat=2, max_iter=200) -> None:
+        
+        # optimizables_backup = self.PSF_model.get_optimizable_param_names() # backup the original optimizables settings to restore them later if needed
+        # Vector to store the encoded PSF model parameters
+        x_params = None
+        
+        optimizables_ = self._select_optimizable_variables(fit)
+        weights_ = self._compute_fitting_weights()
+        
+        fit_subset = weights_.subset  # pre-built once, reused every iteration
+        
+        run_fn  = lambda x: self.simulate_sparse(x, fit_subset) # inference function used by the optimizer
+        loss_fn = lambda x: self.loss(x, self.cube_sparse, run_fn, weights_) # composite loss function to minimize
         
         for _ in range(repeat):
             self._update_flux_norm()
-            self.x_params, _ = OptimizePSFModel(
+            x_params, _ = OptimizePSFModel(
                 self.PSF_model,
                 loss_fn,
-                x_initial  = self.x_params.clone() if self.x_params is not None else None,
+                x_initial  = x_params.clone() if x_params is not None else None,
                 max_iter   = max_iter,
                 n_attempts = 1,
                 verbose    = True,
-                force_bfgs = True
+                force_bfgs = True,
+                include_params = optimizables_
             )
 
-        # NOTE: Intrinsic values inside PSF_model.inputs manager are updated automatically on function call
+        # self.PSF_model.inputs_manager.set_optimizable(optimizables_backup) # restore the original optimizables settings after fitting
+        # NOTE: Intrinsic values inside PSF_model.inputs manager are updated automatically on every function call
         
 
     @torch.no_grad() #TODO: split output
@@ -523,7 +547,7 @@ class MUSEObservation:
             self.simulated_full = add_ROIs(self.canvas_full, PSFs_, self.sources.slices_local, self.sources.slices_global)
             self.residue_full = (self.cube_full - self.simulated_full.numpy()) * self.valid_mask.cpu().numpy()
         else:
-            self.simulated_sparse = self.simulate_sparse(self.x_params, src_subset=None)
+            self.simulated_sparse = self.simulate_sparse(x=None, src_subset=None)
             self.residue_sparse = (self.cube_sparse - self.simulated_sparse) * self.valid_mask
 
 
@@ -569,15 +593,15 @@ class MUSEObservation:
         
         from astropy.convolution import convolve, Box1DKernel
 
-        # Select the subset of sources to plot
-        src_subset = self.sources.select(src_ids)
-
         if plot_residual:
             if self.sources.spectra_res_full is None or self.sources.spectra_res_sparse is None:
                 print("Residual spectra are not available. Computing them now...")
                 self.sources.spectra_res_sparse, self.sources.spectra_res_full = \
                     self.ExtractSpectraFromCore(self.sources.table, self.residue_sparse, self.residue_full)
-                       
+                
+        src_subset = self.sources.select(src_ids) # select a subset of sources to plot
+        
+        if plot_residual:
             src_spectra_full   = src_subset.spectra_res_full
             src_spectra_sparse = src_subset.spectra_res_sparse
         else:
