@@ -36,6 +36,7 @@ sensor_LO:
 - PixelScale
 - SigmaRON
 - Gain
+- NumberPhotons
 
 sensor_science:
 - PixelScale
@@ -65,5 +66,6 @@ DM:
 
 RTC:
 - SensorFrameRate_HO
+- SensorFrameRate_LO
 - LoopDelaySteps_HO
 - LoopGain_HO

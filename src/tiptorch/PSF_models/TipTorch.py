@@ -1332,38 +1332,37 @@ class TipTorch(torch.nn.Module):
             self.retain_PSDs = True
             self.ComputePSD()
             
+        PSD_norm = (self.wvl_atm*1e9/2/torch.pi)**2
 
         for entry in self.PSD_include:
             PSD = self.PSDs[entry]
 
             if len(PSD.shape) > 1:            
-                PSD_norm = (self.wvl_atm*1e9/2/torch.pi)**2
                 PSD = self.half_PSD_to_full(PSD * PSD_norm).real # [nm^2 m^-2]
                 
-                error_budget[entry] = (PSD * self.dk**2).sum().item()
+                error_budget[entry] = (PSD * self.dk**2).sum().sqrt().item()
                 
                 if verbose:
-                    print(f"{entry:15s}: {np.sqrt(error_budget[entry]):.2f} [nm RMS]")
-                
-        total_PSD = self.PSD.real
-        error_budget['Total HO'] = total_PSD.sum().item()
+                    print(f"{entry:15s}: {error_budget[entry]:.2f} [nm RMS]")
+        
+        error_budget['Total HO'] = self.PSD.real.sum().sqrt().item() # self.PSD is already normalized
         
         if verbose:
-            print(f"{'Total HO':15s}: {np.sqrt(error_budget['Total HO']):.2f} [nm RMS]")
+            print(f"{'Total HO':15s}: {error_budget['Total HO']:.2f} [nm RMS]")
             
         #TODO: TT jitter error in [nm RMS]
             
         return error_budget
 
 
-    def SetWavelengths(self, wavelengths):
+    def SetWavelengths(self, wavelengths: torch.Tensor):
         ''' Set new simulated wavelengths in [nm] '''
         self.config['sources_science']['Wavelength'] = wavelengths.view(1,-1) # [nm]
         self.Update(grids=True, pupils=True, tomography=True)
         self.wavelengths = wavelengths # [nm]
 
 
-    def SetImageSize(self, img_size):
+    def SetImageSize(self, img_size: int):
         ''' Set new image size in pixels '''
         self.config['sensor_science']['FieldOfView'] = img_size
         self.Update(grids=True, pupils=True, tomography=True)

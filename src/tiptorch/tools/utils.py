@@ -606,7 +606,7 @@ def FWHM_fitter(PSF_stack, function='Moffat', verbose=False):
     return FWHMs
 
 
-def cov_to_jitter_params(Sigma):
+def cov_to_jitter_params(Sigma: torch.Tensor):
     """
     Converts covariance matrix to Jx, Jy, Jxy_deg.
 
@@ -614,19 +614,13 @@ def cov_to_jitter_params(Sigma):
     
     Parameters
     ----------
-    Sigma : torch.Tensor
-        Covariance matrix of shape (..., 2, 2) where ... represents
-        arbitrary batch dimensions. Can be a single matrix (2, 2),
-        a batch (N, 2, 2), or higher dimensional batches.
+    Sigma : (batched) covariance matrix
     
     Returns
     -------
-    Jx : torch.Tensor
-        Major axis sigma, shape (...,)
-    Jy : torch.Tensor
-        Minor axis sigma, shape (...,)
-    Jxy_deg : torch.Tensor
-        Rotation angle in degrees, shape (...,)
+    Jx: Major axis sigma
+    Jy: Minor axis sigma
+    Jxy_deg: Rotation angle in degrees
     """
     # Ensure input is at least 2D (single covariance matrix case)
     input_shape = Sigma.shape
@@ -778,6 +772,7 @@ def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pix
         tilts = [make_island_TT_mode(x_rot_norm, petal, False) for petal in petals]
 
         petal_modes = np.dstack([*petals, *tips, *tilts])
+        
         return petal_modes
     else:
         return mask_spiders

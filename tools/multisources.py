@@ -23,24 +23,38 @@ This module is used to manage the multi-source simulations. It contains function
 """
 
 
-def DisplaySources(data_src, sources_df, draw_box_size, vmin, vmax, norm=LogNorm, shape='box'):
+def DisplaySources(data_src, sources_df, src_box_size, vmin, vmax, norm=LogNorm, shape='box', ROI=None):
     from photutils.aperture import CircularAperture
     if isinstance(data_src, torch.Tensor):
         data_src = data_src.sum(dim=0).cpu().numpy() if data_src.ndim == 3 else data_src.cpu().numpy()
-    srcs_pos = np.transpose((sources_df['x_peak'], sources_df['y_peak']))
+    
+    # Apply ROI if provided and extract offsets for coordinate adjustment
+    x_offset, y_offset = 0, 0
+    if ROI is not None:
+        data_src = data_src[ROI]
+        # Extract offsets from ROI slices
+        if isinstance(ROI, tuple):
+            slices = [s for s in ROI if isinstance(s, slice)]
+            if len(slices) >= 2:
+                y_slice, x_slice = slices[-2:]
+                y_offset = y_slice.start if y_slice.start is not None else 0
+                x_offset = x_slice.start if x_slice.start is not None else 0
+    
+    srcs_pos = np.transpose((sources_df['x_peak'] - x_offset, sources_df['y_peak'] - y_offset))
     norm_field = norm(vmin=vmin, vmax=vmax)
 
     plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
 
     if shape == 'circle':
-        apertures = CircularAperture(srcs_pos, r=draw_box_size / 2)
+        apertures = CircularAperture(srcs_pos, r=src_box_size / 2)
     else:
-        apertures = RectangularAperture(srcs_pos, draw_box_size, draw_box_size)
+        apertures = RectangularAperture(srcs_pos, src_box_size, src_box_size)
+        
     apertures.plot(color='gold', lw=2, alpha=0.45)
 
     for idx, row in sources_df.iterrows():
-        x, y = row['x_peak'], row['y_peak']
-        offset = draw_box_size / 2
+        x, y = row['x_peak'] - x_offset, row['y_peak'] - y_offset
+        offset = src_box_size / 2
         plt.text(x - offset + 1, y - offset + 1, str(idx),
                  color='gold', fontsize=7, va='bottom', ha='left',
                  bbox=dict(boxstyle='square,pad=0', fc='none', ec='none'))
@@ -164,21 +178,21 @@ def AddSources(data_cube, coords, sources_df=None, weights=None, weight_from_flu
     return result_df
 
 
-def ExtractSources(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
+def ExtractSourceImages(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
     ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size)
-    # sources_valid = srcs_coords.iloc[valid_srcs].reset_index(drop=True) if filter_sources else srcs_coords
     sources_valid = srcs_coords.iloc[valid_srcs] if filter_sources else srcs_coords
 
     if debug_draw:
         N_cols = min(8, int(np.ceil(np.sqrt(len(ROIs))))) # Automatically adjusts the number of displayed  columns
         plot_ROIs_as_grid(ROIs, cols=N_cols)
 
+    # The split between local and global coordinates is necessary because PSF model simulates PSFs of the same size, while an object
+    # Can be only partially present within the field. Then, simulated PSF is first cropped locally and then placed globally back into the full image
     return {
-        "images": ROIs,
-        "coords": sources_valid,
-        "count": len(sources_valid),
-        "img_slices": global_coords,
-        "img_crops": local_coords
+        "src_images": ROIs,          # Sources images extracted from the original image, with NaN padding if the source is close to the edge
+        "src_data":   sources_valid, # DataFrame with source coordinates and other properties, filtered to only include sources with valid ROIs (if filter_sources=True)
+        "ROI_global": global_coords, # List of tuples with global image coordinates (slices) corresponding to each ROI, used for placing the simulated PSF back into the full image
+        "ROI_local":  local_coords   # List of tuples with local image coordinates (slices) corresponding to each ROI
     }
 
 
@@ -186,11 +200,9 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
     torch_flag = False
     if isinstance(image, np.ndarray):
         xp = np
-    # elif isinstance(image, cp.array):
-    #     xp = cp
     elif isinstance(image, torch.Tensor):
         xp = torch
-        torch_flag=True
+        torch_flag = True
     else:
         raise TypeError("Unexpected image data type")
         
@@ -201,7 +213,7 @@ def extract_ROIs(image, sources, box_size=20, max_nan_fraction=0.3):
 
     D = image.shape[0]  # Depth dimension
 
-    half_box = box_size // 2
+    half_box    = box_size // 2
     extra_pixel = box_size % 2  # 1 if box_size is odd, 0 if even
 
     valid_ids = []

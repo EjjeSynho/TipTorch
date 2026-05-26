@@ -46,17 +46,17 @@ if not isinstance(data_folder, Path):
 # cache_path = data_folder / "J0144/J0144-5745_cache.pickle"
 # raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
 
-cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
-raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
-cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
+# cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
+# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
+# cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
 
 # cube_path  = data_folder / "reduced_cubes/CUBE_0002.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_11_59.783.fits.fz"
 # cache_path = data_folder / "reduced_telemetry/CUBE_0002.pickle"
 
-# cube_path  = data_folder / "reduced_cubes/CUBE_0003.fits"
-# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
-# cache_path = data_folder / "reduced_telemetry/CUBE_0003.pickle"
+cube_path  = data_folder / "reduced_cubes/CUBE_0003.fits"
+raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
+cache_path = data_folder / "reduced_telemetry/CUBE_0003.pickle"
 
 # cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
@@ -137,7 +137,7 @@ def ExtractSpectraFromCore(sources, cube_full, cube_sparse, flux_core_radius):
 
 
 #%%
-from tools.multisources import DisplaySources, add_ROIs, DetectSources, AddSources, ExtractSources
+from tools.multisources import DisplaySources, add_ROIs, DetectSources, AddSources, ExtractSourceImages
 
 PSF_size = 111  # Define the size of each extracted PSF
 model_config['sensor_science']['FieldOfView'] = PSF_size
@@ -146,18 +146,20 @@ model_config['sensor_science']['FieldOfView'] = PSF_size
 # This function also defines the order in which sources are indexed ad processed later, so it's important to use it before extracting the source images
 # and spectra. The order is defined by the brightness of the sources, so the brightest source will be indexed as 0, the second brightest as 1, and so on
 sources = DetectSources(cube_sparse, threshold='auto', nsigma=35, box_size=11, sort_by_brightness=True, weight_from_flux=False)
-sources = AddSources(cube_sparse, [[100, 200]], sources, weights=0.0, weight_from_flux=False)
+# sources = AddSources(cube_sparse, [[100, 200]], sources, weights=0.0, weight_from_flux=False)
 
-DisplaySources(cube_sparse, sources, draw_box_size=20, vmin=10, vmax=sources['peak_value'].max()*0.85)
+DisplaySources(cube_sparse, sources, src_box_size=20, vmin=10, vmax=sources['peak_value'].max()*0.85)
 
+#%%
 # --------------- If some sources must be filtered out, here is the right place to do it --------------------------------------
 
 # Extract separate source images + other auxilliary data. It's necessary for later fitting and performance evaluation
-srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
+srcs_image_data = ExtractSourceImages(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
-N_src   = srcs_image_data["count" ]
-sources = srcs_image_data["coords"]
-ROIs    = srcs_image_data["images"]
+sources = srcs_image_data["src_data"]
+ROIs    = srcs_image_data["src_images"]
+
+N_src = len(sources) # update the number of sources after filtering
 
 #%%
 from tiptorch.tools.utils import generate_random_colors
@@ -392,8 +394,8 @@ def simulate_sparse(x, src_ids=None):
     # Select spectra only for the simulated sources
     spectra_sparse = src_spectra_sparse[fit_src_ids] if src_ids is not None else src_spectra_sparse
     # Select ROIs only for the simulated sources
-    img_crops  = [srcs_image_data["img_crops"][i]  for i in fit_src_ids] if src_ids is not None else srcs_image_data["img_crops"]
-    img_slices = [srcs_image_data["img_slices"][i] for i in fit_src_ids] if src_ids is not None else srcs_image_data["img_slices"]
+    img_crops  = [srcs_image_data["ROI_local"][i]  for i in fit_src_ids] if src_ids is not None else srcs_image_data["ROI_local"]
+    img_slices = [srcs_image_data["ROI_global"][i] for i in fit_src_ids] if src_ids is not None else srcs_image_data["ROI_global"]
     
     flux_normalization = F_norm.unsqueeze(-1) * PSF_norm_factor * spectra_sparse
     # Use regular multiplication (not *=) so that PSFs_ shape [1, N_wvl, H, W] can broadcast to [N_src, N_wvl, H, W]
@@ -498,7 +500,7 @@ def simulate_full(): #TODO: spplit output
     # Apply the flux normalization to the PSFs similar to func()
     PSFs_ = PSFs_combined * flux_normalization.unsqueeze(-1).unsqueeze(-1)
 
-    return add_ROIs(canvas_full, PSFs_, srcs_image_data["img_crops"], srcs_image_data["img_slices"]), PSFs_
+    return add_ROIs(canvas_full, PSFs_, srcs_image_data["ROI_local"], srcs_image_data["ROI_global"]), PSFs_
 
 
 model_full, PSFs_separated = simulate_full()
@@ -606,10 +608,10 @@ def SaveModelCubeFITS(cube, output_path, λ_full, sources=None, compress=True, c
             hdr = fits.Header()
             # Spatial WCS: reference pixel is the PSF centre; CRVAL encodes its position
             # in the full field (FITS 1-based convention, hence +1)
-            hdr['CRPIX1'] = crpix_x;               hdr['CRVAL1'] = float(sources.iloc[i]['x_peak']) + 1
-            hdr['CDELT1'] = 1;                      hdr['CUNIT1'] = 'pixel'; hdr['CTYPE1'] = 'PIXEL'
-            hdr['CRPIX2'] = crpix_y;               hdr['CRVAL2'] = float(sources.iloc[i]['y_peak']) + 1
-            hdr['CDELT2'] = 1;                      hdr['CUNIT2'] = 'pixel'; hdr['CTYPE2'] = 'PIXEL'
+            hdr['CRPIX1'] = crpix_x;    hdr['CRVAL1'] = float(sources.iloc[i]['x_peak']) + 1
+            hdr['CDELT1'] = 1;          hdr['CUNIT1'] = 'pixel'; hdr['CTYPE1'] = 'PIXEL'
+            hdr['CRPIX2'] = crpix_y;    hdr['CRVAL2'] = float(sources.iloc[i]['y_peak']) + 1
+            hdr['CDELT2'] = 1;          hdr['CUNIT2'] = 'pixel'; hdr['CTYPE2'] = 'PIXEL'
             _wcs_λ(hdr, λ_full)
             hdr['SRCIDX']  = (i,     'Source index (0-based)')
             hdul.append(_make_hdu(data[i], hdr))

@@ -151,14 +151,14 @@ model_config['telescope']['PupilAngle'] = torch.tensor(model_config['telescope']
 model_config['NumberSources'] = 1
 
 #%%
-from tools.multisources import add_ROIs, DetectSources, ExtractSources
+from tools.multisources import add_ROIs, DetectSources, ExtractSourceImages
 
 PSF_size = 111  # Define the size of each extracted PSF
 
 # sources = DetectSources(cube_sparse, threshold='auto', nsigma=10, display=True, draw_win_size=20)
 sources = DetectSources(cube_sparse, threshold='auto', nsigma=25, display=True, draw_box_size=20)
 # Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
-srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
+srcs_image_data = ExtractSourceImages(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
 N_src   = srcs_image_data["count"]
 sources = srcs_image_data["coords"]

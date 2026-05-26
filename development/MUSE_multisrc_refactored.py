@@ -72,12 +72,12 @@ sources.rename(
 sources[['x_peak', 'y_peak']] = sources[['x_peak', 'y_peak']] * 1000 / 25 + field_center # [asec] -> [pix]
 
 #%%
-from tools.multisources import add_ROIs, ExtractSources
+from tools.multisources import add_ROIs, ExtractSourceImages
 
 PSF_size = 111  # Define the maximum size of each extracted PSF
 
 # Extract separate source images from the data + other data, necessary for later fitting and performance evaluation
-srcs_image_data = ExtractSources(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
+srcs_image_data = ExtractSourceImages(cube_sparse, sources, box_size=PSF_size, filter_sources=True, debug_draw=False)
 
 N_src   = srcs_image_data["count"]
 sources = srcs_image_data["coords"]
