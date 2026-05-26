@@ -1732,6 +1732,10 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
 
 def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
     """ Small utility function to process the AOF Cn2 profile data """
+    # Create writable copies to avoid read-only array errors
+    Cn2_alt = Cn2_alt.copy()
+    Cn2_frac = Cn2_frac.copy()
+    
     # Remove unphysical values
     Cn2_alt [Cn2_alt > 100] = np.nan
     Cn2_alt [Cn2_alt < 0]   = np.nan

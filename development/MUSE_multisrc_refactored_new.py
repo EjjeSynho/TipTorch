@@ -1,5 +1,6 @@
 #%%
 %reload_ext autoreload
+
 %autoreload 2
 
 import sys, os
@@ -15,7 +16,6 @@ import random
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from tiptorch.tools.utils import rad2mas
 from tqdm import tqdm
 
 from tiptorch._config import default_device, project_settings
@@ -52,22 +52,35 @@ sources.rename(
     },
     inplace=True
 )
-sources[['x_peak', 'y_peak']] = sources[['x_peak', 'y_peak']] * 1000 / 25 + ob.field_center # [asec] -> [pix]
+sources[['x_peak', 'y_peak']] = sources[['x_peak', 'y_peak']] * 1e3 / 25.0 + ob.field_center # [asec] -> [pix]
+
+# Add weight column for later use (e.g. in loss function)
+sources['weight'] = 1.0
+
+# Leave the first 400 brighest sources
+# sources = sources.nlargest(400, 'peak_value')
 
 #%%
 ob.sources_table = sources
 
-ob.ExtractSources(verbose=True, max_nan_fraction=0.3)
+ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
 ob.DisplaySources(draw_box_size=5)
 
 #%%
 ob.PlotSourceSpectra()
+
+#%
 ob.InitSimulation()
+
+#%
+ob.InitFluxNorm()
+
+ob.PSF_model['F_norm'] *= 110
 
 #%%
 # ob.FitPSFModel(repeat=3, max_iter=200)
-ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
-ob.FitPSFModel(repeat=3, max_iter=200)
+# ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
+# ob.FitPSFModel(repeat=3, max_iter=200)
 # ob.FitPSFModel(repeat=3, max_iter=200)
 
 #%%

@@ -253,7 +253,9 @@ class MUSEObservation:
         
         # The model config is also updated to simulate only sparse λs
         self.model_config['sources_science']['Wavelength'] = torch.tensor(self.λ_sparse, device=self.device, dtype=torch.float32) * 1e-9 #[m]
-        self.model_config['telescope']['PupilAngle']       = torch.tensor(self.model_config['telescope']['PupilAngle'], device=self.device)
+        
+        if not isinstance(self.model_config['telescope']['PupilAngle'], torch.Tensor):
+            self.model_config['telescope']['PupilAngle'] = torch.tensor(self.model_config['telescope']['PupilAngle'], device=self.device)
 
         self.AddSourcesToModelConfig()
         # Initialize the PSF model
@@ -358,7 +360,6 @@ class MUSEObservation:
 
         # How much flux is spread out of the PSF core because PSF is not a single pixel but rather "a blob". In other words,
         # compute the ratio of the flux in the PSF core (defined by a mask) to the total flux in the quasi-infinite PSF image.
-        # core_mask       = torch.tensor(mask_square(current_PSF_size,   flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=self.device)
         core_mask_inf   = torch.tensor(mask_square(quasi_inf_PSF_size, self.flux_core_radius+1)[None,None,...], dtype=default_torch_type, device=self.device)
         core_flux_ratio = torch.squeeze((PSF_inf * core_mask_inf).sum(dim=(-2,-1), keepdim=True) / PSF_inf.sum(dim=(-2,-1), keepdim=True))
 
@@ -390,6 +391,86 @@ class MUSEObservation:
         F_mean_correction = self.PSF_model.inputs_manager['F_ctrl'].mean().item()
         self.PSF_model.inputs_manager['F_ctrl'] /= F_mean_correction
         self.PSF_model.inputs_manager['F_norm'] *= F_mean_correction
+
+
+    @torch.no_grad()
+    def InitFluxNorm(self) -> None:
+        
+        self._update_flux_norm()
+        
+        # """
+        # Sets initial flux normalization from PSF morphology alone, without using image data.
+        # Avoids the faint-source brightness bias that image-based matched-filter estimates
+        # suffer from (contamination by background and brighter neighbours).
+
+        # 1. Calls _get_flux_factor() to establish F_norm_λ_ctrl from the current PSF shape
+        #    (core encircled-energy fraction and finite-image crop ratio).
+        # 2. Normalises F_ctrl to unit mean, folding any residual overall scale into F_norm.
+        # 3. Resets F_norm to 1.0 per source — the analytically correct initial value given
+        #    that spectra_sparse already encodes the per-source flux and F_norm_λ_ctrl
+        #    accounts for all PSF-morphology flux corrections.
+        # """
+        # self._get_flux_factor()
+
+        # F_ctrl_mean = self.PSF_model.inputs_manager['F_ctrl'].mean().item()
+        # if abs(F_ctrl_mean) > 1e-12:
+        #     self.PSF_model.inputs_manager['F_ctrl'] /= F_ctrl_mean
+
+        # self.PSF_model.inputs_manager['F_norm'] = torch.ones(
+        #     self.N_src, device=self.device,
+        #     dtype=self.PSF_model.inputs_manager['F_norm'].dtype
+        # )
+
+
+    @torch.no_grad()
+    def InitFluxNormFromImage(self) -> None:
+        """
+        Estimates initial per-source flux normalization from the currently predicted PSF
+        morphology using a matched-filter comparison against the observed image.
+
+        NOTE: this approach can overestimate flux for faint sources because their local
+        ROI is contaminated by background and spillover from brighter neighbours.
+        Prefer InitFluxNorm() for an unbiased (image-free) initialisation.
+
+        1. Calls _get_flux_factor() to establish chromatic PSF normalization factors
+           (stored in F_norm_λ_ctrl) from the current PSF shape.
+        2. Resets F_norm to 1.0 and normalizes F_ctrl to unit mean, so the subsequent
+           per-source estimate is unbiased by any residual overall scale.
+        3. Simulates each source individually and computes the optimal F_norm[i] as the
+           matched-filter (least-squares) scale factor between the observed and predicted
+           flux in that source's local field region.
+        """
+        self._get_flux_factor()
+
+        F_ctrl_mean = self.PSF_model.inputs_manager['F_ctrl'].mean().item()
+        if abs(F_ctrl_mean) > 1e-12:
+            self.PSF_model.inputs_manager['F_ctrl'] /= F_ctrl_mean
+
+        self.PSF_model.inputs_manager['F_norm'] = torch.ones(
+            self.N_src, device=self.device,
+            dtype=self.PSF_model.inputs_manager['F_norm'].dtype
+        )
+
+        F_norm_est = torch.empty(self.N_src, device=self.device,
+                                 dtype=self.PSF_model.inputs_manager['F_norm'].dtype)
+
+        for i in range(self.N_src):
+            src_subset_i = self.sources.select(i)
+
+            sim_i = self.simulate_sparse(x=None, src_subset=src_subset_i)
+
+            (y_min, y_max), (x_min, x_max) = src_subset_i.slices_global[0]
+
+            obs_roi = self.cube_sparse[:, y_min:y_max, x_min:x_max]  # [N_wvl, H_roi, W_roi]
+            sim_roi = sim_i           [:, y_min:y_max, x_min:x_max]  # [N_wvl, H_roi, W_roi]
+
+            valid = ~torch.isnan(obs_roi) & (sim_roi > 0)
+
+            numerator   = (obs_roi[valid] * sim_roi[valid]).sum()
+            denominator = (sim_roi[valid] * sim_roi[valid]).sum()
+            F_norm_est[i] = (numerator / (denominator + 1e-12)).clamp(min=0.1)
+
+        self.PSF_model.inputs_manager['F_norm'] = F_norm_est
 
 
     def _compute_fitting_weights(self) -> FitWeights:
