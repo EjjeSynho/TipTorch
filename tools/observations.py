@@ -297,10 +297,10 @@ class MUSEObservation:
         self.sources_table = AddSources(self.cube_sparse, sources_coords, self.sources_table, weights=weights, weight_from_flux=False)
 
 
-    def ExtractSources(self):
+    def ExtractSources(self, verbose=False, max_nan_fraction=0.3):
         ''' Extract separate source images + other auxilliary data. It's necessary for later fitting and performance evaluation '''
         # Filtering means, that the sources on the edge of the filed will be removed since they don't have enough pixels
-        srcs_image_data = ExtractSourceImages(self.cube_sparse, self.sources_table, box_size=self.PSF_size, filter_sources=True, debug_draw=False)
+        srcs_image_data = ExtractSourceImages(self.cube_sparse, self.sources_table, box_size=self.PSF_size, filter_sources=True, max_nan_fraction=max_nan_fraction, debug_draw=False)
         # Extract spectra from the PSF core for each filtered source
         spectra_sparse, spectra_full = self.ExtractSpectraFromCore(srcs_image_data["src_data"], self.cube_sparse, self.cube_full)
         # These are the sources which are included in the model
@@ -313,7 +313,11 @@ class MUSEObservation:
             spectra_sparse = spectra_sparse,
         )
         self.N_src = len(self.sources)
-
+        
+        if verbose:
+            print(f"Extracted {self.N_src} sources for fitting.")
+            print(f"Num. of filtered sources on the edge of the field: {len(self.sources_table) - self.N_src}")
+            
 
     @torch.no_grad()
     def _get_flux_factor(self, quasi_inf_PSF_size: int = 511) -> None:

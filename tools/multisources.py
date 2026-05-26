@@ -43,6 +43,8 @@ def DisplaySources(data_src, sources_df, src_box_size, vmin, vmax, norm=LogNorm,
     srcs_pos = np.transpose((sources_df['x_peak'] - x_offset, sources_df['y_peak'] - y_offset))
     norm_field = norm(vmin=vmin, vmax=vmax)
 
+    _ = plt.figure(figsize=(20, 20))
+
     plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
 
     if shape == 'circle':
@@ -178,12 +180,12 @@ def AddSources(data_cube, coords, sources_df=None, weights=None, weight_from_flu
     return result_df
 
 
-def ExtractSourceImages(data_cube, srcs_coords, box_size, filter_sources=True, debug_draw=False):
-    ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size)
+def ExtractSourceImages(data_cube, srcs_coords, box_size, filter_sources=True, max_nan_fraction=0.3, debug_draw=False):
+    ROIs, local_coords, global_coords, valid_srcs = extract_ROIs(data_cube, srcs_coords, box_size=box_size, max_nan_fraction=max_nan_fraction)
     sources_valid = srcs_coords.iloc[valid_srcs] if filter_sources else srcs_coords
 
     if debug_draw:
-        N_cols = min(8, int(np.ceil(np.sqrt(len(ROIs))))) # Automatically adjusts the number of displayed  columns
+        N_cols = min(8, int(np.ceil(np.sqrt(len(ROIs))))) # Automatically adjusts the number of displayed columns
         plot_ROIs_as_grid(ROIs, cols=N_cols)
 
     # The split between local and global coordinates is necessary because PSF model simulates PSFs of the same size, while an object

@@ -41,19 +41,19 @@ if not isinstance(data_folder, Path):
 
 cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
 raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
-cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
+cache_path = data_folder / "cached_cubes/CUBE_0001.pickle"
 
 # cube_path  = data_folder / "reduced_cubes/CUBE_0002.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_11_59.783.fits.fz"
-# cache_path = data_folder / "reduced_telemetry/CUBE_0002.pickle"
+# cache_path = data_folder / "cached_cubes/CUBE_0002.pickle"
 
 # cube_path  = data_folder / "reduced_cubes/CUBE_0003.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
-# cache_path = data_folder / "reduced_telemetry/CUBE_0003.pickle"
+# cache_path = data_folder / "cached_cubes/CUBE_0003.pickle"
 
 # cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
-# cache_path = data_folder / "reduced_telemetry/CUBE_0021.pickle"
+# cache_path = data_folder / "cached_cubes/CUBE_0021.pickle"
 
 ob = MUSEObservation(raw_path, cube_path, cache_path, device=device)
 
