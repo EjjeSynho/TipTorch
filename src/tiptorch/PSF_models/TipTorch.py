@@ -844,7 +844,7 @@ class TipTorch(torch.nn.Module):
         # Parse WFS parameters
         WFS_wvl  = self.WFS_wvl
         WFS_RON  = self.WFS_RON
-        WFS_Nph  = self.WFS_Nph.abs().view(self.N_obs, self.N_GS)
+        WFS_Nph  = self.WFS_Nph.abs().view(self.N_obs, self.N_GS)#.clamp(min=1.0)  # prevent 1/0=inf -> 0*inf=NaN in backward
         r0_WFS   = self.r0_new(self.r0_(), WFS_wvl, self.wvl_atm).view(-1,1)
         WFS_nPix = self.WFS_FOV / self.WFS_n_sub
         WFS_pixelScale = self.WFS_psInMas * self.mas2arc  # [arcsec]

@@ -58,7 +58,7 @@ cache_path = data_folder / "cached_cubes/CUBE_0001.pickle"
 ob = MUSEObservation(raw_path, cube_path, cache_path, device=device)
 
 ob.DetectSources(nsigma=35, threshold='auto')
-ob.AddSources([[100, 200]], weights=0.0)
+# ob.AddSources([[100, 200]], weights=0.0)
 # NOTE: If some sources must be filtered out, do it here by modifying the ob.sources_table before initializing the sources for simulation
 
 #%%
@@ -71,7 +71,7 @@ ob.InitSimulation()
 
 #%%
 # ob.FitPSFModel(repeat=3, max_iter=200)
-ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
+# ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
 ob.FitPSFModel(repeat=3, max_iter=200)
 # ob.FitPSFModel(repeat=3, max_iter=200)
 

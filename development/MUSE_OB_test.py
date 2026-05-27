@@ -379,13 +379,13 @@ else:
     fit_w_spectral = w_spectral
 
 
-def simulate_sparse(x, src_ids=None):
+def simulate_sparse(x=None, src_ids=None):
     """
     Simulates the field of PSFs, not just a cube, not separate PSFs per source, allowing them to overlap and be added together in the same image.
     When src_ids is set, only the selected sources are simulated with their own field-dependent PSFs
     """
     # Update model inputs with the values from the stacked vector
-    x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True)
+    x_dict = PSF_model.inputs_manager.unstack(x, include_all=True, update=True) if x is not None else PSF_model.inputs_manager.to_dict()
     # Save F_norm for the fitted sources before forward() modifies x_dict in-place (it selects only src_ids entries)
     F_norm = x_dict['F_norm'][src_ids] if src_ids is not None else x_dict['F_norm']
     # When src_ids is set, NFM_wrapper computes PSFs only for the selected sources
@@ -443,6 +443,20 @@ def loss(x_, data, func):
     
     return LO_loss + PSF_loss
 
+#%%
+
+
+
+#%%
+# Jacobian of PSF wrt parameters: shape (N, P)
+J = torch.autograd.functional.jacobian(
+    lambda x: loss(x, cube_sparse, lambda y: simulate_sparse(y, src_ids=fit_src_ids)),
+    PSF_model.inputs_manager.stack(), # input parameters as a single vector; set
+    vectorize=True   # if supported; otherwise drop this argument
+)   # (N, P)
+torch.cuda.empty_cache()
+
+print(J)
 
 #%%
 from fitting.PSF_optimizer import OptimizePSFModel
@@ -470,7 +484,7 @@ from tools.multisources import VisualizeSources, PlotSourcesProfiles, ROI_from_v
 
 # Simulate all sources
 with torch.no_grad():
-    model_fit = simulate_sparse(x_params, src_ids=None)
+    model_fit = simulate_sparse(x=None, src_ids=None)
 
 ROI_plot = ROI_from_valid_mask(valid_mask)["slice"]
 norm_field = LogNorm(vmin=1, vmax=cube_sparse.sum(dim=0).max()) # again, rather empirical values
@@ -646,4 +660,6 @@ def SaveModelCubeFITS(cube, output_path, λ_full, sources=None, compress=True, c
 # Pass PSFs_separated (N_src, N_wvl, 111, 111) + source positions → compact multi-extension format, no zeros
 # SaveModelCubeFITS(PSFs_separated, output_file, λ_full, sources=sources)
 
+
 # %%
+

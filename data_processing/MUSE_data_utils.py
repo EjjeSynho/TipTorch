@@ -512,7 +512,7 @@ def GetIRLOSdata(hdul_raw, hdul_cube, exposure_start, exposure_end, IRLOS_cube, 
         conversion = IRLOS_data_df['conversion, [e-/ADU]'].item()
 
         IRLOS_flux = GetIRLOSphotons(IRLOS_flux_ADU_h, LO_gain, LO_freq, conversion) # [photons/s/m^2]
-        IRLOS_data_df['IRLOS photons, [photons/s/m^2]'] = np.round(IRLOS_flux).astype('uint32')
+        IRLOS_data_df['IRLOS photons, [photons/s/m^2]'] = np.round(IRLOS_flux).astype('uint64')
         IRLOS_data_df['NGS mag (from ph.)'] = GetJmag(IRLOS_data_df.iloc[0]['IRLOS photons, [photons/s/m^2]'])
 
     except KeyError:
@@ -610,7 +610,7 @@ def GetLGSdata(hdul_cube, exposure_start, exposure_end, fill_missing=False, verb
     HO_gains = np.array([hdul_cube[0].header.get(h+'AOS LGS'+str(i+1)+' DET GAIN', 100) for i in range(4)]) # must be the same value for all LGSs
     
     for i in range(1,5):
-        LGS_flux_df.loc[:,f'LGS{i} photons, [photons/m^2/s]'] = ComputeLGSphotons(LGS_flux_df[f'LGS{i} flux, [ADU/frame]'], HO_gains[i-1]).round().astype('uint32')
+        LGS_flux_df.loc[:,f'LGS{i} photons, [photons/m^2/s]'] = ComputeLGSphotons(LGS_flux_df[f'LGS{i} flux, [ADU/frame]'], HO_gains[i-1]).round().astype('uint64')
 
     # Correct laser shutter state based on the data from the cube header
     for i in range(1,5):

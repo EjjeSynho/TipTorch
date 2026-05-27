@@ -6,6 +6,156 @@ from matplotlib import cm
 from tiptorch.tools.utils import safe_centroid
 
 
+try:
+    from graphviz import Digraph
+except:
+    import warnings
+    class Digraph:
+        def __init__(self, *args, **kwargs):
+            warnings.warn("Graphviz package is not installed. Autograd. graph visualization will not be available.")
+            pass   
+        def node(self, *args, **kwargs): pass
+        def edge(self, *args, **kwargs): pass
+
+
+def iter_graph(root, callback):
+    queue = [root]
+    seen = set()
+    while queue:
+        fn = queue.pop()
+        if fn in seen:
+            continue
+        seen.add(fn)
+        for next_fn, _ in fn.next_functions:
+            if next_fn is not None:
+                queue.append(next_fn)
+        callback(fn)
+
+
+def register_hooks(var):
+    fn_dict = {}
+    def hook_c_b(fn):
+        def register_grad(grad_input, grad_output):
+            fn_dict[fn] = grad_input
+        try:
+            fn.register_hook(register_grad)
+        except (AttributeError, RuntimeError):
+            pass  # some internal nodes (e.g. AccumulateGrad) may not support register_hook
+
+    iter_graph(var.grad_fn, hook_c_b)
+
+    def is_bad_grad(grad_output):
+        if grad_output is None:
+            return False
+        return grad_output.isnan().any() or (grad_output.abs() >= 1e6).any()
+
+    def make_dot():
+        node_attr = dict(style='filled',
+                        shape='box',
+                        align='left',
+                        fontsize='12',
+                        ranksep='0.1',
+                        height='0.2')
+        dot = Digraph(node_attr=node_attr, graph_attr=dict(size="12,12"))
+
+        def size_to_str(size):
+            return '('+(', ').join(map(str, size))+')'
+
+        def build_graph(fn):
+            if hasattr(fn, 'variable'):  # if GradAccumulator
+                u = fn.variable
+                node_name = 'Variable\n ' + size_to_str(u.size())
+                dot.node(str(id(u)), node_name, fillcolor='lightblue')
+            else:
+                def grad_ord(x):
+                    mins = ""
+                    maxs = ""
+                    y = [buf for buf in x if buf is not None]
+                    for buf in y:
+                        min_buf = torch.abs(buf).min().cpu().numpy().item()
+                        max_buf = torch.abs(buf).max().cpu().numpy().item()
+
+                        if min_buf < 0.1 or min_buf > 99:
+                            mins += "{:.1e}".format(min_buf) + ', '
+                        else:
+                            mins += str(np.round(min_buf,1)) + ', '
+                        if max_buf < 0.1 or max_buf > 99:
+                            maxs += "{:.1e}".format(max_buf) + ', '
+                        else:
+                            maxs += str(np.round(max_buf,1)) + ', '
+                    return mins[:-2] + ' | ' + maxs[:-2]
+
+                if fn not in fn_dict:
+                    # Node was not hooked — backward may have been cut short (e.g. by detect_anomaly)
+                    dot.node(str(id(fn)), str(type(fn).__name__) + '\n(no grad captured)', fillcolor='lightgray')
+                else:
+                    fillcolor = 'white'
+                    if any(is_bad_grad(gi) for gi in fn_dict[fn]):
+                        fillcolor = 'red'
+                    dot.node(str(id(fn)), str(type(fn).__name__)+'\n'+grad_ord(fn_dict[fn]), fillcolor=fillcolor)
+            for next_fn, _ in fn.next_functions:
+                if next_fn is not None:
+                    next_id = id(getattr(next_fn, 'variable', next_fn))
+                    dot.edge(str(next_id), str(id(fn)))
+        iter_graph(var.grad_fn, build_graph)
+        return dot
+
+    return make_dot
+
+# def plot_grad_graph(model, param='r0', out_path=None):
+#     """
+#     Run one forward+backward pass through `model` and render the autograd
+#     gradient graph.  Red nodes = NaN/Inf gradients; lightgray = hook not fired.
+
+#     Parameters
+#     ----------
+#     model    : callable PSF model (e.g. ob.PSF_model)
+#     param    : key in model.inputs_manager to track
+#     out_path : Path/str for the output PNG (without extension); None → display inline
+#     """
+#     leaf = model.inputs_manager[param].detach().clone().requires_grad_(True)
+#     model.inputs_manager[param] = leaf
+
+#     try:
+#         loss     = model().nansum()
+#         make_dot = register_hooks(loss)   # hooks must be registered before backward
+#         loss.backward()
+#     finally:
+#         model.inputs_manager[param] = leaf.detach()
+
+#     if leaf.grad is None:
+#         print(f"  {param} grad: None  (parameter may not be connected to the graph)")
+#     else:
+#         g = leaf.grad
+#         print(f"  {param} grad: {g}  NaN={g.isnan().any().item()}  Inf={g.isinf().any().item()}")
+
+#     dot = make_dot()
+
+#     if out_path is not None:
+#         try:
+#             from pathlib import Path
+#             Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+#             dot.render(str(out_path), format='png', cleanup=True)
+#             print(f"  Graph saved → {out_path}.png")
+#             return dot
+#         except Exception as e:
+#             print(f"  Render to file failed ({e}), displaying inline")
+
+#     try:
+#         display(dot)
+#     except NameError:
+#         print(dot.source[:3000])
+
+#     return dot
+
+# # Usage: # display inline (Jupyter)
+# plot_grad_graph(ob.PSF_model, param='r0')
+
+# # save to PNG
+# plot_grad_graph(ob.PSF_model, param='r0', out_path=Path(__file__).parent / 'r0_grad_graph')
+
+
+
 def wavelength_to_rgb(wavelength, gamma=0.8, show_invisible=False):
     '''
     Approximate conversion of wavelength to RGB color percieved by human eye.   
@@ -185,8 +335,6 @@ def save_GIF_RGB(images_stack, duration=1e3, downscale=4, path='test.gif'):
         im.thumbnail((im.size[0]//downscale, im.size[1]//downscale), resample=Resampling.BICUBIC)
         gif_anim.append( remove_transparency(im) )
         gif_anim[0].save(path, save_all=True, append_images=gif_anim[1:], optimize=True, duration=duration, loop=0)
-
-
 
 
 
