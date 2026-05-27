@@ -68,14 +68,7 @@ ob.DisplaySources(draw_box_size=5)
 
 #%%
 ob.PlotSourceSpectra()
-
-#%
 ob.InitSimulation()
-
-#%
-ob.InitFluxNorm()
-
-ob.PSF_model['F_norm'] *= 110
 
 #%%
 # ob.FitPSFModel(repeat=3, max_iter=200)

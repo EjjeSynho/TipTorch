@@ -525,7 +525,7 @@ class PSFModelNFM:
     
     
     @torch.no_grad()
-    def SimulateFullSpectrum(self, verbose=False):
+    def SimulateFullSpectrum(self, λ_batch_size=100, verbose=False):
         ''' The function to simulate PSFs across the full MUSE NFM spectral range at once. It simulates the PSF chromatic cube for each source
             sequentially parallelizing over wavelengths batches to avoid GPU memory overflow. '''
 
@@ -566,7 +566,7 @@ class PSFModelNFM:
         # Full spectral cubes for each source
         PSFs_combined = torch.zeros((self.model.N_src, self.num_λ_slices, self.model.N_pix, self.model.N_pix), device='cpu')
 
-        max_λ_batch_size = 100 # TODO: adjust based on memory available and the number of sources simulated
+        max_λ_batch_size = λ_batch_size # TODO: adjust based on memory available and the number of sources simulated
         λ_batches = [torch.tensor(self.λ_full[i:i + max_λ_batch_size], device=self.device) for i in range(0, len(self.λ_full), max_λ_batch_size)]
 
         _initial_wvl = self.λ_sim.clone()

@@ -46,21 +46,21 @@ if not isinstance(data_folder, Path):
 # cache_path = data_folder / "J0144/J0144-5745_cache.pickle"
 # raw_path   = data_folder / "J0144/J0144_raw.114.fits.fz"
 
-# cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
-# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
-# cache_path = data_folder / "reduced_telemetry/CUBE_0001.pickle"
+cube_path  = data_folder / "reduced_cubes/CUBE_0001.fits"
+raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
+cache_path = data_folder / "cached_cubes/CUBE_0001.pickle"
 
 # cube_path  = data_folder / "reduced_cubes/CUBE_0002.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_11_59.783.fits.fz"
-# cache_path = data_folder / "reduced_telemetry/CUBE_0002.pickle"
+# cache_path = data_folder / "cached_cubes/CUBE_0002.pickle"
 
-cube_path  = data_folder / "reduced_cubes/CUBE_0003.fits"
-raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
-cache_path = data_folder / "reduced_telemetry/CUBE_0003.pickle"
+# cube_path  = data_folder / "reduced_cubes/CUBE_0003.fits"
+# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
+# cache_path = data_folder / "cached_cubes/CUBE_0003.pickle"
 
 # cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
-# cache_path = data_folder / "reduced_telemetry/CUBE_0021.pickle"
+# cache_path = data_folder / "cached_cubes/CUBE_0021.pickle"
 
 
 # We need to pre-process the data before using it with the model and asssociate the reduced telemetry - this is done by the LoadDataCache function
@@ -312,14 +312,14 @@ def EvaluateCoreFluxFactor(PSF_model, N_core_pixels, quasi_inf_PSF_size=511) -> 
 @torch.no_grad()
 def UpdateFluxNormalization(PSF_model) -> None:
     #TODO: what about non-optimized sources?
-    PSF_norm_factor_old = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
+    # PSF_norm_factor_old = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
 
     EvaluateCoreFluxFactor(PSF_model, N_core_pixels) # update the core flux normalization factor based on the current PSF morphology
-    PSF_norm_factor_new = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
+    # PSF_norm_factor_new = PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
 
     # Compute the updated normalization factors
-    F_norm_correction = (PSF_norm_factor_new / PSF_norm_factor_old).mean().item()
-    PSF_model.inputs_manager['F_norm'] /= F_norm_correction
+    # F_norm_correction = (PSF_norm_factor_new / PSF_norm_factor_old).mean().item()
+    # PSF_model.inputs_manager['F_norm'] /= F_norm_correction
 
     # Since F_ctrl is the parameter that directly controls the overall flux normalization in the model, we can use its mean value to correct
     # for per-source flux normalization. This is a rather empirical correction
@@ -438,25 +438,12 @@ def loss_LO(w_bump, w_LO):
 
 def loss(x_, data, func):
     model = func(x_)
-    LO_loss  = loss_LO(w_bump=5e-5, w_LO=1e-7)
+    LO_loss  = loss_LO(w_bump=1.5e-4, w_LO=1e-7)
     PSF_loss = loss_PSF(data, model, weights_λ=fit_w_spectral, weight_total=fit_w_total, w_MSE=900.0, w_MAE=2.6)
     
     return LO_loss + PSF_loss
 
-#%%
 
-
-
-#%%
-# Jacobian of PSF wrt parameters: shape (N, P)
-J = torch.autograd.functional.jacobian(
-    lambda x: loss(x, cube_sparse, lambda y: simulate_sparse(y, src_ids=fit_src_ids)),
-    PSF_model.inputs_manager.stack(), # input parameters as a single vector; set
-    vectorize=True   # if supported; otherwise drop this argument
-)   # (N, P)
-torch.cuda.empty_cache()
-
-print(J)
 
 #%%
 from fitting.PSF_optimizer import OptimizePSFModel
@@ -476,8 +463,20 @@ def FitPSFModel(PSF_model, loss_fn, repeat=2, max_iter=200):
         )
     return x_params
 
+
+UpdateFluxNormalization(PSF_model)
+
+print(1.0 / PSF_model['F_norm_λ_ctrl'] * N_core_pixels) # this is the actual composite flux normalization factor that converts the spectrum extracted from the PSF core to the total flux in the PSF, which is what controls the overall flux normalization in the model
+print(PSF_model['F_norm'])
+print(PSF_model['F_ctrl'])
+
 # Fit only selected sources
 x_params = FitPSFModel(PSF_model, lambda x: loss(x, cube_sparse, lambda y: simulate_sparse(y, src_ids=fit_src_ids)), repeat=3, max_iter=200)
+
+#%%
+print(1.0 / PSF_model['F_norm_λ_ctrl'] * N_core_pixels)
+print(PSF_model['F_norm'])
+print(PSF_model['F_ctrl'])
 
 #%%
 from tools.multisources import VisualizeSources, PlotSourcesProfiles, ROI_from_valid_mask
