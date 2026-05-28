@@ -375,21 +375,25 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
     Visualize source data, model, and their difference.
 
     Parameters:
-        data (torch.Tensor or np.ndarray): Source data
-        model (torch.Tensor or np.ndarray): Model data
+        data (torch.Tensor or np.ndarray): Source data (2D or 3D)
+        model (torch.Tensor or np.ndarray): Model data (2D or 3D)
         norm (ImageNormalize, optional): Normalization for visualization
         mask (float or array-like): Mask to apply to the difference
         ROI (slice, optional): Region of interest to visualize
     """
     def process_array(x):
-        # Convert to numpy and sum along first dimension if needed
+        # Convert to numpy
         if isinstance(x, torch.Tensor):
-            x = x.sum(dim=0).abs().cpu().numpy()
+            x_np = x.abs().cpu().numpy()
         else:
-            x = np.abs(x.sum(axis=0))
+            x_np = np.abs(x)
+        
+        # Sum along first dimension if 3D, otherwise keep 2D as-is
+        if x_np.ndim > 2:
+            x_np = x_np.sum(axis=0)
 
         # Apply ROI if specified
-        return np.nan_to_num(x[ROI]) if ROI is not None else np.nan_to_num(x)
+        return np.nan_to_num(x_np[ROI]) if ROI is not None else np.nan_to_num(x_np)
 
     # Process input arrays
     data_vis  = process_array(data)

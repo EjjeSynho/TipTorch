@@ -25,7 +25,11 @@ class PSFModelNFM:
         retain_PSDs     = False,
         Z_mode_max      = 9,
         N_spline_nodes  = 5,
-        device          = default_device
+        device          = default_device,
+        *, # MUSE NFM spectral data
+        λ_min        = 475.e-9,
+        λ_max        = 935.e-9,
+        num_λ_slices = 3681,
     ):
         self.Z_mode_max      = Z_mode_max
         self.LO_N_params     = None
@@ -38,8 +42,8 @@ class PSFModelNFM:
         self.__config_raw    = config # Input config dictionary, defined in TipTop-style
                 
         if N_spline_nodes:
-            if N_spline_nodes < 2 or N_spline_nodes > 3681:
-                raise ValueError(f"Number of control wavelengths for spline representation must be between 2 and 3681. Got {N_spline_nodes}.")
+            if N_spline_nodes < 2 or N_spline_nodes > num_λ_slices:
+                raise ValueError(f"Number of control wavelengths for spline representation must be between 2 and {num_λ_slices}. Got {N_spline_nodes}.")
                 
         # The PSF model can be used in two configurations:
         #  1) Simulating different sources in multiple observations with different conditions -- used mostly in ML training and PSF model calibration
@@ -51,10 +55,10 @@ class PSFModelNFM:
         self.λ_sim = _config['sources_science']['Wavelength'].squeeze()
 
         # Full spectrum span of MUSE NFM
-        self.λ_min = 475.e-9
-        self.λ_max = 935.e-9
-        self.Δλ = 0.125e-9
-        self.num_λ_slices = 3681
+        self.λ_min = λ_min
+        self.λ_max = λ_max
+        self.Δλ    = (self.λ_max - self.λ_min) / (num_λ_slices - 1)
+        self.num_λ_slices = num_λ_slices
         self.λ_full = torch.linspace(self.λ_min, self.λ_max, self.num_λ_slices, device=self.device, dtype=self.λ_sim.dtype)
         
         # Initialize the TipTorch model

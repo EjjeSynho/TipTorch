@@ -25,8 +25,8 @@ device = default_device
 
 #%%
 # Define the paths to the raw and reduced MUSE NFM cubes. The cached data cube will be generated based on them
-data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
-# data_folder = MUSE_DATA_FOLDER / 'clumpy_galaxies/' # change to your actual path with the MUSE NFM data
+# data_folder = MUSE_DATA_FOLDER / 'quasars/' # change to your actual path with the MUSE NFM data
+data_folder = MUSE_DATA_FOLDER / 'clumpy_galaxies/' # change to your actual path with the MUSE NFM data
 
 if not isinstance(data_folder, Path):
     data_folder = Path(data_folder)
@@ -70,13 +70,12 @@ ob.PlotSourceSpectra()
 ob.InitSimulation()
 
 #%%
-# ob.FitPSFModel(repeat=3, max_iter=200)
-# ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
 ob.FitPSFModel(repeat=3, max_iter=200)
-# ob.FitPSFModel(repeat=3, max_iter=200)
+# ob.FitPSFModel(fit=['astrometry'], repeat=3, max_iter=200)
+# ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
 
 #%%
-ob.SimulateField()
+model = ob.SimulateField()
 ob.DisplaySimulation(plot_profiles=True)
 
 #%%
@@ -89,7 +88,7 @@ plt.grid()
 plt.show()
 
 #%%
-ob.SimulateField(full_spectrum=True)
+_ = ob.SimulateField(full_spectrum=True)
 ob.DisplaySimulation(plot_profiles=True, plot_full_spectrum=True)
 
 #%%

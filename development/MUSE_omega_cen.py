@@ -1,6 +1,5 @@
 #%%
 %reload_ext autoreload
-
 %autoreload 2
 
 import sys, os
@@ -19,12 +18,10 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from tiptorch._config import default_device, project_settings
-import matplotlib.pyplot as plt
 from tools.observations import MUSEObservation
 
 from pathlib import Path
 
-# Define the location of your NFM data. It can be whenever. One option is to add it to the project config file 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
 #%%
@@ -33,6 +30,8 @@ cube_path  = MUSE_DATA_FOLDER / "omega_cluster/reduced_cubes/DATACUBEFINALexpcom
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
 ob = MUSEObservation(raw_path, cube_path, cache_path, device=default_device)
+
+ob.λ_batch_size = 3681//3
 
 #%%
 # Read pre-processed HST data from DataFrame
@@ -57,8 +56,8 @@ sources[['x_peak', 'y_peak']] = sources[['x_peak', 'y_peak']] * 1e3 / 25.0 + ob.
 # Add weight column for later use (e.g. in loss function)
 sources['weight'] = 1.0
 
-# Leave the first 400 brighest sources
-# sources = sources.nlargest(400, 'peak_value')
+# Leave the first N brighest sources
+sources = sources.nlargest(50, 'peak_value')
 
 #%%
 ob.sources_table = sources
@@ -73,12 +72,111 @@ ob.InitSimulation()
 #%%
 # ob.FitPSFModel(repeat=3, max_iter=200)
 # ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
+ob.FitPSFModel(fit=['astrometry'], repeat=1, max_iter=200)
 # ob.FitPSFModel(repeat=3, max_iter=200)
 # ob.FitPSFModel(repeat=3, max_iter=200)
 
 #%%
-ob.SimulateField()
+model, PSFs, flux_normalization = ob.SimulateField(return_PSFs=True)
 ob.DisplaySimulation(plot_profiles=True)
+
+#%%
+from tools.multisources import VisualizeSources, add_ROIs_separately
+
+def DisentangleFlux(ob, PSFs, rcond=1e-2):
+    """
+    Reconstruct spectral cube by solving for optimal flux coefficients per wavelength.
+    
+    Parameters
+    ----------
+    ob : MUSEObservation
+        Observation object containing cube data and source information
+    PSFs : torch.Tensor
+        PSF models for each source [N_src, N_wvl, H, W]
+    rcond : float
+        Cutoff for small singular values in least-squares solver
+        
+    Returns
+    -------
+    I_sim : torch.Tensor
+        Reconstructed spectral cube [N_wvl, H, W]
+    """
+    canvas_ = torch.zeros_like(ob.cube_sparse, device=ob.cube_sparse.device)
+    srcs_stack = add_ROIs_separately(canvas_, PSFs, ob.sources.slices_local, ob.sources.slices_global)
+    
+    P = srcs_stack.view(ob.N_src, ob.N_wvl, -1).permute(1, 2, 0)  # [N_wvl, pixels, N_src]
+    I_data = ob.cube_sparse.view(ob.N_wvl, -1, 1)  # [N_wvl, pixels, 1]
+    
+    # Solve flux for all wavelengths
+    spectrum = torch.linalg.lstsq(P, I_data, rcond=rcond).solution  # [N_wvl, N_src, 1]
+    
+    # Reconstruct the full spectral cube
+    I_sim = torch.matmul(P, spectrum).squeeze(-1).view(ob.N_wvl, ob.cube_sparse.shape[-2], ob.cube_sparse.shape[-1])
+    
+    return I_sim, spectrum.squeeze(-1)  # Return both the reconstructed cube and the flux coefficients
+
+
+I_sim, F = DisentangleFlux(ob, PSFs)
+
+#%%
+bg = ob.residue_sparse.clone()
+
+# Adjustable parameters
+min_radius = 2
+max_radius = 14
+border_margin = 15
+
+# Create circular masks around sources with radii proportional to log(flux)
+src_positions = ob.sources_table[['x_peak', 'y_peak']].values
+src_fluxes = ob.sources_table['peak_value'].values
+
+# Compute radii: log-scale mapping from min/max flux to min_radius-max_radius pixel radius
+log_fluxes = np.log10(src_fluxes + 1e-10)  # avoid log(0)
+log_min, log_max = log_fluxes.min(), log_fluxes.max()
+radii = min_radius + (log_fluxes - log_min) / (log_max - log_min + 1e-10) * (max_radius - min_radius)
+
+# Create coordinate grids
+y_grid, x_grid = torch.meshgrid(
+    torch.arange(bg.shape[-2], device=bg.device),
+    torch.arange(bg.shape[-1], device=bg.device),
+    indexing='ij'
+)
+
+# Build composite mask (True = masked out)
+mask = torch.zeros(bg.shape[-2:], dtype=torch.bool, device=bg.device)
+
+# Mask circular regions around sources
+for (x_src, y_src), r in zip(src_positions, radii):
+    dist_sq = (x_grid - x_src)**2 + (y_grid - y_src)**2
+    mask |= (dist_sq <= r**2)
+
+# Mask border regions
+mask |= (x_grid < border_margin) | (x_grid >= bg.shape[-1] - border_margin)
+mask |= (y_grid < border_margin) | (y_grid >= bg.shape[-2] - border_margin)
+
+# Apply mask (set masked pixels to NaN)
+bg[:, mask] = float('nan')
+
+# plt.imshow(bg.sum(dim=0).cpu(), origin='lower', norm=display_norm, cmap='inferno')
+
+bg = torch.nanmean(bg, dim=(-2,-1))  # Average over the field, ignoring NaNs
+
+bg = bg.view(ob.N_wvl, 1, 1)
+
+#%%
+xx = ob.cube_sparse.clone()
+
+#%%
+ob.cube_sparse -= bg
+
+#%%
+from matplotlib.colors import LogNorm
+
+display_norm = LogNorm(vmin=1, vmax=ob.cube_sparse.sum(dim=0).max()) # again, rather empirical values
+_ = VisualizeSources(ob.cube_sparse, ob.simulated_sparse, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
+
+#%%
+_ = VisualizeSources(ob.cube_sparse, I_sim, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
 
 #%%
 Strehls_per_λ = ob.PSF_model.ComputeStrehl()
@@ -90,12 +188,11 @@ plt.grid()
 plt.show()
 
 #%%
-ob.SimulateField(full_spectrum=True)
+_ = ob.SimulateField(full_spectrum=True)
 ob.DisplaySimulation(plot_profiles=True, plot_full_spectrum=True)
 
 #%%
 ob.PlotSourceSpectra(title='Sources spectra (residual)', show_sparse=False, plot_residual=True, smooth_kernel=15)
-# %%
 
 #%%
 # Compute HST spectra for each source

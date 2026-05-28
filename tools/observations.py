@@ -135,6 +135,9 @@ class MUSEObservation:
         self.sources = None
         self.N_src = 0
         
+        # The number of λ slices simulated per batch for the full-spectrum simulation
+        self.λ_batch_size = 100
+        
         # Define the half-width of the region for spectrum extraction = ~size of the PSF core
         self.flux_core_radius = 2 # [pix]
         # Define how many pixels are averaged when extracting the spectra from the PSF core
@@ -160,9 +163,10 @@ class MUSEObservation:
         # Region to plot when visualizing the sources and fitting results
         self.ROI_plot = ROI_from_valid_mask(self.valid_mask)["slice"]
         
-        self.simulated_sparse = None # this will be used to store the simulated field
-        self.simulated_full   = None # this will be used to store the simulated field for the full MUSE-NFM spectrum
-
+        self.simulated_sparse = None # stores simulated field
+        self.simulated_full   = None # stores simulated field for the full MUSE-NFM spectrum
+        
+        
 
     def _load_data(self):
         ''' Loads OB related parameters and data cubes. '''
@@ -197,7 +201,7 @@ class MUSEObservation:
         self.N_wvl = self.cube_sparse.shape[0]
         self.N_wvl_full = self.cube_full.shape[0]
 
-        # Since spectral bins are the sum, they need to be re-normalized to averages to be compatible with the full spectrum
+        # Since spectral bins are the sum, they need to be re-normalized to averages to ≈ the full spectrum values range
         flux_λ_norm = torch.tensor(Δλ_full / Δλ_sparse, device=self.device, dtype=torch.float32)
         self.cube_sparse *= flux_λ_norm[:, None, None]
         
@@ -267,7 +271,10 @@ class MUSEObservation:
             Moffat_absorber = False,
             N_spline_nodes  = 5,
             Z_mode_max      = 9,
-            device          = self.device
+            device          = self.device,
+            λ_min           = self.λ_full.min().item() * 1e-9, # [m]
+            λ_max           = self.λ_full.max().item() * 1e-9, # [m]
+            num_λ_slices    = len(self.λ_full)
         )
         #  Get the initial guess for the PSF model parameters
         calibrator = NFMCalibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth', device=self.device)
@@ -432,7 +439,7 @@ class MUSEObservation:
         )
 
     
-    def simulate_sparse(self, x=None, src_subset: Optional[SourcesSubset] = None) -> torch.Tensor:
+    def simulate_sparse(self, x=None, src_subset: Optional[SourcesSubset] = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Simulates the full-field PSF canvas for the given source subset (all sources by default).
         Accepts a pre-built SourcesSubset so spectra and ROI lists are already indexed,
@@ -450,9 +457,23 @@ class MUSEObservation:
         PSFs_  = self.PSF_model(x_dict, src_ids=None if all_selected else src_subset.ids)
         PSF_norm_factor = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_sim_normed)
         
-        flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor * src_subset.spectra_sparse
-        PSFs_ = PSFs_ * flux_normalization.view(-1, self.N_wvl, 1, 1)
-        return add_ROIs(self.canvas_sparse * 0.0, PSFs_, src_subset.slices_local, src_subset.slices_global)
+        flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor
+        PSFs = PSFs_ * (flux_normalization * src_subset.spectra_sparse).view(-1, self.N_wvl, 1, 1)
+        return add_ROIs(self.canvas_sparse * 0.0, PSFs, src_subset.slices_local, src_subset.slices_global), PSFs_, flux_normalization
+
+
+    @torch.no_grad()
+    def simulate_full(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # No inputs since SimulateFullSpectrum() fully relies on the inputs stored in the inputs_manager, which are already up-to-date
+        PSFs_full = self.PSF_model.SimulateFullSpectrum(verbose=True, λ_batch_size=self.λ_batch_size)
+        # Now, chromatic PSF normalization factor must be re-evaluated for the full NFM spectrum
+        PSF_norm_factor_full = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_full_normed).cpu()
+        flux_normalization   = self.PSF_model.inputs_manager['F_norm'].cpu() * PSF_norm_factor_full
+        # Apply the flux scaling
+        PSFs_ = PSFs_full * (flux_normalization * self.sources.spectra_full).view(-1, self.N_wvl_full, 1, 1)
+        self.simulated_full = add_ROIs(self.canvas_full, PSFs_, self.sources.slices_local, self.sources.slices_global)
+        self.residue_full = (self.cube_full - self.simulated_full.numpy()) * self.valid_mask.cpu().numpy()
+        return self.simulated_full, PSFs_full, flux_normalization
 
 
     def _loss_PSF(self, PSF_data: torch.Tensor, PSF_pred: torch.Tensor, fit_weights: FitWeights):
@@ -487,7 +508,7 @@ class MUSEObservation:
 
 
     def _select_optimizable_variables(self, fit_params):
-        
+        """ Helper function to select which parameters of the PSF model should be optimized based on the user's choice """
         if isinstance(fit_params, str):
             fit_params = [fit_params]
         
@@ -519,7 +540,7 @@ class MUSEObservation:
         
         fit_subset = weights_.subset  # pre-built once, reused every iteration
         
-        run_fn  = lambda x: self.simulate_sparse(x, fit_subset) # inference function used by the optimizer
+        run_fn  = lambda x: self.simulate_sparse(x, fit_subset)[0] # inference function used by the optimizer
         loss_fn = lambda x: self.loss(x, self.cube_sparse, run_fn, weights_) # composite loss function to minimize
         
         for _ in range(repeat):
@@ -540,21 +561,23 @@ class MUSEObservation:
         
 
     @torch.no_grad() #TODO: split output
-    def SimulateField(self, full_spectrum=False) -> None:
+    def SimulateField(self, full_spectrum=False, return_PSFs=False) -> torch.Tensor | tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         ''' Simulate all sources within the field. If full_spectrum is True, simulates the full spectrum instead of the sparse λ-subset. '''
         if full_spectrum:
-            # No inputs since SimulateFullSpectrum() fully relies on the inputs stored in the inputs_manager, which are already up-to-date
-            PSFs_combined = self.PSF_model.SimulateFullSpectrum(verbose=True)
-            # Now, chromatic PSF normalization factor must be re-evaluated for the full spectrum
-            PSF_norm_factor_full = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_full_normed).cpu()
-            flux_normalization   = self.PSF_model.inputs_manager['F_norm'].unsqueeze(-1).cpu() * PSF_norm_factor_full * self.sources.spectra_full
-            # Apply the flux normalization to the PSFs similar to func()
-            PSFs_ = PSFs_combined * flux_normalization.unsqueeze(-1).unsqueeze(-1)
-            self.simulated_full = add_ROIs(self.canvas_full, PSFs_, self.sources.slices_local, self.sources.slices_global)
-            self.residue_full = (self.cube_full - self.simulated_full.numpy()) * self.valid_mask.cpu().numpy()
+            self.simulated_full, PSFs_full, flux_normalization = self.simulate_full()
+            
+            if return_PSFs:
+                return self.simulated_full, PSFs_full.cpu(), flux_normalization.cpu()
+            else:
+                return self.simulated_full
         else:
-            self.simulated_sparse = self.simulate_sparse(x=None, src_subset=None)
+            self.simulated_sparse, PSFs, flux_normalization = self.simulate_sparse(x=None, src_subset=None)
             self.residue_sparse = (self.cube_sparse - self.simulated_sparse) * self.valid_mask
+            
+            if return_PSFs:
+                return self.simulated_sparse, PSFs, flux_normalization
+            else:
+                return self.simulated_sparse
 
 
     def DisplaySources(self, draw_box_size=20):
@@ -811,30 +834,43 @@ class MUSEObservation:
             self.PSF_model = None
         
         # Delete GPU tensors
-        gpu_attrs = ['cube_sparse', 'canvas_sparse', 'valid_mask', 'simulated_sparse', 'residue_sparse']
+        gpu_attrs = ['cube_sparse', 'canvas_sparse', 'valid_mask', 'simulated_sparse', 'residue_sparse', 'λ_sparse']
         for attr in gpu_attrs:
             if hasattr(self, attr) and getattr(self, attr) is not None:
                 tensor = getattr(self, attr)
                 if isinstance(tensor, torch.Tensor) and tensor.device.type == 'cuda':
+                    tensor.detach().cpu()  # Move to CPU first to ensure cleanup
                     del tensor
                     setattr(self, attr, None)
         
         # Delete CPU tensors (to free RAM)
-        cpu_attrs = ['cube_full', 'canvas_full', 'simulated_full', 'residue_full']
+        cpu_attrs = ['cube_full', 'canvas_full', 'simulated_full', 'residue_full', 'λ_full', 'flux_λ_norm']
         for attr in cpu_attrs:
             if hasattr(self, attr) and getattr(self, attr) is not None:
-                del_attr = getattr(self, attr)
-                del del_attr
+                tensor = getattr(self, attr)
+                if isinstance(tensor, torch.Tensor):
+                    if tensor.device.type == 'cuda':
+                        tensor.detach().cpu()
+                del tensor
                 setattr(self, attr, None)
         
         # Delete source data tensors
         if hasattr(self, 'sources') and self.sources is not None:
-            for attr in ['spectra_sparse', 'spectra_full', 'spectra_res_sparse', 'spectra_res_full']:
+            for attr in ['spectra_sparse', 'spectra_full', 'spectra_res_sparse', 'spectra_res_full', 'imgs_sparse']:
                 if hasattr(self.sources, attr):
                     tensor = getattr(self.sources, attr)
                     if tensor is not None:
+                        if isinstance(tensor, torch.Tensor) and tensor.device.type == 'cuda':
+                            tensor.detach().cpu()
                         del tensor
                         setattr(self.sources, attr, None)
+        
+        # Delete model config and other large objects
+        if hasattr(self, 'model_config') and self.model_config is not None:
+            self.model_config = None
+        
+        if hasattr(self, 'reduced_telemetry') and self.reduced_telemetry is not None:
+            self.reduced_telemetry = None
         
         # Force GPU memory cleanup
         if torch.cuda.is_available():
