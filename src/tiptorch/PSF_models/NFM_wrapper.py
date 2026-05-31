@@ -18,38 +18,40 @@ class PSFModelNFM:
     def __init__(
         self,
         config,
-        multiple_obs    = False,
-        LO_NCPAs        = True,
-        chrom_defocus   = False,
-        Moffat_absorber = False,
-        retain_PSDs     = False,
-        Z_mode_max      = 9,
-        N_spline_nodes  = 5,
-        device          = default_device,
+        multiple_obs   = False,
+        LO_NCPAs       = True,
+        chrom_defocus  = False,
+        use_Moffat     = False,
+        retain_PSDs    = False,
+        Z_mode_max     = 9,
+        N_spline_nodes = 5,
+        device         = default_device,
+        dtype          = torch.float32,
         *, # MUSE NFM spectral data
         λ_min        = 475.e-9,
         λ_max        = 935.e-9,
         num_λ_slices = 3681,
     ):
-        self.Z_mode_max      = Z_mode_max
-        self.LO_N_params     = None
-        self.retain_PSDs     = retain_PSDs
-        self.LO_NCPAs        = LO_NCPAs
-        self.device          = device
-        self.Moffat_absorber = Moffat_absorber
-        self.use_splines     = not (N_spline_nodes is None)
-        self.chrom_defocus   = chrom_defocus and LO_NCPAs
-        self.__config_raw    = config # Input config dictionary, defined in TipTop-style
-                
+        self.Z_mode_max    = Z_mode_max
+        self.LO_N_params   = None
+        self.retain_PSDs   = retain_PSDs
+        self.LO_NCPAs      = LO_NCPAs
+        self.use_Moffat    = use_Moffat
+        self.chrom_defocus = chrom_defocus and LO_NCPAs
+        self.__config_raw  = config # Input config dictionary, defined in TipTop-style
+        self.device        = torch.device(device)
+        self.dtype         = dtype
+
         if N_spline_nodes:
             if N_spline_nodes < 2 or N_spline_nodes > num_λ_slices:
                 raise ValueError(f"Number of control wavelengths for spline representation must be between 2 and {num_λ_slices}. Got {N_spline_nodes}.")
+            self.use_splines = True # enable the use of splines for chromatic parameters representation
                 
         # The PSF model can be used in two configurations:
         #  1) Simulating different sources in multiple observations with different conditions -- used mostly in ML training and PSF model calibration
         #  2) Simulating multiple sources in the same observation -- the practical use-case when multiple sources are simulated in one science exposure.
         #                                                            In this case, atmospheric conditions and AO correction is shared by all sources
-        self.multiple_obs    = multiple_obs
+        self.multiple_obs = multiple_obs
         
         _config = self._init_configs(self.__config_raw) # Processed and converted config
         self.λ_sim = _config['sources_science']['Wavelength'].squeeze()
@@ -74,13 +76,12 @@ class PSFModelNFM:
             # wavelengths using natural cubic splines. If so, all parameters must be defined only at the control wavelengths. Unlike objects spectra,
             # the chromatic behavior of the PSF is generally smooth and doesn't have high-frequency features, so a small number of control λs is fine.
             # The same control wavelengths must be used for all chromatic parameters to ensure consistency.
-            self.N_wvl_ctrl = N_spline_nodes
-            self.norm_wvl = Uniform0_1(a=self.λ_min, b=self.λ_max) # [nm], MUSE NFM wavelength range
+            self.N_wvl_ctrl    = N_spline_nodes
+            self.norm_wvl      = Uniform0_1(a=self.λ_min, b=self.λ_max) # [nm], MUSE NFM wavelength range
             self.λ_ctrl_norm   = torch.linspace(0, 1, self.N_wvl_ctrl, device=self.device) # control λ nodes normalized to [0...1]
             self.λ_ctrl        = self.norm_wvl.inverse(self.λ_ctrl_norm) # [nm], control λs re-normalized back to the physical range
             self.λ_sim_normed  = self.norm_wvl(self.λ_sim) # [0...1], simulated wavelengths normalized to [0...1] range for spline evaluation
             self.λ_full_normed = self.norm_wvl(self.λ_full) # normalized full spectrum wavelengths for spline evaluation (if splines are used)
-
 
         self._init_model_inputs()
         
@@ -91,6 +92,129 @@ class PSFModelNFM:
             torch.mps.empty_cache()
     
     
+    @staticmethod
+    def _tree_to_cpu(obj):
+        """Recursively detach tensors and move them to CPU for portable serialization."""
+        if torch.is_tensor(obj):
+            return obj.detach().cpu().clone()
+        
+        if isinstance(obj, dict):
+            return {k: PSFModelNFM._tree_to_cpu(v) for k, v in obj.items()}
+        
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(PSFModelNFM._tree_to_cpu(v) for v in obj)
+        
+        return obj
+
+
+    def save(self, *, cpu: bool = True):
+        """
+        Serialize the wrapper state.
+
+        The returned object is intentionally a plain Python dictionary suitable for
+        torch.save(...).  It stores both:
+          1. constructor arguments needed to rebuild the wrapper; and
+          2. mutable state that may have changed after construction.
+        """
+        dtype_name = str(self.model.dtype).replace('torch.', '') if hasattr(self.model, 'dtype') else str(self.dtype).replace('torch.', '')
+
+        store_data = {
+            # Constructor state.
+            'config':         self.__config_raw,
+            'multiple_obs':   self.multiple_obs,
+            'LO_NCPAs':       self.LO_NCPAs,
+            'chrom_defocus':  self.chrom_defocus,
+            'use_Moffat':     self.use_Moffat,
+            'retain_PSDs':    self.retain_PSDs,
+            'Z_mode_max':     self.Z_mode_max,
+            'N_spline_nodes': self.N_wvl_ctrl if self.use_splines else None,
+
+            # Full MUSE-NFM spectral grid definition.
+            'λ_min':         self.λ_min,
+            'λ_max':         self.λ_max,
+            'num_λ_slices':  self.num_λ_slices,
+
+            # Mutable runtime state.
+            'inputs': self.inputs_manager.save(),
+            
+            'device':         str(self.device),
+            'dtype':          dtype_name,
+        }
+
+        return self._tree_to_cpu(store_data) if cpu else store_data
+
+
+    @classmethod
+    def load(cls, store_data: dict, *, device=None):
+        """
+        Reconstruct a PSFModelNFM instance from save() output.
+
+        Parameters
+        ----------
+        store_data : dict
+            Dictionary produced by PSFModelNFM.save().
+        device : str | torch.device | None
+            Optional device override.  If None, uses the device stored in the save.
+        """
+        
+        def _dtype_from_name(dtype):
+            """Accept torch.dtype objects and names such as 'float32' / 'torch.float32'."""
+            if isinstance(dtype, torch.dtype):
+                return dtype
+            if dtype is None:
+                return torch.float32
+            name = str(dtype).replace('torch.', '')
+            return getattr(torch, name)
+        
+        
+        def _restore_manager(manager, payload, device):
+            out = manager.load(payload)
+            out.to_float()
+            out.to(device)
+            return out
+        
+        def _restore_config(config, device):
+            sample_value = config['atmosphere']['Seeing']
+            if sample_value.device != device:
+                from tiptorch.managers.config_manager import ConfigManager
+                config_manager = ConfigManager()
+                config_manager.Convert(config, framework='pytorch', device=device)
+                
+            return config
+        
+        # Backward compatibility with the old save() key.
+        if 'λ_min, λmax, N_λ' in store_data:
+            λ_min, λ_max, num_λ_slices = store_data['λ_min, λmax, N_λ']
+        else:
+            λ_min        = store_data.get('λ_min', 475.e-9)
+            λ_max        = store_data.get('λ_max', 935.e-9)
+            num_λ_slices = store_data.get('num_λ_slices', 3681)
+
+        device = torch.device(device if device is not None else store_data.get('device', default_device))
+        dtype  = _dtype_from_name(store_data.get('dtype', torch.float32))
+
+        new_instance = cls(
+            config         = _restore_config(store_data['config'], device),
+            multiple_obs   = store_data.get('multiple_obs', store_data.get('multiple_OBs', False)),
+            LO_NCPAs       = store_data.get('LO_NCPAs', True),
+            chrom_defocus  = store_data.get('chrom_defocus', False),
+            use_Moffat     = store_data.get('use_Moffat', False),
+            retain_PSDs    = store_data.get('retain_PSDs', False),
+            Z_mode_max     = store_data.get('Z_mode_max', 9),
+            N_spline_nodes = store_data.get('N_spline_nodes', None),
+            device         = device,
+            dtype          = dtype,
+            λ_min          = λ_min,
+            λ_max          = λ_max,
+            num_λ_slices   = num_λ_slices,
+        )
+
+        # Restore inputs and backup inputs.
+        new_instance.inputs_manager = _restore_manager(new_instance.inputs_manager, store_data.get('inputs'), device)
+
+        return new_instance
+
+
     def cleanup(self):
         """Explicitly clean up GPU memory"""       
         # Clean up model (which will trigger TipTorch cleanup)
@@ -141,7 +265,7 @@ class PSFModelNFM:
             LO_NCPAs        = self.LO_NCPAs,
             chrom_defocus   = self.chrom_defocus,
             N_spline_nodes  = self.N_wvl_ctrl,
-            Moffat_absorber = self.Moffat_absorber,
+            use_Moffat      = self.use_Moffat,
             Z_mode_max      = self.Z_mode_max,
             device          = self.device,
             dtype           = self.model.dtype
@@ -220,7 +344,7 @@ class PSFModelNFM:
             'aliasing':        False,
             'chromatism':      True,
             'diff. refract':   True,
-            'Moffat':          self.Moffat_absorber
+            'Moffat':          self.use_Moffat
         }
         
         self.model = TipTorch(
@@ -232,7 +356,7 @@ class PSFModelNFM:
             device = self.device,
             oversampling = 1,
             retain_PSDs = self.retain_PSDs,
-            dtype = torch.float32
+            dtype = self.dtype
         )
 
 
@@ -364,7 +488,7 @@ class PSFModelNFM:
         add_input('src_dirs_y', self.model.src_dirs_y.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
 
         # Add Moffat PSD absorber's parameters (if one is enabled)
-        if self.Moffat_absorber:
+        if self.use_Moffat:
             add_input('amp',   torch.tensor([1e-4]*N_obs), norm_amp,   is_shared=True)
             add_input('b',     torch.tensor([0.0]*N_obs),  norm_b,     is_shared=True)
             add_input('alpha', torch.tensor([2.0]*N_obs),  norm_alpha, is_shared=True)
@@ -571,7 +695,7 @@ class PSFModelNFM:
         PSFs_combined = torch.zeros((self.model.N_src, self.num_λ_slices, self.model.N_pix, self.model.N_pix), device='cpu')
 
         max_λ_batch_size = λ_batch_size # TODO: adjust based on memory available and the number of sources simulated
-        λ_batches = [torch.tensor(self.λ_full[i:i + max_λ_batch_size], device=self.device) for i in range(0, len(self.λ_full), max_λ_batch_size)]
+        λ_batches = [self.λ_full[i:i + max_λ_batch_size].detach().clone() for i in range(0, len(self.λ_full), max_λ_batch_size)]
 
         _initial_wvl = self.λ_sim.clone()
         _N_src = self.model.N_src

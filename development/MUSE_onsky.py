@@ -100,7 +100,7 @@ PSF_model = PSFModelNFM(
     multiple_obs    = True,
     LO_NCPAs        = True,
     chrom_defocus   = False,
-    Moffat_absorber = False, 
+    use_Moffat = False, 
     Z_mode_max      = 9,
     N_spline_nodes  = 5,
     device          = default_device
@@ -299,9 +299,9 @@ include_general = ['r0', 'dn'] + \
                   (['wind_speed_single'] if fit_wind_speed else []) + \
                   (['wind_dir_single'] if fit_wind_dir else []) + \
                   (['Cn2_weights'] if fit_Cn2_profile else []) + \
-                  (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else [])
+                  (['amp', 'alpha', 'b'] if PSF_model.use_Moffat else [])
 
-exclude_general = ['ratio', 'theta', 'beta', 'F_λ_norm_ctrl', 'F_norm'] if PSF_model.Moffat_absorber else []
+exclude_general = ['ratio', 'theta', 'beta', 'F_λ_norm_ctrl', 'F_norm'] if PSF_model.use_Moffat else []
 
 include_general, exclude_general = set(include_general), set(exclude_general)
 

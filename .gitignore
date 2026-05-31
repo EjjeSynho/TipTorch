@@ -12,6 +12,8 @@ project_config.json
 *.pyc
 *.pyo
 
+amd_aocl_wheels/
+
 # Build / distribution artifacts
 dist/
 build/

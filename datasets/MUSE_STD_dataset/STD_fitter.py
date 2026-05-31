@@ -132,7 +132,7 @@ def load_and_fit_sample(id):
         multiple_obs    = True,
         LO_NCPAs        = True,
         chrom_defocus   = False,
-        Moffat_absorber = False,
+        use_Moffat      = False,
         retain_PSDs     = True,
         Z_mode_max      = 9,
         N_spline_nodes  = 5,
@@ -211,7 +211,7 @@ def load_and_fit_sample(id):
         MSE_loss = diff.pow(2).mean() * w * w_MSE
         MAE_loss = diff.abs().mean()  * w * w_MAE
         LO_loss  = loss_LO_fn(w_bump, w_LO) if PSF_model.LO_NCPAs else 0.0
-        Moffat_loss = Moffat_loss_fn() if PSF_model.Moffat_absorber else 0.0
+        Moffat_loss = Moffat_loss_fn() if PSF_model.use_Moffat else 0.0
         MAP_loss    = loss_MAP()
 
         return MSE_loss + MAE_loss + LO_loss + Moffat_loss + MAP_loss
@@ -310,9 +310,9 @@ def load_and_fit_sample(id):
                       (['wind_speed_single'] if fit_wind_speed else []) + \
                       (['wind_dir_single'] if fit_wind_dir else []) + \
                       (['Cn2_weights'] if fit_Cn2_profile else []) + \
-                      (['amp', 'alpha', 'b'] if PSF_model.Moffat_absorber else [])
+                      (['amp', 'alpha', 'b'] if PSF_model.use_Moffat else [])
 
-    exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.Moffat_absorber else []
+    exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.use_Moffat else []
 
     include_general, exclude_general = set(include_general), set(exclude_general)
 
@@ -356,7 +356,7 @@ def load_and_fit_sample(id):
         'Model norms': to_store(PSF_model.model.norm_scale) if hasattr(PSF_model.model, 'norm_scale') else None,
         'loss':        loss_val,
         'wavelengths': to_store(wavelengths),
-        'is_Moffat':   PSF_model.Moffat_absorber,
+        'is_Moffat':   PSF_model.use_Moffat,
         'is_LO_NCPAs': PSF_model.LO_NCPAs,
         'use_splines': PSF_model.use_splines,
         'N spline nodes': PSF_model.N_wvl_ctrl if hasattr(PSF_model, 'N_wvl_ctrl') else None

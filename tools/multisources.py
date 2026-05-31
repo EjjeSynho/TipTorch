@@ -426,16 +426,39 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
     return diff_vis
 
 
-def PlotSourcesProfiles(data, model, sources, radius, title=''):
+def PlotSourcesProfiles(data, model, sources, radius, select_ids=None, **kwargs):
     # Extract PSFs from the image
-    ROIs_0, _, _, _ = extract_ROIs(data,  sources, box_size=np.round(radius*2+4).astype('int'))
-    ROIs_1, _, _, _ = extract_ROIs(model, sources, box_size=np.round(radius*2+4).astype('int'))
-    
+    box_size = np.round(radius * 2 + 4).astype(int)
+
+    ROIs_0, _, _, _ = extract_ROIs(data,  sources, box_size=box_size)
+    ROIs_1, _, _, _ = extract_ROIs(model, sources, box_size=box_size)
+
+    if select_ids is not None:
+        ROIs_0 = [roi for i, roi in enumerate(ROIs_0) if i in select_ids]
+        ROIs_1 = [roi for i, roi in enumerate(ROIs_1) if i in select_ids]
+
     # Spectrally average the PSFs
-    PSFs_0_white = torch.stack(ROIs_0).mean(dim=1).cpu().numpy() if isinstance(data, torch.Tensor)  else np.mean(np.stack(ROIs_0), axis=1)
-    PSFs_1_white = torch.stack(ROIs_1).mean(dim=1).cpu().numpy() if isinstance(model, torch.Tensor) else np.mean(np.stack(ROIs_1), axis=1)
-    
-    plot_radial_PSF_profiles(PSFs_0_white, PSFs_1_white, 'Data', 'Model', title=title, cutoff=radius, y_min=5e-2)
+    avg_white = (
+        lambda x: torch.stack(x).mean(dim=1)
+        if isinstance(x[0], torch.Tensor)
+        else np.mean(np.stack(x), axis=1)
+    )
+
+    PSFs_0_white = avg_white(ROIs_0)
+    PSFs_1_white = avg_white(ROIs_1)
+
+    fig = plt.figure(figsize=(6, 4), dpi=300)
+    ax = fig.gca()
+
+    plot_radial_PSF_profiles(
+        PSF_0 = PSFs_0_white,
+        PSF_1 = PSFs_1_white,
+        label_0 = 'Data',
+        label_1 = 'Prediction',
+        cutoff=radius,
+        ax=ax,
+        **kwargs,
+    )
     plt.show()
 
 

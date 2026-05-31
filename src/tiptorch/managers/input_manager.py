@@ -11,6 +11,7 @@ from tiptorch.tools.normalizers import TransformSequence, DataTransform, Identit
 This module contains classes to manage the input data for the TipTorch PSF model. 
 """
 
+
 class InputsTransformer:
     """
     A class to manage the input data for the TipTorch PSF model. It allows for the stacking of input dictionaries
@@ -23,8 +24,10 @@ class InputsTransformer:
         self.transforms = transforms
         self.slices = {}
 
+
     def __len__(self):
         return len(self.transforms)
+
 
     def stack(self, args_dict, no_transform=False):
         if len(self.transforms) == 0:
@@ -63,6 +66,7 @@ class InputsTransformer:
     def get_stacked_size(self):
         return self._packed_size
 
+
     def unstack(self, x_stacked):
         if self.slices is None:
             raise ValueError("No cache of decomposing slices found. Stack the tensors first.")
@@ -78,6 +82,7 @@ class InputsTransformer:
             # expects that the 0th dimension is allocated to sources. Meaning that the tensor is of shape (n_sources, n_features)
 
         return decomposed
+
 
     def save(self, filename=None):
         """
@@ -180,6 +185,7 @@ class InputParameter:
     transform: Optional[Any] = None
     optimizable: bool = True
 
+
 class InputsManager:
     """
     The wrapper over the InputsTransformer class. It allows for more convenient management of the model inputs,
@@ -206,25 +212,31 @@ class InputsManager:
         # self.inputs_transformer.transforms = dict(sorted(self.inputs_transformer.transforms.items(), key=lambda x: x[0]))
         # self.parameters = dict(sorted(self.parameters.items(), key=lambda x: x[0]))
 
+
     def get_stacked_size(self):
         """Get the size of the stacked tensor."""
         return self.inputs_transformer.get_stacked_size()
+
 
     def get_transformer(self) -> InputsTransformer:
         """Get the underlying InputsTransformer."""
         return self.inputs_transformer
 
+
     def get_value(self, name: str) -> Any:
         """Get the value of a parameter."""
         return self.parameters[name].value
+
 
     def get_transform(self, name: str) -> Any:
         """Get the transform of a parameter."""
         return self.parameters[name].transform
 
+
     def is_optimizable(self, name: str) -> bool:
         """Check if parameter is optimizable."""
         return self.parameters[name].optimizable
+
 
     def set_optimizable(self, names: Union[str, list], optimizable: bool):
         """Set optimizable status for a parameter or list of parameters.
@@ -244,6 +256,7 @@ class InputsManager:
         if set(optimizable_names) != set(self.inputs_transformer.slices.keys()):
             self.stack()
     
+    
     def update(self, other: dict, selected_ids: Any = None):
         """Update the parameters with a new dictionary of values."""
         for name, value in other.items():
@@ -253,6 +266,7 @@ class InputsManager:
                 else:
                     self.parameters[name].value = value
 
+
     def delete(self, name: str):
         """Delete a parameter by name."""
         if name in self.parameters:
@@ -260,6 +274,7 @@ class InputsManager:
             if name in self.inputs_transformer.slices:
                 del self.inputs_transformer.slices[name]
                 self.stack()
+                
                 
     def stack(self):
         if self.inputs_transformer.transforms == {} or self.parameters == {}:
@@ -293,9 +308,11 @@ class InputsManager:
                     
         return args_dict
 
+
     def __len__(self):
         """Return number of parameters."""
         return len(self.parameters)
+    
     
     def get_names(self, optimizable_only: bool = True, flattened: bool = False) -> list:
         """Get the list of parameter names.
@@ -329,15 +346,19 @@ class InputsManager:
         """Explicit method to convert to dictionary."""
         return {name: param.value for name, param in self.parameters.items()}
 
+
     def __getitem__(self, item):
         return self.parameters[item].value
+
 
     def __setitem__(self, key, value):
         self.parameters[key].value = value
 
+
     def to(self, device: torch.device):
         for name, param in self.parameters.items():
             self.parameters[name].value = param.value.to(device)
+
 
     def to_float(self):
         """Convert all parameter values to float32."""
@@ -345,11 +366,13 @@ class InputsManager:
             if hasattr(param.value, 'float'):
                 self.parameters[name].value = param.value.float()
 
+
     def to_double(self):
         """Convert all parameter values to float64."""
         for name, param in self.parameters.items():
             if hasattr(param.value, 'double'):
                 self.parameters[name].value = param.value.double()
+
 
     def copy(self):
         """Return a new InputsManager instance with copied parameters and transforms."""
@@ -366,8 +389,10 @@ class InputsManager:
         new_manager.inputs_transformer = deepcopy(self.inputs_transformer)
         return new_manager
     
+    
     def clone(self):
         return self.copy()
+
 
     def save(self, filename=None):
         """
@@ -395,6 +420,7 @@ class InputsManager:
             with open(filename, 'wb') as handle:
                 pickle.dump(save_data, handle)
         return save_data
+
 
     @classmethod
     def load(cls, data=None, filename=None):
@@ -430,6 +456,7 @@ class InputsManager:
             )
 
         return instance
+
 
     def __str__(self) -> str:
         """Pretty print the InputsManager contents."""
@@ -537,6 +564,7 @@ class InputsManagersUnion:
         self._stacked_size = len(joint_vector)
         return joint_vector
 
+
     def unstack(self, vector: torch.Tensor, include_all: bool = True, update: bool = True) -> dict:
         """
         Unstack the combined tensor back into a dictionary of parameters.
@@ -579,6 +607,7 @@ class InputsManagersUnion:
             
         return result
 
+
     def get_value(self, name: str) -> Any:
         """Get the value of a parameter from the first manager that contains it.
 
@@ -615,6 +644,7 @@ class InputsManagersUnion:
                 return manager.parameters[name].transform
         raise KeyError(f"Parameter '{name}' not found in any input manager")
 
+
     def set_optimizable(self, names: Union[str, list], optimizable: bool):
         """Set optimizable status for a parameter or list of parameters across all input managers.
 
@@ -628,6 +658,7 @@ class InputsManagersUnion:
             for name in name_list:
                 if name in manager.parameters:
                     manager.set_optimizable(name, optimizable)
+
 
     def is_optimizable(self, name: str) -> bool:
         """Check if parameter is optimizable in the first manager that contains it.
@@ -645,6 +676,7 @@ class InputsManagersUnion:
             if name in manager.parameters:
                 return manager.parameters[name].optimizable
         raise KeyError(f"Parameter '{name}' not found in any input manager")
+
 
     def get_names(self, optimizable_only: bool = True, flattened: bool = False) -> list:
         """Get parameter names across all input managers.
@@ -683,6 +715,7 @@ class InputsManagersUnion:
 
         return flattened_names
 
+
     def to_dict(self) -> dict:
         """Convert all parameters from all managers to a dictionary.
 
@@ -694,6 +727,7 @@ class InputsManagersUnion:
             result.update(manager.to_dict())
         return result
 
+
     def __getitem__(self, item):
         """Get a parameter value using dictionary-like access.
 
@@ -704,6 +738,7 @@ class InputsManagersUnion:
             Parameter value
         """
         return self.get_value(item)
+
 
     def __setitem__(self, key, value):
         """Set a parameter value using dictionary-like access.
@@ -717,6 +752,7 @@ class InputsManagersUnion:
             if key in manager.parameters:
                 manager.parameters[key].value = value
 
+
     def to(self, device: torch.device):
         """Move all parameters to the specified device.
 
@@ -726,15 +762,18 @@ class InputsManagersUnion:
         for manager in self.input_managers.values():
             manager.to(device)
 
+
     def to_float(self):
         """Convert all parameter values to float32."""
         for manager in self.input_managers.values():
             manager.to_float()
 
+
     def to_double(self):
         """Convert all parameter values to float64."""
         for manager in self.input_managers.values():
             manager.to_double()
+
 
     def delete(self, name: str):
         """Delete a parameter from all managers that contain it."""
@@ -752,6 +791,7 @@ class InputsManagersUnion:
                     else:
                         manager.parameters[name].value = value
 
+
     def copy(self) -> "InputsManagersUnion":
         """Create a deep copy of the InputsManagersUnion."""
         new_union = InputsManagersUnion()
@@ -759,9 +799,11 @@ class InputsManagersUnion:
             new_union.input_managers[key] = manager.copy()
         return new_union
         
+        
     def clone(self) -> "InputsManagersUnion":
         """Create a deep copy of the InputsManagersUnion."""
         return self.copy()
+
 
     def save(self, filename=None):
         """
@@ -793,6 +835,7 @@ class InputsManagersUnion:
                 pickle.dump(save_data, handle)
         return save_data
 
+
     @classmethod
     def load(cls, data=None, filename=None):
         """
@@ -807,10 +850,11 @@ class InputsManagersUnion:
         """
         if filename is not None:
             if data is not None:
-                print("Warning: Both data and filename provided to load method. "
-                      "Filename will be used and data will be ignored.")
+                print("Warning: Both data and filename provided to load method. Filename will be used and data will be ignored.")
+                
             with open(filename, 'rb') as handle:
                 data = pickle.load(handle)
+                
         elif data is None:
             raise ValueError("Either data or filename must be provided for loading.")
 
@@ -831,6 +875,7 @@ class InputsManagersUnion:
             instance._stacked_size = data['stacked_size']
 
         return instance
+
 
     def __str__(self) -> str:
         """Pretty print the InputsManagersUnion contents."""

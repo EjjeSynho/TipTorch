@@ -268,7 +268,7 @@ class MUSEObservation:
             multiple_obs    = False,
             LO_NCPAs        = True,
             chrom_defocus   = False,
-            Moffat_absorber = False,
+            use_Moffat      = False,
             N_spline_nodes  = 5,
             Z_mode_max      = 9,
             device          = self.device,
@@ -472,7 +472,6 @@ class MUSEObservation:
         # Apply the flux scaling
         PSFs_ = PSFs_full * (flux_normalization * self.sources.spectra_full).view(-1, self.N_wvl_full, 1, 1)
         self.simulated_full = add_ROIs(self.canvas_full, PSFs_, self.sources.slices_local, self.sources.slices_global)
-        self.residue_full = (self.cube_full - self.simulated_full.numpy()) * self.valid_mask.cpu().numpy()
         return self.simulated_full, PSFs_full, flux_normalization
 
 
@@ -536,7 +535,7 @@ class MUSEObservation:
         x_params = None
         
         optimizables_ = self._select_optimizable_variables(fit)
-        weights_ = self._compute_fitting_weights()
+        weights_      = self._compute_fitting_weights()
         
         fit_subset = weights_.subset  # pre-built once, reused every iteration
         
@@ -564,20 +563,19 @@ class MUSEObservation:
     def SimulateField(self, full_spectrum=False, return_PSFs=False) -> torch.Tensor | tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
         ''' Simulate all sources within the field. If full_spectrum is True, simulates the full spectrum instead of the sparse λ-subset. '''
         if full_spectrum:
-            self.simulated_full, PSFs_full, flux_normalization = self.simulate_full()
-            
-            if return_PSFs:
-                return self.simulated_full, PSFs_full.cpu(), flux_normalization.cpu()
-            else:
-                return self.simulated_full
+            simulated, PSFs, flux_norm = self.simulate_full()
+            self.simulated_full = simulated
+            self.residue_full = (self.cube_full - self.simulated_full.numpy()) * self.valid_mask.cpu().numpy()
         else:
-            self.simulated_sparse, PSFs, flux_normalization = self.simulate_sparse(x=None, src_subset=None)
-            self.residue_sparse = (self.cube_sparse - self.simulated_sparse) * self.valid_mask
-            
-            if return_PSFs:
-                return self.simulated_sparse, PSFs, flux_normalization
-            else:
-                return self.simulated_sparse
+            simulated, PSFs, flux_norm = self.simulate_sparse(x=None, src_subset=None)
+            self.simulated_sparse = simulated
+            self.residue_sparse = (self.cube_sparse - simulated) * self.valid_mask
+        
+        torch.cuda.empty_cache()
+        if return_PSFs:
+            return (simulated, PSFs.cpu() if full_spectrum else PSFs, flux_norm.cpu() if full_spectrum else flux_norm)
+        
+        return simulated
 
 
     def DisplaySources(self, draw_box_size=20):
@@ -686,38 +684,36 @@ class MUSEObservation:
             # Mapping MUSE spectral range to visible spectrum range for RGB conversion
             λ_vis = np.linspace(440, 750, self.N_wvl_full)
 
-            _ = PlotSpetralCubeInRGB(
-                self.residue_full[self.ROI_plot],
-                wavelengths=λ_vis,
-                title="Difference",
-                min_val=500, max_val=60000,
-                scale='log',
-                show=False
-            )
+            # Shared vmin/vmax across data, model, and residual
+            def _to_np(x): return x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
+            data_white = _to_np(self.cube_full     [self.ROI_plot]).sum(axis=0)
+            sim_white  = _to_np(self.simulated_full[self.ROI_plot]).sum(axis=0)
+            res_white  = np.abs(_to_np(self.residue_full[self.ROI_plot])).sum(axis=0)
 
-            _ = PlotSpetralCubeInRGB(
-                self.cube_full[self.ROI_plot],
-                wavelengths=λ_vis,
-                title=f"Data",
-                min_val=500, max_val=200000,
-                scale='log',
-                show=True
-            )
+            all_white = np.stack([data_white, sim_white, res_white])
+            vmax = float(np.nanmax(all_white))
+            pos  = all_white[all_white > 0]
+            vmin = float(max(1.0, np.nanpercentile(pos, 1)) if pos.size > 0 else 1.0)
 
-            _ = PlotSpetralCubeInRGB(
-                self.simulated_full[self.ROI_plot],
-                wavelengths=λ_vis,
-                title=f"Model",
-                min_val=500, max_val=200000,
-                scale='log',
-                show=True
-            )
+            for cube, title in [(self.residue_full, "Difference"), (self.cube_full, "Data"), (self.simulated_full, "Model")]:
+                _ = PlotSpetralCubeInRGB(
+                    cube[self.ROI_plot],
+                    wavelengths=λ_vis,
+                    title=title,
+                    min_val=vmin, max_val=vmax,
+                    scale='log',
+                    show=title != "Difference"
+                )
             
             if plot_profiles:
                 PlotSourcesProfiles(self.cube_full, self.simulated_full, self.sources.table, radius=16, title='Source radial profiles (full spectrum)')                
         
         else:
-            display_norm = LogNorm(vmin=1, vmax=self.cube_sparse.sum(dim=0).max()) # again, rather empirical values
+            data_white = self.cube_sparse.sum(dim=0)
+            sim_white  = self.simulated_sparse.sum(dim=0)
+            vmax = float(max(data_white.max(), sim_white.max()))
+            vmin = float(max(1.0, min(data_white[data_white > 0].min(), sim_white[sim_white > 0].min())))
+            display_norm = LogNorm(vmin=vmin, vmax=vmax)
             VisualizeSources(self.cube_sparse, self.simulated_sparse, norm=display_norm, mask=self.valid_mask, ROI=self.ROI_plot)
             
             if plot_profiles:

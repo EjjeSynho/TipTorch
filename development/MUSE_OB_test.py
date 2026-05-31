@@ -234,7 +234,7 @@ def InitPSFModel():
         multiple_obs    = False,
         LO_NCPAs        = True,
         chrom_defocus   = False,
-        Moffat_absorber = False,
+        use_Moffat = False,
         N_spline_nodes  = 5,
         Z_mode_max      = 9,
         device          = device

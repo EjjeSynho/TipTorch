@@ -4,7 +4,8 @@ import matplotlib.pyplot as plt
 from photutils.profiles import RadialProfile
 from matplotlib import cm
 from tiptorch.tools.utils import safe_centroid
-
+import warnings
+from contextlib import contextmanager
 
 try:
     from graphviz import Digraph
@@ -338,9 +339,18 @@ def save_GIF_RGB(images_stack, duration=1e3, downscale=4, path='test.gif'):
 
 
 
-def render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambda x: x, ax=None):
+def render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambda x: x, ax=None, weights=None):
     x = np.arange(0, profile.shape[-1])
-    profile_m = np.median(profile, axis=0)
+    
+    # Central line: weighted average when weights provided, else median
+    if weights is not None:
+        profile_m = np.average(profile, axis=0, weights=np.asarray(weights).flatten())
+    else:
+        profile_m = np.median(profile, axis=0)
+    
+    # Uncertainty bands always anchored to the unweighted median so they remain
+    # centered on the data distribution regardless of weight skew.
+    profile_band = np.median(profile, axis=0)
     
     p_cutoff = 68.2/2
     n_quantiles = 1
@@ -349,12 +359,12 @@ def render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambd
     alpha_func = lambda x: 0.21436045 * np.exp(-0.11711102 * x)
 
     for p in percentiles:
-        upper_bound = np.percentile(profile-profile_m, 100-p, axis=0)
-        lower_bound = np.percentile(profile-profile_m, p,  axis=0)
+        upper_bound = np.percentile(profile - profile_band, 100-p, axis=0)
+        lower_bound = np.percentile(profile - profile_band, p,  axis=0)
         if ax is not None:
-            ax.fill_between(x, func(profile_m)+lower_bound, func(profile_m)+upper_bound, alpha=alpha_func(n_quantiles), color=color)
+            ax.fill_between(x, func(profile_band)+lower_bound, func(profile_band)+upper_bound, alpha=alpha_func(n_quantiles), color=color)
         else:
-            plt.plot(x, func(profile_m)+lower_bound, color=color, linestyle='--', alpha=alpha_func(n_quantiles))
+            plt.plot(x, func(profile_band)+lower_bound, color=color, linestyle='--', alpha=alpha_func(n_quantiles))
     
     if not ax is None:
         ax.plot(x, func(profile_m), color=color, label=label, linestyle=linestyle, linewidth=linewidth)
@@ -362,28 +372,57 @@ def render_profile(profile, color, label, linestyle='-', linewidth=1, func=lambd
         plt.plot(x, func(profile_m), color=color, label=label, linestyle=linestyle, linewidth=linewidth)
 
 
+@contextmanager
+def _suppress_photutils():
+    """Silence known benign photutils/astropy warnings."""
+    with warnings.catch_warnings():
+        for pat in [
+            '.*non-finite.*',
+            '.*maximum value is at the edge.*',
+            '.*quadratic polynomial maximum.*',
+            '.*quadratic fit does not have a maximum.*',
+        ]:
+            warnings.filterwarnings('ignore', message=pat)
+        yield
+
+
 def calc_profile(data, xycen=None):
-    xycen = safe_centroid(data) if xycen is None else xycen
-    edge_radii = np.arange(data.shape[-1]//2)
-    rp = RadialProfile(data, xycen, edge_radii)
+    with _suppress_photutils():
+        xycen = safe_centroid(data) if xycen is None else xycen
+        edge_radii = np.arange(data.shape[-1]//2)
+        rp = RadialProfile(data, xycen, edge_radii)
     return rp.profile
 
     
-def plot_radial_PSF_profiles(PSF_0,
-                             PSF_1,
-                             label_0 = 'PSF(s) #1',
-                             label_1 = 'PSF(s) #2',
-                             title   = '',
-                             scale   = 'log',
-                             colors  = ['tab:blue', 'tab:orange', 'tab:green'],
-                             cutoff  = 20,
-                             centers = None,
-                             return_profiles = False,
-                             ax = None,
-                             linthresh = 5e-1,
-                             y_min = 1e-2,
-                             suppress_plot = False):
-
+def plot_radial_PSF_profiles(
+    PSF_0,
+    PSF_1,
+    label_0 = 'PSF(s) #1',
+    label_1 = 'PSF(s) #2',
+    title   = '',
+    scale   = 'log',
+    colors  = ['tab:blue', 'tab:orange', 'tab:green'],
+    cutoff  = 20,
+    centers = None,
+    weights = None,
+    ax = None,
+    y_min = 1e-2,
+    y_max = None,
+    linthresh = 5e-1,
+    return_profiles = False,
+    suppress_plot = False
+):
+    """
+    Plot radial profiles of two PSF sets with optional per-PSF weights.
+    
+    Parameters
+    ----------
+    PSF_0, PSF_1 : array-like
+        PSF arrays with shape (N_PSFs, H, W) or (H, W)
+    weights : array-like, optional
+        Per-PSF weights for computing weighted average profiles. 
+        Shape (N_PSFs,). If None, uses unweighted median.
+    """
     if isinstance(PSF_0, torch.Tensor): PSF_0 = PSF_0.detach().cpu().numpy()
     if isinstance(PSF_1, torch.Tensor): PSF_1 = PSF_1.detach().cpu().numpy()
     
@@ -392,19 +431,40 @@ def plot_radial_PSF_profiles(PSF_0,
 
     N_PSFs = PSF_0.shape[0]
     assert PSF_1.shape[0] == N_PSFs, "Number of PSFs in both sets must be the same!"
+    
+    if weights is not None:
+        weights = np.asarray(weights)
+        assert weights.shape[0] == N_PSFs, f"weights must have shape ({N_PSFs},), got {weights.shape}"
 
+    listify_PSF = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
+    
+    # Helper to compute profiles and track valid (non-NaN) PSFs for each set
     def _radial_profiles(PSFs, centers=None):
-        listify_PSF = lambda PSF_stack: [ x.squeeze() for x in np.split(PSF_stack, PSF_stack.shape[0], axis=0) ]
         PSFs = listify_PSF(PSFs)
 
-        profiles = np.vstack( [calc_profile(PSF, center) for PSF, center in zip(PSFs, centers) if not np.all(np.isnan(PSF))] )
-        return profiles
+        valid = [
+            (i, PSF, center) for i, (PSF, center) in enumerate(zip(PSFs, centers))
+            if not np.all(np.isnan(PSF))
+        ]
+        valid_indices = [i for i, _, _ in valid]
+        profiles = np.vstack([calc_profile(PSF, center) for _, PSF, center in valid])
+        return profiles, valid_indices
+
+    # Filter weights to match the valid (non-NaN) PSF subset for each profile set
+    def _filter_weights(w, valid_idx):
+        if w is None:
+            return None
+        w_filt = w[valid_idx]
+        total = w_filt.sum()
+        return w_filt / total if total > 0 else w_filt
+
 
     if centers is None:
         centers = []
         # Compute PSF peaks if not provided explicitly
         for i in range(PSF_0.shape[0]):
-            centers.append( safe_centroid(PSF_0[i,...]))
+            with _suppress_photutils():
+                centers.append(safe_centroid(PSF_0[i,...]))
     else:
         # Shared center coordinate provided for all PSFs
         if len(centers) == 2:
@@ -413,43 +473,63 @@ def plot_radial_PSF_profiles(PSF_0,
         else:
             centers = [centers[i,...] for i in range(N_PSFs)]
 
-    profiles_0   = _radial_profiles( PSF_0, centers )
-    profiles_1   = _radial_profiles( PSF_1, centers )
-    profiles_err = _radial_profiles( PSF_0-PSF_1, centers )
+    profiles_0,   valid_idx_0   = _radial_profiles( PSF_0,       centers )
+    profiles_1,   valid_idx_1   = _radial_profiles( PSF_1,       centers )
+    profiles_err, valid_idx_err = _radial_profiles( PSF_0-PSF_1, centers )
+
+    w_0   = _filter_weights(weights, valid_idx_0)
+    w_1   = _filter_weights(weights, valid_idx_1)
+    w_err = _filter_weights(weights, valid_idx_err)
 
     if not suppress_plot:
         if ax is None:
             fig = plt.figure(figsize=(6, 4), dpi=300)
             ax  = fig.gca()
     
-    y_max = np.median(profiles_0, axis=0).max()
+    # Always normalise by a data-derived peak so that error percentages are
+    # independent of the externally-supplied y_max display limit.
+    if w_0 is not None:
+        norm_factor = np.average(profiles_0, axis=0, weights=w_0).max()
+    else:
+        norm_factor = np.median(profiles_0, axis=0).max()
+    if norm_factor == 0:
+        norm_factor = 1.0
 
-    p_0 = profiles_0 / y_max * 100.0
-    p_1 = profiles_1 / y_max * 100.0
-    p_err = np.abs(profiles_err / y_max * 100.0)
+    p_0 = profiles_0 / norm_factor * 100.0 # [%]
+    p_1 = profiles_1 / norm_factor * 100.0 # -//-
+    p_err = np.abs(profiles_err / norm_factor * 100.0) # -//-
 
     if not suppress_plot:
-        render_profile(p_0,   color=colors[0], label=label_0, linewidth=2, ax=ax)
-        render_profile(p_1,   color=colors[1], label=label_1, linewidth=2, ax=ax)
-        render_profile(p_err, color=colors[2], label='Error', linestyle='--', ax=ax)
+        render_profile(p_0,   color=colors[0], label=label_0, linewidth=2,    ax=ax, weights=w_0)
+        render_profile(p_1,   color=colors[1], label=label_1, linewidth=2,    ax=ax, weights=w_1)
+        render_profile(p_err, color=colors[2], label='Error', linestyle='--', ax=ax, weights=w_err)
 
-        max_err = np.median(p_err, axis=0).max()
+        # Compute max_err using weights if provided
+        if w_err is not None:
+            max_err = np.average(p_err, axis=0, weights=w_err).max()
+        else:
+            max_err = np.median(p_err, axis=0).max()
         ax.axhline(max_err, color='green', linestyle='-', alpha=0.5)
 
-        y_lim = max([p_0.max(), p_1.max(), p_err.max()])
+        # y_max controls the axis display limit in % units; default to the data range
+        if y_max is None:
+            y_max_disp = max(np.median(p_0, axis=0).max(), np.median(p_1, axis=0).max())
+        else:
+            y_max_disp = y_max
+
         if scale == 'log':
             x_max = cutoff
             ax.set_yscale('symlog', linthresh=linthresh)
-            ax.set_ylim(y_min, y_lim)
+            ax.set_ylim(y_min, y_max_disp)
         else:
             x_max = cutoff
-            ax.set_ylim(0, y_lim)
+            ax.set_ylim(0, y_max_disp)
 
         ax.set_title(title)
         ax.legend()
         ax.set_xlim(0, x_max)
-        # ax.text(x_max-16, max_err+2.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
-        ax.text(6, max_err+0.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
+        text_x = min(6, x_max * 0.15)  # keep label inside the axes
+        ax.text(text_x, max_err+0.5, "Max. err.: {:.1f}%".format(max_err), fontsize=12)
         ax.set_xlabel('Pixels from on-axis, [pix]')
         ax.set_ylabel('Normalized intensity, [%]')
         ax.grid()

@@ -228,7 +228,7 @@ with torch.no_grad():
         multiple_obs    = True,
         LO_NCPAs        = True,
         chrom_defocus   = False,
-        Moffat_absorber = False,
+        use_Moffat      = False,
         retain_PSDs     = False,
         N_spline_nodes  = 5,
         Z_mode_max      = 9,
@@ -255,7 +255,7 @@ PSF_model.inputs_manager.delete('src_dirs_y') # -//-
 PSF_model.inputs_manager.delete('wind_speed_single') # Wind vector is not predicted
 PSF_model.inputs_manager.delete('wind_dir_single') # -//-
 
-if PSF_model.Moffat_absorber:
+if PSF_model.use_Moffat:
     # PSF_model.inputs_manager.delete('beta')
     # PSF_model.inputs_manager.delete('b')
     PSF_model.inputs_manager.delete('theta')

@@ -1,3 +1,4 @@
+
 #%%
 %reload_ext autoreload
 %autoreload 2
@@ -31,7 +32,11 @@ cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcomb
 
 ob = MUSEObservation(raw_path, cube_path, cache_path, device=default_device)
 
-ob.λ_batch_size = 3681//3
+ob.λ_batch_size = ob.λ_full.shape[0]  # Process all wavelengths at once (adjust if memory issues arise)
+
+# empirical values for background per spectral layer
+# bg = torch.tensor([6.0098, 6.1958, 4.9111, 4.5129, 5.3333, 4.7910, 7.7348], device=ob.cube_sparse.device)
+# ob.cube_sparse -= bg.view(-1, 1, 1)
 
 #%%
 # Read pre-processed HST data from DataFrame
@@ -57,7 +62,7 @@ sources[['x_peak', 'y_peak']] = sources[['x_peak', 'y_peak']] * 1e3 / 25.0 + ob.
 sources['weight'] = 1.0
 
 # Leave the first N brighest sources
-sources = sources.nlargest(50, 'peak_value')
+# sources = sources.nlargest(50, 'peak_value')
 
 #%%
 ob.sources_table = sources
@@ -70,6 +75,12 @@ ob.PlotSourceSpectra()
 ob.InitSimulation()
 
 #%%
+model_data = ob.PSF_model.save(cpu=True)
+
+#%%
+ob.PSF_model.load(model_data, device=ob.PSF_model.device)
+
+#%%
 # ob.FitPSFModel(repeat=3, max_iter=200)
 # ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
 ob.FitPSFModel(fit=['astrometry'], repeat=1, max_iter=200)
@@ -78,47 +89,237 @@ ob.FitPSFModel(fit=['astrometry'], repeat=1, max_iter=200)
 
 #%%
 model, PSFs, flux_normalization = ob.SimulateField(return_PSFs=True)
-ob.DisplaySimulation(plot_profiles=True)
 
 #%%
-from tools.multisources import VisualizeSources, add_ROIs_separately
+from tools.multisources import VisualizeSources, add_ROIs_separately, PlotSourcesProfiles, extract_ROIs
+from matplotlib.colors import LogNorm
 
-def DisentangleFlux(ob, PSFs, rcond=1e-2):
+
+def DisentangleFlux(
+    ob,
+    PSFs,
+    cube=None,            # optional: supply any [N_wvl, H, W] tensor directly;
+                          # if None, falls back to ob.cube_full / ob.cube_sparse
+    solver='linear',      # 'linear' | 'nonlinear'
+    full_spectrum=False,  # used only when cube=None: selects ob.cube_full vs ob.cube_sparse
+    rcond=1e-2,
+    # nonlinear-only options
+    n_iter=1000,
+    lr=1e-2,
+    init_from_lstsq=True,
+    bg_unconstrained=True,
+    verbose=False,
+    nan_policy="zero",
+    grad_clip=None,
+    preferred_device=None
+):
     """
-    Reconstruct spectral cube by solving for optimal flux coefficients per wavelength.
-    
+    Reconstruct spectral cube by solving for per-source flux spectra and a
+    per-wavelength background:  P @ spectrum + bg ≈ I_data
+
     Parameters
     ----------
     ob : MUSEObservation
-        Observation object containing cube data and source information
-    PSFs : torch.Tensor
-        PSF models for each source [N_src, N_wvl, H, W]
+    PSFs : torch.Tensor  [N_src, N_wvl, H, W]
+    cube : torch.Tensor or None
+        Observed data cube [N_wvl, H, W].  If None, the cube is taken from
+        ob.cube_full (when full_spectrum=True) or ob.cube_sparse otherwise.
+    solver : {'linear', 'nonlinear'}
+        'linear'    — unconstrained least-squares (fast, may yield negative fluxes
+                      which are then clamped to zero).
+        'nonlinear' — gradient-based with softplus constraint enforcing non-negative
+                      spectra (slower, but physically consistent).
+    full_spectrum : bool
+        Only used when cube=None.  If True, ob.cube_full is used instead of
+        ob.cube_sparse.
     rcond : float
-        Cutoff for small singular values in least-squares solver
-        
+        Cutoff for small singular values in the least-squares solver.
+    n_iter : int
+        Number of Adam iterations (nonlinear solver only).
+    lr : float
+        Adam learning rate (nonlinear solver only).
+    init_from_lstsq : bool
+        Warm-start the nonlinear solver from the least-squares solution.
+    bg_unconstrained : bool
+        If True the background is left unconstrained; otherwise it is also
+        passed through softplus (nonlinear solver only).
+    verbose : bool
+        Print progress every 100 iterations (nonlinear solver only).
+    nan_policy : {'zero', 'raise'}
+        How to handle NaN/Inf values in inputs or intermediate results
+        (nonlinear solver only).
+    grad_clip : float or None
+        Gradient-norm clip value (nonlinear solver only).
+    preferred_device : torch.device or None
+        If set, both cube and PSFs are moved to this device before solving.
+
     Returns
     -------
-    I_sim : torch.Tensor
-        Reconstructed spectral cube [N_wvl, H, W]
+    I_sim    : torch.Tensor  [N_wvl, H, W]
+    spectrum : torch.Tensor  [N_wvl, N_src]
+    bg       : torch.Tensor  [N_wvl]
     """
-    canvas_ = torch.zeros_like(ob.cube_sparse, device=ob.cube_sparse.device)
-    srcs_stack = add_ROIs_separately(canvas_, PSFs, ob.sources.slices_local, ob.sources.slices_global)
-    
-    P = srcs_stack.view(ob.N_src, ob.N_wvl, -1).permute(1, 2, 0)  # [N_wvl, pixels, N_src]
-    I_data = ob.cube_sparse.view(ob.N_wvl, -1, 1)  # [N_wvl, pixels, 1]
-    
-    # Solve flux for all wavelengths
-    spectrum = torch.linalg.lstsq(P, I_data, rcond=rcond).solution  # [N_wvl, N_src, 1]
-    
-    # Reconstruct the full spectral cube
-    I_sim = torch.matmul(P, spectrum).squeeze(-1).view(ob.N_wvl, ob.cube_sparse.shape[-2], ob.cube_sparse.shape[-1])
-    
-    return I_sim, spectrum.squeeze(-1)  # Return both the reconstructed cube and the flux coefficients
+
+    # ------------------------------------------------------------------
+    # Shared setup: resolve cube and N_wvl
+    # ------------------------------------------------------------------
+    if cube is not None:
+        cube_in = cube if isinstance(cube, torch.Tensor) else torch.as_tensor(cube)
+        N_wvl_  = cube_in.shape[0]
+    else:
+        cube_in = ob.cube_full  if full_spectrum else ob.cube_sparse
+        N_wvl_  = ob.N_wvl_full if full_spectrum else ob.N_wvl
+
+    if preferred_device is not None:
+        if verbose:
+            print("Moving data to preferred device for optimization...")
+        cube_in = cube_in.to(preferred_device)
+        PSFs    = PSFs.to(preferred_device)
+        device  = preferred_device
+    else:
+        device = cube_in.device
+            
+    dtype = cube_in.dtype
+
+    def sanitize(x, name):
+        if torch.isfinite(x).all():
+            return x
+        if nan_policy == "raise":
+            raise FloatingPointError(f"{name} contains {(~torch.isfinite(x)).sum().item()} NaN/Inf values.")
+        
+        if nan_policy == "zero":
+            return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        raise ValueError("nan_policy must be 'zero' or 'raise'.")
+
+    cube_sparse = cube_in if solver == 'linear' else sanitize(cube_in, "cube_in")
+    PSFs_       = PSFs    if solver == 'linear' else sanitize(PSFs,    "PSFs")
+
+    canvas_    = torch.zeros_like(cube_sparse, device=device, dtype=dtype)
+    srcs_stack = add_ROIs_separately(canvas_, PSFs_, ob.sources.slices_local, ob.sources.slices_global)
+    if solver == 'nonlinear':
+        srcs_stack = sanitize(srcs_stack, "srcs_stack")
+
+    P      = srcs_stack.view(ob.N_src, N_wvl_, -1).permute(1, 2, 0)  # [N_wvl, pixels, N_src]
+    I_data = cube_sparse.view(N_wvl_, -1, 1)                          # [N_wvl, pixels, 1]
+
+    if solver == 'nonlinear':
+        P      = sanitize(P,      "P")
+        I_data = sanitize(I_data, "I_data")
+
+    N_wvl, N_pix, N_src = P.shape
+
+    # ------------------------------------------------------------------
+    # Linear solver
+    # ------------------------------------------------------------------
+    if solver == 'linear':
+        ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
+        P_aug = torch.cat([P, ones], dim=-1)                              # [N_wvl, pixels, N_src+1]
+
+        solution = torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution  # [N_wvl, N_src+1, 1]
+
+        spectrum = solution[:, :N_src, :].clamp(min=0)  # [N_wvl, N_src, 1]
+        bg       = solution[:, N_src:,  :]              # [N_wvl, 1,     1]
+
+        I_sim = (torch.matmul(P, spectrum) + bg).squeeze(-1).view(
+            N_wvl_, cube_in.shape[-2], cube_in.shape[-1]
+        )
+        return I_sim, spectrum.squeeze(-1), bg.view(N_wvl)
+
+    # ------------------------------------------------------------------
+    # Nonlinear solver
+    # ------------------------------------------------------------------
+    def safe_softplus_inverse(y):
+        y   = sanitize(y, "softplus inverse input")
+        eps = torch.finfo(y.dtype).eps
+        y   = y.clamp_min(eps)
+        thr = torch.tensor(20.0, device=y.device, dtype=y.dtype)
+        return torch.where(y > thr, y, torch.log(torch.expm1(y).clamp_min(eps)))
+
+    # Initialization
+    if init_from_lstsq:
+        ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
+        P_aug = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
+        with torch.no_grad():
+            sol            = sanitize(torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution, "least-squares solution")
+            spectrum_init  = sanitize(sol[:, :N_src, 0], "spectrum_init").clamp_min(0)
+            bg_init        = sanitize(sol[:, N_src,  0], "bg_init")
+            raw_spec_init  = safe_softplus_inverse(spectrum_init)
+            raw_bg_init    = bg_init if bg_unconstrained else safe_softplus_inverse(bg_init.clamp_min(0))
+    else:
+        raw_spec_init = torch.zeros(N_wvl, N_src, device=device, dtype=dtype)
+        raw_bg_init   = torch.zeros(N_wvl,        device=device, dtype=dtype)
+
+    raw_spectrum = torch.nn.Parameter(sanitize(raw_spec_init, "raw_spectrum_init").clone())
+    raw_bg       = torch.nn.Parameter(sanitize(raw_bg_init,   "raw_bg_init").clone())
+
+    optimizer = torch.optim.Adam([raw_spectrum, raw_bg], lr=lr)
+
+    last_good_spec = raw_spectrum.detach().clone()
+    last_good_bg   = raw_bg.detach().clone()
+
+    for i in range(n_iter):
+        optimizer.zero_grad(set_to_none=True)
+
+        spectrum = F.softplus(raw_spectrum)
+        bg       = raw_bg if bg_unconstrained else F.softplus(raw_bg)
+
+        pred = torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1)
+        loss = torch.mean((pred - I_data) ** 2)
+
+        if not torch.isfinite(loss):
+            if verbose:
+                print(f"iter {i:05d} | non-finite loss; restoring last good state")
+            with torch.no_grad():
+                raw_spectrum.copy_(last_good_spec)
+                raw_bg.copy_(last_good_bg)
+            break
+
+        loss.backward()
+
+        with torch.no_grad():
+            for param in [raw_spectrum, raw_bg]:
+                if param.grad is not None and not torch.isfinite(param.grad).all():
+                    param.grad = torch.nan_to_num(param.grad, nan=0.0, posinf=0.0, neginf=0.0)
+
+        if grad_clip is not None:
+            torch.nn.utils.clip_grad_norm_([raw_spectrum, raw_bg], grad_clip)
+
+        optimizer.step()
+
+        if not torch.isfinite(raw_spectrum).all() or not torch.isfinite(raw_bg).all():
+            if verbose:
+                print(f"iter {i:05d} | non-finite parameters; restoring last good state")
+            with torch.no_grad():
+                raw_spectrum.copy_(last_good_spec)
+                raw_bg.copy_(last_good_bg)
+            break
+
+        with torch.no_grad():
+            last_good_spec.copy_(raw_spectrum)
+            last_good_bg.copy_(raw_bg)
+
+        if verbose and (i % 100 == 0 or i == n_iter - 1):
+            print(f"iter {i:05d} | loss = {loss.item():.6e}")
+
+    with torch.no_grad():
+        spectrum = sanitize(F.softplus(raw_spectrum), "final spectrum")
+        bg       = sanitize(raw_bg if bg_unconstrained else F.softplus(raw_bg), "final background")
+
+        I_sim = (torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1)).squeeze(-1).view(
+            N_wvl_, cube_sparse.shape[-2], cube_sparse.shape[-1]
+        )
+        I_sim = sanitize(I_sim, "I_sim")
+
+    return I_sim.detach(), spectrum.detach(), bg.detach()
 
 
-I_sim, F = DisentangleFlux(ob, PSFs)
+# Sparse spectrum (fast, good for fitting / QC)
+# I_sim, fluxes, bg_solved = DisentangleFlux(ob, PSFs, ob.cube_sparse, solver='linear')
+I_sim, fluxes, bg_solved = DisentangleFlux(ob, PSFs, ob.cube_sparse, solver='nonlinear')
 
 #%%
+from matplotlib.colors import LogNorm
+
 bg = ob.residue_sparse.clone()
 
 # Adjustable parameters
@@ -157,26 +358,107 @@ mask |= (y_grid < border_margin) | (y_grid >= bg.shape[-2] - border_margin)
 # Apply mask (set masked pixels to NaN)
 bg[:, mask] = float('nan')
 
-# plt.imshow(bg.sum(dim=0).cpu(), origin='lower', norm=display_norm, cmap='inferno')
+display_norm = LogNorm(vmin=1, vmax=ob.cube_sparse.sum(dim=0).max()) # again, rather empirical values
+plt.imshow(bg.sum(dim=0).cpu(), origin='lower', norm=display_norm, cmap='inferno')
 
 bg = torch.nanmean(bg, dim=(-2,-1))  # Average over the field, ignoring NaNs
-
 bg = bg.view(ob.N_wvl, 1, 1)
 
 #%%
-xx = ob.cube_sparse.clone()
+data_img = ob.cube_sparse.clone() - bg_solved.view(ob.N_wvl, 1, 1)
+I_sim_ = I_sim - bg_solved.view(ob.N_wvl, 1, 1)
 
 #%%
-ob.cube_sparse -= bg
+# display_norm = LogNorm(vmin=1, vmax=data_img.sum(dim=0).max()) # again, rather empirical values
+# _ = VisualizeSources(data_img, ob.simulated_sparse, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
+
+display_norm = LogNorm(vmin=1, vmax=data_img.sum(dim=0).max().item()) # again, rather empirical values
+
+_ = VisualizeSources(data_img, I_sim_, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
 
 #%%
-from matplotlib.colors import LogNorm
+# w = ob.sources.table['peak_value'].values.copy() # get flux values as weights
+# w = w / w.max() # Normalize weights by flux to [0, 1]
+# min_thresh = 0.1
+# w += min_thresh
+# w /= 1. + min_thresh
 
-display_norm = LogNorm(vmin=1, vmax=ob.cube_sparse.sum(dim=0).max()) # again, rather empirical values
-_ = VisualizeSources(ob.cube_sparse, ob.simulated_sparse, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
+PlotSourcesProfiles(data_img, I_sim_, ob.sources.table, radius=16, title='Source radial profiles (sparse spectrum)')
+# PlotSourcesProfiles(ob.cube_sparse, ob.simulated_sparse, ob.sources.table, radius=16, title='Source radial profiles (sparse spectrum)')
 
 #%%
-_ = VisualizeSources(ob.cube_sparse, I_sim, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
+ROIs_0, _, _, _ = extract_ROIs(data_img, ob.sources.table, box_size=7)
+ROIs_1, _, _, _ = extract_ROIs(I_sim_,   ob.sources.table, box_size=7)
+
+# Spectrally average the PSFs
+avg_white = (
+    lambda x: torch.stack(x).mean(dim=1)
+    if isinstance(x[0], torch.Tensor)
+    else np.mean(np.stack(x), axis=1)
+)
+
+PSFs_0_white = avg_white(ROIs_0)
+PSFs_1_white = avg_white(ROIs_1)
+
+
+cutoff_id = None
+
+a = PSFs_0_white[:cutoff_id, ...].amax(dim=(-2,-1)).cpu()
+b = PSFs_1_white[:cutoff_id, ...].amax(dim=(-2,-1)).cpu()
+
+d = (a-b).abs() / (a + 1e-10)
+
+# print(d.mean()*100, '%')
+
+#%%
+plt.hist(d.cpu().numpy() * 100, bins=50, range=(0, 100))
+
+# Median line
+median_val = np.median(d.cpu().numpy() * 100)
+plt.axvline(median_val, color='red', linestyle='--', label=f'Median (all sources): {median_val:.2f}%')
+plt.legend()
+
+# plt.yscale('log')
+
+#%%
+from scipy.stats import gaussian_kde
+
+flux = np.asarray(ob.sources.table['peak_value'].values, dtype=float)
+d_pct = d.cpu().numpy() * 100
+valid = (flux > 0) & (d_pct > 0)
+xy = np.vstack([np.log10(flux[valid]), np.log10(d_pct[valid])])
+z_valid = gaussian_kde(xy)(xy)
+z = np.zeros(len(flux))
+z[valid] = z_valid
+
+plt.xlabel('Flux (normalized), [a.u.]')
+plt.ylabel('Difference, [%]')
+plt.yscale('log')
+plt.xscale('log')
+plt.grid()
+plt.scatter(flux, d_pct, c=z, s=20, alpha=0.7, cmap='viridis')
+plt.colorbar(label='Density')
+plt.show()
+
+#%%
+i_src = np.random.randint(0, ob.N_src)
+
+p0   = PSFs_0_white[i_src].cpu()
+p1   = PSFs_1_white[i_src].cpu()
+diff = np.abs(p0 - p1)
+
+vmin = 0.0
+vmax = max(p0.max(), p1.max()).item()
+
+fig, axes = plt.subplots(1, 3, figsize=(12, 4))
+im0 = axes[0].imshow(p0,   origin='lower', cmap='inferno', vmin=vmin, vmax=vmax)
+im1 = axes[1].imshow(p1,   origin='lower', cmap='inferno', vmin=vmin, vmax=vmax)
+im2 = axes[2].imshow(diff, origin='lower', cmap='inferno', vmin=vmin, vmax=vmax)
+axes[0].set_title('Data (white-light)')
+axes[1].set_title('Model (white-light)')
+axes[2].set_title('Difference')
+fig.colorbar(im2, ax=axes, shrink=0.7)
+plt.show()
 
 #%%
 Strehls_per_λ = ob.PSF_model.ComputeStrehl()
@@ -187,8 +469,15 @@ plt.xlabel('Wavelength, [nm]')
 plt.grid()
 plt.show()
 
+
 #%%
-_ = ob.SimulateField(full_spectrum=True)
+# Full spectrum (slow — runs on CPU; PSFs_full must be [N_src, N_wvl_full, H, W])
+PSFs_full = ob.PSF_model.SimulateFullSpectrum(λ_batch_size=ob.λ_batch_size, verbose=True)
+
+#%%
+I_sim_full, fluxes_full, bg_solved_full = DisentangleFlux(ob, PSFs_full, ob.cube_full, solver='linear', preferred_device=torch.device('cpu'))
+
+#%%
 ob.DisplaySimulation(plot_profiles=True, plot_full_spectrum=True)
 
 #%%
