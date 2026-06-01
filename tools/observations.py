@@ -1,6 +1,8 @@
 #%%
 import sys, os
 
+from astropy.units import pR
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tiptorch._config import WEIGHTS_FOLDER, default_torch_type
@@ -44,7 +46,10 @@ class SourcesSubset:
     spectra_full: torch.Tensor
     spectra_res_sparse: Optional[torch.Tensor] = None
     spectra_res_full: Optional[torch.Tensor] = None
+    proximity_table: Optional[np.ndarray] = None
 
+    def __len__(self) -> int:
+        return len(self.ids)
 
 @dataclass
 class SourcesData:
@@ -57,11 +62,13 @@ class SourcesData:
     spectra_sparse: torch.Tensor
     spectra_res_full: Optional[torch.Tensor] = None
     spectra_res_sparse: Optional[torch.Tensor] = None
+    proximity_table: Optional[np.ndarray] = None
 
     def __post_init__(self) -> None:
         self.table = self.table.reset_index(drop=True).copy()
         self.table.index.name = "src_id"
         self.table["src_id"] = np.arange(len(self.table), dtype=int)
+        self.create_proximity_table() # Precompute the proximity table for efficient spatial queries later  
 
     def __len__(self) -> int:
         return len(self.table)
@@ -89,8 +96,89 @@ class SourcesData:
             spectra_sparse = self.spectra_sparse[ids],
             spectra_full   = self.spectra_full[ids],
             spectra_res_sparse = self.spectra_res_sparse[ids] if self.spectra_res_sparse is not None else None,
-            spectra_res_full   = self.spectra_res_full[ids]   if self.spectra_res_full is not None   else None
+            spectra_res_full   = self.spectra_res_full[ids]   if self.spectra_res_full is not None   else None,
+            proximity_table    = self.proximity_table[np.ix_(ids, ids)] if self.proximity_table is not None else None
         )
+
+    def create_proximity_table(self) -> None:
+        """Vectorized squared-distance matrix between all source pairs. Returns [N, N] array in pix^2."""
+        coords = self.table[['x_peak', 'y_peak']].to_numpy()
+        diff = coords[:, None, :] - coords[None, :, :]  # [N, N, 2]
+        self.proximity_table = np.einsum('ijk,ijk->ij', diff, diff) # [N, N]
+
+    def get_N_closest_sources(self, i_src: int, N: int) -> "SourcesSubset":
+        """Return indices of the n closest sources to i_src, sorted by ascending distance."""
+        distances = self.proximity_table[i_src]
+        indices = np.argpartition(distances, min(N, len(distances) - 1))[:N]
+        return self.select(indices[np.argsort(distances[indices])].tolist())
+
+    def sources_within_radius(self, i_src: int, radius: float, d_offset: float = 0.0) -> "SourcesSubset":
+        """Return indices of sources within radius + d_offset of i_src, sorted by ascending distance."""
+        distances = self.proximity_table[i_src]
+        indices = np.where(distances <= (radius + d_offset) ** 2)[0]
+        return self.select(indices[np.argsort(distances[indices])].tolist())
+
+    def select_sources_in_tile(
+        self,
+        ROI: tuple,   # (slice_y, slice_x) - same format as slices_global entries
+        d_offset: float,
+        N: int | None = None
+    ) -> SourcesSubset:
+        """
+        Return source indices inside the tile (plus sources within d_offset of its boundary).
+
+        ROI is a (slice_y, slice_x) pair matching the slices_global format, e.g.
+            (slice(y_min, y_max), slice(x_min, x_max))
+        If N is None, all sources within ROI + d_offset are returned sorted by brightness.
+        If N is given and fewer sources qualify, remaining slots are filled by proximity to
+        the nearest in-tile source. When the tile has more than N sources, the brightest N are kept.
+        """
+        sources_pos = self.table[['x_peak', 'y_peak']].to_numpy()
+        slice_y, slice_x = ROI
+        y_min, y_max = slice_y.start, slice_y.stop
+        x_min, x_max = slice_x.start, slice_x.stop
+
+        in_tile_mask = (
+            (sources_pos[:, 0] >= x_min) & (sources_pos[:, 0] <= x_max) &
+            (sources_pos[:, 1] >= y_min) & (sources_pos[:, 1] <= y_max)
+        )
+        in_tile_idx = np.where(in_tile_mask)[0].tolist()
+        outside_idx = np.where(~in_tile_mask)[0]
+
+        outside_pos = sources_pos[outside_idx]
+        dx = np.maximum(0, np.maximum(x_min - outside_pos[:, 0], outside_pos[:, 0] - x_max))
+        dy = np.maximum(0, np.maximum(y_min - outside_pos[:, 1], outside_pos[:, 1] - y_max))
+        near_mask = np.hypot(dx, dy) <= d_offset
+
+        def _by_brightness(idx_list):
+            vals = self.table.iloc[idx_list]['peak_value'].to_numpy()
+            return [idx_list[i] for i in np.argsort(vals)[::-1]]
+
+        # When N is not given, return all sources within ROI + d_offset, sorted by brightness
+        if N is None:
+            in_idx   = _by_brightness(in_tile_idx)
+            near_idx = _by_brightness(outside_idx[near_mask].tolist())
+            return self.select(in_idx + [i for i in near_idx if i not in set(in_idx)])
+
+        # More sources than needed -> keep brightest
+        if len(in_tile_idx) >= N:
+            return self.select(_by_brightness(in_tile_idx)[:N])
+
+        # Fewer sources than needed -> pad with nearby sources
+        near_idx = _by_brightness(outside_idx[near_mask].tolist())
+
+        all_idx = in_tile_idx + near_idx
+        n_needed = N - len(all_idx)
+
+        if n_needed > 0:
+            remaining = np.setdiff1d(np.arange(len(self.table)), all_idx)
+            if len(in_tile_idx) > 0:
+                dists = self.proximity_table[in_tile_idx[0], remaining]
+            else:
+                dists = -self.table.iloc[remaining]['peak_value'].to_numpy()
+            all_idx += remaining[np.argsort(dists)][:n_needed].tolist()
+
+        return self.select(all_idx[:N])
 
     def subset(self, src_ids: Optional[Union[int, Sequence[int]]] = None) -> "SourcesSubset":
         """Return a subset view for the requested source IDs."""
@@ -326,7 +414,7 @@ class MUSEObservation:
         self.N_src = len(self.sources)
         
         if verbose:
-            print(f"Extracted {self.N_src} sources for fitting.")
+            print(f"Extracted {self.N_src} source{'s' if self.N_src != 1 else ''}.")
             print(f"Num. of filtered sources on the edge of the field: {len(self.sources_table) - self.N_src}")
             
 
@@ -463,15 +551,24 @@ class MUSEObservation:
 
 
     @torch.no_grad()
-    def simulate_full(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def simulate_full(self, src_subset: Optional[SourcesSubset] = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if src_subset is None:
+            src_subset = self.sources.select(None)
+
+        all_selected = len(src_subset.ids) == self.N_src
         # No inputs since SimulateFullSpectrum() fully relies on the inputs stored in the inputs_manager, which are already up-to-date
-        PSFs_full = self.PSF_model.SimulateFullSpectrum(verbose=True, λ_batch_size=self.λ_batch_size)
+        PSFs_full = self.PSF_model.SimulateFullSpectrum(
+            src_ids = None if all_selected else src_subset.ids,
+            λ_batch_size = self.λ_batch_size,
+            verbose = True
+        )
         # Now, chromatic PSF normalization factor must be re-evaluated for the full NFM spectrum
         PSF_norm_factor_full = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_full_normed).cpu()
-        flux_normalization   = self.PSF_model.inputs_manager['F_norm'].cpu() * PSF_norm_factor_full
+        F_norm = self.PSF_model.inputs_manager['F_norm'].cpu() if all_selected else self.PSF_model.inputs_manager['F_norm'][src_subset.ids].cpu()
+        flux_normalization = F_norm * PSF_norm_factor_full
         # Apply the flux scaling
-        PSFs_ = PSFs_full * (flux_normalization * self.sources.spectra_full).view(-1, self.N_wvl_full, 1, 1)
-        self.simulated_full = add_ROIs(self.canvas_full, PSFs_, self.sources.slices_local, self.sources.slices_global)
+        PSFs_ = PSFs_full * (flux_normalization * src_subset.spectra_full).view(-1, self.N_wvl_full, 1, 1)
+        self.simulated_full = add_ROIs(self.canvas_full, PSFs_, src_subset.slices_local, src_subset.slices_global)
         return self.simulated_full, PSFs_full, flux_normalization
 
 
@@ -517,20 +614,19 @@ class MUSEObservation:
         photometry_params = ['bg_ctrl', 'F_norm_λ_ctrl', 'F_norm']
 
         if 'PSF' in fit_params and 'astrometry' in fit_params and 'photometry' in fit_params:
-            fitable_set = None # all PSF model parameters are optimized
+            fitable_set = None # all currently selected model parameters are optimized
         else:
             fitable_set = (PSF_params        if 'PSF'        in fit_params else []) + \
                           (astrometry_params if 'astrometry' in fit_params else []) + \
                           (photometry_params if 'photometry' in fit_params else [])
-            # Check if selected parameters are fittable within the PSF model
+            # Check if selected parameters are already selected within the PSF model
             fitable_set = [param for param in fitable_set if self.PSF_model.inputs_manager.is_optimizable(param)]
         return fitable_set
 
 
     # TODO: provide sources selection from outside
     def FitPSFModel(self, fit=['PSF', 'astrometry', 'photometry'], repeat=2, max_iter=200) -> None:
-        
-        # optimizables_backup = self.PSF_model.get_optimizable_param_names() # backup the original optimizables settings to restore them later if needed
+        import gc
         # Vector to store the encoded PSF model parameters
         x_params = None
         
@@ -554,9 +650,11 @@ class MUSEObservation:
                 force_bfgs = True,
                 include_params = optimizables_
             )
-
-        # self.PSF_model.inputs_manager.set_optimizable(optimizables_backup) # restore the original optimizables settings after fitting
         # NOTE: Intrinsic values inside PSF_model.inputs manager are updated automatically on every function call
+             
+        gc.collect()
+        torch.cuda.empty_cache()
+        # Clean up GPU memory after fitting
         
 
     @torch.no_grad() #TODO: split output

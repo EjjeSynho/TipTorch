@@ -653,9 +653,15 @@ class PSFModelNFM:
     
     
     @torch.no_grad()
-    def SimulateFullSpectrum(self, λ_batch_size=100, verbose=False):
+    def SimulateFullSpectrum(self, src_ids=None, λ_batch_size=100, verbose=False) -> torch.Tensor:
         ''' The function to simulate PSFs across the full MUSE NFM spectral range at once. It simulates the PSF chromatic cube for each source
             sequentially parallelizing over wavelengths batches to avoid GPU memory overflow. '''
+
+        # Determine the number of simulated sources
+        if src_ids is None:
+            N_src_sim = self.model.N_src
+        else:
+            N_src_sim = len(src_ids) if isinstance(src_ids, (list, tuple)) else 1
 
         # ----- Manage model inputs
         x_dict = self.inputs_manager.to_dict()
@@ -665,7 +671,6 @@ class PSFModelNFM:
         for entry in self.polychromatic_params:
             if entry + '_ctrl' in x_dict:
                 x_dict_λ_full[entry] = self.evaluate_splines(x_dict[entry + '_ctrl'], self.λ_full_normed)
-                x_dict[entry + '_ctrl']
                 x_dict.pop(entry + '_ctrl') # Remove the control λs from x_dict to avoid confusion, since we now have the full λs values for these parameters
 
         x_dict_λ_full['Jx'] = x_dict_λ_full['J']
@@ -692,13 +697,24 @@ class PSFModelNFM:
 
         # ----- Manage wavelengths batches and PSF simulation
         # Full spectral cubes for each source
-        PSFs_combined = torch.zeros((self.model.N_src, self.num_λ_slices, self.model.N_pix, self.model.N_pix), device='cpu')
+        PSFs_combined = torch.zeros((N_src_sim, self.num_λ_slices, self.model.N_pix, self.model.N_pix), device='cpu')
 
         max_λ_batch_size = λ_batch_size # TODO: adjust based on memory available and the number of sources simulated
         λ_batches = [self.λ_full[i:i + max_λ_batch_size].detach().clone() for i in range(0, len(self.λ_full), max_λ_batch_size)]
 
         _initial_wvl = self.λ_sim.clone()
         _N_src = self.model.N_src
+
+        # Resolve which sources to simulate
+        if src_ids is None:
+            src_ids_list = list(range(_N_src))
+            
+        elif isinstance(src_ids, int):
+            src_ids_list = [src_ids]
+        else:
+            src_ids_list = list(src_ids)
+            
+        N_src_sim = len(src_ids_list)
 
         self.model.N_src = 1 # Temporarily set to 1 to compute PSFs for each source separately
 
@@ -728,8 +744,8 @@ class PSFModelNFM:
                 chrom_defocus_batch = x_dict['chrom_defocus'][..., λ_ids] if self.chrom_defocus else None
                 self.model.ComputeStaticOTF(self.phase_func(x_dict['LO_coefs'], chrom_defocus_batch))
 
-            # Iterate over all sources
-            for src_id in range(_N_src):
+            # Iterate over selected sources
+            for out_idx, src_id in enumerate(src_ids_list):
                 # Select current object simulated
                 for entry in per_src_params:
                     if entry in polychromatic_params:
@@ -738,7 +754,7 @@ class PSFModelNFM:
                     else:
                         x_[entry] = x_dict[entry][src_id, ...].unsqueeze(0)
 
-                PSFs_combined[src_id, λ_ids, ...] = self.model(x_, None, None).cpu()
+                PSFs_combined[out_idx, λ_ids, ...] = self.model(x_, None, None).cpu()
 
         self.model.N_src = _N_src  # Restore the original number of sources
         self.SetWavelengths(_initial_wvl)  # recomputes grids + tomographic projectors for correct N_src
@@ -747,8 +763,9 @@ class PSFModelNFM:
             self.model.ComputeStaticOTF(phase_)
 
         torch.cuda.empty_cache()
-        
-        return PSFs_combined # [N_src, N_λ_full, N_pix, N_pix]
+        # NOTE: the resulting PSF cube is on CPU to avoid VRAM overflow
+        # NOTE: the order of sources in the output cube corresponds to the order of src_ids_list
+        return PSFs_combined # [N_src_sim, N_λ_full, N_pix, N_pix]
 
 
     @torch.no_grad()

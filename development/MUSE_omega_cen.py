@@ -64,28 +64,51 @@ sources['weight'] = 1.0
 # Leave the first N brighest sources
 # sources = sources.nlargest(50, 'peak_value')
 
-#%%
 ob.sources_table = sources
-
 ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
-ob.DisplaySources(draw_box_size=5)
-
 #%%
-ob.PlotSourceSpectra()
+# ob.DisplaySources(draw_box_size=5)
+# ob.PlotSourceSpectra()
+
+#%
 ob.InitSimulation()
 
 #%%
-model_data = ob.PSF_model.save(cpu=True)
+from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
+
+model_cache = MUSE_DATA_FOLDER / "omega_cluster/PSF_model_predicted.pt"
+
+if model_cache.exists():
+    print("Loading PSF model from cache...")
+    model_data = torch.load(model_cache)
+    ob.PSF_model = PSFModelNFM.load(torch.load(model_cache), device=ob.device)
+else:
+    print("Fitting PSF model...")
+    # ob.FitPSFModel(repeat=3, max_iter=200)
+    # ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
+    ob.FitPSFModel(fit=['astrometry'], repeat=1, max_iter=200)
+    # ob.FitPSFModel(repeat=3, max_iter=200)
+    # ob.FitPSFModel(repeat=3, max_iter=200)
+    model_data = ob.PSF_model.save()#cpu=True)
+    torch.save(model_data, model_cache)
+    print(f"PSF model saved to {model_cache}")
 
 #%%
-ob.PSF_model.load(model_data, device=ob.PSF_model.device)
+from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
-#%%
-# ob.FitPSFModel(repeat=3, max_iter=200)
-# ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
-ob.FitPSFModel(fit=['astrometry'], repeat=1, max_iter=200)
-# ob.FitPSFModel(repeat=3, max_iter=200)
-# ob.FitPSFModel(repeat=3, max_iter=200)
+model_cache = MUSE_DATA_FOLDER / "omega_cluster/PSF_model_fitted.pt"
+
+if model_cache.exists():
+    print("Loading PSF model from cache...")
+    model_data = torch.load(model_cache)
+    ob.PSF_model = PSFModelNFM.load(model_data, device=ob.device)
+else:
+    print("Fitting PSF model...")
+    ob.FitPSFModel(repeat=3, max_iter=200)
+    model_data = ob.PSF_model.save()
+    torch.save(model_data, model_cache)
+    print(f"PSF model saved to {model_cache}")
+
 
 #%%
 model, PSFs, flux_normalization = ob.SimulateField(return_PSFs=True)
@@ -93,15 +116,14 @@ model, PSFs, flux_normalization = ob.SimulateField(return_PSFs=True)
 #%%
 from tools.multisources import VisualizeSources, add_ROIs_separately, PlotSourcesProfiles, extract_ROIs
 from matplotlib.colors import LogNorm
+from tools.observations import SourcesSubset
 
 
 def DisentangleFlux(
-    ob,
+    srcs: SourcesSubset,
     PSFs,
-    cube=None,            # optional: supply any [N_wvl, H, W] tensor directly;
-                          # if None, falls back to ob.cube_full / ob.cube_sparse
-    solver='linear',      # 'linear' | 'nonlinear'
-    full_spectrum=False,  # used only when cube=None: selects ob.cube_full vs ob.cube_sparse
+    data_cube,
+    solver='linear', # 'linear' | 'nonlinear'
     rcond=1e-2,
     # nonlinear-only options
     n_iter=1000,
@@ -117,42 +139,6 @@ def DisentangleFlux(
     Reconstruct spectral cube by solving for per-source flux spectra and a
     per-wavelength background:  P @ spectrum + bg ≈ I_data
 
-    Parameters
-    ----------
-    ob : MUSEObservation
-    PSFs : torch.Tensor  [N_src, N_wvl, H, W]
-    cube : torch.Tensor or None
-        Observed data cube [N_wvl, H, W].  If None, the cube is taken from
-        ob.cube_full (when full_spectrum=True) or ob.cube_sparse otherwise.
-    solver : {'linear', 'nonlinear'}
-        'linear'    — unconstrained least-squares (fast, may yield negative fluxes
-                      which are then clamped to zero).
-        'nonlinear' — gradient-based with softplus constraint enforcing non-negative
-                      spectra (slower, but physically consistent).
-    full_spectrum : bool
-        Only used when cube=None.  If True, ob.cube_full is used instead of
-        ob.cube_sparse.
-    rcond : float
-        Cutoff for small singular values in the least-squares solver.
-    n_iter : int
-        Number of Adam iterations (nonlinear solver only).
-    lr : float
-        Adam learning rate (nonlinear solver only).
-    init_from_lstsq : bool
-        Warm-start the nonlinear solver from the least-squares solution.
-    bg_unconstrained : bool
-        If True the background is left unconstrained; otherwise it is also
-        passed through softplus (nonlinear solver only).
-    verbose : bool
-        Print progress every 100 iterations (nonlinear solver only).
-    nan_policy : {'zero', 'raise'}
-        How to handle NaN/Inf values in inputs or intermediate results
-        (nonlinear solver only).
-    grad_clip : float or None
-        Gradient-norm clip value (nonlinear solver only).
-    preferred_device : torch.device or None
-        If set, both cube and PSFs are moved to this device before solving.
-
     Returns
     -------
     I_sim    : torch.Tensor  [N_wvl, H, W]
@@ -160,26 +146,17 @@ def DisentangleFlux(
     bg       : torch.Tensor  [N_wvl]
     """
 
-    # ------------------------------------------------------------------
-    # Shared setup: resolve cube and N_wvl
-    # ------------------------------------------------------------------
-    if cube is not None:
-        cube_in = cube if isinstance(cube, torch.Tensor) else torch.as_tensor(cube)
-        N_wvl_  = cube_in.shape[0]
+    N_src  = PSFs.shape[0]
+    N_wvl  = PSFs.shape[1]
+    device = preferred_device if preferred_device is not None else PSFs.device 
+    dtype  = PSFs.dtype
+    
+    PSFs = PSFs.to(device=device, dtype=dtype)
+    if isinstance(data_cube, torch.Tensor):
+        data_cube = data_cube.to(device=device, dtype=dtype)
     else:
-        cube_in = ob.cube_full  if full_spectrum else ob.cube_sparse
-        N_wvl_  = ob.N_wvl_full if full_spectrum else ob.N_wvl
-
-    if preferred_device is not None:
-        if verbose:
-            print("Moving data to preferred device for optimization...")
-        cube_in = cube_in.to(preferred_device)
-        PSFs    = PSFs.to(preferred_device)
-        device  = preferred_device
-    else:
-        device = cube_in.device
-            
-    dtype = cube_in.dtype
+        data_cube = torch.tensor(data_cube, device=device, dtype=dtype)
+    
 
     def sanitize(x, name):
         if torch.isfinite(x).all():
@@ -189,18 +166,21 @@ def DisentangleFlux(
         
         if nan_policy == "zero":
             return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+        
         raise ValueError("nan_policy must be 'zero' or 'raise'.")
 
-    cube_sparse = cube_in if solver == 'linear' else sanitize(cube_in, "cube_in")
+    cube_sparse = data_cube if solver == 'linear' else sanitize(data_cube, "cube_in")
     PSFs_       = PSFs    if solver == 'linear' else sanitize(PSFs,    "PSFs")
 
-    canvas_    = torch.zeros_like(cube_sparse, device=device, dtype=dtype)
-    srcs_stack = add_ROIs_separately(canvas_, PSFs_, ob.sources.slices_local, ob.sources.slices_global)
+    # Put PSFs where they should be within the field
+    canvas_ = torch.zeros_like(cube_sparse, device=device, dtype=dtype)
+    srcs_stack = add_ROIs_separately(canvas_, PSFs_, srcs.slices_local, srcs.slices_global)
+    
     if solver == 'nonlinear':
         srcs_stack = sanitize(srcs_stack, "srcs_stack")
 
-    P      = srcs_stack.view(ob.N_src, N_wvl_, -1).permute(1, 2, 0)  # [N_wvl, pixels, N_src]
-    I_data = cube_sparse.view(N_wvl_, -1, 1)                          # [N_wvl, pixels, 1]
+    P      = srcs_stack.view(N_src, N_wvl, -1).permute(1, 2, 0)  # [N_wvl, pixels, N_src]
+    I_data = cube_sparse.view(N_wvl, -1, 1) # [N_wvl, pixels, 1]
 
     if solver == 'nonlinear':
         P      = sanitize(P,      "P")
@@ -208,9 +188,7 @@ def DisentangleFlux(
 
     N_wvl, N_pix, N_src = P.shape
 
-    # ------------------------------------------------------------------
-    # Linear solver
-    # ------------------------------------------------------------------
+    #  ==================================== Linear solver ====================================
     if solver == 'linear':
         ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
         P_aug = torch.cat([P, ones], dim=-1)                              # [N_wvl, pixels, N_src+1]
@@ -221,13 +199,11 @@ def DisentangleFlux(
         bg       = solution[:, N_src:,  :]              # [N_wvl, 1,     1]
 
         I_sim = (torch.matmul(P, spectrum) + bg).squeeze(-1).view(
-            N_wvl_, cube_in.shape[-2], cube_in.shape[-1]
+            N_wvl, data_cube.shape[-2], data_cube.shape[-1]
         )
         return I_sim, spectrum.squeeze(-1), bg.view(N_wvl)
 
-    # ------------------------------------------------------------------
-    # Nonlinear solver
-    # ------------------------------------------------------------------
+    #  ==================================== Non-linear solver ====================================
     def safe_softplus_inverse(y):
         y   = sanitize(y, "softplus inverse input")
         eps = torch.finfo(y.dtype).eps
@@ -242,7 +218,7 @@ def DisentangleFlux(
         with torch.no_grad():
             sol            = sanitize(torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution, "least-squares solution")
             spectrum_init  = sanitize(sol[:, :N_src, 0], "spectrum_init").clamp_min(0)
-            bg_init        = sanitize(sol[:, N_src,  0], "bg_init")
+            bg_init        = sanitize(sol[:,  N_src, 0], "bg_init")
             raw_spec_init  = safe_softplus_inverse(spectrum_init)
             raw_bg_init    = bg_init if bg_unconstrained else safe_softplus_inverse(bg_init.clamp_min(0))
     else:
@@ -306,16 +282,15 @@ def DisentangleFlux(
         bg       = sanitize(raw_bg if bg_unconstrained else F.softplus(raw_bg), "final background")
 
         I_sim = (torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1)).squeeze(-1).view(
-            N_wvl_, cube_sparse.shape[-2], cube_sparse.shape[-1]
+            N_wvl, cube_sparse.shape[-2], cube_sparse.shape[-1]
         )
         I_sim = sanitize(I_sim, "I_sim")
 
     return I_sim.detach(), spectrum.detach(), bg.detach()
 
 
-# Sparse spectrum (fast, good for fitting / QC)
 # I_sim, fluxes, bg_solved = DisentangleFlux(ob, PSFs, ob.cube_sparse, solver='linear')
-I_sim, fluxes, bg_solved = DisentangleFlux(ob, PSFs, ob.cube_sparse, solver='nonlinear')
+I_sim, fluxes, bg_solved = DisentangleFlux(ob.sources.select(None), PSFs, ob.cube_sparse, solver='nonlinear')
 
 #%%
 from matplotlib.colors import LogNorm
@@ -383,7 +358,7 @@ _ = VisualizeSources(data_img, I_sim_, norm=display_norm, mask=ob.valid_mask, RO
 # w += min_thresh
 # w /= 1. + min_thresh
 
-PlotSourcesProfiles(data_img, I_sim_, ob.sources.table, radius=16, title='Source radial profiles (sparse spectrum)')
+PlotSourcesProfiles(data_img, I_sim_, ob.sources.table, radius=16, title='Radial profiles', y_max=350, y_min=0.5)
 # PlotSourcesProfiles(ob.cube_sparse, ob.simulated_sparse, ob.sources.table, radius=16, title='Source radial profiles (sparse spectrum)')
 
 #%%
@@ -471,17 +446,116 @@ plt.show()
 
 
 #%%
-# Full spectrum (slow — runs on CPU; PSFs_full must be [N_src, N_wvl_full, H, W])
-PSFs_full = ob.PSF_model.SimulateFullSpectrum(λ_batch_size=ob.λ_batch_size, verbose=True)
+def DisentangleFluxBatched(
+    ob,
+    PSFs,
+    data_cube,
+    batch_size=32,
+    solver="linear",
+    verbose=False,
+    **disentangle_kwargs,
+):
+    """
+    Batched wavelength wrapper around DisentangleFlux.
 
-#%%
-I_sim_full, fluxes_full, bg_solved_full = DisentangleFlux(ob, PSFs_full, ob.cube_full, solver='linear', preferred_device=torch.device('cpu'))
+    Splits the spectral axis into batches, solves
 
-#%%
-ob.DisplaySimulation(plot_profiles=True, plot_full_spectrum=True)
+        spectrum @ PSFs + bg ≈ I_data
 
-#%%
-ob.PlotSourceSpectra(title='Sources spectra (residual)', show_sparse=False, plot_residual=True, smooth_kernel=15)
+    independently for each wavelength batch, then concatenates the results.
+
+    Parameters
+    ----------
+    ob : object
+        Observation object passed directly to DisentangleFlux.
+
+    PSFs : torch.Tensor
+        Normalized source PSFs with shape [N_src, N_wvl, h, w].
+
+    data_cube : torch.Tensor
+        Data cube with shape [N_wvl, H, W].
+
+    batch_size : int
+        Number of wavelength slices per batch. Can be as small as 1.
+
+    solver : str
+        Passed to DisentangleFlux. Either "linear" or "nonlinear".
+
+    verbose : bool
+        If True, prints batch progress.
+
+    **disentangle_kwargs
+        Any extra keyword arguments forwarded to DisentangleFlux, e.g.
+        rcond, n_iter, lr, init_from_lstsq, nan_policy, grad_clip, etc.
+
+    Returns
+    -------
+    I_sim_full : torch.Tensor
+        Simulated/reconstructed cube with shape [N_wvl, H, W].
+
+    spectrum_full : torch.Tensor
+        Recovered source spectra with shape [N_wvl, N_src].
+
+    bg_full : torch.Tensor
+        Recovered background with shape [N_wvl].
+    """
+
+    if batch_size is None:
+        batch_size = data_cube.shape[0]
+
+    batch_size = int(batch_size)
+    if batch_size < 1:
+        raise ValueError("batch_size must be >= 1.")
+
+    N_src_psf, N_wvl_psf = PSFs.shape[:2]
+    N_wvl_cube = data_cube.shape[0]
+
+    if N_wvl_psf != N_wvl_cube:
+        raise ValueError(
+            f"PSFs and data_cube have inconsistent spectral sizes: "
+            f"PSFs.shape[1]={N_wvl_psf}, data_cube.shape[0]={N_wvl_cube}."
+        )
+
+    I_sim_batches = []
+    spectrum_batches = []
+    bg_batches = []
+
+    for l0 in range(0, N_wvl_cube, batch_size):
+        l1 = min(l0 + batch_size, N_wvl_cube)
+
+        if verbose:
+            print(f"Disentangling wavelength batch {l0}:{l1} / {N_wvl_cube}")
+
+        PSFs_batch = PSFs[:, l0:l1, ...]
+        cube_batch = data_cube[l0:l1, ...]
+
+        I_sim_batch, spectrum_batch, bg_batch = DisentangleFlux(
+            ob,
+            PSFs_batch,
+            cube_batch,
+            solver=solver,
+            verbose=verbose,
+            **disentangle_kwargs,
+        )
+
+        I_sim_batches.append(I_sim_batch)
+        spectrum_batches.append(spectrum_batch)
+        bg_batches.append(bg_batch)
+
+    I_sim_full = torch.cat(I_sim_batches, dim=0)
+    spectrum_full = torch.cat(spectrum_batches, dim=0)
+    bg_full = torch.cat(bg_batches, dim=0)
+
+    return I_sim_full, spectrum_full, bg_full
+
+#%
+# I_sim_full, fluxes_full, bg_solved_full = DisentangleFlux(PSFs_full, ob.cube_full, ob.sources.select(None), solver='linear', preferred_device=torch.device('cpu'))
+
+#%
+# ob.DisplaySimulation(plot_profiles=True, plot_full_spectrum=True)
+
+#%
+# ob.PlotSourceSpectra(title='Sources spectra (residual)', show_sparse=False, plot_residual=True, smooth_kernel=15)
 
 #%%
 # Compute HST spectra for each source
@@ -529,206 +603,84 @@ plt.show()
 
 
 #%% --------------- Tiled optimization ------------------------------
-def find_closest_sources(i_src: int, N: int) -> np.ndarray:
-    """
-    Find N closest sources to the source with index i_src.
 
-    Args:
-        i_src: Index of the reference source
-        N: Number of closest sources to return
+from matplotlib import patches
+import gc
 
-    Returns:
-        numpy array of indices of N closest sources, sorted by distance
-    """
-    sources_ = sources.to_numpy()[:, :-1]  # Exclude the last column
-    deltas = sources_ - sources_[i_src]
-    dist_sq = np.einsum('ij,ij->i', deltas, deltas)  # Efficient way to compute squared distances
-    indices = np.argpartition(dist_sq, N)[:N]  # Get indices of N smallest distances
-    return indices[np.argsort(dist_sq[indices])]  # Sort indices by distance
+y_min = 100
+y_max = 150
+x_min = 100
+x_max = 150
 
+v_max = ob.cube_sparse.sum(0).max().item()
 
-def create_proximity_table(sources_data: pd.DataFrame) -> np.ndarray:
-    """
-    Create a proximity table for all sources.
+selected_ROI = np.s_[y_min:y_max, x_min:x_max]
 
-    Args:
-        sources_data: DataFrame containing source positions
+src_subset = ob.sources.select_sources_in_tile(selected_ROI, d_offset=20)
 
-    Returns:
-        N_src x N_src numpy array where element [i,j] is the squared distance
-        between source i and source j
-    """
-    sources_ = sources_data.to_numpy()[:, :-1]  # Exclude the last column
-    N = len(sources_)
-    proximity_table = np.zeros((N, N))
+simulated, PSFs, flux_norm = ob.simulate_sparse(x=None, src_subset=src_subset)
 
-    for i in range(N):
-        deltas = sources_ - sources_[i]
-        proximity_table[i, :] = np.einsum('ij,ij->i', deltas, deltas)
-
-    return proximity_table # [pix^2]
+plt.imshow(simulated.sum(0).log().cpu(), origin='lower', cmap='inferno', vmin=0.1, vmax=np.log(v_max))
+# Draw square ROI
+rect = patches.Rectangle((x_min, y_min), x_max - x_min, y_max - y_min, linewidth=1, edgecolor='cyan', facecolor='none')
+plt.gca().add_patch(rect)
+plt.title(f"Simulated sparse field for selected tile (N={len(src_subset)} sources)")
+plt.colorbar(label='log(Flux)')
+plt.show()
 
 
-def get_sources_in_ROI(i_src: int, roi_radius: float, proximity_table: np.ndarray) -> list:
-    """
-    Find all sources within a specified ROI around the selected source.
+gc.collect()
+torch.cuda.empty_cache()
 
-    Args:
-        i_src: Index of the center source
-        roi_radius: Radius of ROI in pixels
-        proximity_table: Pre-computed proximity table with squared distances
+#%%
+from tools.multisources import rebase_coords, add_ROIs
 
-    Returns:
-        List of indices of sources within the ROI, sorted by distance
-    """
-    # Get squared distances from source i_src to all other sources
-    distances = proximity_table[i_src, :]
+new_local, new_global, _ = rebase_coords(src_subset.slices_local, src_subset.slices_global, crop_roi=selected_ROI, filter_empty=False)
 
-    # Find indices of sources within the ROI radius (using squared distance)
-    indices = np.where(distances <= roi_radius**2)[0]
+sparse_cube_cropped = ob.cube_sparse[:, selected_ROI[0], selected_ROI[1]]
 
-    # Sort indices by distance
-    return indices[np.argsort(distances[indices])].tolist()
+canva = torch.zeros_like(sparse_cube_cropped, device=ob.device, dtype=ob.cube_sparse.dtype)
 
+testos = add_ROIs(canva, PSFs * (flux_norm * src_subset.spectra_sparse).unsqueeze(-1).unsqueeze(-1), new_local, new_global)
 
-def get_N_closest_sources(i_src: int, n: int, proximity_table: np.ndarray) -> list:
-    """
-    Find the N closest sources to the selected source.
+# plt.imshow(testos.sum(0).log().cpu(), origin='lower', cmap='inferno', vmin=0.1, vmax=np.log(v_max))
 
-    Args:
-        i_src: Index of the center source
-        n: Number of closest sources to return (including the center source)
-        proximity_table: Pre-computed proximity table with squared distances
+simulated_aaa = simulated.clone()
+simulated_aaa[:, selected_ROI[0], selected_ROI[1]] -= testos
+simulated_aaa += 1e-4
 
-    Returns:
-        List of indices of N closest sources, sorted by distance
-    """
-    # Get squared distances from source i_src to all other sources
-    distances = proximity_table[i_src, :]
+#%%
+plt.imshow(simulated_aaa.sum(0).log().cpu(), origin='lower', cmap='inferno', vmin=0.1, vmax=np.log(v_max))
 
-    # Get indices of n smallest distances (including the center source)
-    indices = np.argpartition(distances, min(n, len(distances)-1))[:n]
-    # Sort indices by distance
-    return indices[np.argsort(distances[indices])].tolist()
+#%%
+from tools.multisources import add_ROIs
+
+# Full spectrum (slow — runs on CPU; PSFs_full must be [N_src, N_wvl_full, H, W])
+PSFs_full = ob.PSF_model.SimulateFullSpectrum(src_ids=selected_ids, λ_batch_size=ob.λ_batch_size, verbose=True)
+
+gc.collect()
+torch.cuda.empty_cache()
+
+canva = torch.zeros_like(ob.cube_full, device='cpu', dtype=ob.cube_full.dtype)
+
+simulated_full_selected = add_ROIs(canva, PSFs_full, src_subset.slices_local, src_subset.slices_global)
 
 
-def select_sources_in_tile(
-    sources_data: pd.DataFrame,
-    proximity_table: np.ndarray,
-    x_range: tuple,
-    y_range: tuple,
-    d_offset: float,
-    N: int
-) -> list:
-    """
-    Select all sources within a specified tile plus some sources outside the tile
-    but within d_offset distance, ensuring that exactly N sources are returned.
 
-    Args:
-        sources_data: DataFrame containing source positions and other info
-        proximity_table: Pre-computed proximity table with squared distances
-        x_range: (x_min, x_max) defining the tile's x boundaries
-        y_range: (y_min, y_max) defining the tile's y boundaries
-        d_offset: Maximum distance outside the tile to consider additional sources
-        N: Exact number of sources to return
+#%% Plot multispectral cubes as RGB images
+from tools.plotting import PlotSpetralCubeInRGB
 
-    Returns:
-        List of indices of selected sources
-    """
-    sources_pos = sources_data[['x_peak', 'y_peak']].to_numpy()
+# Mapping MUSE spectral range to visible spectrum range for RGB conversion
+λ_vis = np.linspace(440, 750, diff_img_full.shape[0])
 
-    # Extract x and y range values
-    x_min, x_max = x_range
-    y_min, y_max = y_range
+_ = PlotSpetralCubeInRGB(
+    diff_img_full[ob.ROI_plot],
+    wavelengths=λ_vis,
+    title="Difference",
+    min_val=500, max_val=60000,
+    show=False
+)
 
-    # Find sources within the tile
-    in_tile_mask = ((sources_pos[:, 0] >= x_min) &
-                   (sources_pos[:, 0] <= x_max) &
-                   (sources_pos[:, 1] >= y_min) &
-                   (sources_pos[:, 1] <= y_max))
-
-    in_tile_indices = np.where(in_tile_mask)[0].tolist()
-
-    # If we have exactly N sources, return them
-    if len(in_tile_indices) == N:
-        return in_tile_indices
-
-    # If we have fewer than N sources within the tile, add nearby sources
-    if len(in_tile_indices) < N:
-        # Find sources outside the tile but within d_offset
-        outside_tile_mask = ~in_tile_mask
-        outside_sources = sources_pos[outside_tile_mask]
-        outside_indices = np.where(outside_tile_mask)[0]
-
-        # Calculate distances to the nearest tile boundary for each outside source
-        distances = np.zeros(len(outside_sources))
-        for i, (x, y) in enumerate(outside_sources):
-            # Calculate distance to nearest x and y boundaries
-            dx = max(0, x_min - x, x - x_max)
-            dy = max(0, y_min - y, y - y_max)
-            # Euclidean distance to nearest boundary
-            distances[i] = np.sqrt(dx**2 + dy**2)
-        # Find indices within d_offset of the tile boundary
-        near_tile_mask = distances <= d_offset
-        near_tile_indices = outside_indices[near_tile_mask].tolist()
-
-        # Sort near tile indices by peak value (brightness)
-        if len(near_tile_indices) > 0:
-            peak_values = sources_data.iloc[near_tile_indices]['peak_value'].to_numpy()
-            sorted_indices = np.argsort(peak_values)[::-1]  # Sort descending
-            near_tile_indices = [near_tile_indices[i] for i in sorted_indices]
-
-        # Add more sources from proximity if needed
-        if len(in_tile_indices) + len(near_tile_indices) < N:
-            # Find remaining sources
-            remaining_indices = np.setdiff1d(np.arange(len(sources_data)),
-                                            np.concatenate([in_tile_indices, near_tile_indices]))
-
-            # If we have tile sources, find closest to those
-            if len(in_tile_indices) > 0:
-                # Use the closest source from the tile as reference
-                ref_source = in_tile_indices[0]
-                distances = proximity_table[ref_source, remaining_indices]
-                sorted_indices = np.argsort(distances)
-                additional_indices = remaining_indices[sorted_indices][:N - len(in_tile_indices) - len(near_tile_indices)]
-            else:
-                # Use the brightest source as reference
-                peak_values = sources_data.iloc[remaining_indices]['peak_value'].to_numpy()
-                sorted_indices = np.argsort(peak_values)[::-1]  # Sort descending
-                additional_indices = remaining_indices[sorted_indices][:N - len(in_tile_indices) - len(near_tile_indices)]
-
-            all_indices = in_tile_indices + near_tile_indices + additional_indices.tolist()
-        else:
-            # Just add near tile indices until we have N
-            all_indices = in_tile_indices + near_tile_indices[:N - len(in_tile_indices)]
-
-    # If we have more than N sources within the tile, keep the brightest ones
-    else:
-        peak_values = sources_data.iloc[in_tile_indices]['peak_value'].to_numpy()
-        sorted_indices = np.argsort(peak_values)[::-1]  # Sort descending
-        all_indices = [in_tile_indices[i] for i in sorted_indices[:N]]
-
-    return all_indices
-
-
-proximity_table = create_proximity_table(sources)
-
-# brightest_id = sources_valid['peak_value'].argmax()
-# brightest_pos = sources_valid.iloc[brightest_id][['x_peak', 'y_peak']].to_numpy()
-# x_range = (brightest_pos[0] - 50, brightest_pos[0] + 10)
-# y_range = (brightest_pos[1] - 50, brightest_pos[1] + 10)
-
-# # testo = get_n_closest_sources(brightest_id, N_batch, proximity_table)
-# testo = select_sources_in_tile(sources_valid, proximity_table, x_range, y_range, 50, N_batch)
-
-# model_sparse = add_ROIs(
-#     torch.zeros([N_wvl, data_onsky.shape[-2], data_onsky.shape[-1]], device=device),
-#     [PSFs_fitted[i,...]*norm_factors[i] for i in testo],
-#     [local_coords[i]  for i in testo],
-#     [global_coords[i] for i in testo]
-# )
-
-# VisualizeSources(data_sparse, model_sparse, norm=norm_field, mask=valid_mask)
 
 
 #%%
@@ -779,8 +731,7 @@ def split_image_into_tiles(
                 x_max = width - border_offset
 
             tile_info = {
-                'x_range': (x_min, x_max),
-                'y_range': (y_min, y_max),
+                'roi': (slice(y_min, y_max), slice(x_min, x_max)),
                 'id': (i, j)
             }
 
@@ -827,8 +778,9 @@ def visualize_tiles(
     colors = plt.cm.tab10.colors
 
     for i, tile in enumerate(tiles):
-        x_min, x_max = tile['x_range']
-        y_min, y_max = tile['y_range']
+        slice_y, slice_x = tile['roi']
+        y_min, y_max = slice_y.start, slice_y.stop
+        x_min, x_max = slice_x.start, slice_x.stop
         width = x_max - x_min
         height = y_max - y_min
 
@@ -861,20 +813,18 @@ sources_inputs['dy'] = sources_inputs['dy'].unsqueeze(-1).repeat(1,N_wvl)
 
 
 def simulate_tile(model_inputs, tile, proximity_table, sources, max_sources):
-    
-    x_range, y_range = tile['x_range'], tile['y_range']
+    slice_y, slice_x = tile['roi']
 
     source_indices = select_sources_in_tile(
         sources,
         proximity_table,
-        tile['x_range'],
-        tile['y_range'],
+        tile['roi'],
         d_offset = 30,
         N = max_sources
     )
 
     if len(source_indices) == 0:
-        return torch.zeros([N_wvl, tile['y_range']-tile['y_range'], tile['x_range']-tile['x_range']], device=default_device)
+        return torch.zeros([N_wvl, slice_y.stop - slice_y.start, slice_x.stop - slice_x.start], device=default_device)
 
     # Create model for this tile using the selected sources
     # model_tile = add_ROIs(
@@ -894,7 +844,7 @@ def simulate_tile(model_inputs, tile, proximity_table, sources, max_sources):
         [global_coords[src_id] for src_id in source_indices]
     )
     
-    return model_tile[..., y_range[0]:y_range[1], x_range[0]:x_range[1]]
+    return model_tile[..., slice_y, slice_x]
 
 
 torch.cuda.empty_cache()
@@ -904,9 +854,8 @@ with torch.no_grad():
 # Concatenate tiles back into image based on their positions
 model_sparse_tiled = torch.zeros_like(cube_sparse, device=default_device)
 for tile, model_tile in zip(tiles, tiles_model):
-    x_min, x_max = tile['x_range']
-    y_min, y_max = tile['y_range']
-    model_sparse_tiled[:, y_min:y_max, x_min:x_max] = model_tile[...]
+    slice_y, slice_x = tile['roi']
+    model_sparse_tiled[:, slice_y, slice_x] = model_tile[...]
 
     
 #%%

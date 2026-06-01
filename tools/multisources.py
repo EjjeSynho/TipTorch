@@ -297,6 +297,86 @@ def extract_ROIs_from_coords(image, roi_local_coords, roi_global_coords, PSF_siz
     return ROIs
 
 
+def rebase_coords(local_coords, global_coords, crop_roi, filter_empty=True):
+    """
+    Re-express (local_coords, global_coords) relative to a crop of the original image.
+
+    Parameters
+    ----------
+    local_coords  : list of ((y_min_roi, y_max_roi), (x_min_roi, x_max_roi))
+        Coordinates inside each PSF box.
+    global_coords : list of ((y_min_img, y_max_img), (x_min_img, x_max_img))
+        Coordinates inside the *original* full image.
+    crop_roi : (slice_y, slice_x)
+        The crop expressed as a pair of slices, e.g. ``(slice(64, 192), slice(32, 160))``.
+        ``slice.stop`` may be ``None`` to indicate "until the end" (no upper clipping).
+    filter_empty : bool
+        If True (default), entries whose overlap with the crop is empty are dropped.
+        The function then also returns a list of the surviving original indices.
+        If False, all entries are kept; zero-size slices are left as-is (they are
+        harmless in ``add_ROIs`` because empty slice additions are no-ops).
+
+    Returns
+    -------
+    new_local  : list  - rebased local coordinates
+    new_global : list  - rebased global coordinates (relative to crop origin)
+    kept_ids   : list[int]  - indices into the input lists that were kept
+                 (always returned; equals ``list(range(len(local_coords)))`` when
+                 ``filter_empty=False``)
+    """
+    slice_y, slice_x = crop_roi
+    y_start = slice_y.start if slice_y.start is not None else 0
+    x_start = slice_x.start if slice_x.start is not None else 0
+    y_end   = slice_y.stop   # None = no upper clip
+    x_end   = slice_x.stop   # None = no upper clip
+
+    new_local  = []
+    new_global = []
+    kept_ids   = []
+
+    for idx, (local, glob) in enumerate(zip(local_coords, global_coords)):
+        (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local
+        (y_min_img, y_max_img), (x_min_img, x_max_img) = glob
+
+        # Shift global coords to be relative to crop origin
+        ny_min = y_min_img - y_start
+        ny_max = y_max_img - y_start
+        nx_min = x_min_img - x_start
+        nx_max = x_max_img - x_start
+
+        # Adjust local coords to account for any part of the ROI that falls before the crop
+        new_y_min_roi = y_min_roi + max(0, -ny_min)
+        new_x_min_roi = x_min_roi + max(0, -nx_min)
+
+        # Clip global to [0, crop_size]
+        ny_min = max(0, ny_min)
+        nx_min = max(0, nx_min)
+
+        # Adjust local coords for the upper edge, then clip global
+        if y_end is not None:
+            new_y_max_roi = y_max_roi - max(0, ny_max - y_end + y_start)
+            ny_max = min(ny_max, y_end - y_start)
+        else:
+            new_y_max_roi = y_max_roi
+
+        if x_end is not None:
+            new_x_max_roi = x_max_roi - max(0, nx_max - x_end + x_start)
+            nx_max = min(nx_max, x_end - x_start)
+        else:
+            new_x_max_roi = x_max_roi
+
+        # Check for empty overlap
+        if filter_empty and (ny_min >= ny_max or nx_min >= nx_max or
+                              new_y_min_roi >= new_y_max_roi or new_x_min_roi >= new_x_max_roi):
+            continue
+
+        new_local.append(((new_y_min_roi, new_y_max_roi), (new_x_min_roi, new_x_max_roi)))
+        new_global.append(((ny_min, ny_max), (nx_min, nx_max)))
+        kept_ids.append(idx)
+
+    return new_local, new_global, kept_ids
+
+
 def add_ROIs(image, ROIs, local_coords, global_coords):    
     # If ROIs is a torch tensor with ROIs in the 0th dimension
     if isinstance(ROIs, torch.Tensor) and ROIs.ndim == 4:  # [num_rois, channels, height, width]
