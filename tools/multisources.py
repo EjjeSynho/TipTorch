@@ -13,6 +13,9 @@ from matplotlib.colors import LogNorm
 from tools.plotting import plot_radial_PSF_profiles  # local tools/ dir, not tiptorch
 from scipy import ndimage
 
+from typing import Optional, Union, Sequence
+from dataclasses import dataclass
+
 
 """
 This module is used to manage the multi-source simulations. It contains functions to 
@@ -21,6 +24,262 @@ This module is used to manage the multi-source simulations. It contains function
 - merge multiple images into a single image,
 - visualize sources.
 """
+
+
+@dataclass
+class SourcesSubset:
+    ids: list[int]
+    table: pd.DataFrame
+    imgs_sparse: list | None
+    slices_local: list
+    slices_global: list
+    spectra_sparse: torch.Tensor | None
+    spectra_full: torch.Tensor | None
+    spectra_res_sparse: Optional[torch.Tensor] = None
+    spectra_res_full: Optional[torch.Tensor] = None
+    proximity_table: Optional[np.ndarray] = None
+
+    def __len__(self) -> int:
+        return len(self.ids)
+    
+    def clone(self, light_weight=False) -> "SourcesSubset":
+        """ Light-weight copy creates a copy of the subset without the potentially large image and spectra data when not needed. """
+        return SourcesSubset(
+            ids   = self.ids.copy(),
+            table = self.table.copy(),
+            imgs_sparse        = self.imgs_sparse.copy() if not light_weight else None,
+            slices_local       = self.slices_local.copy(),
+            slices_global      = self.slices_global.copy(),
+            spectra_sparse     = self.spectra_sparse.clone() if not light_weight else None,
+            spectra_full       = self.spectra_full.clone() if not light_weight else None,
+            spectra_res_sparse = self.spectra_res_sparse.clone() if self.spectra_res_sparse is not None and not light_weight else None,
+            spectra_res_full   = self.spectra_res_full.clone() if self.spectra_res_full is not None and not light_weight else None,
+            proximity_table    = self.proximity_table.copy() if self.proximity_table is not None else None
+        )
+
+    def rebase_coords(self, crop_ROI, filter_empty=True) -> "SourcesSubset":
+        """
+        Return a new SourcesSubset whose slices_local / slices_global are re-expressed
+        relative to a crop of the original image.
+
+        Parameters
+        ----------
+        crop_ROI : (slice_y, slice_x)
+            The crop as a pair of slices, e.g. ``(slice(64, 192), slice(32, 160))``.
+            ``slice.stop`` may be ``None`` to indicate "until the end" (no upper clipping).
+        filter_empty : bool
+            If True (default), sources with no overlap with the crop are dropped and all
+            other fields (table, imgs_sparse, spectra_*, proximity_table) are subset
+            accordingly.  If False, all entries are kept with zero-size slices for
+            non-overlapping sources (harmless no-ops in ``add_ROIs``).
+
+        Returns
+        -------
+        SourcesSubset  - new subset with rebased coordinate lists (and optionally filtered).
+        """
+        slice_y, slice_x = crop_ROI
+        y_start = slice_y.start if slice_y.start is not None else 0
+        x_start = slice_x.start if slice_x.start is not None else 0
+        y_end   = slice_y.stop
+        x_end   = slice_x.stop
+
+        new_local  = []
+        new_global = []
+        kept_ids   = []
+
+        for idx, (local, glob) in enumerate(zip(self.slices_local, self.slices_global)):
+            (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local
+            (y_min_img, y_max_img), (x_min_img, x_max_img) = glob
+
+            # Shift global coords to be relative to crop origin
+            ny_min = y_min_img - y_start
+            ny_max = y_max_img - y_start
+            nx_min = x_min_img - x_start
+            nx_max = x_max_img - x_start
+
+            # Advance local coords to skip the part of the ROI that falls before the crop
+            new_y_min_roi = y_min_roi + max(0, -ny_min)
+            new_x_min_roi = x_min_roi + max(0, -nx_min)
+
+            # Clip global lower bound to 0
+            ny_min = max(0, ny_min)
+            nx_min = max(0, nx_min)
+
+            # Trim local / global upper bounds at the crop edge
+            if y_end is not None:
+                new_y_max_roi = y_max_roi - max(0, ny_max - (y_end - y_start))
+                ny_max = min(ny_max, y_end - y_start)
+            else:
+                new_y_max_roi = y_max_roi
+
+            if x_end is not None:
+                new_x_max_roi = x_max_roi - max(0, nx_max - (x_end - x_start))
+                nx_max = min(nx_max, x_end - x_start)
+            else:
+                new_x_max_roi = x_max_roi
+
+            if filter_empty and (ny_min >= ny_max or nx_min >= nx_max or
+                                  new_y_min_roi >= new_y_max_roi or new_x_min_roi >= new_x_max_roi):
+                continue
+
+            new_local.append(((new_y_min_roi, new_y_max_roi), (new_x_min_roi, new_x_max_roi)))
+            new_global.append(((ny_min, ny_max), (nx_min, nx_max)))
+            kept_ids.append(idx)
+
+        # Build the filtered subset if filter_empty=True, otherwise keep all entries with adjusted slices
+        k = kept_ids
+        return SourcesSubset(
+            ids            = [self.ids[i] for i in k],
+            table          = self.table.iloc[k].reset_index(drop=True) if self.table is not None else None,
+            imgs_sparse    = [self.imgs_sparse[i] for i in k] if self.imgs_sparse is not None else None,
+            slices_local   = new_local,
+            slices_global  = new_global,
+            spectra_sparse = self.spectra_sparse[k] if self.spectra_sparse is not None else None,
+            spectra_full   = self.spectra_full[k]   if self.spectra_full   is not None else None,
+            spectra_res_sparse = self.spectra_res_sparse[k] if self.spectra_res_sparse is not None else None,
+            spectra_res_full   = self.spectra_res_full[k]   if self.spectra_res_full   is not None else None,
+            proximity_table    = self.proximity_table[np.ix_(k, k)] if self.proximity_table is not None else None,
+        )
+
+
+@dataclass
+class SourcesData:
+    """All source-indexed arrays. Row order is the canonical source ID order."""
+    table: pd.DataFrame
+    imgs_sparse: list
+    slices_local: list
+    slices_global: list
+    spectra_full: torch.Tensor
+    spectra_sparse: torch.Tensor
+    spectra_res_full: Optional[torch.Tensor] = None
+    spectra_res_sparse: Optional[torch.Tensor] = None
+    proximity_table: Optional[np.ndarray] = None
+
+    def __post_init__(self) -> None:
+        self.table = self.table.reset_index(drop=True).copy()
+        self.table.index.name = "src_id"
+        self.table["src_id"] = np.arange(len(self.table), dtype=int)
+        self.create_proximity_table() # Precompute the proximity table for efficient spatial queries later  
+
+    def __len__(self) -> int:
+        return len(self.table)
+
+    def index(self, src_ids: Optional[Union[int, np.integer, Sequence[int]]] = None) -> list[int]:
+        """Normalize src_ids to an explicit validated list. None returns all source IDs."""
+        if src_ids is None:
+            return list(range(len(self)))
+        if isinstance(src_ids, (int, np.integer)):
+            src_ids = [int(src_ids)]
+        ids = [int(i) for i in src_ids]
+        bad = [i for i in ids if i < 0 or i >= len(self)]
+        if bad:
+            raise IndexError(f"Source IDs out of range: {bad}; valid range is [0, {len(self) - 1}]")
+        return ids
+
+    def select(self, src_ids: Optional[Union[int, Sequence[int]]]) -> "SourcesSubset":
+        ids = self.index(src_ids)
+        return SourcesSubset(
+            ids   = ids,
+            table = self.table.iloc[ids],
+            imgs_sparse    = [self.imgs_sparse[i]   for i in ids],
+            slices_local   = [self.slices_local[i]  for i in ids],
+            slices_global  = [self.slices_global[i] for i in ids],
+            spectra_sparse = self.spectra_sparse[ids],
+            spectra_full   = self.spectra_full[ids],
+            spectra_res_sparse = self.spectra_res_sparse[ids] if self.spectra_res_sparse is not None else None,
+            spectra_res_full   = self.spectra_res_full[ids]   if self.spectra_res_full is not None   else None,
+            proximity_table    = self.proximity_table[np.ix_(ids, ids)] if self.proximity_table is not None else None
+        )
+
+    def create_proximity_table(self) -> None:
+        """Vectorized squared-distance matrix between all source pairs. Returns [N, N] array in pix^2."""
+        coords = self.table[['x_peak', 'y_peak']].to_numpy()
+        diff = coords[:, None, :] - coords[None, :, :]  # [N, N, 2]
+        self.proximity_table = np.einsum('ijk,ijk->ij', diff, diff) # [N, N]
+
+    def get_N_closest_sources(self, i_src: int, N: int) -> "SourcesSubset":
+        """Return indices of the n closest sources to i_src, sorted by ascending distance."""
+        distances = self.proximity_table[i_src]
+        indices = np.argpartition(distances, min(N, len(distances) - 1))[:N]
+        return self.select(indices[np.argsort(distances[indices])].tolist())
+
+    def sources_within_radius(self, i_src: int, radius: float, d_offset: float = 0.0) -> "SourcesSubset":
+        """Return indices of sources within radius + d_offset of i_src, sorted by ascending distance."""
+        distances = self.proximity_table[i_src]
+        indices = np.where(distances <= (radius + d_offset) ** 2)[0]
+        return self.select(indices[np.argsort(distances[indices])].tolist())
+
+    def select_sources_in_tile(
+        self,
+        ROI: tuple,   # (slice_y, slice_x) - same format as slices_global entries
+        d_offset: float,
+        N: int | None = None
+    ) -> SourcesSubset:
+        """
+        Return source indices inside the tile (plus sources within d_offset of its boundary).
+
+        ROI is a (slice_y, slice_x) pair matching the slices_global format, e.g.
+            (slice(y_min, y_max), slice(x_min, x_max))
+        If N is None, all sources within ROI + d_offset are returned sorted by brightness.
+        If N is given and fewer sources qualify, remaining slots are filled by proximity to
+        the nearest in-tile source. When the tile has more than N sources, the brightest N are kept.
+        """
+        sources_pos = self.table[['x_peak', 'y_peak']].to_numpy()
+        slice_y, slice_x = ROI
+        y_min, y_max = slice_y.start, slice_y.stop
+        x_min, x_max = slice_x.start, slice_x.stop
+
+        in_tile_mask = (
+            (sources_pos[:, 0] >= x_min) & (sources_pos[:, 0] <= x_max) &
+            (sources_pos[:, 1] >= y_min) & (sources_pos[:, 1] <= y_max)
+        )
+        in_tile_idx = np.where(in_tile_mask)[0].tolist()
+        outside_idx = np.where(~in_tile_mask)[0]
+
+        outside_pos = sources_pos[outside_idx]
+        dx = np.maximum(0, np.maximum(x_min - outside_pos[:, 0], outside_pos[:, 0] - x_max))
+        dy = np.maximum(0, np.maximum(y_min - outside_pos[:, 1], outside_pos[:, 1] - y_max))
+        near_mask = np.hypot(dx, dy) <= d_offset
+
+        def _by_brightness(idx_list):
+            vals = self.table.iloc[idx_list]['peak_value'].to_numpy()
+            return [idx_list[i] for i in np.argsort(vals)[::-1]]
+
+        # When N is not given, return all sources within ROI + d_offset, sorted by brightness
+        if N is None:
+            in_idx   = _by_brightness(in_tile_idx)
+            near_idx = _by_brightness(outside_idx[near_mask].tolist())
+            return self.select(in_idx + [i for i in near_idx if i not in set(in_idx)])
+
+        # More sources than needed -> keep brightest
+        if len(in_tile_idx) >= N:
+            return self.select(_by_brightness(in_tile_idx)[:N])
+
+        # Fewer sources than needed -> pad with nearby sources
+        near_idx = _by_brightness(outside_idx[near_mask].tolist())
+
+        all_idx = in_tile_idx + near_idx
+        n_needed = N - len(all_idx)
+
+        if n_needed > 0:
+            remaining = np.setdiff1d(np.arange(len(self.table)), all_idx)
+            if len(in_tile_idx) > 0:
+                dists = self.proximity_table[in_tile_idx[0], remaining]
+            else:
+                dists = -self.table.iloc[remaining]['peak_value'].to_numpy()
+            all_idx += remaining[np.argsort(dists)][:n_needed].tolist()
+
+        return self.select(all_idx[:N])
+
+    def subset(self, src_ids: Optional[Union[int, Sequence[int]]] = None) -> "SourcesSubset":
+        """Return a subset view for the requested source IDs."""
+        return self.select(src_ids)
+
+    def __getitem__(self, src_ids: Union[int, np.integer, Sequence[int], slice]) -> "SourcesSubset":
+        """Enable bracket-based source subset selection."""
+        if isinstance(src_ids, slice):
+            return self.select(list(range(len(self)))[src_ids])
+        return self.select(src_ids)
 
 
 def DisplaySources(data_src, sources_df, src_box_size, vmin, vmax, norm=LogNorm, shape='box', ROI=None):
@@ -295,86 +554,6 @@ def extract_ROIs_from_coords(image, roi_local_coords, roi_global_coords, PSF_siz
         ROIs.append(ROI)
 
     return ROIs
-
-
-def rebase_coords(local_coords, global_coords, crop_roi, filter_empty=True):
-    """
-    Re-express (local_coords, global_coords) relative to a crop of the original image.
-
-    Parameters
-    ----------
-    local_coords  : list of ((y_min_roi, y_max_roi), (x_min_roi, x_max_roi))
-        Coordinates inside each PSF box.
-    global_coords : list of ((y_min_img, y_max_img), (x_min_img, x_max_img))
-        Coordinates inside the *original* full image.
-    crop_roi : (slice_y, slice_x)
-        The crop expressed as a pair of slices, e.g. ``(slice(64, 192), slice(32, 160))``.
-        ``slice.stop`` may be ``None`` to indicate "until the end" (no upper clipping).
-    filter_empty : bool
-        If True (default), entries whose overlap with the crop is empty are dropped.
-        The function then also returns a list of the surviving original indices.
-        If False, all entries are kept; zero-size slices are left as-is (they are
-        harmless in ``add_ROIs`` because empty slice additions are no-ops).
-
-    Returns
-    -------
-    new_local  : list  - rebased local coordinates
-    new_global : list  - rebased global coordinates (relative to crop origin)
-    kept_ids   : list[int]  - indices into the input lists that were kept
-                 (always returned; equals ``list(range(len(local_coords)))`` when
-                 ``filter_empty=False``)
-    """
-    slice_y, slice_x = crop_roi
-    y_start = slice_y.start if slice_y.start is not None else 0
-    x_start = slice_x.start if slice_x.start is not None else 0
-    y_end   = slice_y.stop   # None = no upper clip
-    x_end   = slice_x.stop   # None = no upper clip
-
-    new_local  = []
-    new_global = []
-    kept_ids   = []
-
-    for idx, (local, glob) in enumerate(zip(local_coords, global_coords)):
-        (y_min_roi, y_max_roi), (x_min_roi, x_max_roi) = local
-        (y_min_img, y_max_img), (x_min_img, x_max_img) = glob
-
-        # Shift global coords to be relative to crop origin
-        ny_min = y_min_img - y_start
-        ny_max = y_max_img - y_start
-        nx_min = x_min_img - x_start
-        nx_max = x_max_img - x_start
-
-        # Adjust local coords to account for any part of the ROI that falls before the crop
-        new_y_min_roi = y_min_roi + max(0, -ny_min)
-        new_x_min_roi = x_min_roi + max(0, -nx_min)
-
-        # Clip global to [0, crop_size]
-        ny_min = max(0, ny_min)
-        nx_min = max(0, nx_min)
-
-        # Adjust local coords for the upper edge, then clip global
-        if y_end is not None:
-            new_y_max_roi = y_max_roi - max(0, ny_max - y_end + y_start)
-            ny_max = min(ny_max, y_end - y_start)
-        else:
-            new_y_max_roi = y_max_roi
-
-        if x_end is not None:
-            new_x_max_roi = x_max_roi - max(0, nx_max - x_end + x_start)
-            nx_max = min(nx_max, x_end - x_start)
-        else:
-            new_x_max_roi = x_max_roi
-
-        # Check for empty overlap
-        if filter_empty and (ny_min >= ny_max or nx_min >= nx_max or
-                              new_y_min_roi >= new_y_max_roi or new_x_min_roi >= new_x_max_roi):
-            continue
-
-        new_local.append(((new_y_min_roi, new_y_max_roi), (new_x_min_roi, new_x_max_roi)))
-        new_global.append(((ny_min, ny_max), (nx_min, nx_max)))
-        kept_ids.append(idx)
-
-    return new_local, new_global, kept_ids
 
 
 def add_ROIs(image, ROIs, local_coords, global_coords):    

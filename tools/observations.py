@@ -1,21 +1,19 @@
 #%%
 import sys, os
 
-from astropy.units import pR
-
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tiptorch._config import WEIGHTS_FOLDER, default_torch_type
 
 import torch
+import gc
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
+from tqdm import tqdm
 
 from matplotlib.colors import LogNorm
-from typing import Optional, Union, Sequence
+from typing import Optional
 from dataclasses import dataclass
-from pathlib import Path
 
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.tools.utils import mask_square, generate_random_colors, rad2mas, rad2arc
@@ -26,169 +24,15 @@ from fitting.PSF_optimizer import OptimizePSFModel
 from tools.multisources import (
     add_ROIs,
     AddSources,
+    SourcesData,
+    SourcesSubset,
     DetectSources,
     DisplaySources,
-    ExtractSourceImages,
     VisualizeSources,
+    ExtractSourceImages,
     ROI_from_valid_mask,
-    PlotSourcesProfiles,
+    PlotSourcesProfiles
 )
-
-
-@dataclass
-class SourcesSubset:
-    ids: list[int]
-    table: pd.DataFrame
-    imgs_sparse: list
-    slices_local: list
-    slices_global: list
-    spectra_sparse: torch.Tensor
-    spectra_full: torch.Tensor
-    spectra_res_sparse: Optional[torch.Tensor] = None
-    spectra_res_full: Optional[torch.Tensor] = None
-    proximity_table: Optional[np.ndarray] = None
-
-    def __len__(self) -> int:
-        return len(self.ids)
-
-@dataclass
-class SourcesData:
-    """All source-indexed arrays. Row order is the canonical source ID order."""
-    table: pd.DataFrame
-    imgs_sparse: list
-    slices_local: list
-    slices_global: list
-    spectra_full: torch.Tensor
-    spectra_sparse: torch.Tensor
-    spectra_res_full: Optional[torch.Tensor] = None
-    spectra_res_sparse: Optional[torch.Tensor] = None
-    proximity_table: Optional[np.ndarray] = None
-
-    def __post_init__(self) -> None:
-        self.table = self.table.reset_index(drop=True).copy()
-        self.table.index.name = "src_id"
-        self.table["src_id"] = np.arange(len(self.table), dtype=int)
-        self.create_proximity_table() # Precompute the proximity table for efficient spatial queries later  
-
-    def __len__(self) -> int:
-        return len(self.table)
-
-    def index(self, src_ids: Optional[Union[int, np.integer, Sequence[int]]] = None) -> list[int]:
-        """Normalize src_ids to an explicit validated list. None returns all source IDs."""
-        if src_ids is None:
-            return list(range(len(self)))
-        if isinstance(src_ids, (int, np.integer)):
-            src_ids = [int(src_ids)]
-        ids = [int(i) for i in src_ids]
-        bad = [i for i in ids if i < 0 or i >= len(self)]
-        if bad:
-            raise IndexError(f"Source IDs out of range: {bad}; valid range is [0, {len(self) - 1}]")
-        return ids
-
-    def select(self, src_ids: Optional[Union[int, Sequence[int]]]) -> "SourcesSubset":
-        ids = self.index(src_ids)
-        return SourcesSubset(
-            ids   = ids,
-            table = self.table.iloc[ids],
-            imgs_sparse    = [self.imgs_sparse[i]   for i in ids],
-            slices_local   = [self.slices_local[i]  for i in ids],
-            slices_global  = [self.slices_global[i] for i in ids],
-            spectra_sparse = self.spectra_sparse[ids],
-            spectra_full   = self.spectra_full[ids],
-            spectra_res_sparse = self.spectra_res_sparse[ids] if self.spectra_res_sparse is not None else None,
-            spectra_res_full   = self.spectra_res_full[ids]   if self.spectra_res_full is not None   else None,
-            proximity_table    = self.proximity_table[np.ix_(ids, ids)] if self.proximity_table is not None else None
-        )
-
-    def create_proximity_table(self) -> None:
-        """Vectorized squared-distance matrix between all source pairs. Returns [N, N] array in pix^2."""
-        coords = self.table[['x_peak', 'y_peak']].to_numpy()
-        diff = coords[:, None, :] - coords[None, :, :]  # [N, N, 2]
-        self.proximity_table = np.einsum('ijk,ijk->ij', diff, diff) # [N, N]
-
-    def get_N_closest_sources(self, i_src: int, N: int) -> "SourcesSubset":
-        """Return indices of the n closest sources to i_src, sorted by ascending distance."""
-        distances = self.proximity_table[i_src]
-        indices = np.argpartition(distances, min(N, len(distances) - 1))[:N]
-        return self.select(indices[np.argsort(distances[indices])].tolist())
-
-    def sources_within_radius(self, i_src: int, radius: float, d_offset: float = 0.0) -> "SourcesSubset":
-        """Return indices of sources within radius + d_offset of i_src, sorted by ascending distance."""
-        distances = self.proximity_table[i_src]
-        indices = np.where(distances <= (radius + d_offset) ** 2)[0]
-        return self.select(indices[np.argsort(distances[indices])].tolist())
-
-    def select_sources_in_tile(
-        self,
-        ROI: tuple,   # (slice_y, slice_x) - same format as slices_global entries
-        d_offset: float,
-        N: int | None = None
-    ) -> SourcesSubset:
-        """
-        Return source indices inside the tile (plus sources within d_offset of its boundary).
-
-        ROI is a (slice_y, slice_x) pair matching the slices_global format, e.g.
-            (slice(y_min, y_max), slice(x_min, x_max))
-        If N is None, all sources within ROI + d_offset are returned sorted by brightness.
-        If N is given and fewer sources qualify, remaining slots are filled by proximity to
-        the nearest in-tile source. When the tile has more than N sources, the brightest N are kept.
-        """
-        sources_pos = self.table[['x_peak', 'y_peak']].to_numpy()
-        slice_y, slice_x = ROI
-        y_min, y_max = slice_y.start, slice_y.stop
-        x_min, x_max = slice_x.start, slice_x.stop
-
-        in_tile_mask = (
-            (sources_pos[:, 0] >= x_min) & (sources_pos[:, 0] <= x_max) &
-            (sources_pos[:, 1] >= y_min) & (sources_pos[:, 1] <= y_max)
-        )
-        in_tile_idx = np.where(in_tile_mask)[0].tolist()
-        outside_idx = np.where(~in_tile_mask)[0]
-
-        outside_pos = sources_pos[outside_idx]
-        dx = np.maximum(0, np.maximum(x_min - outside_pos[:, 0], outside_pos[:, 0] - x_max))
-        dy = np.maximum(0, np.maximum(y_min - outside_pos[:, 1], outside_pos[:, 1] - y_max))
-        near_mask = np.hypot(dx, dy) <= d_offset
-
-        def _by_brightness(idx_list):
-            vals = self.table.iloc[idx_list]['peak_value'].to_numpy()
-            return [idx_list[i] for i in np.argsort(vals)[::-1]]
-
-        # When N is not given, return all sources within ROI + d_offset, sorted by brightness
-        if N is None:
-            in_idx   = _by_brightness(in_tile_idx)
-            near_idx = _by_brightness(outside_idx[near_mask].tolist())
-            return self.select(in_idx + [i for i in near_idx if i not in set(in_idx)])
-
-        # More sources than needed -> keep brightest
-        if len(in_tile_idx) >= N:
-            return self.select(_by_brightness(in_tile_idx)[:N])
-
-        # Fewer sources than needed -> pad with nearby sources
-        near_idx = _by_brightness(outside_idx[near_mask].tolist())
-
-        all_idx = in_tile_idx + near_idx
-        n_needed = N - len(all_idx)
-
-        if n_needed > 0:
-            remaining = np.setdiff1d(np.arange(len(self.table)), all_idx)
-            if len(in_tile_idx) > 0:
-                dists = self.proximity_table[in_tile_idx[0], remaining]
-            else:
-                dists = -self.table.iloc[remaining]['peak_value'].to_numpy()
-            all_idx += remaining[np.argsort(dists)][:n_needed].tolist()
-
-        return self.select(all_idx[:N])
-
-    def subset(self, src_ids: Optional[Union[int, Sequence[int]]] = None) -> "SourcesSubset":
-        """Return a subset view for the requested source IDs."""
-        return self.select(src_ids)
-
-    def __getitem__(self, src_ids: Union[int, np.integer, Sequence[int], slice]) -> "SourcesSubset":
-        """Enable bracket-based source subset selection."""
-        if isinstance(src_ids, slice):
-            return self.select(list(range(len(self)))[src_ids])
-        return self.select(src_ids)
 
 
 @dataclass
@@ -527,7 +371,7 @@ class MUSEObservation:
         )
 
     
-    def simulate_sparse(self, x=None, src_subset: Optional[SourcesSubset] = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def simulate_sparse(self, x=None, src_subset: Optional[SourcesSubset]=None, return_PSFs=False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Simulates the full-field PSF canvas for the given source subset (all sources by default).
         Accepts a pre-built SourcesSubset so spectra and ROI lists are already indexed,
@@ -547,11 +391,15 @@ class MUSEObservation:
         
         flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor
         PSFs = PSFs_ * (flux_normalization * src_subset.spectra_sparse).view(-1, self.N_wvl, 1, 1)
+        
+        if not return_PSFs:
+            return add_ROIs(self.canvas_sparse * 0.0, PSFs, src_subset.slices_local, src_subset.slices_global), None, flux_normalization
+        
         return add_ROIs(self.canvas_sparse * 0.0, PSFs, src_subset.slices_local, src_subset.slices_global), PSFs_, flux_normalization
 
 
     @torch.no_grad()
-    def simulate_full(self, src_subset: Optional[SourcesSubset] = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def simulate_full(self, src_subset: Optional[SourcesSubset]=None, return_PSFs=False, force_cpu=True, verbose=False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if src_subset is None:
             src_subset = self.sources.select(None)
 
@@ -560,16 +408,117 @@ class MUSEObservation:
         PSFs_full = self.PSF_model.SimulateFullSpectrum(
             src_ids = None if all_selected else src_subset.ids,
             λ_batch_size = self.λ_batch_size,
-            verbose = True
+            verbose = verbose,
+            force_cpu = force_cpu
         )
+        # Determine target device for all intermediate tensors
+        target_device = 'cpu' if force_cpu else self.device
         # Now, chromatic PSF normalization factor must be re-evaluated for the full NFM spectrum
-        PSF_norm_factor_full = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_full_normed).cpu()
-        F_norm = self.PSF_model.inputs_manager['F_norm'].cpu() if all_selected else self.PSF_model.inputs_manager['F_norm'][src_subset.ids].cpu()
-        flux_normalization = F_norm * PSF_norm_factor_full
-        # Apply the flux scaling
-        PSFs_ = PSFs_full * (flux_normalization * src_subset.spectra_full).view(-1, self.N_wvl_full, 1, 1)
-        self.simulated_full = add_ROIs(self.canvas_full, PSFs_, src_subset.slices_local, src_subset.slices_global)
-        return self.simulated_full, PSFs_full, flux_normalization
+        PSF_norm_factor_full = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_full_normed).to(target_device)
+        F_norm_raw = self.PSF_model.inputs_manager['F_norm'] if all_selected else self.PSF_model.inputs_manager['F_norm'][src_subset.ids]
+        F_norm = F_norm_raw.to(target_device)
+        flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor_full
+        # Apply the flux scaling; spectra_full is on CPU, move to target device if needed
+        spectra_full = src_subset.spectra_full.to(target_device)
+        PSFs_ = PSFs_full * (flux_normalization * spectra_full).view(-1, self.N_wvl_full, 1, 1)
+        canvas = self.canvas_full.to(target_device)
+        simulated_full = add_ROIs(canvas, PSFs_, src_subset.slices_local, src_subset.slices_global)
+
+        if not return_PSFs:
+            return simulated_full, None, flux_normalization
+        
+        return simulated_full, PSFs_full, flux_normalization
+
+
+    @torch.no_grad()
+    def simulate_range(
+        self,
+        λ_min        = None,
+        λ_max        = None,
+        src_subset: Optional[SourcesSubset] = None,
+        return_PSFs  = False,
+        sequential   = True,
+        λ_batch_size = None,
+        force_cpu    = True,
+        verbose      = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Simulate the field over a spectral sub-range of the full MUSE NFM spectrum.
+        Mirrors simulate_full but delegates to PSFModelNFM.SimulateSpectralRange so
+        only the requested wavelength slice is computed.
+
+        Parameters
+        ----------
+        λ_min, λ_max : float or None
+            Wavelength bounds in the same units as PSF_model.λ_full (metres).
+            None falls back to the respective end of the full spectrum.
+        src_subset : SourcesSubset or None
+            Sources to simulate. None selects all sources.
+        return_PSFs : bool
+            If True, the raw (un-scaled) PSF cube is included in the return tuple.
+        sequential : bool
+            Passed to SimulateSpectralRange. True = one source per forward call
+            (lower VRAM); False = all sources in one call per λ-batch (faster).
+        λ_batch_size : int or None
+            Wavelength slices per forward pass. Defaults to self.λ_batch_size.
+        force_cpu : bool
+            Keep output tensors on CPU to avoid VRAM overflow.
+        verbose : bool
+            Show a progress bar over wavelength batches.
+
+        Returns
+        -------
+        simulated_range  : torch.Tensor [N_λ_range, H, W]
+        PSFs_range       : torch.Tensor [N_src_sim, N_λ_range, N_pix, N_pix] or None
+        flux_normalization : torch.Tensor [N_src_sim, N_λ_range]
+        λ_range          : torch.Tensor [N_λ_range]  — wavelengths that were simulated
+        """
+        if src_subset is None:
+            src_subset = self.sources.select(None)
+
+        all_selected = len(src_subset.ids) == self.N_src
+        batch_size   = λ_batch_size if λ_batch_size is not None else self.λ_batch_size
+
+        PSFs_range, λ_range = self.PSF_model.SimulateSpectralRange(
+            λ_min        = λ_min,
+            λ_max        = λ_max,
+            src_ids      = None if all_selected else src_subset.ids,
+            λ_batch_size = batch_size,
+            sequential   = sequential,
+            verbose      = verbose,
+            force_cpu    = force_cpu,
+        )
+
+        target_device = 'cpu' if force_cpu else self.device
+        N_λ_range     = len(λ_range)
+
+        # Evaluate the chromatic PSF normalisation factor at the simulated sub-range wavelengths
+        λ_range_normed       = self.PSF_model.norm_wvl(λ_range.to(self.PSF_model.device)).to(target_device)
+        PSF_norm_factor_range = self.PSF_model.evaluate_splines(
+            self.PSF_model.inputs_manager['F_norm_λ_ctrl'], λ_range_normed
+        ).to(target_device)
+
+        F_norm_raw = self.PSF_model.inputs_manager['F_norm'] if all_selected else self.PSF_model.inputs_manager['F_norm'][src_subset.ids]
+        F_norm     = F_norm_raw.to(target_device)
+        flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor_range  # [N_src_sim, N_λ_range]
+
+        # Slice the source spectra to the same wavelength sub-range
+        wvl_mask    = (self.PSF_model.λ_full >= λ_range[0]) & (self.PSF_model.λ_full <= λ_range[-1])
+        spectra_range = src_subset.spectra_full[:, wvl_mask].to(target_device)  # [N_src_sim, N_λ_range]
+
+        PSFs_ = PSFs_range * (flux_normalization * spectra_range).view(-1, N_λ_range, 1, 1)
+
+        # Build a zero canvas matching the sub-range spectral depth
+        canvas = torch.zeros(
+            (N_λ_range, self.canvas_full.shape[-2], self.canvas_full.shape[-1]),
+            device=target_device, dtype=self.canvas_full.dtype
+        )
+        simulated_range = add_ROIs(canvas, PSFs_, src_subset.slices_local, src_subset.slices_global)
+
+        if not return_PSFs:
+            return simulated_range, None, flux_normalization, λ_range
+
+        return simulated_range, PSFs_range, flux_normalization, λ_range
 
 
     def _loss_PSF(self, PSF_data: torch.Tensor, PSF_pred: torch.Tensor, fit_weights: FitWeights):
@@ -657,23 +606,36 @@ class MUSEObservation:
         # Clean up GPU memory after fitting
         
 
-    @torch.no_grad() #TODO: split output
-    def SimulateField(self, full_spectrum=False, return_PSFs=False) -> torch.Tensor | tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    @torch.no_grad()
+    def SimulateField(self, full_spectrum=False, N_src_per_batch=None, force_cpu=True) -> torch.Tensor:
         ''' Simulate all sources within the field. If full_spectrum is True, simulates the full spectrum instead of the sparse λ-subset. '''
         if full_spectrum:
-            simulated, PSFs, flux_norm = self.simulate_full()
-            self.simulated_full = simulated
-            self.residue_full = (self.cube_full - self.simulated_full.numpy()) * self.valid_mask.cpu().numpy()
+            if N_src_per_batch is None:
+                simulated, _, _ = self.simulate_full()
+            else:
+                source_indices = np.arange(len(self.sources))
+                np.random.shuffle(source_indices)
+                batches = np.array_split(source_indices, (len(self.sources) + N_src_per_batch - 1) // N_src_per_batch)
+
+                device_ = 'cpu' if force_cpu else self.device
+
+                simulated = torch.zeros([self.N_wvl_full, self.cube_full.shape[-2], self.cube_full.shape[-1]], device=device_, dtype=self.PSF_model.dtype)
+
+                for batch in tqdm(batches):
+                    src_subset = self.sources.select(batch)
+                    simulated += self.simulate_full(src_subset=src_subset, force_cpu=force_cpu)[0]
+
+            self.simulated_full = simulated.cpu() if force_cpu else simulated
+            self.residue_full = (self.cube_full - self.simulated_full.cpu().numpy()) * self.valid_mask.cpu().numpy()
         else:
-            simulated, PSFs, flux_norm = self.simulate_sparse(x=None, src_subset=None)
+            simulated, _, _ = self.simulate_sparse(x=None, src_subset=None)
             self.simulated_sparse = simulated
             self.residue_sparse = (self.cube_sparse - simulated) * self.valid_mask
         
+        gc.collect()
         torch.cuda.empty_cache()
-        if return_PSFs:
-            return (simulated, PSFs.cpu() if full_spectrum else PSFs, flux_norm.cpu() if full_spectrum else flux_norm)
-        
-        return simulated
+
+        return simulated if not force_cpu else simulated.cpu()
 
 
     def DisplaySources(self, draw_box_size=20):
@@ -984,3 +946,113 @@ class MUSEObservation:
 
 
 # %%
+import matplotlib.patches as patches
+
+
+def split_field_into_tiles(image_shape: tuple, N_tiles_x: int, N_tiles_y: int, border_offset: int=0) -> list:
+    """
+    Split an image into N_tiles_x x N_tiles_y tiles with an optional border offset.
+
+    Args:
+        image_shape: Tuple of (height, width) for the image
+        N_tiles_x: Number of tiles along x-axis
+        N_tiles_y: Number of tiles along y-axis
+        border_offset: Pixels to exclude from borders
+
+    Returns:
+        List of dictionaries containing tile information with x_range and y_range
+    """
+    height, width = image_shape[-2:]
+
+    # Calculate effective dimensions after applying border offset
+    eff_height = height - 2 * border_offset
+    eff_width  = width  - 2 * border_offset
+
+    # Calculate tile sizes
+    tile_height = eff_height // N_tiles_y
+    tile_width = eff_width // N_tiles_x
+
+    tiles = []
+
+    for i in range(N_tiles_y):
+        for j in range(N_tiles_x):
+            # Calculate tile boundaries with offset
+            y_min = border_offset + i * tile_height
+            y_max = border_offset + (i + 1) * tile_height
+            x_min = border_offset + j * tile_width
+            x_max = border_offset + (j + 1) * tile_width
+
+            # Ensure the last tiles include any remaining pixels
+            if i == N_tiles_y - 1:  y_max = height - border_offset
+            if j == N_tiles_x - 1:  x_max = width - border_offset
+
+            tile_info = {
+                'ROI': (slice(y_min, y_max), slice(x_min, x_max)),
+                'ID': (i, j)
+            }
+            tiles.append(tile_info)
+
+    return tiles
+
+
+def visualize_field_tiles(
+    image,
+    tiles: list,
+    title: str = 'Field Tiles',
+    cmap: str = 'gray',
+    norm = None,
+    alpha: float = 0.7
+) -> None:
+    """
+    Visualize the tiling of an image.
+
+    Args:
+        image: The image data to display
+        tiles: List of tile dictionaries as returned by split_field_into_tiles
+        title: Plot title
+        cmap: Colormap for the image display
+        norm: Normalization for the image display
+        alpha: Alpha value for the rectangle overlay
+    """
+    if torch.is_tensor(image):
+        if image.dim() > 2:
+            # If multi-channel/wavelength, take mean or sum
+            display_img = image.mean(dim=0).cpu().numpy()
+        else:
+            display_img = image.cpu().numpy()
+    else:
+        if image.ndim > 2:
+            # If multi-channel/wavelength, take mean or sum
+            display_img = image.mean(axis=0)
+        else:
+            display_img = image
+
+    plt.figure(figsize=(10, 8))
+    plt.imshow(display_img, origin='lower', cmap=cmap, norm=norm)
+
+    colors = plt.cm.tab10.colors
+
+    for i, tile in enumerate(tiles):
+        slice_y, slice_x = tile['ROI']
+        y_min, y_max = slice_y.start, slice_y.stop
+        x_min, x_max = slice_x.start, slice_x.stop
+        width = x_max - x_min
+        height = y_max - y_min
+
+        color = colors[i % len(colors)]
+        rect = patches.Rectangle(
+            (x_min, y_min), width, height,
+            linewidth=2, edgecolor=color, facecolor='none', alpha=alpha
+        )
+        plt.gca().add_patch(rect)
+
+        # Add tile ID label
+        plt.text(
+            x_min + width/2, y_min + height/2,
+            f"Tile {tile['ID']}", color=color,
+            ha='center', va='center', fontweight='bold'
+        )
+
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
