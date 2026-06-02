@@ -2,7 +2,6 @@
 %reload_ext autoreload
 %autoreload 2
 
-import gc
 import sys, os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -141,7 +140,7 @@ from matplotlib.colors import LogNorm
 # plt.show()
 
 # field_disentangled = ob.simulate_sparse(return_PSFs=False)[0]
-#%%
+#%
 field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=True, force_cpu=False)
 
 #%%
@@ -193,7 +192,6 @@ bg = bg.view(ob.N_wvl, 1, 1)
 
 #%%
 data_img = ob.cube_sparse.clone() - ob.background_sparse.view(ob.N_wvl, 1, 1)
-# I_sim_ = I_sim - bg_solved.view(ob.N_wvl, 1, 1)
 
 #%%
 # display_norm = LogNorm(vmin=1, vmax=data_img.sum(dim=0).max()) # again, rather empirical values
@@ -307,12 +305,11 @@ plt.show()
 
 
 # I_sim_full, fluxes_full, bg_full = DisentangleFluxBatched(ob, λ_batch_size=10, solver='nonlinear')
-I_sim_full, fluxes_full, bg_full = DisentangleFluxBatched(ob, λ_batch_size=10, solver='linear')
+# I_sim_full, fluxes_full, bg_full = DisentangleFluxBatched(ob, λ_batch_size=10, solver='linear')
 
 
 #%%
-simulated_full = ob.SimulateField(full_spectrum=True, N_src_per_batch=100, force_cpu=False)
-
+simulated_full = ob.SimulateField(full_spectrum=True, N_λ_per_batch=10, disentangle_spectra=True, force_cpu=False)
 
 #%% Plot multispectral cubes as RGB images
 from tools.plotting import PlotSpetralCubeInRGB
@@ -322,7 +319,7 @@ from tools.plotting import PlotSpetralCubeInRGB
 
 
 _ = PlotSpetralCubeInRGB(
-    I_sim_full[ob.ROI_plot] - 1.3*bg_full.view(-1, 1, 1).numpy(),
+    simulated_full[ob.ROI_plot],
     wavelengths=λ_vis,
     title="Model",
     min_val=500, max_val=7.5e6,
@@ -330,7 +327,7 @@ _ = PlotSpetralCubeInRGB(
 )
 
 _ = PlotSpetralCubeInRGB(
-    ob.cube_full[ob.ROI_plot] - bg_full.view(-1, 1, 1).numpy(),
+    ob.cube_full[ob.ROI_plot] - ob.background_full.view(-1, 1, 1).numpy(),
     wavelengths=λ_vis,
     title="Data",
     min_val=500, max_val=7.5e6,

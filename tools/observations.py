@@ -16,12 +16,12 @@ from matplotlib.colors import LogNorm
 from typing import Optional
 from dataclasses import dataclass
 
-from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
-from tiptorch.tools.utils import mask_square, generate_random_colors, rad2mas, rad2arc
-from tools.plotting import PlotSpetralCubeInRGB
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
 from fitting.PSF_optimizer import OptimizePSFModel
+from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
+from tiptorch.tools.utils import mask_square, generate_random_colors, rad2mas, rad2arc
+from tools.plotting import PlotSpetralCubeInRGB
 from tools.multisources import (
     add_ROIs,
     AddSources,
@@ -405,7 +405,7 @@ class MUSEObservation:
 
 
     @torch.no_grad()
-    def simulate_full(self, src_subset: Optional[SourcesSubset]=None, return_PSFs=False, force_cpu=True, verbose=False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def simulate_full(self, src_subset: Optional[SourcesSubset]=None, return_PSFs=False, λ_batch_size=None, force_cpu=True, verbose=False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if src_subset is None:
             src_subset = self.sources.select(None)
 
@@ -413,17 +413,17 @@ class MUSEObservation:
         # No inputs since SimulateFullSpectrum() fully relies on the inputs stored in the inputs_manager, which are already up-to-date
         PSFs_full = self.PSF_model.SimulateFullSpectrum(
             src_ids = None if all_selected else src_subset.ids,
-            λ_batch_size = self.λ_batch_size,
+            λ_batch_size = self.λ_batch_size if λ_batch_size is None else λ_batch_size,
             verbose = verbose,
             force_cpu = force_cpu
         )
         # Determine target device for all intermediate tensors
         target_device = 'cpu' if force_cpu else self.device
         # Now, chromatic PSF normalization factor must be re-evaluated for the full NFM spectrum
-        PSF_norm_factor_full = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_full_normed).to(target_device)
-        F_norm_raw = self.PSF_model.inputs_manager['F_norm'] if all_selected else self.PSF_model.inputs_manager['F_norm'][src_subset.ids]
-        F_norm = F_norm_raw.to(target_device)
-        flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor_full
+        PSF_norm_factor_full = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_full_normed)
+        F_norm = self.PSF_model.inputs_manager['F_norm'] if all_selected else self.PSF_model.inputs_manager['F_norm'][src_subset.ids]
+
+        flux_normalization = (F_norm.view(-1, 1) * PSF_norm_factor_full).to(target_device)
         # Apply the flux scaling; spectra_full is on CPU, move to target device if needed
         spectra_full = src_subset.spectra_full.to(target_device)
         PSFs_ = PSFs_full * (flux_normalization * spectra_full).view(-1, self.N_wvl_full, 1, 1)
@@ -477,7 +477,7 @@ class MUSEObservation:
         simulated_range  : torch.Tensor [N_λ_range, H, W]
         PSFs_range       : torch.Tensor [N_src_sim, N_λ_range, N_pix, N_pix] or None
         flux_normalization : torch.Tensor [N_src_sim, N_λ_range]
-        λ_range          : torch.Tensor [N_λ_range]  — wavelengths that were simulated
+        λ_range          : torch.Tensor [N_λ_range]  - wavelengths that were simulated
         """
         if src_subset is None:
             src_subset = self.sources.select(None)
@@ -574,6 +574,7 @@ class MUSEObservation:
             fitable_set = (PSF_params        if 'PSF'        in fit_params else []) + \
                           (astrometry_params if 'astrometry' in fit_params else []) + \
                           (photometry_params if 'photometry' in fit_params else [])
+
             # Check if selected parameters are already selected within the PSF model
             fitable_set = [param for param in fitable_set if self.PSF_model.inputs_manager.is_optimizable(param)]
         return fitable_set
@@ -607,45 +608,79 @@ class MUSEObservation:
             )
         # NOTE: Intrinsic values inside PSF_model.inputs manager are updated automatically on every function call
              
+        # Clean up GPU memory after fitting
         gc.collect()
         torch.cuda.empty_cache()
-        # Clean up GPU memory after fitting
         
 
-    def SimulateField(self, full_spectrum=False, N_src_per_batch=None, disentangle_spectra=True, force_cpu=True) -> torch.Tensor:
+    def SimulateField(self, full_spectrum=False, N_src_per_batch=None, N_λ_per_batch=None, disentangle_spectra=True, force_cpu=True) -> torch.Tensor:
         ''' Simulate all sources within the field. If full_spectrum is True, simulates the full spectrum instead of the sparse λ-subset. '''
+        # ------------- In this branch, all spectral slices from the full range are simulated
         if full_spectrum:
-            with torch.no_grad():
-                if N_src_per_batch is None:
-                    simulated, _, _ = self.simulate_full()
-                else:
-                    source_indices = np.arange(len(self.sources))
-                    np.random.shuffle(source_indices)
-                    batches = np.array_split(source_indices, (len(self.sources) + N_src_per_batch - 1) // N_src_per_batch)
-
-                    device_ = 'cpu' if force_cpu else self.device
-
-                    simulated = torch.zeros([self.N_wvl_full, self.cube_full.shape[-2], self.cube_full.shape[-1]], device=device_, dtype=self.PSF_model.dtype)
-
-                    for batch in tqdm(batches):
-                        src_subset = self.sources.select(batch)
-                        simulated += self.simulate_full(src_subset=src_subset, force_cpu=force_cpu)[0]
-
-                self.simulated_full = simulated.cpu() if force_cpu else simulated
-                self.residue_full = (self.cube_full - self.simulated_full.cpu().numpy()) * self.valid_mask.cpu().numpy()
+            
+            if N_λ_per_batch is None:
+                N_λ_per_batch = self.λ_batch_size
+            
+            if disentangle_spectra:
+                # This function simulates raw PSFs per λ-batch and disentangles in one pass
+                I_sim_full, fluxes_full, bg_full = self.disentangle_flux_batched(
+                    λ_batch_size = N_λ_per_batch,
+                    solver = 'linear', # for the sake of speed, let is be linear
+                    verbose = False,
+                )
+                simulated = I_sim_full - bg_full.view(-1, 1, 1)
+                self.background_full   = bg_full
                 
+                # Compute PSF normalization factors for the full spectral range. Without disentangling, it is done inside simulate_full()
+                PSF_norm_factor_full = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_full_normed)
+                F_norm = self.PSF_model.inputs_manager['F_norm']
+                # The F_PSF factor is used to correct for the overall flux normalization changes during fitting, but it has the same value for all sources,
+                # so it doesn't affect the relative spectra shapes. However, it's important to apply it to get the correct absolute flux values in the spectra,
+                # assuming that ∑ PSF(λ) ≡ 1 for ∀ PSF ∈ field
+                F_PSF = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_ctrl'], self.PSF_model.λ_full_normed)
+                
+                flux_normalization = (F_norm.view(-1, 1) * PSF_norm_factor_full).cpu()
+                
+                self.sources.spectra_full_true = fluxes_full.T / F_PSF.cpu()        # True astrophysical decoupled sources spectrum
+                self.sources.spectra_full      = fluxes_full.T / flux_normalization # [N_src, N_wvl_full], on CPU
+                
+            else:
+                with torch.no_grad():
+                    if N_src_per_batch is None:
+                        simulated, _, _ = self.simulate_full(λ_batch_size=N_λ_per_batch)
+                    else:
+                        source_indices = np.arange(len(self.sources))
+                        np.random.shuffle(source_indices)
+                        batches = np.array_split(source_indices, (len(self.sources) + N_src_per_batch - 1) // N_src_per_batch)
+
+                        device_ = 'cpu' if force_cpu else self.device
+
+                        simulated = torch.zeros([self.N_wvl_full, self.cube_full.shape[-2], self.cube_full.shape[-1]], device=device_, dtype=self.PSF_model.dtype)
+
+                        for batch in tqdm(batches):
+                            src_subset = self.sources.select(batch)
+                            simulated += self.simulate_full(src_subset=src_subset, λ_batch_size=N_λ_per_batch, force_cpu=force_cpu)[0]
+
+            self.simulated_full = simulated.cpu() if force_cpu else simulated
+            self.residue_full   = (self.cube_full - self.simulated_full.cpu().numpy()) * self.valid_mask.cpu().numpy()
+                
+        
+        # ------------- In this branch, only the fast simulation of the sparse subset is done
         else: #TODO: PSFs must add-up exactly to 1 per λ when getting the true spectrum
             with torch.no_grad():
                 simulated, PSFs, flux_normalization = self.simulate_sparse(x=None, src_subset=None, return_PSFs=disentangle_spectra)
             
             if disentangle_spectra:
                 I_sim, fluxes, bg_solved = self.disentangle_flux(self.sources.select(None), PSFs, self.cube_sparse, solver='nonlinear')
-                fluxes_ = fluxes.T / flux_normalization # spectra_sparse stores flux per PSF core, not full flux per source, that's why we need it here
-                self.sources.spectra_sparse = fluxes_ # replace the first estimates of the sources spectra with the disentangling results
-                
                 simulated = I_sim - bg_solved.view(self.N_wvl, 1, 1) # Leave the pure PSF contribution in the simulated image
                 self.background_sparse = bg_solved
-            
+                
+                F_PSF = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_ctrl'], self.PSF_model.λ_sim_normed).cpu()
+                
+                # spectra_sparse stores flux per PSF core, not full flux per source, that's why we need it here
+                self.sources.spectra_sparse      = fluxes.T / flux_normalization # update the previous spectra estimates with the disentangling results
+                self.sources.spectra_sparse_true = fluxes.T / F_PSF
+                
             self.simulated_sparse = simulated
             self.residue_sparse = (self.cube_sparse - simulated) * self.valid_mask
         
@@ -654,6 +689,16 @@ class MUSEObservation:
 
         return simulated if not force_cpu else simulated.cpu()
 
+
+    def GetSpectrum(self, source_id=None):
+        if self.sources is None:
+            raise ValueError("Sources must be initialized before getting spectra. Please run ExtractSources() first.")
+        
+        if all(s is None for s in [self.sources.spectra_full_true]):
+            raise ValueError("Spectra are not yet computed. Please simulate the full first field with spectra disentangling enabled by running SimulateField(full_spectrum=True)")
+        
+        return self.sources.spectra_full if source_id is None else self.sources.spectra_full[source_id]
+        
 
     def DisplaySources(self, draw_box_size=20):
         if self.sources_table is None:
@@ -688,6 +733,8 @@ class MUSEObservation:
     ):
         """
         Reconstruct spectral cube by solving  P @ spectrum + bg ≈ I_data.
+        Can do this with a single linear least-squares solve or with an iterative non-linear optimization
+        enforcing non-negativity on the spectra and optionally on the background as well.
 
         Returns
         -------
@@ -705,12 +752,9 @@ class MUSEObservation:
                     else torch.tensor(data_cube)).to(device=device, dtype=dtype)
 
         def sanitize(x, name):
-            if torch.isfinite(x).all():
-                return x
-            if nan_policy == "raise":
-                raise FloatingPointError(f"{name} contains {(~torch.isfinite(x)).sum().item()} NaN/Inf values.")
-            if nan_policy == "zero":
-                return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            if torch.isfinite(x).all(): return x
+            if nan_policy == "raise":   raise FloatingPointError(f"{name} contains {(~torch.isfinite(x)).sum().item()} NaN/Inf values.")
+            if nan_policy == "zero":    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
             raise ValueError("nan_policy must be 'zero' or 'raise'.")
 
         # Scatter PSFs onto the field canvas → design matrix P
@@ -746,7 +790,7 @@ class MUSEObservation:
             y   = sanitize(y, "softplus_inv input").clamp_min(eps)
             return torch.where(y > 20.0, y, torch.log(torch.expm1(y).clamp_min(eps)))
 
-        # Initialise from lstsq solution (warm-starting across λ-batches is not
+        # Initialize from lstsq solution (warm-starting across λ-batches is not
         # useful here: spectra vary strongly per wavelength while only PSF shape
         # is smooth, so lstsq gives a better starting point every time)
         if init_from_lstsq:
@@ -917,19 +961,21 @@ class MUSEObservation:
         from astropy.convolution import convolve, Box1DKernel
 
         if plot_residual:
-            if self.sources.spectra_res_full is None or self.sources.spectra_res_sparse is None:
-                print("Residual spectra are not available. Computing them now...")
-                self.sources.spectra_res_sparse, self.sources.spectra_res_full = \
-                    self.ExtractSpectraFromCore(self.sources.table, self.residue_sparse, self.residue_full)
+            raise NotImplementedError("Residual spectra plotting is not properly implemented yet.")
+            # if self.sources.spectra_res_full is None or self.sources.spectra_res_sparse is None:
+            #     print("Residual spectra are not available. Computing them now...")
+            #     self.sources.spectra_res_sparse, self.sources.spectra_res_full = \
+            #         self.ExtractSpectraFromCore(self.sources.table, self.residue_sparse, self.residue_full)
                 
         src_subset = self.sources.select(src_ids) # select a subset of sources to plot
         
         if plot_residual:
-            src_spectra_full   = src_subset.spectra_res_full
-            src_spectra_sparse = src_subset.spectra_res_sparse
+            raise NotImplementedError("Residual spectra plotting is not properly implemented yet.")
+            # src_spectra_full   = src_subset.spectra_res_full
+            # src_spectra_sparse = src_subset.spectra_res_sparse
         else:
-            src_spectra_full   = src_subset.spectra_full
-            src_spectra_sparse = src_subset.spectra_sparse
+            src_spectra_full   = src_subset.spectra_full_true
+            src_spectra_sparse = src_subset.spectra_sparse_true
                   
         N = len(src_subset.ids)
         colors = generate_random_colors(N)
@@ -1031,7 +1077,7 @@ class MUSEObservation:
 
         4D input with sources=<DataFrame> → multi-extension FITS: one compact HDU per source
         (N_wvl, psf_H, psf_W), with the WCS in each extension encoding where the PSF belongs
-        in the full field. No zeros are stored at all — this is the recommended format.
+        in the full field. No zeros are stored at all - this is the recommended format.
         Reading back: for source i, hdul[i+1].data gives its PSF cube; CRVAL1/2 give its
         1-based (x, y) centroid in the full-field pixel frame.
 

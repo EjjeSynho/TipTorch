@@ -30,14 +30,16 @@ This module is used to manage the multi-source simulations. It contains function
 class SourcesSubset:
     ids: list[int]
     table: pd.DataFrame
-    imgs_sparse: list | None
-    slices_local: list
+    imgs_sparse:   list | None
+    slices_local:  list
     slices_global: list
     spectra_sparse: torch.Tensor | None
-    spectra_full: torch.Tensor | None
-    spectra_res_sparse: Optional[torch.Tensor] = None
-    spectra_res_full: Optional[torch.Tensor] = None
-    proximity_table: Optional[np.ndarray] = None
+    spectra_full:   torch.Tensor | None
+    spectra_sparse_true: Optional[torch.Tensor] = None
+    spectra_full_true :  Optional[torch.Tensor] = None
+    spectra_res_sparse:  Optional[torch.Tensor] = None
+    spectra_res_full:    Optional[torch.Tensor] = None
+    proximity_table:     Optional[np.ndarray] = None
 
     def __len__(self) -> int:
         return len(self.ids)
@@ -47,14 +49,16 @@ class SourcesSubset:
         return SourcesSubset(
             ids   = self.ids.copy(),
             table = self.table.copy(),
-            imgs_sparse        = self.imgs_sparse.copy() if not light_weight else None,
-            slices_local       = self.slices_local.copy(),
-            slices_global      = self.slices_global.copy(),
-            spectra_sparse     = self.spectra_sparse.clone() if not light_weight else None,
-            spectra_full       = self.spectra_full.clone() if not light_weight else None,
-            spectra_res_sparse = self.spectra_res_sparse.clone() if self.spectra_res_sparse is not None and not light_weight else None,
-            spectra_res_full   = self.spectra_res_full.clone() if self.spectra_res_full is not None and not light_weight else None,
-            proximity_table    = self.proximity_table.copy() if self.proximity_table is not None else None
+            imgs_sparse         = self.imgs_sparse.copy() if not light_weight else None,
+            slices_local        = self.slices_local.copy(),
+            slices_global       = self.slices_global.copy(),
+            spectra_sparse      = self.spectra_sparse.clone() if not light_weight else None,
+            spectra_sparse_true = self.spectra_sparse_true.clone() if self.spectra_sparse_true is not None and not light_weight else None,
+            spectra_full        = self.spectra_full.clone() if not light_weight else None,
+            spectra_full_true   = self.spectra_full_true.clone() if self.spectra_full_true is not None and not light_weight else None,
+            spectra_res_sparse  = self.spectra_res_sparse.clone() if self.spectra_res_sparse is not None and not light_weight else None,
+            spectra_res_full    = self.spectra_res_full.clone() if self.spectra_res_full is not None and not light_weight else None,
+            proximity_table     = self.proximity_table.copy() if self.proximity_table is not None else None
         )
 
     def rebase_coords(self, crop_ROI, filter_empty=True) -> "SourcesSubset":
@@ -129,16 +133,18 @@ class SourcesSubset:
         # Build the filtered subset if filter_empty=True, otherwise keep all entries with adjusted slices
         k = kept_ids
         return SourcesSubset(
-            ids            = [self.ids[i] for i in k],
-            table          = self.table.iloc[k].reset_index(drop=True) if self.table is not None else None,
-            imgs_sparse    = [self.imgs_sparse[i] for i in k] if self.imgs_sparse is not None else None,
-            slices_local   = new_local,
-            slices_global  = new_global,
-            spectra_sparse = self.spectra_sparse[k] if self.spectra_sparse is not None else None,
-            spectra_full   = self.spectra_full[k]   if self.spectra_full   is not None else None,
-            spectra_res_sparse = self.spectra_res_sparse[k] if self.spectra_res_sparse is not None else None,
-            spectra_res_full   = self.spectra_res_full[k]   if self.spectra_res_full   is not None else None,
-            proximity_table    = self.proximity_table[np.ix_(k, k)] if self.proximity_table is not None else None,
+            ids                 = [self.ids[i] for i in k],
+            table               = self.table.iloc[k].reset_index(drop=True) if self.table is not None else None,
+            imgs_sparse         = [self.imgs_sparse[i] for i in k] if self.imgs_sparse is not None else None,
+            slices_local        = new_local,
+            slices_global       = new_global,
+            spectra_sparse      = self.spectra_sparse[k] if self.spectra_sparse is not None else None,
+            spectra_sparse_true = self.spectra_sparse_true[k] if self.spectra_sparse_true is not None else None,
+            spectra_full        = self.spectra_full[k]   if self.spectra_full   is not None else None,
+            spectra_full_true   = self.spectra_full_true[k] if self.spectra_full_true   is not None else None,
+            spectra_res_sparse  = self.spectra_res_sparse[k] if self.spectra_res_sparse is not None else None,
+            spectra_res_full    = self.spectra_res_full[k]   if self.spectra_res_full   is not None else None,
+            proximity_table     = self.proximity_table[np.ix_(k, k)] if self.proximity_table is not None else None,
         )
 
 
@@ -146,14 +152,16 @@ class SourcesSubset:
 class SourcesData:
     """All source-indexed arrays. Row order is the canonical source ID order."""
     table: pd.DataFrame
-    imgs_sparse: list
-    slices_local: list
+    imgs_sparse:   list
+    slices_local:  list
     slices_global: list
-    spectra_full: torch.Tensor
+    spectra_full:   torch.Tensor
     spectra_sparse: torch.Tensor
-    spectra_res_full: Optional[torch.Tensor] = None
-    spectra_res_sparse: Optional[torch.Tensor] = None
-    proximity_table: Optional[np.ndarray] = None
+    spectra_sparse_true: Optional[torch.Tensor] = None
+    spectra_full_true :  Optional[torch.Tensor] = None
+    spectra_res_full:    Optional[torch.Tensor] = None
+    spectra_res_sparse:  Optional[torch.Tensor] = None
+    proximity_table:     Optional[np.ndarray]   = None
 
     def __post_init__(self) -> None:
         self.table = self.table.reset_index(drop=True).copy()
@@ -181,14 +189,16 @@ class SourcesData:
         return SourcesSubset(
             ids   = ids,
             table = self.table.iloc[ids],
-            imgs_sparse    = [self.imgs_sparse[i]   for i in ids],
-            slices_local   = [self.slices_local[i]  for i in ids],
-            slices_global  = [self.slices_global[i] for i in ids],
-            spectra_sparse = self.spectra_sparse[ids],
-            spectra_full   = self.spectra_full[ids],
-            spectra_res_sparse = self.spectra_res_sparse[ids] if self.spectra_res_sparse is not None else None,
-            spectra_res_full   = self.spectra_res_full[ids]   if self.spectra_res_full is not None   else None,
-            proximity_table    = self.proximity_table[np.ix_(ids, ids)] if self.proximity_table is not None else None
+            imgs_sparse         = [self.imgs_sparse[i]   for i in ids],
+            slices_local        = [self.slices_local[i]  for i in ids],
+            slices_global       = [self.slices_global[i] for i in ids],
+            spectra_sparse      = self.spectra_sparse[ids],
+            spectra_sparse_true = self.spectra_sparse_true[ids] if self.spectra_sparse_true is not None else None,
+            spectra_full        = self.spectra_full[ids],
+            spectra_full_true   = self.spectra_full_true[ids] if self.spectra_full_true is not None else None,
+            spectra_res_sparse  = self.spectra_res_sparse[ids] if self.spectra_res_sparse is not None else None,
+            spectra_res_full    = self.spectra_res_full[ids]   if self.spectra_res_full is not None   else None,
+            proximity_table     = self.proximity_table[np.ix_(ids, ids)] if self.proximity_table is not None else None
         )
 
     def create_proximity_table(self) -> None:
