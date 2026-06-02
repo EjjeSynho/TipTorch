@@ -9,8 +9,9 @@ import torch
 import gc
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+import torch.nn.functional as F
 
+from tqdm import tqdm
 from matplotlib.colors import LogNorm
 from typing import Optional
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ from tools.multisources import (
     DetectSources,
     DisplaySources,
     VisualizeSources,
+    add_ROIs_separately,
     ExtractSourceImages,
     ROI_from_valid_mask,
     PlotSourcesProfiles
@@ -51,7 +53,7 @@ class FitWeights:
 
 # TODO: implement a OB storage function (not only FITS cubes, but also sources data, fitting results, etc.)
 class MUSEObservation:
-    def __init__(self, raw_path, cube_path, cache_path, device=default_torch_type):
+    def __init__(self, raw_path, cube_path, cache_path, PSF_size=111, device=default_torch_type):
         self.raw_path   = raw_path
         self.cube_path  = cube_path
         self.cache_path = cache_path
@@ -83,7 +85,7 @@ class MUSEObservation:
             raise e
         
         # Simulated PSF size
-        self.PSF_size = 111
+        self.PSF_size = PSF_size
         self.model_config['sensor_science']['FieldOfView'] = self.PSF_size # Sice of the PSF to simulate
         
         # Empty image to store the simulated PSFs while adding them to the right locations in the field. This is more memory efficient than storing all PSFs
@@ -139,6 +141,10 @@ class MUSEObservation:
         
         self.λ_full   = λ_full
         self.λ_sparse = λ_sparse
+        
+        # Constant flux background wthin the field
+        self.background_sparse = torch.zeros([self.N_wvl], device=self.device)
+        self.background_full   = torch.zeros([self.N_wvl_full], device='cpu')
         
         self.model_config = model_config #TODO: make config (re-)initialization more flexible
         self.valid_mask = valid_mask
@@ -606,29 +612,40 @@ class MUSEObservation:
         # Clean up GPU memory after fitting
         
 
-    @torch.no_grad()
-    def SimulateField(self, full_spectrum=False, N_src_per_batch=None, force_cpu=True) -> torch.Tensor:
+    def SimulateField(self, full_spectrum=False, N_src_per_batch=None, disentangle_spectra=True, force_cpu=True) -> torch.Tensor:
         ''' Simulate all sources within the field. If full_spectrum is True, simulates the full spectrum instead of the sparse λ-subset. '''
         if full_spectrum:
-            if N_src_per_batch is None:
-                simulated, _, _ = self.simulate_full()
-            else:
-                source_indices = np.arange(len(self.sources))
-                np.random.shuffle(source_indices)
-                batches = np.array_split(source_indices, (len(self.sources) + N_src_per_batch - 1) // N_src_per_batch)
+            with torch.no_grad():
+                if N_src_per_batch is None:
+                    simulated, _, _ = self.simulate_full()
+                else:
+                    source_indices = np.arange(len(self.sources))
+                    np.random.shuffle(source_indices)
+                    batches = np.array_split(source_indices, (len(self.sources) + N_src_per_batch - 1) // N_src_per_batch)
 
-                device_ = 'cpu' if force_cpu else self.device
+                    device_ = 'cpu' if force_cpu else self.device
 
-                simulated = torch.zeros([self.N_wvl_full, self.cube_full.shape[-2], self.cube_full.shape[-1]], device=device_, dtype=self.PSF_model.dtype)
+                    simulated = torch.zeros([self.N_wvl_full, self.cube_full.shape[-2], self.cube_full.shape[-1]], device=device_, dtype=self.PSF_model.dtype)
 
-                for batch in tqdm(batches):
-                    src_subset = self.sources.select(batch)
-                    simulated += self.simulate_full(src_subset=src_subset, force_cpu=force_cpu)[0]
+                    for batch in tqdm(batches):
+                        src_subset = self.sources.select(batch)
+                        simulated += self.simulate_full(src_subset=src_subset, force_cpu=force_cpu)[0]
 
-            self.simulated_full = simulated.cpu() if force_cpu else simulated
-            self.residue_full = (self.cube_full - self.simulated_full.cpu().numpy()) * self.valid_mask.cpu().numpy()
-        else:
-            simulated, _, _ = self.simulate_sparse(x=None, src_subset=None)
+                self.simulated_full = simulated.cpu() if force_cpu else simulated
+                self.residue_full = (self.cube_full - self.simulated_full.cpu().numpy()) * self.valid_mask.cpu().numpy()
+                
+        else: #TODO: PSFs must add-up exactly to 1 per λ when getting the true spectrum
+            with torch.no_grad():
+                simulated, PSFs, flux_normalization = self.simulate_sparse(x=None, src_subset=None, return_PSFs=disentangle_spectra)
+            
+            if disentangle_spectra:
+                I_sim, fluxes, bg_solved = self.disentangle_flux(self.sources.select(None), PSFs, self.cube_sparse, solver='nonlinear')
+                fluxes_ = fluxes.T / flux_normalization # spectra_sparse stores flux per PSF core, not full flux per source, that's why we need it here
+                self.sources.spectra_sparse = fluxes_ # replace the first estimates of the sources spectra with the disentangling results
+                
+                simulated = I_sim - bg_solved.view(self.N_wvl, 1, 1) # Leave the pure PSF contribution in the simulated image
+                self.background_sparse = bg_solved
+            
             self.simulated_sparse = simulated
             self.residue_sparse = (self.cube_sparse - simulated) * self.valid_mask
         
@@ -653,6 +670,225 @@ class MUSEObservation:
             ROI  = self.ROI_plot
         )
    
+    @staticmethod
+    def disentangle_flux(
+        srcs: SourcesSubset,
+        PSFs,
+        data_cube,
+        solver           = 'linear',   # 'linear' | 'nonlinear'
+        rcond            = 1e-2,
+        n_iter           = 1000,
+        lr               = 1e-2,
+        init_from_lstsq  = True,
+        bg_unconstrained = True,
+        verbose          = False,
+        nan_policy       = "zero",
+        grad_clip        = None,
+        preferred_device = None,
+    ):
+        """
+        Reconstruct spectral cube by solving  P @ spectrum + bg ≈ I_data.
+
+        Returns
+        -------
+        I_sim    : torch.Tensor  [N_wvl, H, W]
+        spectrum : torch.Tensor  [N_wvl, N_src]
+        bg       : torch.Tensor  [N_wvl]
+        """
+        N_src  = PSFs.shape[0]
+        N_wvl  = PSFs.shape[1]
+        device = preferred_device if preferred_device is not None else PSFs.device
+        dtype  = PSFs.dtype
+
+        PSFs = PSFs.to(device=device, dtype=dtype)
+        data_cube = (data_cube if isinstance(data_cube, torch.Tensor)
+                    else torch.tensor(data_cube)).to(device=device, dtype=dtype)
+
+        def sanitize(x, name):
+            if torch.isfinite(x).all():
+                return x
+            if nan_policy == "raise":
+                raise FloatingPointError(f"{name} contains {(~torch.isfinite(x)).sum().item()} NaN/Inf values.")
+            if nan_policy == "zero":
+                return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            raise ValueError("nan_policy must be 'zero' or 'raise'.")
+
+        # Scatter PSFs onto the field canvas → design matrix P
+        with torch.no_grad():
+            PSFs_ = PSFs if solver == 'linear' else sanitize(PSFs, "PSFs")
+            canvas = torch.zeros_like(data_cube, device=device, dtype=dtype)
+            srcs_stack = add_ROIs_separately(canvas, PSFs_, srcs.slices_local, srcs.slices_global)
+            del canvas, PSFs_
+
+            P      = srcs_stack.view(N_src, N_wvl, -1).permute(1, 2, 0).contiguous()  # [N_wvl, pixels, N_src]
+            I_data = data_cube.view(N_wvl, -1, 1)                                      # [N_wvl, pixels, 1]
+            del srcs_stack
+
+            if solver == 'nonlinear':
+                P      = sanitize(P,      "P")
+                I_data = sanitize(I_data, "I_data")
+
+        N_wvl, N_pix, N_src = P.shape
+
+        # ======================== Linear solver ========================
+        if solver == 'linear':
+            ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
+            P_aug = torch.cat([P, ones], dim=-1)
+            sol   = torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution
+            spectrum = sol[:, :N_src, :].clamp(min=0)
+            bg       = sol[:, N_src:,  :]
+            I_sim    = (torch.matmul(P, spectrum) + bg).squeeze(-1).view(N_wvl, data_cube.shape[-2], data_cube.shape[-1])
+            return I_sim, spectrum.squeeze(-1), bg.view(N_wvl)
+
+        # ======================== Non-linear solver ========================
+        def softplus_inv(y):
+            eps = torch.finfo(y.dtype).eps
+            y   = sanitize(y, "softplus_inv input").clamp_min(eps)
+            return torch.where(y > 20.0, y, torch.log(torch.expm1(y).clamp_min(eps)))
+
+        # Initialise from lstsq solution (warm-starting across λ-batches is not
+        # useful here: spectra vary strongly per wavelength while only PSF shape
+        # is smooth, so lstsq gives a better starting point every time)
+        if init_from_lstsq:
+            ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
+            P_aug = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
+            with torch.no_grad():
+                sol           = sanitize(torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution, "lstsq init")
+                spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
+                bg_init       = sanitize(sol[:,  N_src, 0], "bg_init")
+                raw_spec_init = softplus_inv(spec_init)
+                raw_bg_init   = bg_init if bg_unconstrained else softplus_inv(bg_init.clamp_min(0))
+        else:
+            raw_spec_init = torch.zeros(N_wvl, N_src, device=device, dtype=dtype)
+            raw_bg_init   = torch.zeros(N_wvl,        device=device, dtype=dtype)
+
+        raw_spectrum = torch.nn.Parameter(raw_spec_init.clone())
+        raw_bg       = torch.nn.Parameter(raw_bg_init.clone())
+        # P and I_data are plain tensors (no requires_grad); gradients only flow
+        # through raw_spectrum / raw_bg, keeping the computation graph minimal.
+        optimizer = torch.optim.Adam([raw_spectrum, raw_bg], lr=lr)
+
+        for i in range(n_iter):
+            optimizer.zero_grad(set_to_none=True)
+            spectrum = F.softplus(raw_spectrum)
+            bg       = raw_bg if bg_unconstrained else F.softplus(raw_bg)
+            loss     = torch.mean((torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1) - I_data) ** 2)
+
+            if not torch.isfinite(loss):
+                if verbose: print(f"iter {i:05d} | non-finite loss, stopping")
+                break
+
+            loss.backward()
+
+            if grad_clip is not None:
+                torch.nn.utils.clip_grad_norm_([raw_spectrum, raw_bg], grad_clip)
+
+            # Sanitize gradients in-place before the step
+            with torch.no_grad():
+                for p in [raw_spectrum, raw_bg]:
+                    if p.grad is not None and not torch.isfinite(p.grad).all():
+                        p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
+
+            optimizer.step()
+
+            if verbose and (i % 100 == 0 or i == n_iter - 1):
+                print(f"iter {i:05d} | loss = {loss.item():.6e}")
+
+        with torch.no_grad():
+            spectrum = sanitize(F.softplus(raw_spectrum), "final spectrum")
+            bg       = sanitize(raw_bg if bg_unconstrained else F.softplus(raw_bg), "final bg")
+            I_sim    = sanitize(
+                (torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1))
+                .squeeze(-1).view(N_wvl, data_cube.shape[-2], data_cube.shape[-1]),
+                "I_sim"
+            )
+
+        return I_sim.detach(), spectrum.detach(), bg.detach()
+
+
+    def disentangle_flux_batched(
+        self,
+        λ_batch_size  = 100,
+        solver        = 'nonlinear',
+        n_iter        = 1000,
+        verbose       = False,
+        **disentangle_kwargs
+    ):
+        """
+        Disentangle source fluxes for all sources simultaneously, batching only
+        over wavelengths. Simpler than the tiled approach: no spatial subdivision,
+        one DisentangleFlux call per λ-batch over the entire field.
+
+        PSFs for each λ-batch are simulated on-the-fly via
+        PSFModelNFM.SimulateSpectralRange so that only one batch of PSFs lives in
+        memory at a time.
+
+        Parameters
+        ----------
+        λ_batch_size  : int   - wavelength slices per DisentangleFlux call
+        solver        : str   - 'linear' or 'nonlinear'
+        n_iter        : int   - Adam iterations per λ-batch
+        verbose       : bool  - show per-batch progress information
+        **disentangle_kwargs  - forwarded verbatim to DisentangleFlux
+
+        Returns
+        -------
+        I_sim_full   : torch.Tensor [N_wvl_full, H, W]  on CPU
+        fluxes_full  : torch.Tensor [N_wvl_full, N_src] on CPU
+        bg_full      : torch.Tensor [N_wvl_full]        on CPU
+        """
+        
+        # Clear GPU memory before starting the batch processing loop
+        gc.collect()
+        torch.cuda.empty_cache()
+            
+        srcs       = self.sources.select(None)   # all sources, full-field coords
+        dtype      = self.PSF_model.dtype
+        λ_full     = self.PSF_model.λ_full       # [N_wvl_full], in metres
+        N_wvl_full = self.N_wvl_full
+        H, W       = self.cube_full.shape[-2], self.cube_full.shape[-1]
+
+        I_sim_full  = torch.zeros([N_wvl_full, H, W],     device='cpu', dtype=dtype)
+        fluxes_full = torch.zeros([N_wvl_full, self.N_src], device='cpu', dtype=dtype)
+        bg_full     = torch.zeros([N_wvl_full],           device='cpu', dtype=dtype)
+
+        for λ0 in tqdm(range(0, N_wvl_full, λ_batch_size), desc='Disentangling λ-batches'):
+            λ1 = min(λ0 + λ_batch_size, N_wvl_full)
+
+            # Simulate raw PSFs for this spectral sub-range on-the-fly
+            PSFs_batch, _ = self.PSF_model.SimulateSpectralRange(
+                λ_min        = λ_full[λ0].item(),
+                λ_max        = λ_full[λ1 - 1].item(),
+                src_ids      = None,
+                λ_batch_size = λ1 - λ0,
+                sequential   = False,
+                force_cpu    = False,
+                verbose      = False,
+            )
+
+            data_batch = torch.tensor(self.cube_full[λ0:λ1]).to(self.device)
+
+            I_sim_batch, spec_batch, bg_batch = self.disentangle_flux(
+                srcs,
+                PSFs_batch,
+                data_batch,
+                solver  = solver,
+                n_iter  = n_iter,
+                verbose = verbose,
+                **disentangle_kwargs
+            )
+
+            I_sim_full [λ0:λ1] = I_sim_batch.cpu()
+            fluxes_full[λ0:λ1] = spec_batch.cpu()
+            bg_full    [λ0:λ1] = bg_batch.cpu()
+
+            del PSFs_batch, data_batch, I_sim_batch, spec_batch, bg_batch
+            gc.collect()
+            torch.cuda.empty_cache()
+            
+        
+        return I_sim_full, fluxes_full, bg_full
+
 
     def PlotSourceSpectra(self, src_ids=None, title='Sources spectra', show_sparse=True, plot_residual=False, smooth_kernel=None, figsize=(10, 6)):
         """

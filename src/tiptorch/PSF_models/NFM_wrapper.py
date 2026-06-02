@@ -634,7 +634,7 @@ class PSFModelNFM:
         # Cheap pointer check first (same tensor object → same values, no GPU sync needed)
         if self.λ_sim.data_ptr() == wavelengths.data_ptr():
             return
-        # Fallback value check — forces a CUDA sync, but only reached for distinct tensor objects
+        # Fallback value check - forces a CUDA sync, but only reached for distinct tensor objects
         if self.λ_sim.shape == wavelengths.shape and \
             torch.allclose(wavelengths.flatten(), self.λ_sim.flatten(), atol=1e-12):
             return
@@ -653,126 +653,6 @@ class PSFModelNFM:
     
     
     @torch.no_grad()
-    def SimulateFullSpectrum(self, src_ids=None, λ_batch_size=100, verbose=False, force_cpu=True) -> torch.Tensor:
-        ''' The function to simulate PSFs across the full MUSE NFM spectral range at once. It simulates the PSF chromatic cube for each source
-            sequentially parallelizing over wavelengths batches to avoid GPU memory overflow. '''
-            
-        # NOTE: the resulting PSF cube can be stored on CPU to avoid VRAM overflow
-        # NOTE: the order of sources in the output cube corresponds to the order of src_ids_list
-        
-        # Determine the number of simulated sources
-        if src_ids is None:
-            N_src_sim = self.model.N_src
-        else:
-            N_src_sim = len(src_ids) if isinstance(src_ids, (list, tuple)) else 1
-
-        # ----- Manage model inputs
-        x_dict = self.inputs_manager.to_dict()
-        x_dict_λ_full = {}
-
-        # Evaluate all spline parameters at the full λs range beforehand to avoid redundant computations during the PSF simulation loop
-        for entry in self.polychromatic_params:
-            if entry + '_ctrl' in x_dict:
-                x_dict_λ_full[entry] = self.evaluate_splines(x_dict[entry + '_ctrl'], self.λ_full_normed)
-                x_dict.pop(entry + '_ctrl') # Remove the control λs from x_dict to avoid confusion, since we now have the full λs values for these parameters
-
-        x_dict_λ_full['Jx'] = x_dict_λ_full['J']
-        x_dict_λ_full['Jy'] = x_dict_λ_full['J']
-        x_dict_λ_full.pop('J') # Remove the joint jitter parameter
-
-        # Extend to all atmospheric layers assuming the wind is only in ground layer
-        if 'wind_speed_single' in x_dict:
-            x_dict['wind_speed'] = torch.nn.functional.pad(x_dict['wind_speed_single'].view(-1, 1), (0, self.model.N_L - 1))
-            x_dict.pop('wind_speed_single')
-
-        if 'wind_dir_single' in x_dict:
-            x_dict['wind_dir'] = torch.nn.functional.pad(x_dict['wind_dir_single'].view(-1, 1), (0, self.model.N_L - 1))
-            x_dict.pop('wind_dir_single')
-
-        chrom_defocus = x_dict['chrom_defocus'] if self.chrom_defocus else None
-        phase_ = self.phase_func(x_dict['LO_coefs'], chrom_defocus) if self.LO_NCPAs else None
-
-        # The final dictionary with all necessary values stored inside
-        x_dict.update(x_dict_λ_full)
-
-        per_src_params = [p.replace('_ctrl', '') for p in self.inputs_manager.input_managers['per_src'].to_dict().keys()]
-        polychromatic_params = list(x_dict_λ_full.keys())
-
-        # ----- Manage wavelengths batches and PSF simulation
-        # Full spectral cubes for each source
-      
-        device = torch.device('cpu') if force_cpu else self.device
-        PSFs_combined = torch.zeros((N_src_sim, self.num_λ_slices, self.model.N_pix, self.model.N_pix), device=device)
-
-        max_λ_batch_size = λ_batch_size # TODO: adjust based on memory available and the number of sources simulated
-        λ_batches = [self.λ_full[i:i + max_λ_batch_size].detach().clone() for i in range(0, len(self.λ_full), max_λ_batch_size)]
-
-        _initial_wvl = self.λ_sim.clone()
-        _N_src = self.model.N_src
-
-        # Resolve which sources to simulate
-        if src_ids is None:
-            src_ids_list = list(range(_N_src))
-            
-        elif isinstance(src_ids, int):
-            src_ids_list = [src_ids]
-        else:
-            src_ids_list = list(src_ids)
-            
-        N_src_sim = len(src_ids_list)
-
-        self.model.N_src = 1 # Temporarily set to 1 to compute PSFs for each source separately
-
-        if verbose:
-            from tqdm import tqdm
-            pbar = tqdm(total=self.num_λ_slices, desc='Simulating PSF across wavelengths')
-
-        # Copy all shared non-chromatic entries, they stay the same for every λ and every source
-        x_ = { key: x_dict[key] for key in x_dict.keys() if (key not in per_src_params) and (key not in polychromatic_params) }
-        
-        for i, λ_batch in enumerate(λ_batches):
-            if verbose:
-                pbar.update(len(λ_batch))
-            
-            current_batch_size = len(λ_batch)
-            start = i * max_λ_batch_size
-            λ_ids = slice(start, start + current_batch_size)
-
-            self.model.SetWavelengths(λ_batch)
-            
-            # Select current λ batch for all chromatic parameters
-            for entry in polychromatic_params:
-                x_[entry] = x_dict[entry][..., λ_ids]
-            
-            # Compute the static OTF once per λ batch - it's source-independent, assuming it's constant over the field
-            if self.LO_NCPAs:
-                chrom_defocus_batch = x_dict['chrom_defocus'][..., λ_ids] if self.chrom_defocus else None
-                self.model.ComputeStaticOTF(self.phase_func(x_dict['LO_coefs'], chrom_defocus_batch))
-
-            # Iterate over selected sources
-            for out_idx, src_id in enumerate(src_ids_list):
-                # Select current object simulated
-                for entry in per_src_params:
-                    if entry in polychromatic_params:
-                        # Both per-source AND chromatic (e.g. dx, dy): select source AND λ batch
-                        x_[entry] = x_dict[entry][src_id, λ_ids].unsqueeze(0)
-                    else:
-                        x_[entry] = x_dict[entry][src_id, ...].unsqueeze(0)
-
-                PSFs_combined[out_idx, λ_ids, ...] = self.model(x_, None, None).cpu() if force_cpu else self.model(x_, None, None)
-
-        self.model.N_src = _N_src  # Restore the original number of sources
-        self.SetWavelengths(_initial_wvl)  # recomputes grids + tomographic projectors for correct N_src
-        # Restore OTF_static for the original wavelengths and LO coefficients
-        if self.LO_NCPAs:
-            self.model.ComputeStaticOTF(phase_)
-
-        torch.cuda.empty_cache()
-
-        return PSFs_combined # [N_src_sim, N_λ_full, N_pix, N_pix]
-
-
-    @torch.no_grad()
     def SimulateSpectralRange(
         self,
         λ_min        = None,
@@ -783,23 +663,20 @@ class PSFModelNFM:
         verbose      = False,
         force_cpu    = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        '''Simulate PSFs over a user-specified sub-range of the full MUSE NFM spectrum.
+        '''
+        Simulate PSFs over a sub-range (or the full range) of the MUSE NFM spectrum.
 
         Parameters
         ----------
         λ_min, λ_max : float or None
-            Wavelength bounds (same units as ``self.λ_full``, i.e. metres by default).
-            ``None`` falls back to the respective end of the full spectrum.
+            Wavelength bounds (same units as 'self.λ_full', i.e. metres); 'None' falls back to the respective end of the full spectrum.
         src_ids : int | list[int] | None
-            Sources to simulate.  ``None`` simulates all sources.
+            Sources to simulate.  'None' simulates all sources.
         λ_batch_size : int
             Number of wavelength slices per forward pass.
         sequential : bool
-            If ``True``  (default) simulate one source at a time, identical to
-            ``SimulateFullSpectrum``.  Requires less VRAM but is slower for small
-            source counts.
-            If ``False`` simulate all selected sources in a single forward call per
-            λ-batch (faster but uses more VRAM proportional to N_src_sim).
+            If 'True' (default) simulate one source at a time - lower VRAM, slower for large source counts.
+            If 'False' simulate all selected sources in a single forward call per λ-batch - faster but VRAM scales with N_src_sim.
         verbose : bool
             Show a tqdm progress bar over wavelength slices.
         force_cpu : bool
@@ -808,8 +685,9 @@ class PSFModelNFM:
         Returns
         -------
         PSFs_out : torch.Tensor  [N_src_sim, N_λ_range, N_pix, N_pix]
-        λ_range  : torch.Tensor  [N_λ_range]  — the wavelengths that were simulated
+        λ_range  : torch.Tensor  [N_λ_range]  - the wavelengths that were simulated
         '''
+        
         # ── 1. Resolve the spectral sub-range ──────────────────────────────────
         λ_lo = self.λ_full.min().item() if λ_min is None else λ_min
         λ_hi = self.λ_full.max().item() if λ_max is None else λ_max
@@ -818,20 +696,22 @@ class PSFModelNFM:
         if mask.sum() == 0:
             raise ValueError(f"No wavelength slices found in [{λ_lo}, {λ_hi}]. Check units.")
 
-        λ_range        = self.λ_full[mask]                   # [N_λ_range]
-        global_indices = mask.nonzero(as_tuple=True)[0]      # original positions in λ_full
+        λ_range        = self.λ_full[mask]               # [N_λ_range]
+        global_indices = mask.nonzero(as_tuple=True)[0]  # positions in λ_full
 
         # ── 2. Resolve source list ──────────────────────────────────────────────
         _N_src = self.model.N_src
+        
         if src_ids is None:
             src_ids_list = list(range(_N_src))
         elif isinstance(src_ids, int):
             src_ids_list = [src_ids]
         else:
             src_ids_list = list(src_ids)
+            
         N_src_sim = len(src_ids_list)
 
-        # ── 3. Build the fully-evaluated input dict (same as SimulateFullSpectrum) ──
+        # ── 3. Build the fully-evaluated model inputs dict ─────────────────────────────
         x_dict = self.inputs_manager.to_dict()
         x_dict_λ_full = {}
 
@@ -859,90 +739,57 @@ class PSFModelNFM:
 
         per_src_params       = [p.replace('_ctrl', '') for p in self.inputs_manager.input_managers['per_src'].to_dict().keys()]
         polychromatic_params = list(x_dict_λ_full.keys())
+        
+        # Shared non-chromatic entries - constant across λ and sources
+        x_ = { key: x_dict[key] for key in x_dict if key not in per_src_params and key not in polychromatic_params }
 
         # ── 4. Allocate output ──────────────────────────────────────────────────
         device    = torch.device('cpu') if force_cpu else self.device
         N_λ_range = len(λ_range)
         PSFs_out  = torch.zeros((N_src_sim, N_λ_range, self.model.N_pix, self.model.N_pix), device=device)
 
-        # ── 5. Build λ-batches restricted to the selected range ─────────────────
-        # We iterate over the selected wavelengths in chunks; each chunk maps to a
-        # contiguous slice of PSFs_out and potentially non-contiguous positions in λ_full.
-        out_batches = [
-            slice(i, min(i + λ_batch_size, N_λ_range))
-            for i in range(0, N_λ_range, λ_batch_size)
-        ]
-
+        out_batches  = [slice(i, min(i + λ_batch_size, N_λ_range)) for i in range(0, N_λ_range, λ_batch_size)]
         _initial_wvl = self.λ_sim.clone()
 
         if verbose:
             from tqdm import tqdm
             pbar = tqdm(total=N_λ_range, desc='Simulating spectral range')
+            
+        # ── 5. PSF simulation loop ──────────────────────────────────────────────────
+        self.model.N_src = 1 if sequential else N_src_sim
 
-        # Shared non-chromatic entries (same for every λ and every source)
-        x_ = {key: x_dict[key] for key in x_dict if (key not in per_src_params) and (key not in polychromatic_params)}
+        for out_sl in out_batches:
+            global_sl = global_indices[out_sl]
+            λ_batch   = λ_range[out_sl]
 
-        if sequential:
-            # ── Sequential mode: one source per forward call ──────────────────
-            self.model.N_src = 1
+            if verbose:
+                pbar.update(len(λ_batch))
 
-            for out_sl in out_batches:
-                global_sl = global_indices[out_sl]          # indices into λ_full
-                λ_batch   = λ_range[out_sl]
+            self.model.SetWavelengths(λ_batch)
 
-                if verbose:
-                    pbar.update(len(λ_batch))
+            for entry in polychromatic_params:
+                x_[entry] = x_dict[entry][..., global_sl]
 
-                self.model.SetWavelengths(λ_batch)
+            # LO NCPAs induced phase error is shared between all sources, but varies with λ
+            if self.LO_NCPAs:
+                cd_batch = x_dict['chrom_defocus'][..., global_sl] if self.chrom_defocus else None
+                self.model.ComputeStaticOTF(self.phase_func(x_dict['LO_coefs'], cd_batch))
 
-                for entry in polychromatic_params:
-                    x_[entry] = x_dict[entry][..., global_sl]
-
-                if self.LO_NCPAs:
-                    cd_batch = x_dict['chrom_defocus'][..., global_sl] if self.chrom_defocus else None
-                    self.model.ComputeStaticOTF(self.phase_func(x_dict['LO_coefs'], cd_batch))
-
+            if sequential:
                 for out_idx, src_id in enumerate(src_ids_list):
                     for entry in per_src_params:
-                        if entry in polychromatic_params:
-                            x_[entry] = x_dict[entry][src_id, global_sl].unsqueeze(0)
-                        else:
-                            x_[entry] = x_dict[entry][src_id, ...].unsqueeze(0)
-
+                        x_[entry] = (x_dict[entry][src_id, global_sl].unsqueeze(0) if entry in polychromatic_params else x_dict[entry][src_id, ...].unsqueeze(0))
+                        
                     result = self.model(x_, None, None)
-                    PSFs_out[out_idx, out_sl, ...] = result.cpu() if force_cpu else result
-
-        else:
-            # ── Batch mode: all selected sources in one forward call ───────────
-            self.model.N_src = N_src_sim
-
-            for out_sl in out_batches:
-                global_sl = global_indices[out_sl]
-                λ_batch   = λ_range[out_sl]
-
-                if verbose:
-                    pbar.update(len(λ_batch))
-
-                self.model.SetWavelengths(λ_batch)
-
-                for entry in polychromatic_params:
-                    x_[entry] = x_dict[entry][..., global_sl]
-
-                if self.LO_NCPAs:
-                    cd_batch = x_dict['chrom_defocus'][..., global_sl] if self.chrom_defocus else None
-                    self.model.ComputeStaticOTF(self.phase_func(x_dict['LO_coefs'], cd_batch))
-
+                    PSFs_out[out_idx, out_sl] = result.cpu() if force_cpu else result
+            else:
                 for entry in per_src_params:
-                    if entry in polychromatic_params:
-                        # [N_src_sim, λ_batch]
-                        x_[entry] = x_dict[entry][src_ids_list, :][:, global_sl]
-                    else:
-                        x_[entry] = x_dict[entry][src_ids_list, ...]
-
+                    x_[entry] = (x_dict[entry][src_ids_list, :][:, global_sl] if entry in polychromatic_params else x_dict[entry][src_ids_list, ...])
+                
                 result = self.model(x_, None, None)
-                PSFs_out[:, out_sl, ...] = result.cpu() if force_cpu else result
+                PSFs_out[:, out_sl] = result.cpu() if force_cpu else result
 
-        # ── 6. Restore model state ──────────────────────────────────────────────
+        # ── 6. Restore sparse model state ──────────────────────────────────────────────
         self.model.N_src = _N_src
         self.SetWavelengths(_initial_wvl)
         if self.LO_NCPAs:
@@ -954,6 +801,15 @@ class PSFModelNFM:
         torch.cuda.empty_cache()
 
         return PSFs_out, λ_range   # [N_src_sim, N_λ_range, N_pix, N_pix], [N_λ_range]
+
+
+    def SimulateFullSpectrum(self, src_ids=None, λ_batch_size=100, verbose=False, force_cpu=True) -> torch.Tensor:
+        '''Backward-compatible wrapper - calls SimulateSpectralRange over the full spectrum.'''
+        PSFs, _ = self.SimulateSpectralRange(
+            src_ids=src_ids, λ_batch_size=λ_batch_size,
+            sequential=True, verbose=verbose, force_cpu=force_cpu,
+        )
+        return PSFs
 
 
     @torch.no_grad()

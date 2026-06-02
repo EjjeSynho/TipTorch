@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import pandas as pd
+
 from typing import Union
 from sklearn.cluster import DBSCAN
 from matplotlib import pyplot as plt
@@ -10,12 +11,11 @@ from astropy.stats import sigma_clipped_stats
 from photutils.detection import find_peaks
 from photutils.aperture import RectangularAperture
 from matplotlib.colors import LogNorm
-from tools.plotting import plot_radial_PSF_profiles  # local tools/ dir, not tiptorch
 from scipy import ndimage
-
 from typing import Optional, Union, Sequence
 from dataclasses import dataclass
 
+from tools.plotting import plot_radial_PSF_profiles
 
 """
 This module is used to manage the multi-source simulations. It contains functions to 
