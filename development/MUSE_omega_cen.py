@@ -27,7 +27,7 @@ raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw_data/MUSE.2020-02-24T05-16-30
 cube_path  = MUSE_DATA_FOLDER / "omega_cluster/reduced_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
-ob = MUSEObservation(raw_path, cube_path, cache_path, device=default_device)
+ob = MUSEObservation(raw_path, cube_path, cache_path, model_type='tiptorch', device=default_device)
 ob.λ_batch_size = ob.λ_full.shape[0] // 3 + 1  # Process all wavelengths at once (adjust if memory issues arise)
 
 #%%
@@ -58,12 +58,13 @@ sources['weight'] = 1.0
 
 ob.sources_table = sources
 ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
-#%%
-# ob.DisplaySources(draw_box_size=5)
-# ob.PlotSourceSpectra()
 
-#%
+# ob.DisplaySources(draw_box_size=5)
+
 ob.InitSimulation()
+
+#%%
+ob.FitPSFModel(repeat=3, max_iter=200)
 
 #%%
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
@@ -81,66 +82,27 @@ else:
     torch.save(model_data, model_cache)
     print(f"PSF model saved to {model_cache}")
 
-#%%
-from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
-model_cache = MUSE_DATA_FOLDER / "omega_cluster/PSF_model_fitted.pt"
+# model_cache = MUSE_DATA_FOLDER / "omega_cluster/PSF_model_fitted.pt"
 
-if model_cache.exists():
-    print("Loading PSF model from cache...")
-    model_data = torch.load(model_cache)
-    ob.PSF_model = PSFModelNFM.load(model_data, device=ob.device)
-else:
-    print("Fitting PSF model...")
-    ob.FitPSFModel(repeat=3, max_iter=200)
-    model_data = ob.PSF_model.save()
-    torch.save(model_data, model_cache)
-    print(f"PSF model saved to {model_cache}")
+# if model_cache.exists():
+#     print("Loading PSF model from cache...")
+#     model_data = torch.load(model_cache)
+#     ob.PSF_model = PSFModelNFM.load(model_data, device=ob.device)
+# else:
+#     print("Fitting PSF model...")
+#     ob.FitPSFModel(repeat=3, max_iter=200)
+#     model_data = ob.PSF_model.save()
+#     torch.save(model_data, model_cache)
+#     print(f"PSF model saved to {model_cache}")
 
 
-#%
-# _, PSFs, _ = ob.simulate_sparse(return_PSFs=True)
 
 #%%
-from tools.multisources import VisualizeSources, add_ROIs_separately, PlotSourcesProfiles, extract_ROIs, add_ROIs
-from tools.observations import SourcesSubset
+from tools.multisources import VisualizeSources, PlotSourcesProfiles, extract_ROIs, add_ROIs
 from matplotlib.colors import LogNorm
 
 
-# I_sim, fluxes, bg_solved = DisentangleFlux(ob.sources.select(None), PSFs, ob.cube_sparse, solver='nonlinear')
-
-# fluxes_ = fluxes.cpu().numpy().T  # [N_src, N_wvl]
-# F_norm = ob.PSF_model['F_norm'].unsqueeze(-1).cpu().numpy()
-# PSF_norm_factor = ob.PSF_model.evaluate_splines(ob.PSF_model.inputs_manager['F_norm_λ_ctrl'], ob.PSF_model.λ_sim_normed).cpu().numpy()
-# fluxes_ /= F_norm * PSF_norm_factor
-
-# for i in range(ob.N_src):
-#     ob.sources.spectra_sparse[i] = torch.tensor(fluxes_[i], device=ob.device, dtype=ob.PSF_model.dtype)
-
-# colors = []
-# for _ in range(0,8):
-#     r = random.random()
-#     g = random.random()
-#     b = random.random()
-#     colors.append(f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}')
-
-# colors[:10] = ['blue', 'orange', 'green', 'red', 'purple', 'brown', 'pink', 'gray', 'olive', 'cyan']
-
-# plt.figure(figsize=(6, 4))
-
-# for i_src in range(0, 8):
-#     plt.plot(ob.λ_sparse, ob.sources.spectra_sparse[i_src].cpu().numpy(), color=colors[i_src], alpha=0.8)
-#     plt.plot(ob.λ_sparse, fluxes_[i_src], color=colors[i_src], alpha=0.8, linestyle='--')
-
-# plt.xlabel('Wavelength, [nm]')
-# plt.ylabel(r'Flux, [ $10^{-20} \frac{erg} {s \, \cdot \, cm^2 \, \cdot \, Å} ]$')
-# plt.title('Sources spectra preview')
-# plt.grid(alpha=0.3)
-# plt.tight_layout()
-# plt.show()
-
-# field_disentangled = ob.simulate_sparse(return_PSFs=False)[0]
-#%
 field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=True, force_cpu=False)
 
 #%%
@@ -194,21 +156,10 @@ bg = bg.view(ob.N_wvl, 1, 1)
 data_img = ob.cube_sparse.clone() - ob.background_sparse.view(ob.N_wvl, 1, 1)
 
 #%%
-# display_norm = LogNorm(vmin=1, vmax=data_img.sum(dim=0).max()) # again, rather empirical values
-# _ = VisualizeSources(data_img, ob.simulated_sparse, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
-
 display_norm = LogNorm(vmin=1, vmax=data_img.sum(dim=0).max().item()) # again, rather empirical values
 _ = VisualizeSources(data_img, field_disentangled, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
 
-#%%
-# w = ob.sources.table['peak_value'].values.copy() # get flux values as weights
-# w = w / w.max() # Normalize weights by flux to [0, 1]
-# min_thresh = 0.1
-# w += min_thresh
-# w /= 1. + min_thresh
-
 PlotSourcesProfiles(data_img, field_disentangled, ob.sources.table, radius=16, title='Radial profiles', y_max=350, y_min=0.25)
-# PlotSourcesProfiles(ob.cube_sparse, ob.simulated_sparse, ob.sources.table, radius=16, title='Source radial profiles (sparse spectrum)')
 
 #%%
 Strehls_per_λ = ob.PSF_model.ComputeStrehl()
@@ -291,21 +242,6 @@ axes[2].set_title('Difference')
 fig.colorbar(im2, ax=axes, shrink=0.7)
 plt.show()
 
-
-#%%
-# from tools.observations import split_field_into_tiles, visualize_field_tiles
-
-# tiles = split_field_into_tiles(ob.cube_sparse.shape, N_tiles_x=4, N_tiles_y=4, border_offset=0)
-# visualize_field_tiles(ob.cube_sparse.sum(axis=0).cpu().numpy(), tiles, title='Field Tiles', norm=display_norm)
-
-# for tile in tiles:
-#     tile['srcs'] = ob.sources.select_sources_in_tile(tile['ROI'], d_offset=30)
-#     tile['srcs_light'] = tile['srcs'].clone(light_weight=True).rebase_coords(crop_ROI=tile['ROI'], filter_empty=False)
-#     print(f"Tile {tile['ID']}: {len(tile['srcs'])} sources in tile")
-
-
-# I_sim_full, fluxes_full, bg_full = DisentangleFluxBatched(ob, λ_batch_size=10, solver='nonlinear')
-# I_sim_full, fluxes_full, bg_full = DisentangleFluxBatched(ob, λ_batch_size=10, solver='linear')
 
 
 #%%

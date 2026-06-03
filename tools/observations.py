@@ -20,6 +20,7 @@ from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
 from fitting.PSF_optimizer import OptimizePSFModel
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
+from tiptorch.PSF_models.NFM_Moffat  import MoffatPSFModelNFM
 from tiptorch.tools.utils import mask_square, generate_random_colors, rad2mas, rad2arc
 from tools.plotting import PlotSpetralCubeInRGB
 from tools.multisources import (
@@ -53,12 +54,12 @@ class FitWeights:
 
 # TODO: implement a OB storage function (not only FITS cubes, but also sources data, fitting results, etc.)
 class MUSEObservation:
-    def __init__(self, raw_path, cube_path, cache_path, PSF_size=111, device=default_torch_type):
+    def __init__(self, raw_path, cube_path, cache_path, PSF_size=111, model_type='TipTorch', device=default_torch_type):
         self.raw_path   = raw_path
         self.cube_path  = cube_path
         self.cache_path = cache_path
         self.device     = device
-        
+        self.model_type = model_type.lower()
         self.suppress_bump_flag = False # Flag to suppress fitting of the "phase bump" NCPA of MUSE NFM
         self.suppress_LO_flag   = False # Flag to suppress fitting of the quasi-static LO aberrations
         # Helper function during the fitting
@@ -166,7 +167,6 @@ class MUSEObservation:
         sources_azimuth = np.degrees(np.arctan2(sources_coords[:,1], sources_coords[:,0]))  # [deg]
 
         # Update the model config with the sources coordinates
-        self.model_config['NumberSources'] = len(self.sources)
         self.model_config['sources_science']['Zenith']  = torch.tensor(sources_zenith,  device=self.device).unsqueeze(-1)
         self.model_config['sources_science']['Azimuth'] = torch.tensor(sources_azimuth, device=self.device).unsqueeze(-1)
 
@@ -195,35 +195,53 @@ class MUSEObservation:
         
         # The model config is also updated to simulate only sparse λs
         self.model_config['sources_science']['Wavelength'] = torch.tensor(self.λ_sparse, device=self.device, dtype=torch.float32) * 1e-9 #[m]
+        self.model_config['NumberSources'] = len(self.sources)
         
         if not isinstance(self.model_config['telescope']['PupilAngle'], torch.Tensor):
             self.model_config['telescope']['PupilAngle'] = torch.tensor(self.model_config['telescope']['PupilAngle'], device=self.device)
 
-        self.AddSourcesToModelConfig()
-        # Initialize the PSF model
-        self.PSF_model = PSFModelNFM(
-            self.model_config,
-            multiple_obs    = False,
-            LO_NCPAs        = True,
-            chrom_defocus   = False,
-            use_Moffat      = False,
-            N_spline_nodes  = 5,
-            Z_mode_max      = 9,
-            device          = self.device,
-            λ_min           = self.λ_full.min().item() * 1e-9, # [m]
-            λ_max           = self.λ_full.max().item() * 1e-9, # [m]
-            num_λ_slices    = len(self.λ_full)
-        )
-        #  Get the initial guess for the PSF model parameters
-        calibrator = NFMCalibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth', device=self.device)
-        _ = calibrator.check_compatibility(self.PSF_model)
-        # Change PSF model parameters based on NN's predictions
-        calibrator.calibrate(self.reduced_telemetry, self.PSF_model)
+        if self.model_type == 'tiptorch':
+            self.AddSourcesToModelConfig()
+            # Initialize the PSF model
+            self.PSF_model = PSFModelNFM(
+                self.model_config,
+                multiple_obs    = False,
+                LO_NCPAs        = True,
+                chrom_defocus   = False,
+                use_Moffat      = False,
+                N_spline_nodes  = 5,
+                Z_mode_max      = 9,
+                device          = self.device,
+                λ_min           = self.λ_full.min().item() * 1e-9, # [m]
+                λ_max           = self.λ_full.max().item() * 1e-9, # [m]
+                num_λ_slices    = len(self.λ_full)
+            )
+            #  Get the initial guess for the PSF model parameters
+            calibrator = NFMCalibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth', device=self.device)
+            _ = calibrator.check_compatibility(self.PSF_model)
+            # Change PSF model parameters based on NN's predictions
+            calibrator.calibrate(self.reduced_telemetry, self.PSF_model)
 
-        # Disable optimization of some variables
-        self.PSF_model.inputs_manager.set_optimizable('bg_ctrl',  False)
-        self.PSF_model.inputs_manager.set_optimizable('wind_dir', False)
+            # Disable optimization of some variables
+            self.PSF_model.inputs_manager.set_optimizable('bg_ctrl',  False)
+            self.PSF_model.inputs_manager.set_optimizable('wind_dir', False)
         
+        elif self.model_type == 'psfao':
+            raise NotImplementedError("PSF-AO model is not implemented yet. Please use 'TipTorch' or 'Moffat' as the model type.")
+        
+        elif self.model_type == 'moffat':
+            self.PSF_model = MoffatPSFModelNFM(
+                self.model_config,
+                N_spline_nodes = 5,
+                device         = self.device,
+                λ_min          = self.λ_full.min().item() * 1e-9, # [m]
+                λ_max          = self.λ_full.max().item() * 1e-9, # [m]
+                num_λ_slices   = len(self.λ_full)
+            )
+            
+        elif self.model_type == 'gaussian':
+            raise NotImplementedError("Gaussian PSF model is not implemented yet. Please use 'TipTorch' or 'Moffat' as the model type.")
+            
         self._update_flux_norm() # Update the flux normalization factor based on the initial guess for the PSF shape
 
 
@@ -280,14 +298,15 @@ class MUSEObservation:
             wvl_current = self.PSF_model.λ_sim.clone()
             self.PSF_model.SetWavelengths(self.PSF_model.λ_ctrl) # isntead of anchor λs, evaluate at spline nodes
 
-        # Backup the original sources coordinates
-        coords_backup = (
-            self.PSF_model.inputs_manager['src_dirs_x'].clone(),
-            self.PSF_model.inputs_manager['src_dirs_y'].clone()
-        )
-        # Assume on-axis PSF for computing the ratio
-        self.PSF_model.inputs_manager['src_dirs_x'] *= 0.0
-        self.PSF_model.inputs_manager['src_dirs_y'] *= 0.0
+        has_src_dirs = all(name in self.PSF_model.get_param_names() for name in ['src_dirs_x', 'src_dirs_y'])
+        if has_src_dirs:
+            coords_backup = (
+                self.PSF_model.inputs_manager['src_dirs_x'].clone(),
+                self.PSF_model.inputs_manager['src_dirs_y'].clone()
+            )
+            # Assume on-axis PSF for computing the ratio
+            self.PSF_model.inputs_manager['src_dirs_x'] *= 0.0
+            self.PSF_model.inputs_manager['src_dirs_y'] *= 0.0
 
         PSF_small = self.PSF_model.forward(src_ids=0) # compute only for the first source ignoring the field variability (just for speed's sake)
         self.PSF_model.SetImageSize(quasi_inf_PSF_size) # quasi-infinite PSF image to compute how much flux is lost while cropping
@@ -298,8 +317,8 @@ class MUSEObservation:
         if self.PSF_model.use_splines:
             self.PSF_model.SetWavelengths(wvl_current) # switch back to the original wavelengths
 
-        # Restore the original coordinates
-        self.PSF_model.inputs_manager['src_dirs_x'], self.PSF_model.inputs_manager['src_dirs_y'] = coords_backup
+        if has_src_dirs:
+            self.PSF_model.inputs_manager['src_dirs_x'], self.PSF_model.inputs_manager['src_dirs_y'] = coords_backup
 
         # How much flux is cropped by assuming the finite size of the PSF. Since PSFs are normalized to ∑PSF≈1 per wavelength,
         # the crop ratio is given by the ratio of the max pixel values in the small and quasi-infinite PSF images
@@ -541,6 +560,9 @@ class MUSEObservation:
 
     def _loss_LO(self, fit_weights: FitWeights):
         ''' Loss function term focus on values of LO aberrations coefficients '''
+        if 'LO_coefs' not in self.PSF_model.get_param_names():
+            return torch.zeros((), device=self.cube_sparse.device, dtype=self.cube_sparse.dtype)
+
         # L2 regularization on all LO coefficients
         LO_loss = self.PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * fit_weights.LO
         # Constraint to enforce first element of LO_coefs to be positive
@@ -564,7 +586,8 @@ class MUSEObservation:
             fit_params = [fit_params]
         
         # Determine which parameters must be fitted
-        PSF_params        = ['r0', 'dn', 'LO_coefs', 'F_ctrl', 'J_ctrl', 'L0', 'wind_speed_single', 'wind_dir_single', 'Cn2_weights']
+        PSF_params        = ['r0', 'dn', 'LO_coefs', 'F_ctrl', 'J_ctrl', 'L0', 'wind_speed_single', 'wind_dir_single', 'Cn2_weights',
+                             'alpha_x_ctrl', 'alpha_y_ctrl', 'beta_ctrl', 'theta']
         astrometry_params = ['dx_ctrl', 'dy_ctrl']
         photometry_params = ['bg_ctrl', 'F_norm_λ_ctrl', 'F_norm']
 
@@ -575,8 +598,8 @@ class MUSEObservation:
                           (astrometry_params if 'astrometry' in fit_params else []) + \
                           (photometry_params if 'photometry' in fit_params else [])
 
-            # Check if selected parameters are already selected within the PSF model
-            fitable_set = [param for param in fitable_set if self.PSF_model.inputs_manager.is_optimizable(param)]
+            optimizable_names = set(self.PSF_model.get_optimizable_param_names())
+            fitable_set = [param for param in fitable_set if param in optimizable_names]
         return fitable_set
 
 
@@ -675,7 +698,7 @@ class MUSEObservation:
                 simulated = I_sim - bg_solved.view(self.N_wvl, 1, 1) # Leave the pure PSF contribution in the simulated image
                 self.background_sparse = bg_solved
                 
-                F_PSF = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_ctrl'], self.PSF_model.λ_sim_normed).cpu()
+                F_PSF = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_ctrl'], self.PSF_model.λ_sim_normed)
                 
                 # spectra_sparse stores flux per PSF core, not full flux per source, that's why we need it here
                 self.sources.spectra_sparse      = fluxes.T / flux_normalization # update the previous spectra estimates with the disentangling results

@@ -85,6 +85,7 @@ class NFMCalibrator():
         # Inputs transformers
         with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'rb') as handle:
             self.telemetry_imputer = pickle.load(handle)
+        self.telemetry_imputer.verbose = 0
 
         with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as handle:
             self.telemetry_scaler = pickle.load(handle)
