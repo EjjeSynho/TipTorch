@@ -362,14 +362,19 @@ class MUSEObservation:
 
     @torch.no_grad()
     def _update_flux_norm(self) -> None:
-        # PSF_norm_factor_old = self.PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
-
+        # # Since there is no calibration step involved when using purely empirical PSF models, the flux normalization can be quite far from optimum
+        # # when optimization starts, which can lead to very high initial loss values and unstable optimization. To mitigate this issue, we can update
+        # # the initial flux normalization factor based on the crop factor
+        # if self.model_type in ('moffat', 'gaussian', 'psfao'):
+        #     PSF_norm_factor_old = self.PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
+        #     self._compute_flux_crop_factor() # update the core flux normalization factor based on the current PSF morphology
+        #     PSF_norm_factor_new = self.PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
+        #     # Compute the updated normalization factors
+        #     F_norm_correction = (PSF_norm_factor_new / PSF_norm_factor_old).mean().item()
+        #     self.PSF_model.inputs_manager['F_norm'] /= F_norm_correction
+        # # Since for physical modelling, a data-driven calibrator gices already good-enough initial flux normalization, we can skip that step
+        # else:
         self._compute_flux_crop_factor() # update the core flux normalization factor based on the current PSF morphology
-        # PSF_norm_factor_new = self.PSF_model.inputs_manager['F_norm_λ_ctrl'].clone()
-        
-        # Compute the updated normalization factors
-        # F_norm_correction = (PSF_norm_factor_new / PSF_norm_factor_old).mean().item()
-        # self.PSF_model.inputs_manager['F_norm'] /= F_norm_correction
 
         # Since F_ctrl is the parameter that directly controls the overall flux normalization in the model, we can use its mean value to correct
         # for per-source flux normalization. This is a rather empirical correction

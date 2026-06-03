@@ -27,7 +27,7 @@ raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw_data/MUSE.2020-02-24T05-16-30
 cube_path  = MUSE_DATA_FOLDER / "omega_cluster/reduced_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
-ob = MUSEObservation(raw_path, cube_path, cache_path, model_type='TipTorch', device=default_device)
+ob = MUSEObservation(raw_path, cube_path, cache_path, model_type='PSFAO', device=default_device)
 ob.λ_batch_size = ob.λ_full.shape[0] // 3 + 1  # Process all wavelengths at once (adjust if memory issues arise)
 
 #%%

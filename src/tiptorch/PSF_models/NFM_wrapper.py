@@ -463,10 +463,12 @@ class PSFModelNFM:
             # Precise per-source chromatic astrometry correction
             add_input('dx_ctrl', torch.tensor([[0.0,]*self.N_wvl_ctrl]*N_src),  norm_dxy, is_shared=False)
             add_input('dy_ctrl', torch.tensor([[0.0,]*self.N_wvl_ctrl]*N_src),  norm_dxy, is_shared=False) 
-            # An auxiliary chromatic normalization factor. It's different from F and used to store chromatic flux crop factor due to finite PSF size and
-            # chromatic core vs. wings flux ratio, Meanwhile F, is used to normalize the overall flux level of the PSF across wavelengths due to its morphology
+            # An auxiliary chromatic normalization factor. It's different from F and used to store chromatic flux crop factor due to finite
+            # PSF size and chromatic core vs. wings flux ratio, Meanwhile F, is used to normalize the overall flux level of the PSF
+            # across wavelengths due to its morphology
             add_input('F_norm_λ_ctrl', torch.tensor([[1.0,]*self.N_wvl_ctrl]*N_obs), norm=norm_F_λ_norm, optimizable=False, is_shared=True)  
         else:
+            # Same stuff here, but without splines
             add_input('F',  torch.tensor([[1.0,]*N_wvl]*N_obs),  norm_F,   is_shared=True)
             add_input('bg', torch.tensor([[0.0,]*N_wvl]*N_obs),  norm_bg,  is_shared=True)
             add_input('dx', torch.tensor([[0.0,]*N_wvl]*N_src),  norm_dxy, is_shared=False)
@@ -482,36 +484,45 @@ class PSFModelNFM:
                 add_input('J_ctrl', torch.tensor([[25.0,]*self.N_wvl_ctrl]*N_obs), norm_J, is_shared=True)
             else:
                 add_input('J', torch.tensor([[25.0]*N_wvl]*N_obs), norm_J, is_shared=True)
-
         add_input('Jxy', torch.tensor([0.0]), norm_J, optimizable=False, is_shared=True) # essentially, this disables the TT jitter anisotropy
-
+        
+        # Von Kármán turbulence parameters
         add_input('r0', self.model.r0.detach().clone(), norm_r0, is_shared=True)
         add_input('L0', self.model.L0.detach().clone(), norm_L0, is_shared=True)
 
         if self.model_type != 'psfao':
             # HO WFSing error correction factor — only needed when physics PSDs are active
             add_input('dn',  torch.tensor([0.25]*N_obs),    norm_dn, is_shared=True)
+            
             # Wind speed and direction are only accounted for the ground layer
             add_input('wind_speed_single', self.model.wind_speed[:,0].detach().clone().unsqueeze(-1), norm_wind_speed, is_shared=True)
             add_input('wind_dir_single', self.model.wind_dir[:,0].detach().clone().unsqueeze(-1), norm_wind_speed, optimizable=False, is_shared=True)
             add_input('Cn2_weights', self.model.Cn2_weights.detach().clone(), norm_Cn2_profile, optimizable=False, is_shared=True)
-        
+            
             # Sources directions within the FoV
             add_input('src_dirs_x', self.model.src_dirs_x.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
             add_input('src_dirs_y', self.model.src_dirs_y.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
 
+        # Add Moffat PSD absorber's parameters (if Moffat regime is active)
+        if self.model_type in ('hybrid', 'psfao'):
+            add_input('b',     torch.tensor([0.0]*N_obs),  norm_b,     optimizable=True,  is_shared=True)
+            add_input('ratio', torch.tensor([1.0]*N_obs),  norm_ratio, optimizable=False, is_shared=True)
+            add_input('theta', torch.tensor([0.0]*N_obs),  norm_theta, optimizable=False, is_shared=True)
+            
+            if self.model_type == 'psfao':
+                # Stronger Moffat component to fully replace the physical PSDs
+                add_input('amp',   torch.tensor([1e-1]*N_obs),  norm_amp,   optimizable=True,  is_shared=True)
+                add_input('alpha', torch.tensor([1.0]*N_obs),  norm_alpha, optimizable=True,  is_shared=True)
+                add_input('beta',  torch.tensor([1.5]*N_obs),  norm_beta,  optimizable=True,  is_shared=True)
+            else:
+                # small Moffat component
+                add_input('amp',   torch.tensor([1e-4]*N_obs), norm_amp,   optimizable=True,  is_shared=True)
+                add_input('beta',  torch.tensor([2.5]*N_obs),  norm_beta,  optimizable=True,  is_shared=True)
+                add_input('alpha', torch.tensor([2.0]*N_obs),  norm_alpha, optimizable=True,  is_shared=True)
+
         # Overall per-source flux scaling factor, can be used per-source for photometry fine tuning
         add_input('F_norm', torch.tensor([[1.0,]]*N_src), norm=norm_F_norm, optimizable=(not self.multiple_obs), is_shared=False)
         
-        # Add Moffat PSD absorber's parameters (if Moffat regime is active)
-        if self.model_type in ('hybrid', 'psfao'):
-            add_input('amp',   torch.tensor([1e-4]*N_obs), norm_amp,   optimizable=True,  is_shared=True)
-            add_input('b',     torch.tensor([0.0]*N_obs),  norm_b,     optimizable=True,  is_shared=True)
-            add_input('alpha', torch.tensor([2.0]*N_obs),  norm_alpha, optimizable=True,  is_shared=True)
-            add_input('beta',  torch.tensor([2.5]*N_obs),  norm_beta,  optimizable=True,  is_shared=True)
-            add_input('ratio', torch.tensor([1.0]*N_obs),  norm_ratio, optimizable=False, is_shared=True)
-            add_input('theta', torch.tensor([0.0]*N_obs),  norm_theta, optimizable=False, is_shared=True)
-
         if self.LO_NCPAs:
             if isinstance(self.LO_basis, PixelmapBasis):
                 # add_input('LO_coefs', torch.zeros([self.model.N_obs, self.LO_N_params**2]), norm_LO, is_shared=True)
