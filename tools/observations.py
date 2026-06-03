@@ -209,6 +209,7 @@ class MUSEObservation:
                 LO_NCPAs        = True,
                 chrom_defocus   = False,
                 use_Moffat      = False,
+                model_type      = 'physics-based',
                 N_spline_nodes  = 5,
                 Z_mode_max      = 9,
                 device          = self.device,
@@ -227,7 +228,22 @@ class MUSEObservation:
             self.PSF_model.inputs_manager.set_optimizable('wind_dir', False)
         
         elif self.model_type == 'psfao':
-            raise NotImplementedError("PSF-AO model is not implemented yet. Please use 'TipTorch' or 'Moffat' as the model type.")
+            self.AddSourcesToModelConfig()
+            # Initialize the PSF model
+            self.PSF_model = PSFModelNFM(
+                self.model_config,
+                multiple_obs    = False,
+                LO_NCPAs        = True,
+                chrom_defocus   = False,
+                model_type      = 'psfao',
+                N_spline_nodes  = 5,
+                Z_mode_max      = 9,
+                device          = self.device,
+                λ_min           = self.λ_full.min().item() * 1e-9, # [m]
+                λ_max           = self.λ_full.max().item() * 1e-9, # [m]
+                num_λ_slices    = len(self.λ_full)
+            )
+            self.PSF_model.inputs_manager.set_optimizable('bg_ctrl', False)
         
         elif self.model_type == 'moffat':
             self.PSF_model = MoffatPSFModelNFM(
@@ -238,10 +254,14 @@ class MUSEObservation:
                 λ_max          = self.λ_full.max().item() * 1e-9, # [m]
                 num_λ_slices   = len(self.λ_full)
             )
+            self.PSF_model.inputs_manager.set_optimizable('bg_ctrl',  False)
             
         elif self.model_type == 'gaussian':
             raise NotImplementedError("Gaussian PSF model is not implemented yet. Please use 'TipTorch' or 'Moffat' as the model type.")
-            
+        
+        else:
+            raise ValueError(f"Invalid model type: {self.model_type}. Supported types are: 'TipTorch', 'PSFAO', 'Moffat', 'Gaussian'.")
+        
         self._update_flux_norm() # Update the flux normalization factor based on the initial guess for the PSF shape
 
 
@@ -587,7 +607,8 @@ class MUSEObservation:
         
         # Determine which parameters must be fitted
         PSF_params        = ['r0', 'dn', 'LO_coefs', 'F_ctrl', 'J_ctrl', 'L0', 'wind_speed_single', 'wind_dir_single', 'Cn2_weights',
-                             'alpha_x_ctrl', 'alpha_y_ctrl', 'beta_ctrl', 'theta']
+                             'alpha_x_ctrl', 'alpha_y_ctrl', 'beta_ctrl', 'theta', # pixel-space Moffat parameters
+                             'amp', 'b', 'alpha', 'beta', 'ratio']  # Moffat PSD params (PSFAO / hybrid modes)
         astrometry_params = ['dx_ctrl', 'dy_ctrl']
         photometry_params = ['bg_ctrl', 'F_norm_λ_ctrl', 'F_norm']
 

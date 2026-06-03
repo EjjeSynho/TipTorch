@@ -15,28 +15,39 @@ import gc
 
 
 class PSFModelNFM:
+    # Valid PSD regime identifiers
+    _VALID_REGIMES = ('physics-based', 'psfao', 'hybrid')
+
     def __init__(
         self,
         config,
         multiple_obs   = False,
         LO_NCPAs       = True,
         chrom_defocus  = False,
-        use_Moffat     = False,
+        use_Moffat     = False,   # Deprecated: use model_type='hybrid' instead
         retain_PSDs    = False,
         Z_mode_max     = 9,
         N_spline_nodes = 5,
         device         = default_device,
         dtype          = torch.float32,
+        model_type     = None,    # 'physics-based' | 'psfao' | 'hybrid'
         *, # MUSE NFM spectral data
         λ_min        = 475.e-9,
         λ_max        = 935.e-9,
         num_λ_slices = 3681,
     ):
+        # Resolve model_type: explicit argument wins; fall back to use_Moffat for backward compat
+        if model_type is None:
+            model_type = 'hybrid' if use_Moffat else 'physics-based'
+        if model_type not in self._VALID_REGIMES:
+            raise ValueError(f"model_type must be one of {self._VALID_REGIMES}, got '{model_type}'")
+
         self.Z_mode_max    = Z_mode_max
         self.LO_N_params   = None
         self.retain_PSDs   = retain_PSDs
         self.LO_NCPAs      = LO_NCPAs
-        self.use_Moffat    = use_Moffat
+        self.model_type    = model_type
+        self.use_Moffat    = model_type in ('hybrid',)   # kept for backward compat
         self.chrom_defocus = chrom_defocus and LO_NCPAs
         self.__config_raw  = config # Input config dictionary, defined in TipTop-style
         self.device        = torch.device(device)
@@ -124,7 +135,8 @@ class PSFModelNFM:
             'multiple_obs':   self.multiple_obs,
             'LO_NCPAs':       self.LO_NCPAs,
             'chrom_defocus':  self.chrom_defocus,
-            'use_Moffat':     self.use_Moffat,
+            'model_type':     self.model_type,
+            'use_Moffat':     self.use_Moffat,   # kept for backward compat readers
             'retain_PSDs':    self.retain_PSDs,
             'Z_mode_max':     self.Z_mode_max,
             'N_spline_nodes': self.N_wvl_ctrl if self.use_splines else None,
@@ -198,7 +210,7 @@ class PSFModelNFM:
             multiple_obs   = store_data.get('multiple_obs', store_data.get('multiple_OBs', False)),
             LO_NCPAs       = store_data.get('LO_NCPAs', True),
             chrom_defocus  = store_data.get('chrom_defocus', False),
-            use_Moffat     = store_data.get('use_Moffat', False),
+            model_type     = store_data.get('model_type', 'hybrid' if store_data.get('use_Moffat', False) else 'physics-based'),
             retain_PSDs    = store_data.get('retain_PSDs', False),
             Z_mode_max     = store_data.get('Z_mode_max', 9),
             N_spline_nodes = store_data.get('N_spline_nodes', None),
@@ -265,7 +277,7 @@ class PSFModelNFM:
             LO_NCPAs        = self.LO_NCPAs,
             chrom_defocus   = self.chrom_defocus,
             N_spline_nodes  = self.N_wvl_ctrl,
-            use_Moffat      = self.use_Moffat,
+            model_type      = self.model_type,
             Z_mode_max      = self.Z_mode_max,
             device          = self.device,
             dtype           = self.model.dtype
@@ -337,19 +349,21 @@ class PSFModelNFM:
             config['telescope']['PupilAngle'] = pupil_angle
        
         pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=pupil_angle), device=self.device )
+
+        physics_on = self.model_type != 'psfao'
         PSD_include = {
             'fitting':         True,
-            'WFS noise':       True,
-            'spatio-temporal': True,
+            'WFS noise':       physics_on,
+            'spatio-temporal': physics_on,
             'aliasing':        False,
-            'chromatism':      True,
-            'diff. refract':   True,
-            'Moffat':          self.use_Moffat
+            'chromatism':      physics_on,
+            'diff. refract':   physics_on,
+            'Moffat':          self.model_type in ('hybrid', 'psfao'),
         }
         
         self.model = TipTorch(
             AO_config = config,
-            AO_type = 'LTAO',
+            AO_type = 'LTAO' if self.model_type in ('physics-based', 'hybrid') else 'PSFAO',
             pupil = pupil,
             PSD_include = PSD_include,
             norm_regime = 'sum',
@@ -473,28 +487,30 @@ class PSFModelNFM:
 
         add_input('r0', self.model.r0.detach().clone(), norm_r0, is_shared=True)
         add_input('L0', self.model.L0.detach().clone(), norm_L0, is_shared=True)
-        add_input('dn',  torch.tensor([0.25]*N_obs),    norm_dn, is_shared=True) # HO WFSing error correction factor
 
-        # Wind speed and direction are only accounted for the ground layer
-        add_input('wind_speed_single', self.model.wind_speed[:,0].detach().clone().unsqueeze(-1), norm_wind_speed, is_shared=True)
-        add_input('wind_dir_single', self.model.wind_dir[:,0].detach().clone().unsqueeze(-1), norm_wind_speed, optimizable=False, is_shared=True)
-        add_input('Cn2_weights', self.model.Cn2_weights.detach().clone(), norm_Cn2_profile, optimizable=False, is_shared=True)
+        if self.model_type != 'psfao':
+            # HO WFSing error correction factor — only needed when physics PSDs are active
+            add_input('dn',  torch.tensor([0.25]*N_obs),    norm_dn, is_shared=True)
+            # Wind speed and direction are only accounted for the ground layer
+            add_input('wind_speed_single', self.model.wind_speed[:,0].detach().clone().unsqueeze(-1), norm_wind_speed, is_shared=True)
+            add_input('wind_dir_single', self.model.wind_dir[:,0].detach().clone().unsqueeze(-1), norm_wind_speed, optimizable=False, is_shared=True)
+            add_input('Cn2_weights', self.model.Cn2_weights.detach().clone(), norm_Cn2_profile, optimizable=False, is_shared=True)
         
+            # Sources directions within the FoV
+            add_input('src_dirs_x', self.model.src_dirs_x.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
+            add_input('src_dirs_y', self.model.src_dirs_y.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
+
         # Overall per-source flux scaling factor, can be used per-source for photometry fine tuning
         add_input('F_norm', torch.tensor([[1.0,]]*N_src), norm=norm_F_norm, optimizable=(not self.multiple_obs), is_shared=False)
         
-        # Sources directions within the FoV
-        add_input('src_dirs_x', self.model.src_dirs_x.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
-        add_input('src_dirs_y', self.model.src_dirs_y.detach().clone(), norm=norm_src_coords, optimizable=False, is_shared=False)
-
-        # Add Moffat PSD absorber's parameters (if one is enabled)
-        if self.use_Moffat:
-            add_input('amp',   torch.tensor([1e-4]*N_obs), norm_amp,   is_shared=True)
-            add_input('b',     torch.tensor([0.0]*N_obs),  norm_b,     is_shared=True)
-            add_input('alpha', torch.tensor([2.0]*N_obs),  norm_alpha, is_shared=True)
-            add_input('beta',  torch.tensor([2.5]*N_obs),  norm_beta,  is_shared=True)
-            add_input('ratio', torch.tensor([1.0]*N_obs),  norm_ratio, is_shared=True)
-            add_input('theta', torch.tensor([0.0]*N_obs),  norm_theta, is_shared=True)
+        # Add Moffat PSD absorber's parameters (if Moffat regime is active)
+        if self.model_type in ('hybrid', 'psfao'):
+            add_input('amp',   torch.tensor([1e-4]*N_obs), norm_amp,   optimizable=True,  is_shared=True)
+            add_input('b',     torch.tensor([0.0]*N_obs),  norm_b,     optimizable=True,  is_shared=True)
+            add_input('alpha', torch.tensor([2.0]*N_obs),  norm_alpha, optimizable=True,  is_shared=True)
+            add_input('beta',  torch.tensor([2.5]*N_obs),  norm_beta,  optimizable=True,  is_shared=True)
+            add_input('ratio', torch.tensor([1.0]*N_obs),  norm_ratio, optimizable=False, is_shared=True)
+            add_input('theta', torch.tensor([0.0]*N_obs),  norm_theta, optimizable=False, is_shared=True)
 
         if self.LO_NCPAs:
             if isinstance(self.LO_basis, PixelmapBasis):

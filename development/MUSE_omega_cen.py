@@ -27,7 +27,7 @@ raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw_data/MUSE.2020-02-24T05-16-30
 cube_path  = MUSE_DATA_FOLDER / "omega_cluster/reduced_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
-ob = MUSEObservation(raw_path, cube_path, cache_path, model_type='tiptorch', device=default_device)
+ob = MUSEObservation(raw_path, cube_path, cache_path, model_type='TipTorch', device=default_device)
 ob.λ_batch_size = ob.λ_full.shape[0] // 3 + 1  # Process all wavelengths at once (adjust if memory issues arise)
 
 #%%
@@ -64,7 +64,8 @@ ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
 ob.InitSimulation()
 
 #%%
-ob.FitPSFModel(repeat=3, max_iter=200)
+# ob.FitPSFModel(repeat=3, max_iter=200)
+ob.FitPSFModel(repeat=1, max_iter=500)
 
 #%%
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
@@ -83,18 +84,18 @@ else:
     print(f"PSF model saved to {model_cache}")
 
 
-# model_cache = MUSE_DATA_FOLDER / "omega_cluster/PSF_model_fitted.pt"
+model_cache = MUSE_DATA_FOLDER / "omega_cluster/PSF_model_fitted.pt"
 
-# if model_cache.exists():
-#     print("Loading PSF model from cache...")
-#     model_data = torch.load(model_cache)
-#     ob.PSF_model = PSFModelNFM.load(model_data, device=ob.device)
-# else:
-#     print("Fitting PSF model...")
-#     ob.FitPSFModel(repeat=3, max_iter=200)
-#     model_data = ob.PSF_model.save()
-#     torch.save(model_data, model_cache)
-#     print(f"PSF model saved to {model_cache}")
+if model_cache.exists():
+    print("Loading PSF model from cache...")
+    model_data = torch.load(model_cache)
+    ob.PSF_model = PSFModelNFM.load(model_data, device=ob.device)
+else:
+    print("Fitting PSF model...")
+    ob.FitPSFModel(repeat=3, max_iter=200)
+    model_data = ob.PSF_model.save()
+    torch.save(model_data, model_cache)
+    print(f"PSF model saved to {model_cache}")
 
 
 
