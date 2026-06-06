@@ -12,7 +12,6 @@ import numpy as np
 import pandas as pd
 import torch.nn as nn
 import torch.optim as optim
-
 import matplotlib.pyplot as plt
 
 from tqdm import tqdm
@@ -20,15 +19,21 @@ from pathlib import Path
 from tiptorch._config import default_device, project_settings
 from tools.observations import MUSEObservation
 
+#%%
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
-#%%
 raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw_data/MUSE.2020-02-24T05-16-30.566.fits.fz"
 cube_path  = MUSE_DATA_FOLDER / "omega_cluster/reduced_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
 
-ob = MUSEObservation(raw_path, cube_path, cache_path, model_type='PSFAO', device=default_device)
-ob.λ_batch_size = ob.λ_full.shape[0] // 3 + 1  # Process all wavelengths at once (adjust if memory issues arise)
+ob = MUSEObservation(
+    raw_path,
+    cube_path,
+    cache_path,
+    model_type='TipTorch',
+    device=default_device
+)
+ob.λ_batch_size = ob.λ_full.shape[0] // 3 + 1
 
 #%%
 # Read pre-processed HST data from DataFrame
@@ -65,7 +70,7 @@ ob.InitSimulation()
 
 #%%
 # ob.FitPSFModel(repeat=3, max_iter=200)
-ob.FitPSFModel(repeat=1, max_iter=500)
+# ob.FitPSFModel(repeat=1, max_iter=500)
 
 #%%
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
@@ -97,70 +102,23 @@ else:
     torch.save(model_data, model_cache)
     print(f"PSF model saved to {model_cache}")
 
+#%%
 
+ob.FitPSFModel(fit=['astrometry'], repeat=1, max_iter=200)
+
+
+#%%
+field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=True, force_cpu=False)
+data_img = ob.cube_sparse.clone() - ob.background_sparse.view(ob.N_wvl, 1, 1)
 
 #%%
 from tools.multisources import VisualizeSources, PlotSourcesProfiles, extract_ROIs, add_ROIs
 from matplotlib.colors import LogNorm
 
-
-field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=True, force_cpu=False)
-
-#%%
-from matplotlib.colors import LogNorm
-
-bg = ob.residue_sparse.clone()
-
-# Adjustable parameters
-min_radius = 2
-max_radius = 14
-border_margin = 15
-
-# Create circular masks around sources with radii proportional to log(flux)
-src_positions = ob.sources_table[['x_peak', 'y_peak']].values
-src_fluxes = ob.sources_table['peak_value'].values
-
-# Compute radii: log-scale mapping from min/max flux to min_radius-max_radius pixel radius
-log_fluxes = np.log10(src_fluxes + 1e-10)  # avoid log(0)
-log_min, log_max = log_fluxes.min(), log_fluxes.max()
-radii = min_radius + (log_fluxes - log_min) / (log_max - log_min + 1e-10) * (max_radius - min_radius)
-
-# Create coordinate grids
-y_grid, x_grid = torch.meshgrid(
-    torch.arange(bg.shape[-2], device=bg.device),
-    torch.arange(bg.shape[-1], device=bg.device),
-    indexing='ij'
-)
-
-# Build composite mask (True = masked out)
-mask = torch.zeros(bg.shape[-2:], dtype=torch.bool, device=bg.device)
-
-# Mask circular regions around sources
-for (x_src, y_src), r in zip(src_positions, radii):
-    dist_sq = (x_grid - x_src)**2 + (y_grid - y_src)**2
-    mask |= (dist_sq <= r**2)
-
-# Mask border regions
-mask |= (x_grid < border_margin) | (x_grid >= bg.shape[-1] - border_margin)
-mask |= (y_grid < border_margin) | (y_grid >= bg.shape[-2] - border_margin)
-
-# Apply mask (set masked pixels to NaN)
-bg[:, mask] = float('nan')
-
-display_norm = LogNorm(vmin=1, vmax=ob.cube_sparse.sum(dim=0).max()) # again, rather empirical values
-plt.imshow(bg.sum(dim=0).cpu(), origin='lower', norm=display_norm, cmap='inferno')
-
-bg = torch.nanmean(bg, dim=(-2,-1))  # Average over the field, ignoring NaNs
-bg = bg.view(ob.N_wvl, 1, 1)
-
-#%%
-data_img = ob.cube_sparse.clone() - ob.background_sparse.view(ob.N_wvl, 1, 1)
-
-#%%
 display_norm = LogNorm(vmin=1, vmax=data_img.sum(dim=0).max().item()) # again, rather empirical values
 _ = VisualizeSources(data_img, field_disentangled, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
 
-PlotSourcesProfiles(data_img, field_disentangled, ob.sources.table, radius=16, title='Radial profiles', y_max=350, y_min=0.25)
+PlotSourcesProfiles(data_img, field_disentangled, ob.sources.table, radius=16, title='Predicted profiles + astrometry correction (spectrally binned)', y_max=350, y_min=0.25)
 
 #%%
 Strehls_per_λ = ob.PSF_model.ComputeStrehl()
@@ -254,22 +212,56 @@ from tools.plotting import PlotSpetralCubeInRGB
 # Mapping MUSE spectral range to visible spectrum range for RGB conversion
 λ_vis = np.linspace(440, 750, ob.N_wvl_full)  # MUSE covers ~465-930nm, so we map it to 440-750nm for visualization
 
+color_kwargs ={
+    'saturation' :  2.0,
+    'contrast'   :  1.75,
+    'wb_shift'   : -0.3,
+    'mg_shift'   : 0.15,
+    'min_val'    : 500,
+    'max_val'    : 7.5e6,
+}
+
+model_full = simulated_full[ob.ROI_plot] + ob.background_full.view(-1, 1, 1).numpy()
+data_full  = ob.cube_full[ob.ROI_plot]
+diff_full  = np.abs(model_full - data_full)
 
 _ = PlotSpetralCubeInRGB(
-    simulated_full[ob.ROI_plot],
+    model_full,
     wavelengths=λ_vis,
-    title="Model",
-    min_val=500, max_val=7.5e6,
-    show=False
+    title="Model (full spectrum)",
+    **color_kwargs
 )
 
 _ = PlotSpetralCubeInRGB(
-    ob.cube_full[ob.ROI_plot] - ob.background_full.view(-1, 1, 1).numpy(),
+    data_full,
     wavelengths=λ_vis,
-    title="Data",
-    min_val=500, max_val=7.5e6,
-    show=False
+    title="Data (full spectrum)",
+    **color_kwargs
 )
+
+_ = PlotSpetralCubeInRGB(
+    diff_full,
+    wavelengths=λ_vis,
+    title="Difference",
+    **color_kwargs
+)
+
+# del model_full, data_full, diff_full
+# torch.cuda.empty_cache()
+
+#%%
+
+PlotSourcesProfiles(
+    data_full - ob.background_full.view(-1, 1, 1).numpy(),
+    simulated_full,
+    ob.sources.table,
+    radius=16,
+    title='Radial profiles',
+    y_max=350,
+    y_min=0.25
+)
+
+
     
 #%%
 # Compute HST spectra for each source

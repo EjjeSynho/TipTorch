@@ -674,7 +674,7 @@ class MUSEObservation:
                 # This function simulates raw PSFs per λ-batch and disentangles in one pass
                 I_sim_full, fluxes_full, bg_full = self.disentangle_flux_batched(
                     λ_batch_size = N_λ_per_batch,
-                    solver = 'linear', # for the sake of speed, let is be linear
+                    solver = 'linear', # for saving resources, let it be linear
                     verbose = False,
                 )
                 simulated = I_sim_full - bg_full.view(-1, 1, 1)
@@ -941,9 +941,9 @@ class MUSEObservation:
         N_wvl_full = self.N_wvl_full
         H, W       = self.cube_full.shape[-2], self.cube_full.shape[-1]
 
-        I_sim_full  = torch.zeros([N_wvl_full, H, W],     device='cpu', dtype=dtype)
+        I_sim_full  = torch.zeros([N_wvl_full, H, W],       device='cpu', dtype=dtype)
         fluxes_full = torch.zeros([N_wvl_full, self.N_src], device='cpu', dtype=dtype)
-        bg_full     = torch.zeros([N_wvl_full],           device='cpu', dtype=dtype)
+        bg_full     = torch.zeros([N_wvl_full],             device='cpu', dtype=dtype)
 
         for λ0 in tqdm(range(0, N_wvl_full, λ_batch_size), desc='Disentangling λ-batches'):
             λ1 = min(λ0 + λ_batch_size, N_wvl_full)
@@ -965,7 +965,7 @@ class MUSEObservation:
                 srcs,
                 PSFs_batch,
                 data_batch,
-                solver  = solver,
+                solver  = solver.replace('non-', 'non'),
                 n_iter  = n_iter,
                 verbose = verbose,
                 **disentangle_kwargs
@@ -981,6 +981,88 @@ class MUSEObservation:
             
         
         return I_sim_full, fluxes_full, bg_full
+
+
+    def ExtractBackgroundFromResidue(self, residue, min_radius=2, max_radius=14, border_margin=15, show=False):
+        """
+        Estimate a per-wavelength background level from the residue cube by
+        averaging over pixels that are not contaminated by sources or borders.
+
+        Works on both the sparse cube (N_wvl slices) and the full cube (~4 K
+        slices) without copying the input tensor — only a small 2-D boolean
+        mask and a 1-D pixel-index vector are allocated.
+
+        Parameters
+        ----------
+        residue      : torch.Tensor [N_λ, H, W]
+            Residue cube (data - model).  Not modified in place.
+        min_radius   : float
+            Minimum masking radius around faint sources, in pixels.
+        max_radius   : float
+            Maximum masking radius around bright sources, in pixels.
+        border_margin : int
+            Width of the border strip to exclude, in pixels.
+        show         : bool
+            If True, display a diagnostic image of the masked residue sum.
+
+        Returns
+        -------
+        bg : torch.Tensor [N_λ, 1, 1]
+            Mean background per wavelength slice, ready to broadcast over (H, W).
+        """
+        if self.sources is None:
+            raise ValueError("Sources must be initialised before calling ExtractBackgroundFromResidue().")
+
+        N_λ, H, W = residue.shape
+        device     = residue.device
+
+        # ---- build the 2-D exclusion mask (True = exclude) ---------------
+        src_positions = self.sources.table[['x_peak', 'y_peak']].values
+        src_fluxes    = self.sources.table['peak_value'].values
+
+        log_fluxes = np.log10(src_fluxes + 1e-10)
+        log_min, log_max = log_fluxes.min(), log_fluxes.max()
+        radii = min_radius + (log_fluxes - log_min) / (log_max - log_min + 1e-10) * (max_radius - min_radius)
+
+        y_grid, x_grid = torch.meshgrid(
+            torch.arange(H, device=device),
+            torch.arange(W, device=device),
+            indexing='ij'
+        )
+
+        mask = torch.zeros(H, W, dtype=torch.bool, device=device)
+
+        for (x_src, y_src), r in zip(src_positions, radii):
+            dist_sq = (x_grid - x_src) ** 2 + (y_grid - y_src) ** 2
+            mask |= dist_sq <= r ** 2
+
+        mask |= (x_grid <  border_margin) | (x_grid >= W - border_margin)
+        mask |= (y_grid <  border_margin) | (y_grid >= H - border_margin)
+
+        # valid pixel indices as a 1-D flat index — allocated once, reused for all λ
+        valid_idx = (~mask).flatten().nonzero(as_tuple=True)[0]  # [N_valid]
+
+        if valid_idx.numel() == 0:
+            raise RuntimeError("ExtractBackgroundFromResidue: no unmasked pixels remain. "
+                               "Try reducing min_radius or border_margin.")
+
+        # ---- background estimate: mean over valid pixels per λ, no copy -----
+        # residue[:, valid_pixels] gathers only the unmasked columns — O(N_λ * N_valid)
+        # instead of O(N_λ * H * W) for a full clone.
+        residue_flat  = residue.view(N_λ, H * W)          # view, no copy
+        bg_vals       = residue_flat[:, valid_idx].mean(dim=-1)  # [N_λ]
+
+        if show:
+            display_norm = LogNorm(vmin=1, vmax=float(self.cube_sparse.sum(dim=0).max()))
+            masked_sum   = residue.sum(dim=0).clone()
+            masked_sum[mask] = 0.0
+            plt.figure()
+            plt.imshow(masked_sum.cpu(), origin='lower', norm=display_norm, cmap='inferno')
+            plt.title('Background mask (sources + border excluded)')
+            plt.axis('off')
+            plt.show()
+
+        return bg_vals.view(N_λ, 1, 1)
 
 
     def PlotSourceSpectra(self, src_ids=None, title='Sources spectra', show_sparse=True, plot_residual=False, smooth_kernel=None, figsize=(10, 6)):

@@ -229,7 +229,7 @@ def render_spectral_PSF(spectral_cube, λs):
         plt.title(f'λ = {λs[id]:.2f} nm')
 
 
-def PlotSpetralCubeInRGB(image, wavelengths, min_val=1e-6, max_val=1e2, scale='log', title=None, show=True):
+def PlotSpetralCubeInRGB(image, wavelengths, min_val=1e-6, max_val=1e2, scale='log', title=None, show=True, saturation=1.0, contrast=1.0, wb_shift=0.0, mg_shift=0.0):
     """
     Map a multi-wavelength image into RGB.
 
@@ -251,6 +251,20 @@ def PlotSpetralCubeInRGB(image, wavelengths, min_val=1e-6, max_val=1e2, scale='l
         Plot title.
     show : bool
         Whether to call plt.show() or not.
+    saturation : float
+        Saturation multiplier. 1.0 = original, >1 more vivid, <1 desaturated,
+        0.0 = grayscale. Default 1.0.
+    contrast : float
+        Contrast multiplier applied around the mid-point (0.5). 1.0 = original,
+        >1 higher contrast, <1 lower contrast. Default 1.0.
+    wb_shift : float
+        Red/blue white-balance shift in [-1, 1]. 0.0 = neutral. Positive values
+        boost red and suppress blue (warmer); negative values do the opposite
+        (cooler). Default 0.0.
+    mg_shift : float
+        Magenta/green white-balance shift in [-1, 1]. 0.0 = neutral. Positive
+        values boost red+blue (magenta tint) and suppress green; negative values
+        do the opposite (green tint). Default 0.0.
 
     Returns
     -------
@@ -285,12 +299,39 @@ def PlotSpetralCubeInRGB(image, wavelengths, min_val=1e-6, max_val=1e2, scale='l
 
     torch.cuda.empty_cache() if use_cuda else None
 
+    # White-balance gains: applied in linear domain before log so they operate
+    # on the full unclipped dynamic range.  Both axes are independent and compose
+    # multiplicatively: R gain = (1 + wb_shift)(1 + mg_shift), etc.
+    if wb_shift != 0.0 or mg_shift != 0.0:
+        wb_gains = np.array(
+            [(1.0 + wb_shift) * (1.0 + mg_shift),   # R: warm + magenta
+              1.0              * (1.0 - mg_shift),   # G: green axis only
+             (1.0 - wb_shift) * (1.0 + mg_shift)],  # B: cool + magenta
+            dtype=np.float32
+        )
+        image_RGB = image_RGB * wb_gains
+
     if scale == 'log':
         lo, hi = np.log10(min_val), np.log10(max_val)
         image_scaled = np.log10(image_RGB + 1e-10)
     else:
         lo, hi = min_val, max_val
-        image_scaled = image_RGB
+        image_scaled = image_RGB.copy()
+
+    # Saturation adjustment in the pre-clip scaled domain so dark and bright
+    # regions are treated consistently (no saturation-of-clipped-values artefact).
+    if saturation != 1.0:
+        luma = (0.2126 * image_scaled[..., 0]
+              + 0.7152 * image_scaled[..., 1]
+              + 0.0722 * image_scaled[..., 2])[..., np.newaxis]
+        image_scaled = luma + saturation * (image_scaled - luma)
+
+    # Contrast: shrink/widen the display window around its midpoint before
+    # clipping, so highlights and shadows are not prematurely crushed.
+    if contrast != 1.0:
+        mid       = (lo + hi) * 0.5
+        half_span = (hi - lo) * 0.5 / contrast
+        lo, hi    = mid - half_span, mid + half_span
 
     norm_image = (np.clip(image_scaled, lo, hi) - lo) / (hi - lo)
 
