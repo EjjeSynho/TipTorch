@@ -8,6 +8,7 @@ sys.path.append('..')
 
 import os
 import glob
+import json
 import pickle
 import pandas as pd
 import numpy as np
@@ -21,13 +22,39 @@ from astropy.coordinates import SkyCoord
 from astropy.io import fits
 from astropy.nddata import Cutout2D
 from pathlib import Path
+from tqdm import tqdm
 
 from tiptorch._config import project_settings
+from MUSE_STD_dataset.STD_dataset_utils import MatchRawWithCubes
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
-cube_path   = MUSE_DATA_FOLDER / "omega_cluster/cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
+# Empirical WCS pre-alignment offsets [arcsec]; tune per observation if needed.
+hst_x_offset = +1.56297598 # + 0.3945033774349758
+hst_y_offset = -2.3518643  # + 0.2351929662951795
+
+# MUSE flux units for the photometry conversion (1e-20 erg/s/cm²/Å)
+MUSE_units = u.Unit("1e-20 erg / (s cm2 Angstrom)")
+
+#%%
 data_folder = MUSE_DATA_FOLDER / 'omega_cluster/OmegaCentaury_data/'
+RAW_FOLDER   = data_folder / "../raw_data"
+CUBES_FOLDER = data_folder / "../reduced_cubes"
+
+files_matches, files_mismatches = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=True)
+
+# reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
+# reduced_cube = "ADP.2019-05-30T08-10-58.821.fits"
+# reduced_cube = "ADP.2021-05-19T05-26-01.345.fits"
+# reduced_cube = "ADP.2021-05-19T05-26-01.337.fits"
+reduced_cube = "ADP.2021-05-19T05-26-01.303.fits"
+
+raw_file = files_matches.loc[files_matches['cube'] == reduced_cube]['raw'].values[0]
+
+cube_path  = MUSE_DATA_FOLDER / f"omega_cluster/reduced_cubes/{reduced_cube}"
+raw_path   = MUSE_DATA_FOLDER / f"omega_cluster/raw_data/{raw_file}"
+cache_path = MUSE_DATA_FOLDER / f"omega_cluster/cached_cubes/{cube_path.stem}.pickle"
+
 
 #%%
 print("Loading the Astrometric part of the catalog...")
@@ -143,8 +170,6 @@ plt.tight_layout()
 plt.show()
 
 #%%
-import json
-
 with open(data_folder / 'HST_filters_folder.json', 'r') as f:
     config = json.load(f)
     os.environ['PYSYN_CDBS'] = config['filters_folder']
@@ -154,86 +179,82 @@ from synphot.models import ConstFlux1D
 from astropy import units as u
 from synphot import Observation
 import stsynphot as stsyn
-from tqdm import tqdm
 
-# Convert the magnitude dataframe to flux dataframe
-df_flux = pd.DataFrame(index=df_mag.index)
-MUSE_units = u.Unit("1e-20 erg / (s cm2 Angstrom)")
 
-print('Computing photometry...\n')
+if not (data_folder / f'../metadata/selected_srcs_{cube_path.stem}.pkl').is_file():
+    print('Computing photometry...\n')
+    df_flux = pd.DataFrame(index=df_mag.index) # Convert the magnitude dataframe to flux dataframe
 
-# Process each filter separately
-for filter_name in df_mag.columns:
-    print(f'Processing targets for filter {filter_name}...')
-    bp = stsyn.band(f'ACS,WFC1,{filter_name}')
-    
-    # Convert each magnitude to flux units
-    flux_values = []
-    for mag in tqdm(df_mag[filter_name]):
-        if pd.isna(mag):
-            flux_values.append(np.nan)
-            continue
+    # Process each filter separately
+    for filter_name in df_mag.columns:
+        print(f'Processing targets for filter {filter_name}...')
+        bp = stsyn.band(f'ACS,WFC1,{filter_name}')
         
-        sp   = SourceSpectrum(ConstFlux1D, amplitude=mag*u.ABmag)
-        obs  = Observation(sp, bp)
-        flux = obs.effstim(MUSE_units).value
-        flux_values.append(flux * 1e20)  # Convert to true MUSE units
-    
-    df_flux[filter_name] = flux_values
-
-
-filters_data = {}
-
-for filter_name in df_mag.columns:
-    filter_data = stsyn.band(f'ACS,WFC1,{filter_name}')
-    filters_data[filter_name] = (filter_data.pivot().value / 10, filter_data.fwhm().value / 10)
-
-#%%
-data_store = {
-    'Astrometry': df_sel,
-    'AB magnitudes': df_mag,
-    'Fluxes (MUSE units):': df_flux,
-    'Filters data (pivot, FWHM) [nm]': filters_data
-}
-
-try:
-    with open(fname := data_folder / 'omega_selected_srcs.pkl', 'wb') as f:
-        pickle.dump(data_store, f)
-        print(f'Data saved to {str(fname)}')
-except Exception as e:
-    print(f'Error saving data: {e}')
-    
-#%%
-try:
-    with open(fname := data_folder / 'omega_selected_srcs.pkl', 'rb') as f:
-        data_store = pickle.load(f)
-        print(f'Data loaded from {str(fname)}')
-
-        # Extract data from the dictionary
-        df_sel = data_store['Astrometry']
-        df_mag = data_store['AB magnitudes']
-        df_flux = data_store['Fluxes (MUSE units):']
-        filters_data = data_store['Filters data (pivot, FWHM) [nm]']
+        # Convert each magnitude to flux units
+        flux_values = []
+        for mag in tqdm(df_mag[filter_name]):
+            if pd.isna(mag):
+                flux_values.append(np.nan)
+                continue
+            
+            sp   = SourceSpectrum(ConstFlux1D, amplitude=mag*u.ABmag)
+            obs  = Observation(sp, bp)
+            flux = obs.effstim(MUSE_units).value
+            flux_values.append(flux * 1e20)  # Convert to true MUSE units
         
-except Exception as e:
-    print(f'Error loading data: {e}')
+        df_flux[filter_name] = flux_values
+
+    filters_data = {}
+
+    for filter_name in df_mag.columns:
+        filter_data = stsyn.band(f'ACS,WFC1,{filter_name}')
+        filters_data[filter_name] = (filter_data.pivot().value / 10, filter_data.fwhm().value / 10)
+
+    data_store = {
+        'Astrometry': df_sel,
+        'AB magnitudes': df_mag,
+        'Fluxes (MUSE units):': df_flux,
+        'Filters data (pivot, FWHM) [nm]': filters_data
+    }
+    try:
+        with open(fname := data_folder / f'../metadata/selected_srcs_{cube_path.stem}.pkl', 'wb') as f:
+            pickle.dump(data_store, f)
+            print(f'Data saved to {str(fname)}')
+            
+    except Exception as e:
+        print(f'Error saving data: {e}')
+        
+else:
+    print('Loading photometry from cache...\n')
+    try:
+        with open(fname := data_folder / f'../metadata/selected_srcs_{cube_path.stem}.pkl', 'rb') as f:
+            data_store = pickle.load(f)
+            print(f'Data loaded from {str(fname)}')
+
+            # Extract data from the dictionary
+            df_sel = data_store['Astrometry']
+            df_mag = data_store['AB magnitudes']
+            df_flux = data_store['Fluxes (MUSE units):']
+            filters_data = data_store['Filters data (pivot, FWHM) [nm]']
+            
+    except Exception as e:
+        print(f'Error loading data: {e}')
 
 
 #%% ========================= Load MUSE data to detect and match sources =========================
-from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
+from data_processing.MUSE_data_utils import LoadCachedDataMUSE
 from tiptorch._config import default_device
 
-raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw/MUSE.2020-02-24T05-16-30.566.fits.fz"
-cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
-
 spectral_cubes, spectral_info, TELEMETRY_CACHE, model_config = LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=default_device, verbose=True)   
-cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_sparse"], spectral_cubes["mask"]
+cube_full, cube_sparse, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_binned"], spectral_cubes["mask"]
 
 #%%
 from tools.multisources import DetectSources
+from scipy.spatial import cKDTree
+from skimage.transform import AffineTransform
 
 # Compute coordinates of sources in the field in arcsec relative to the center of pointing
-sources = DetectSources(cube_sparse, threshold=50000, display=True, draw_box_size=21)
+sources = DetectSources(cube_sparse, nsigma=25, threshold=500000, display=True, draw_box_size=21)
 
 # Compute center of mass for valid mask assuming it's the center of the field
 yy, xx = np.where(valid_mask.cpu().numpy().squeeze() > 0)
@@ -250,29 +271,54 @@ df_HST_sources = df_sel.drop(columns = ['RA', 'DEC'])
 df_HST_sources = df_HST_sources.rename(columns={'x, [asec]': 'x', 'y, [asec]': 'y'})
 df_HST_sources['flux'] = df_flux.sum(axis=1)
 
-df_HST_sources['x'] += 1.56297598 # Empirical coefficients
-df_HST_sources['y'] -= 2.3518643
+df_HST_sources['x'] += hst_x_offset  # Empirical WCS pre-alignment offsets
+df_HST_sources['y'] += hst_y_offset
+
+# Flux-weighted centroid shift from N brightest sources (pre-ICP coarse alignment)
+n_bright_prealign  = 5    # set 0 to disable
+prealign_max_dist  = 2.0  # [arcsec] max search radius for bright-source pairing
+
+if n_bright_prealign > 0:
+    top_hst  = df_HST_sources.nlargest(n_bright_prealign, 'flux')
+    top_muse = df_MUSE_sources.nlargest(n_bright_prealign, 'flux')
+
+    tree_muse = cKDTree(top_muse[['x', 'y']].to_numpy())
+    dists, idxs = tree_muse.query(top_hst[['x', 'y']].to_numpy(), k=1)
+
+    within = dists <= prealign_max_dist
+    if within.sum() >= 1:
+        matched_hst  = top_hst.iloc[within]
+        matched_muse = top_muse.iloc[idxs[within]]
+
+        cx_hst  = np.average(matched_hst ['x'].values, weights=matched_hst ['flux'].values)
+        cy_hst  = np.average(matched_hst ['y'].values, weights=matched_hst ['flux'].values)
+        cx_muse = np.average(matched_muse['x'].values, weights=matched_muse['flux'].values)
+        cy_muse = np.average(matched_muse['y'].values, weights=matched_muse['flux'].values)
+
+        prealign_dx = cx_muse - cx_hst
+        prealign_dy = cy_muse - cy_hst
+        df_HST_sources['x'] += prealign_dx
+        df_HST_sources['y'] += prealign_dy
+        print(f"Pre-alignment centroid shift ({within.sum()} pairs): dx={prealign_dx:+.4f}\", dy={prealign_dy:+.4f}\"")
+    else:
+        print(f"Pre-alignment: no bright pairs found within {prealign_max_dist}\" — skipping")
 
 # Normalize fluxes
-flux_hst  = df_HST_sources['flux'].values
-flux_muse = df_MUSE_sources['flux'].values
+flux_HST  = df_HST_sources['flux'].values
+flux_MUSE = df_MUSE_sources['flux'].values
 
 # Sort the fluxes in descending order and take top N (where N is min of array lengths)
-n_compare = min(len(flux_hst), len(flux_muse))
+n_compare = min(len(flux_HST), len(flux_MUSE))
+
 # Calculate median flux ratio between top HST and MUSE sources
-flux_ratio_median = np.median(np.sort(flux_hst) [-n_compare:] / np.sort(flux_muse)[-n_compare:])
+flux_ratio_median = np.median(np.sort(flux_HST) [-n_compare:] / np.sort(flux_MUSE)[-n_compare:])
 print(f"Median HST/MUSE flux ratio (for top {n_compare} sources): {flux_ratio_median:.4f}")
 
 # Scale MUSE fluxes to match HST scale (initial approximation)
-flux_hst_norm  = flux_hst  / np.max(flux_hst) / flux_ratio_median
-flux_muse_norm = flux_muse / np.max(flux_hst) 
+flux_HST_norm  = flux_HST  / np.max(flux_HST) / flux_ratio_median
+flux_MUSE_norm = flux_MUSE / np.max(flux_HST) 
 
 #%%
-import numpy as np
-import pandas as pd
-from scipy.spatial import cKDTree
-from skimage.transform import AffineTransform
-
 
 def weighted_affine_fit_proximity(
     df_src: pd.DataFrame,
@@ -280,68 +326,120 @@ def weighted_affine_fit_proximity(
     x_col: str = 'x',
     y_col: str = 'y',
     weight_col: str = 'flux',
-    max_distance: float = None
+    max_distance: float = None,
+    max_iters: int = 30,
+    tol: float = 1e-7,
+    exclude_brightest_src: int = 0,
+    exclude_brightest_dst: int = 0
 ) -> AffineTransform:
+    '''
+    ICP-style weighted affine fit.
 
-    # 1) Build a KD‐Tree on df_src coords
-    src_coords = df_src[[x_col, y_col]].to_numpy()
-    tree = cKDTree(src_coords)
+    Each iteration:
+      1. Apply current transform to src points.
+      2. Match via mutual nearest neighbours (bidirectional agreement required).
+      3. Weight each pair by geometric-mean flux / (1 + distance)  — bright,
+         close matches dominate; uncertain distant matches are down-weighted.
+      4. Re-solve the affine system from the *original* src coords to dst.
+      5. Repeat until the matrix change drops below `tol`.
 
-    # 2) For each df_dst point, find nearest in df_src
-    dst_coords = df_dst[[x_col, y_col]].to_numpy()
-    dists, idxs = tree.query(dst_coords, k=1)
+    Parameters
+    ----------
+    exclude_brightest_src : int
+        Drop this many brightest sources from df_src before fitting.
+    exclude_brightest_dst : int
+        Drop this many brightest sources from df_dst before fitting.
+    '''
+    # Optionally strip the brightest sources from each catalogue
+    if exclude_brightest_src > 0:
+        drop_idx = df_src[weight_col].nlargest(exclude_brightest_src).index
+        df_src = df_src.drop(index=drop_idx)
+    if exclude_brightest_dst > 0:
+        drop_idx = df_dst[weight_col].nlargest(exclude_brightest_dst).index
+        df_dst = df_dst.drop(index=drop_idx)
 
-    # 3) Optionally filter by max_distance
-    if max_distance is not None:
-        mask = (dists <= max_distance)
-    else:
-        mask = np.ones(len(dists), dtype=bool)
+    src_coords  = df_src[[x_col, y_col]].to_numpy().copy()
+    dst_coords  = df_dst[[x_col, y_col]].to_numpy()
+    src_weights = df_src[weight_col].to_numpy().astype(float)
+    dst_weights = df_dst[weight_col].to_numpy().astype(float)
 
-    if mask.sum() < 3:
-        raise ValueError(f"Need ≥3 matched pairs, got {mask.sum()}")
+    M = np.eye(3)
 
-    # 4) Extract matched subsets
-    matched_src = df_src.iloc[idxs[mask]].reset_index(drop=True)
-    matched_dst = df_dst[mask].reset_index(drop=True)
+    for _ in range(max_iters):
+        # 1) Warp src under current estimate
+        homog      = np.column_stack([src_coords, np.ones(len(src_coords))])
+        src_warped = (M @ homog.T).T[:, :2]
 
-    src_pts = matched_src[[x_col, y_col]].to_numpy()
-    dst_pts = matched_dst[[x_col, y_col]].to_numpy()
-    weights = matched_src[weight_col].to_numpy()
+        # 2) Mutual nearest-neighbour matching
+        tree_src = cKDTree(src_warped)
+        tree_dst = cKDTree(dst_coords)
 
-    N = len(src_pts)
-    # 5) Build weighted least‐squares system A θ = b
-    #    θ = [a, b, c, d, e, f]^T
-    A = np.zeros((2*N, 6))
-    b = np.zeros((2*N,))
-    for i, ((x, y), (u, v), w) in enumerate(zip(src_pts, dst_pts, weights)):
-        sw = np.sqrt(w)
-        A[2*i    ] = sw * np.array([x, y, 1, 0, 0, 0])
-        A[2*i + 1] = sw * np.array([0, 0, 0, x, y, 1])
-        b[2*i    ] = sw * u
-        b[2*i + 1] = sw * v
+        dists_fwd, idxs_fwd = tree_src.query(dst_coords, k=1)   # dst  → src
+        _,         idxs_bwd = tree_dst.query(src_warped,  k=1)   # src  → dst
 
-    # 6) Solve for θ via least‐squares
-    theta, *_ = np.linalg.lstsq(A, b, rcond=None)
+        # Keep only pairs that agree in both directions
+        mutual = np.array([idxs_bwd[idxs_fwd[i]] == i for i in range(len(dst_coords))])
+        if max_distance is not None:
+            mutual &= (dists_fwd <= max_distance)
 
-    # 7) Pack into a 3x3 affine matrix
-    M = np.array([
-        [theta[0], theta[1], theta[2]],
-        [theta[3], theta[4], theta[5]],
-        [      0.,       0.,       1.]
-    ])
+        if mutual.sum() < 3:
+            # Fall back to one-directional distance filter
+            mutual = (dists_fwd <= max_distance) if max_distance is not None \
+                     else np.ones(len(dists_fwd), dtype=bool)
+
+        if mutual.sum() < 3:
+            raise ValueError(f"Need ≥3 matched pairs, got {mutual.sum()}")
+
+        src_idx = idxs_fwd[mutual]
+        src_pts = src_coords[src_idx]          # original (unwarped) src coords
+        dst_pts = dst_coords[mutual]
+
+        # 3) Weights: geometric mean of both-catalogue fluxes, penalised by distance
+        w = (np.sqrt(src_weights[src_idx] * dst_weights[mutual])
+             / (1.0 + dists_fwd[mutual]))
+        w = np.clip(w, 0, None)
+
+        # 4) Weighted least-squares  A θ = b
+        N = len(src_pts)
+        A = np.zeros((2*N, 6))
+        b = np.zeros(2*N)
+        for i, ((x, y), (u, v), wi) in enumerate(zip(src_pts, dst_pts, w)):
+            sw = np.sqrt(wi)
+            A[2*i    ] = sw * np.array([x, y, 1, 0, 0, 0])
+            A[2*i + 1] = sw * np.array([0, 0, 0, x, y, 1])
+            b[2*i    ] = sw * u
+            b[2*i + 1] = sw * v
+
+        theta, *_ = np.linalg.lstsq(A, b, rcond=None)
+        M_new = np.array([
+            [theta[0], theta[1], theta[2]],
+            [theta[3], theta[4], theta[5]],
+            [      0.,       0.,       1.]
+        ])
+
+        # 5) Convergence check
+        if np.max(np.abs(M_new - M)) < tol:
+            M = M_new
+            break
+        M = M_new
 
     return AffineTransform(matrix=M)
 
 
 # Compute transform, allowing only matches within 5 pixels:
-tform = weighted_affine_fit_proximity(
-    df_src=df_HST_sources,
-    df_dst=df_MUSE_sources,
-    x_col='x',
-    y_col='y',
-    weight_col='flux',
-    max_distance=0.5
-)
+use_identity = False  # set True to skip fitting and use identity transform
+
+if use_identity:
+    tform = AffineTransform(matrix=np.eye(3))
+else:
+    tform = weighted_affine_fit_proximity(
+        df_src=df_HST_sources,
+        df_dst=df_MUSE_sources,
+        x_col='x',
+        y_col='y',
+        weight_col='flux',
+        max_distance=0.5
+    )
 
 print("Affine matrix:\n", tform.params)
 
@@ -368,18 +466,23 @@ df_HST_sources_filtered = df_HST_sources_filtered.sort_values(by='flux', ascendi
 
 x_hst_sel = df_HST_sources_filtered['x'].to_numpy()
 y_hst_sel = df_HST_sources_filtered['y'].to_numpy()
-flux_hst_norm_sel  = df_HST_sources_filtered['flux'].values  / np.max(flux_hst) / flux_ratio_median
+flux_hst_norm_sel  = df_HST_sources_filtered['flux'].values  / np.max(flux_HST) / flux_ratio_median
 
 #%%
 # Plot the matches
 plt.figure(figsize=(10, 10))
 
-dot_scaler = 500
+dot_scaler = 2500
 
-plt.scatter(x_hst, y_hst, s=dot_scaler*flux_hst_norm, facecolors='none', edgecolors='blue', label='HST sources')
-plt.scatter(x_hst_sel, y_hst_sel, s=dot_scaler*flux_hst_norm_sel, facecolors='none', edgecolors='green', label='HST sources (selected)')
-plt.scatter(x_muse, y_muse, marker='.', color='red', s=dot_scaler*flux_muse_norm, alpha=0.5, label='MUSE sources')
-# Draw a square to specify MUSE NFM field of view of 7.5x7.5 arcsec^2, centered at (0,0)
+def norm_size(flux, max_flux, scale=dot_scaler):
+    return scale * (flux / max_flux) ** 0.8
+
+max_flux_all = max(flux_HST_norm.max(), flux_MUSE_norm.max(), flux_hst_norm_sel.max())
+
+plt.scatter(x_hst, y_hst, s=norm_size(flux_HST_norm, max_flux_all), facecolors='none', edgecolors='blue', label='HST sources')
+plt.scatter(x_hst_sel, y_hst_sel, s=norm_size(flux_hst_norm_sel, max_flux_all), facecolors='none', edgecolors='green', label='HST sources (selected)')
+plt.scatter(x_muse, y_muse, marker='.', color='red', s=norm_size(flux_MUSE_norm, max_flux_all), alpha=0.5, label='MUSE sources')
+# Draw a square to specify MUSE NFM field of view of 7.5"×7.5" centered at (0,0)
 plt.plot([-3.75, -3.75, 3.75, 3.75, -3.75], [-3.75, 3.75, 3.75, -3.75, -3.75], color='black', linestyle='--', label='MUSE NFM FoV')
 
 plt.axis('equal')
@@ -400,8 +503,10 @@ df_HST_sources_filtered.rename(columns={'x': 'x, [asec]'}, inplace=True)
 df_HST_sources_filtered.rename(columns={'y': 'y, [asec]'}, inplace=True)
 
 try:
-    df_HST_sources_filtered.to_csv(fname := data_folder / 'HST_sources_in_FoV.csv', index=True, index_label='ID')
+    df_HST_sources_filtered.to_csv(fname := data_folder / f'../metadata/HST_srcs_{cube_path.stem}.csv', index=True, index_label='ID')
     print("DataFrame saved successfully to", fname)
 except Exception as e:
     print(f"An error occurred while saving the DataFrame: {e}")
 
+
+ # %%

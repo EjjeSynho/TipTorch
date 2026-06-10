@@ -113,11 +113,15 @@ def MatchRawWithCubes(
 
     if verbose: print(f'Scanning the cubes...')
     for file in tqdm(os.listdir(cubes_folder)):
+        if not (cubes_folder / file).is_file():
+            continue
         with fits.open(cubes_folder / file) as hdul_cube:
             cubes_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
     
     if verbose: print(f'Scanning the raw files...')
     for file in tqdm(os.listdir(raw_folder)):
+        if not (raw_folder / file).is_file():
+            continue
         with fits.open(raw_folder / file) as hdul_cube:
             raw_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
 
@@ -1700,7 +1704,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     cube_binned = cube_binned * (cube_full.sum(axis=0).max() /  cube_binned.sum(axis=0).max())
 
     # Extract config file and update it
-    model_config = InitNFMConfig(data_cache, cube_binned, device=device, convert_config=True)
+    model_config = InitNFMConfig(data_cache, cube_binned, device=device, convert_config=True, plotting=False)
     cube_binned = cube_binned.squeeze()
 
     model_config['NumberSources'] = 1 # Placeholder value
@@ -1768,7 +1772,7 @@ def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
     return Cn2_alt, Cn2_frac
 
 
-def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, convert_config=True, plotting=True):
+def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, convert_config=True, plotting=False):
     """
     Spcialized routine for loading configs for the cached MUSE NFM data samples.
     It largely overloads the standart config creation routine from the ConfigManager class and tailors it to MUSE NFM PSF data format.
@@ -1926,7 +1930,7 @@ def filter_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     df.loc[df['IA_FWHM'] > 5, 'IA_FWHM'] = np.nan
     df.loc[df['ASM_RFLRMS'] > 0.25, 'ASM_RFLRMS'] = np.nan
     df.loc[df['Strehl (header)'] < 0.01, 'Strehl (header)'] = np.nan
-    df.loc[df['LGS3 flux, [ADU/frame]'] < 1e-12, 'LGS3 flux, [ADU/frame]'] = np.nan
+    df.loc[df['LGS3 flux, [ADU/frame]'] < 1e-12, 'LGS3 flux, [ADU/frame]'] = np.nan #LGS3 was down for a while
     df.loc[df['LGS3 photons, [photons/m^2/s]'] < 1e-12, 'LGS3 photons, [photons/m^2/s]'] = np.nan
     df.loc[df['IRLOS photons, [photons/s/m^2]'] < 1e-12, 'IRLOS photons, [photons/s/m^2]'] = np.nan
 

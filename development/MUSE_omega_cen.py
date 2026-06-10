@@ -20,11 +20,11 @@ from tiptorch._config import default_device, project_settings
 from tools.observations import MUSEObservation
 
 #%%
-MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
+data_folder = Path(project_settings["MUSE_data_folder"]) / "omega_cluster"
 
-raw_path   = MUSE_DATA_FOLDER / "omega_cluster/raw_data/MUSE.2020-02-24T05-16-30.566.fits.fz"
-cube_path  = MUSE_DATA_FOLDER / "omega_cluster/reduced_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
-cache_path = MUSE_DATA_FOLDER / "omega_cluster/cached_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.pickle"
+raw_path   = data_folder / "raw_data/MUSE.2020-02-24T05-16-30.566.fits.fz"
+cube_path  = data_folder / "reduced_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
+cache_path = data_folder / "cached_cubes" / (cube_path.stem + '.pickle')
 
 ob = MUSEObservation(
     raw_path,
@@ -37,7 +37,7 @@ ob.λ_batch_size = ob.λ_full.shape[0] // 3 + 1
 
 #%%
 # Read pre-processed HST data from DataFrame
-sources_file = MUSE_DATA_FOLDER / 'omega_cluster/OmegaCentaury_data/HST_sources_in_FoV.csv'
+sources_file = data_folder / f'metadata/HST_sources_in_FoV_{cube_path.stem}.csv'
 
 with open(sources_file, 'r') as f:
     sources_df = pd.read_csv(f)
@@ -75,7 +75,7 @@ ob.InitSimulation()
 #%%
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
-model_cache = MUSE_DATA_FOLDER / "omega_cluster/PSF_model_predicted.pt"
+model_cache = data_folder / "metadata/PSF_model_predicted.pt"
 
 if model_cache.exists():
     print("Loading PSF model from cache...")
@@ -89,7 +89,7 @@ else:
     print(f"PSF model saved to {model_cache}")
 
 
-model_cache = MUSE_DATA_FOLDER / "omega_cluster/PSF_model_fitted.pt"
+model_cache = data_folder / "metadata/PSF_model_fitted.pt"
 
 if model_cache.exists():
     print("Loading PSF model from cache...")
