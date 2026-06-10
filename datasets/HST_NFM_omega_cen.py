@@ -30,14 +30,14 @@ from MUSE_STD_dataset.STD_dataset_utils import MatchRawWithCubes
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
 # Empirical WCS pre-alignment offsets [arcsec]; tune per observation if needed.
-hst_x_offset = +1.56297598 # + 0.3945033774349758
-hst_y_offset = -2.3518643  # + 0.2351929662951795
+hst_x_offset = +1.56297598
+hst_y_offset = -2.3518643
 
 # MUSE flux units for the photometry conversion (1e-20 erg/s/cm²/Å)
 MUSE_units = u.Unit("1e-20 erg / (s cm2 Angstrom)")
 
 #%%
-data_folder = MUSE_DATA_FOLDER / 'omega_cluster/OmegaCentaury_data/'
+data_folder  = MUSE_DATA_FOLDER / 'omega_cluster/OmegaCentaury_data/'
 RAW_FOLDER   = data_folder / "../raw_data"
 CUBES_FOLDER = data_folder / "../reduced_cubes"
 
@@ -152,10 +152,7 @@ im = ax.imshow(cutout_data + 15,
                zorder = 0)
 
 # your selected sources
-ax.scatter(dx, dy,
-           s=40, facecolors='none',
-           edgecolors='red', linewidths=0.5,
-           label=f'{len(df_sel)} sources')
+ax.scatter(dx, dy, s=40, facecolors='none', edgecolors='red', linewidths=0.5, label=f'{len(df_sel)} sources')
 
 # mark (0,0) = the cube center
 ax.scatter(0, 0, marker='o', color='green', s=80, label='MUSE center')
@@ -174,10 +171,9 @@ with open(data_folder / 'HST_filters_folder.json', 'r') as f:
     config = json.load(f)
     os.environ['PYSYN_CDBS'] = config['filters_folder']
 
-from synphot import SourceSpectrum
+from synphot import SourceSpectrum, Observation
 from synphot.models import ConstFlux1D
 from astropy import units as u
-from synphot import Observation
 import stsynphot as stsyn
 
 
@@ -254,7 +250,7 @@ from scipy.spatial import cKDTree
 from skimage.transform import AffineTransform
 
 # Compute coordinates of sources in the field in arcsec relative to the center of pointing
-sources = DetectSources(cube_sparse, nsigma=25, threshold=500000, display=True, draw_box_size=21)
+sources = DetectSources(cube_sparse, nsigma=25, display=True, draw_box_size=21)
 
 # Compute center of mass for valid mask assuming it's the center of the field
 yy, xx = np.where(valid_mask.cpu().numpy().squeeze() > 0)

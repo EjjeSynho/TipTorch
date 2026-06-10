@@ -332,7 +332,7 @@ def DisplaySources(data_src, sources_df, src_box_size, vmin, vmax, norm=LogNorm,
     plt.show()
 
 
-def DetectSources(data_cube, threshold, nsigma=3.0, box_size=11, sort_by_brightness=True, weight_from_flux=False, display=False, draw_box_size=None, verbose=False):
+def DetectSources(data_cube, threshold=None, nsigma=3.0, box_size=11, sort_by_brightness=True, weight_from_flux=False, display=False, draw_box_size=None, verbose=False):
     """ Detects sources in a 3D data cube. """
     
     def _detect_sources(data_src, threshold, box_size, eps=2, verbose=False):
@@ -355,23 +355,41 @@ def DetectSources(data_cube, threshold, nsigma=3.0, box_size=11, sort_by_brightn
             print(f"Merged to {len(merged_sources)} sources")
         
         return merged_sources
-    
+
+    def _auto_threshold(data_src, nsigma):
+        """
+        Estimate threshold from the image histogram using the mirrored-noise estimator.
+        Only sub-background pixels are used to measure noise sigma, so the estimate is
+        unbiased by source flux even in crowded fields.
+        """
+        flat = data_src.ravel()
+        flat = flat[np.isfinite(flat) & (flat > 0)]
+        if len(flat) == 0:
+            return 0.0
+        _, bg_level, _ = sigma_clipped_stats(flat, sigma=nsigma)
+        below_bg = flat[flat < bg_level]
+        if len(below_bg) > 10:
+            # Reflect sub-background pixels around bg_level for an unbiased noise sigma
+            noise_sigma = np.std(np.concatenate([below_bg, 2.0 * bg_level - below_bg]))
+        else:
+            _, bg_level, noise_sigma = sigma_clipped_stats(flat, sigma=nsigma)
+        return bg_level + nsigma * noise_sigma
+
     data_src = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_cube.sum(axis=0)
     data_src = np.nan_to_num(data_src)
-    
-    _, median, std = sigma_clipped_stats(data_src[data_src > 0], sigma=nsigma)
-    
+
     if threshold is None or threshold == 'auto':
-        threshold = median + nsigma * std
+        threshold = _auto_threshold(data_src, nsigma)
         if verbose:
-            print(f"[auto] using threshold = median + {nsigma}·std = {threshold:.2f}")
-    
+            print(f"[auto] threshold from histogram = {threshold:.2f}")
+
     sources_df = _detect_sources(data_src, threshold=threshold, box_size=box_size, verbose=verbose)
 
     # Draw the detected sources
     if display and draw_box_size is not None:
         draw_box_size = box_size if draw_box_size is None else int(draw_box_size)
-        DisplaySources(data_src, sources_df, draw_box_size, median*0.9, threshold*10)
+        bg = float(np.nanmedian(data_src[data_src > 0]))
+        DisplaySources(data_src, sources_df, draw_box_size, bg * 0.9, threshold * 10)
 
     # Sort in descending order of flux (peak value)
     if sort_by_brightness:
