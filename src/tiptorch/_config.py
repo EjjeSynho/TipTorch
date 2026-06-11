@@ -97,27 +97,30 @@ default_torch_type = torch.float32
 def resolve_device(preferred: str) -> torch.device:
     global default_torch_type
     preferred = preferred.lower()
+    # TODO: implement MPS support; for now fall through to CPU
+    if platform.system() == "Darwin" and getattr(torch.backends, "mps", None) is not None and getattr(torch.backends.mps, "is_available", lambda: False)():
+        torch.set_default_dtype(torch.float32)
+        default_torch_type = torch.float32
+        warnings.warn("MPS (Apple Silicon GPU) support is not yet implemented. Using CPU.")
+        return torch.device("cpu")
 
     if "cuda" in preferred:
         if torch.cuda.is_available():
             index = torch.device(preferred).index or 0
-            if index < torch.cuda.device_count():
+            if index >= torch.cuda.device_count():
+                warnings.warn(f"Preferred CUDA device index {index} is out of range (only {torch.cuda.device_count()} available). Falling back to 'cuda:0'.")
                 return torch.device('cuda:0')
-            warnings.warn(f"CUDA device '{preferred}' not found ({torch.cuda.device_count()} available). Falling back.")
-        if torch.cuda.is_available():
-            return torch.device("cuda")
-
-    # TODO: implement MPS support; for now fall through to CPU
-    if platform.system() == "Darwin" and getattr(torch.backends.mps, "is_available", lambda: False)():
-        torch.set_default_dtype(torch.float32)
-        default_torch_type = torch.float32
-        warnings.warn("MPS (Apple Silicon GPU) support is not yet implemented. Using CPU.")
-
+            else:
+                return torch.device(preferred)
+        else:
+            warnings.warn("CUDA is not available. Falling back to CPU.")
+            return torch.device("cpu")
+    
     return torch.device("cpu")
 
 
 default_device = resolve_device(project_settings["device"])
-project_settings["device"] = str(default_device)
+project_settings["device"] = str(default_device) # overwrite with resolved device string for consistency
 
 # =============== GPU/Backend detection and setup ================
 # Check if GPU is available and has sufficient VRAM to use CuPy

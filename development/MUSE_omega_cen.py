@@ -18,26 +18,88 @@ from tqdm import tqdm
 from pathlib import Path
 from tiptorch._config import default_device, project_settings
 from tools.observations import MUSEObservation
+from datasets.MUSE_STD_dataset.STD_dataset_utils import MatchRawWithCubes
 
-#%%
 data_folder = Path(project_settings["MUSE_data_folder"]) / "omega_cluster"
 
-raw_path   = data_folder / "raw_data/MUSE.2020-02-24T05-16-30.566.fits.fz"
-cube_path  = data_folder / "reduced_cubes/DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
-cache_path = data_folder / "cached_cubes" / (cube_path.stem + '.pickle')
+RAW_FOLDER   = data_folder / "raw_data"
+CUBES_FOLDER = data_folder / "reduced_cubes"
+
+#%%
+files_matches, _ = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=False)
+
+# reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
+# reduced_cube = "ADP.2019-05-30T08-10-58.821.fits"
+reduced_cube = "ADP.2021-05-19T05-26-01.345.fits"
+# reduced_cube = "ADP.2021-05-19T05-26-01.337.fits"
+# reduced_cube = "ADP.2021-05-19T05-26-01.303.fits"
+
+raw_file = files_matches.loc[files_matches['cube'] == reduced_cube]['raw'].values[0]
+
+cube_path  = data_folder / f"reduced_cubes/{reduced_cube}"
+cache_path = data_folder / f"cached_cubes/{cube_path.stem}.pickle"
 
 ob = MUSEObservation(
-    raw_path,
+    raw_file,
     cube_path,
     cache_path,
+    PSF_size = 71,
     model_type='TipTorch',
     device=default_device
 )
 ob.λ_batch_size = ob.λ_full.shape[0] // 3 + 1
 
+
+# .303.:
+# bg_custom = np.array([-6.7931, -5.4455, -4.1980, -3.6123, -2.8540, -2.2158, -1.5991])
+# ob.bg_prior = torch.tensor(bg_custom, device=ob.device, dtype=ob.cube_sparse.dtype)
+
+# .345.:
+bg_custom = np.array([-8, -7, -5, -4.5, -4, -3.5, -5])
+ob.cube_sparse -= torch.tensor(bg_custom, device=ob.device, dtype=ob.cube_sparse.dtype).view(-1, 1, 1)
+ob.bg_prior     = torch.zeros(ob.N_wvl, device=ob.device, dtype=ob.cube_sparse.dtype)
+
+#%%
+from tools.plotting import PlotSpetralCubeInRGB
+from matplotlib.colors import LogNorm
+
+
+img = ob.cube_sparse.cpu().numpy() - bg_custom.reshape(-1, 1, 1)
+
+# display_norm = LogNorm(vmin=1, vmax=img.sum(axis=0).max().item()) # again, rather empirical values
+# plt.imshow(img.sum(axis=0), norm=display_norm, origin='lower')
+
+
+idx = 6
+
+display_norm = LogNorm(vmin=1, vmax=img[idx, ...].max().item()) # again, rather empirical values
+plt.imshow(img[idx, ...], norm=display_norm, origin='lower')
+
+plt.axis('off')
+plt.show()
+
+# color_kwargs = {
+#     'saturation':  2.0,
+#     'contrast'  :  1.0,
+#     'wb_shift'  : -0.1,
+#     'mg_shift'  :  0.075,
+#     'min_val'   :  1,
+#     'max_val'   :  5e4,
+# }
+
+# λ_vis_sparse = np.linspace(440, 750, ob.N_wvl)
+
+# _ = PlotSpetralCubeInRGB(
+#     img,
+#     wavelengths = λ_vis_sparse,
+#     title = "Model (full spectrum)",
+#     **color_kwargs
+# )
+
+
 #%%
 # Read pre-processed HST data from DataFrame
-sources_file = data_folder / f'metadata/HST_sources_in_FoV_{cube_path.stem}.csv'
+sources_file = data_folder / f'metadata/HST_srcs_{cube_path.stem}.csv'
 
 with open(sources_file, 'r') as f:
     sources_df = pd.read_csv(f)
@@ -59,7 +121,7 @@ sources[['x_peak', 'y_peak']] = sources[['x_peak', 'y_peak']] * 1e3 / 25.0 + ob.
 sources['weight'] = 1.0
 
 # Leave the first N brighest sources
-# sources = sources.nlargest(50, 'peak_value')
+# sources = sources.nlargest(200, 'peak_value')
 
 ob.sources_table = sources
 ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
@@ -69,13 +131,13 @@ ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
 ob.InitSimulation()
 
 #%%
-# ob.FitPSFModel(repeat=3, max_iter=200)
+ob.FitPSFModel(repeat=3, max_iter=200)
 # ob.FitPSFModel(repeat=1, max_iter=500)
 
 #%%
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
-model_cache = data_folder / "metadata/PSF_model_predicted.pt"
+model_cache = data_folder / f"metadata/PSF_model_predicted_{cube_path.stem}.pt"
 
 if model_cache.exists():
     print("Loading PSF model from cache...")
@@ -89,7 +151,7 @@ else:
     print(f"PSF model saved to {model_cache}")
 
 
-model_cache = data_folder / "metadata/PSF_model_fitted.pt"
+model_cache = data_folder / f"metadata/PSF_model_fitted_{cube_path.stem}.pt"
 
 if model_cache.exists():
     print("Loading PSF model from cache...")
@@ -103,13 +165,28 @@ else:
     print(f"PSF model saved to {model_cache}")
 
 #%%
-
+field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=True, force_cpu=False)
 ob.FitPSFModel(fit=['astrometry'], repeat=1, max_iter=200)
-
 
 #%%
 field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=True, force_cpu=False)
+# field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=False, force_cpu=False)
 data_img = ob.cube_sparse.clone() - ob.background_sparse.view(ob.N_wvl, 1, 1)
+
+#%%
+residue_sparse = (ob.cube_sparse - field_disentangled) * ob.valid_mask
+
+bg_correct = ob.ExtractBackgroundFromResidue(residue_sparse, min_radius=2, max_radius=18, border_margin = 30, regime='median', show=True)
+
+bg_testo = ob.background_sparse + bg_correct.squeeze()
+
+#%%
+ob.bg_prior = bg_testo
+ob.background_sparse *= 0.0
+
+field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=True, force_cpu=False)
+# field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=False, force_cpu=False)
+data_img = ob.cube_sparse.clone() #- ob.background_sparse.view(ob.N_wvl, 1, 1)
 
 #%%
 from tools.multisources import VisualizeSources, PlotSourcesProfiles, extract_ROIs, add_ROIs
@@ -119,6 +196,11 @@ display_norm = LogNorm(vmin=1, vmax=data_img.sum(dim=0).max().item()) # again, r
 _ = VisualizeSources(data_img, field_disentangled, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
 
 PlotSourcesProfiles(data_img, field_disentangled, ob.sources.table, radius=16, title='Predicted profiles + astrometry correction (spectrally binned)', y_max=350, y_min=0.25)
+
+#%%
+# spec = ob.sources.spectra_sparse
+# id_max = spec.sum(dim=1).argmax().item()
+# print(id_max,':',spec[id_max])
 
 #%%
 Strehls_per_λ = ob.PSF_model.ComputeStrehl()
@@ -213,12 +295,12 @@ from tools.plotting import PlotSpetralCubeInRGB
 λ_vis = np.linspace(440, 750, ob.N_wvl_full)  # MUSE covers ~465-930nm, so we map it to 440-750nm for visualization
 
 color_kwargs ={
-    'saturation' :  2.0,
-    'contrast'   :  1.75,
-    'wb_shift'   : -0.3,
-    'mg_shift'   : 0.15,
-    'min_val'    : 500,
-    'max_val'    : 7.5e6,
+    'saturation':  2.0,
+    'contrast'  :  1.75,
+    'wb_shift'  : -0.3,
+    'mg_shift'  :  0.15,
+    'min_val'   :  500,
+    'max_val'   :  7.5e6,
 }
 
 model_full = simulated_full[ob.ROI_plot] + ob.background_full.view(-1, 1, 1).numpy()
@@ -250,7 +332,6 @@ _ = PlotSpetralCubeInRGB(
 # torch.cuda.empty_cache()
 
 #%%
-
 PlotSourcesProfiles(
     data_full - ob.background_full.view(-1, 1, 1).numpy(),
     simulated_full,
@@ -260,8 +341,6 @@ PlotSourcesProfiles(
     y_max=350,
     y_min=0.25
 )
-
-
     
 #%%
 # Compute HST spectra for each source

@@ -112,14 +112,14 @@ def MatchRawWithCubes(
     cubes_obs_date_table, raw_obs_date_table = {}, {}
 
     if verbose: print(f'Scanning the cubes...')
-    for file in tqdm(os.listdir(cubes_folder)):
+    for file in tqdm(os.listdir(cubes_folder), disable=not verbose):
         if not (cubes_folder / file).is_file():
             continue
         with fits.open(cubes_folder / file) as hdul_cube:
             cubes_obs_date_table[file] = hdul_cube[0].header['DATE-OBS']
     
     if verbose: print(f'Scanning the raw files...')
-    for file in tqdm(os.listdir(raw_folder)):
+    for file in tqdm(os.listdir(raw_folder), disable=not verbose):
         if not (raw_folder / file).is_file():
             continue
         with fits.open(raw_folder / file) as hdul_cube:

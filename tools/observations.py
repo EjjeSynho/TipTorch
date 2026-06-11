@@ -73,6 +73,8 @@ class MUSEObservation:
         # The number of λ slices simulated per batch for the full-spectrum simulation
         self.λ_batch_size = 100
         
+        self.bg_prior = None
+        
         # Define the half-width of the region for spectrum extraction = ~size of the PSF core
         self.flux_core_radius = 2 # [pix]
         # Define how many pixels are averaged when extracting the spectra from the PSF core
@@ -711,16 +713,16 @@ class MUSEObservation:
                             simulated += self.simulate_full(src_subset=src_subset, λ_batch_size=N_λ_per_batch, force_cpu=force_cpu)[0]
 
             self.simulated_full = simulated.cpu() if force_cpu else simulated
-            self.residue_full   = (self.cube_full - self.simulated_full.cpu().numpy()) * self.valid_mask.cpu().numpy()
-                
-        
+            # TODO: what's up with the background subtraction here?
+            # self.residue_full   = (self.cube_full - self.simulated_full.cpu().numpy()) * self.valid_mask.cpu().numpy() 
+            
         # ------------- In this branch, only the fast simulation of the sparse subset is done
         else: #TODO: PSFs must add-up exactly to 1 per λ when getting the true spectrum
             with torch.no_grad():
                 simulated, PSFs, flux_normalization = self.simulate_sparse(x=None, src_subset=None, return_PSFs=disentangle_spectra)
             
             if disentangle_spectra:
-                I_sim, fluxes, bg_solved = self.disentangle_flux(self.sources.select(None), PSFs, self.cube_sparse, solver='nonlinear')
+                I_sim, fluxes, bg_solved = self.disentangle_flux(self.sources.select(None), PSFs, self.cube_sparse, solver='nonlinear', field_crop=self.ROI_plot, fixed_bg=self.bg_prior)
                 simulated = I_sim - bg_solved.view(self.N_wvl, 1, 1) # Leave the pure PSF contribution in the simulated image
                 self.background_sparse = bg_solved
                 
@@ -731,7 +733,7 @@ class MUSEObservation:
                 self.sources.spectra_sparse_true = fluxes.T / F_PSF
                 
             self.simulated_sparse = simulated
-            self.residue_sparse = (self.cube_sparse - simulated) * self.valid_mask
+            # self.residue_sparse = (self.cube_sparse - I_sim) * self.valid_mask
         
         gc.collect()
         torch.cuda.empty_cache()
@@ -779,6 +781,8 @@ class MUSEObservation:
         nan_policy       = "zero",
         grad_clip        = None,
         preferred_device = None,
+        field_crop       = None,   # (slice_y, slice_x) to restrict pixel space during the solve; output is always full-field
+        fixed_bg         = None,   # Optional fixed background [N_wvl] or [N_wvl, 1, 1]; if provided, bg is not solved
     ):
         """
         Reconstruct spectral cube by solving  P @ spectrum + bg ≈ I_data.
@@ -795,44 +799,80 @@ class MUSEObservation:
         N_wvl  = PSFs.shape[1]
         device = preferred_device if preferred_device is not None else PSFs.device
         dtype  = PSFs.dtype
+        solver = solver.lower().replace('_', '')
 
         PSFs = PSFs.to(device=device, dtype=dtype)
-        data_cube = (data_cube if isinstance(data_cube, torch.Tensor)
-                    else torch.tensor(data_cube)).to(device=device, dtype=dtype)
+        data_cube = (data_cube if isinstance(data_cube, torch.Tensor) else torch.tensor(data_cube)).to(device=device, dtype=dtype)
 
         def sanitize(x, name):
             if torch.isfinite(x).all(): return x
-            if nan_policy == "raise":   raise FloatingPointError(f"{name} contains {(~torch.isfinite(x)).sum().item()} NaN/Inf values.")
-            if nan_policy == "zero":    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+            if nan_policy == "raise": raise FloatingPointError(f"{name} contain(s) {(~torch.isfinite(x)).sum().item()} NaN/Inf values.")
+            if nan_policy == "zero" : return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
             raise ValueError("nan_policy must be 'zero' or 'raise'.")
 
-        # Scatter PSFs onto the field canvas → design matrix P
+        # Store original field dimensions for full-size output rendering
+        H_out, W_out = data_cube.shape[-2], data_cube.shape[-1]
+
+        # Optional fixed per-wavelength background; when provided, skip bg solving.
+        if fixed_bg is not None:
+            fixed_bg = fixed_bg if isinstance(fixed_bg, torch.Tensor) else torch.tensor(fixed_bg)
+            fixed_bg = fixed_bg.to(device=device, dtype=dtype)
+            if fixed_bg.numel() == 1:
+                fixed_bg = fixed_bg.reshape(1).repeat(N_wvl)
+            elif fixed_bg.numel() == N_wvl:
+                fixed_bg = fixed_bg.reshape(N_wvl)
+            else:
+                if fixed_bg.shape[0] != N_wvl:
+                    raise ValueError(f"fixed_bg first dimension must be N_wvl={N_wvl}, got shape {tuple(fixed_bg.shape)}")
+                fixed_bg = fixed_bg.view(N_wvl, -1).mean(dim=-1)
+            fixed_bg = fixed_bg.contiguous()  # [N_wvl]
+            fixed_bg = sanitize(fixed_bg, "fixed_bg")
+
+        # Scatter PSFs onto the field canvas -> design matrix P
         with torch.no_grad():
             PSFs_ = PSFs if solver == 'linear' else sanitize(PSFs, "PSFs")
             canvas = torch.zeros_like(data_cube, device=device, dtype=dtype)
             srcs_stack = add_ROIs_separately(canvas, PSFs_, srcs.slices_local, srcs.slices_global)
             del canvas, PSFs_
 
-            P      = srcs_stack.view(N_src, N_wvl, -1).permute(1, 2, 0).contiguous()  # [N_wvl, pixels, N_src]
-            I_data = data_cube.view(N_wvl, -1, 1)                                      # [N_wvl, pixels, 1]
+            # When a crop is provided, restrict the solve to that sub-region but keep
+            # the full-field P_full so that I_sim is always rendered at original resolution.
+            if field_crop is not None:
+                slice_y, slice_x = field_crop[-2], field_crop[-1]
+                P_full = srcs_stack.view(N_src, N_wvl, -1).permute(1, 2, 0).contiguous()           # [N_wvl, H*W, N_src]
+                P      = srcs_stack[:, :, slice_y, slice_x].contiguous().view(N_src, N_wvl, -1).permute(1, 2, 0).contiguous()
+                I_data = data_cube[:, slice_y, slice_x].contiguous().view(N_wvl, -1, 1)
+            else:
+                P      = srcs_stack.view(N_src, N_wvl, -1).permute(1, 2, 0).contiguous()  # [N_wvl, pixels, N_src]
+                I_data = data_cube.view(N_wvl, -1, 1)                                      # [N_wvl, pixels, 1]
+                P_full = P
             del srcs_stack
 
             if solver == 'nonlinear':
-                P      = sanitize(P,      "P")
-                I_data = sanitize(I_data, "I_data")
+                P      = sanitize(P, "Simulated PSFs")
+                I_data = sanitize(I_data, "Data")
+                if field_crop is not None:
+                    P_full = sanitize(P_full, "Simulated PSFs (full)")
 
         N_wvl, N_pix, N_src = P.shape
 
         # ======================== Linear solver ========================
         if solver == 'linear':
-            ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
-            P_aug = torch.cat([P, ones], dim=-1)
-            sol   = torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution
-            spectrum = sol[:, :N_src, :].clamp(min=0)
-            bg       = sol[:, N_src:,  :]
-            I_sim    = (torch.matmul(P, spectrum) + bg).squeeze(-1).view(N_wvl, data_cube.shape[-2], data_cube.shape[-1])
+            if fixed_bg is None:
+                ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
+                P_aug = torch.cat([P, ones], dim=-1)
+                sol   = torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution
+                spectrum = sol[:, :N_src, :].clamp(min=0)
+                bg       = sol[:, N_src:,  :]
+            else:
+                I_centered = I_data - fixed_bg.view(N_wvl, 1, 1)
+                sol = torch.linalg.lstsq(P, I_centered, rcond=rcond).solution
+                spectrum = sol.clamp(min=0)
+                bg       = fixed_bg.view(N_wvl, 1, 1)
+            I_sim    = (torch.matmul(P_full, spectrum) + bg).squeeze(-1).view(N_wvl, H_out, W_out)
             return I_sim, spectrum.squeeze(-1), bg.view(N_wvl)
 
+        #--------------------------------------------------------------------------
         # ======================== Non-linear solver ========================
         def softplus_inv(y):
             eps = torch.finfo(y.dtype).eps
@@ -843,28 +883,35 @@ class MUSEObservation:
         # useful here: spectra vary strongly per wavelength while only PSF shape
         # is smooth, so lstsq gives a better starting point every time)
         if init_from_lstsq:
-            ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
-            P_aug = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
             with torch.no_grad():
-                sol           = sanitize(torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution, "lstsq init")
-                spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
-                bg_init       = sanitize(sol[:,  N_src, 0], "bg_init")
+                if fixed_bg is None:
+                    ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
+                    P_aug = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
+                    sol           = sanitize(torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution, "lstsq init")
+                    spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
+                    bg_init       = sanitize(sol[:,  N_src, 0], "bg_init")
+                else:
+                    I_centered = sanitize(I_data - fixed_bg.view(N_wvl, 1, 1), "I_data centered")
+                    sol           = sanitize(torch.linalg.lstsq(P, I_centered, rcond=rcond).solution, "lstsq init")
+                    spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
+                    bg_init       = fixed_bg
                 raw_spec_init = softplus_inv(spec_init)
                 raw_bg_init   = bg_init if bg_unconstrained else softplus_inv(bg_init.clamp_min(0))
         else:
             raw_spec_init = torch.zeros(N_wvl, N_src, device=device, dtype=dtype)
-            raw_bg_init   = torch.zeros(N_wvl,        device=device, dtype=dtype)
+            raw_bg_init   = fixed_bg.clone() if fixed_bg is not None else torch.zeros(N_wvl, device=device, dtype=dtype)
 
         raw_spectrum = torch.nn.Parameter(raw_spec_init.clone())
-        raw_bg       = torch.nn.Parameter(raw_bg_init.clone())
+        raw_bg       = torch.nn.Parameter(raw_bg_init.clone()) if fixed_bg is None else None
         # P and I_data are plain tensors (no requires_grad); gradients only flow
         # through raw_spectrum / raw_bg, keeping the computation graph minimal.
-        optimizer = torch.optim.Adam([raw_spectrum, raw_bg], lr=lr)
+        optim_params = [raw_spectrum] + ([] if raw_bg is None else [raw_bg])
+        optimizer = torch.optim.Adam(optim_params, lr=lr)
 
         for i in range(n_iter):
             optimizer.zero_grad(set_to_none=True)
             spectrum = F.softplus(raw_spectrum)
-            bg       = raw_bg if bg_unconstrained else F.softplus(raw_bg)
+            bg       = fixed_bg if raw_bg is None else (raw_bg if bg_unconstrained else F.softplus(raw_bg))
             loss     = torch.mean((torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1) - I_data) ** 2)
 
             if not torch.isfinite(loss):
@@ -874,11 +921,11 @@ class MUSEObservation:
             loss.backward()
 
             if grad_clip is not None:
-                torch.nn.utils.clip_grad_norm_([raw_spectrum, raw_bg], grad_clip)
+                torch.nn.utils.clip_grad_norm_(optim_params, grad_clip)
 
             # Sanitize gradients in-place before the step
             with torch.no_grad():
-                for p in [raw_spectrum, raw_bg]:
+                for p in optim_params:
                     if p.grad is not None and not torch.isfinite(p.grad).all():
                         p.grad = torch.nan_to_num(p.grad, nan=0.0, posinf=0.0, neginf=0.0)
 
@@ -889,11 +936,11 @@ class MUSEObservation:
 
         with torch.no_grad():
             spectrum = sanitize(F.softplus(raw_spectrum), "final spectrum")
-            bg       = sanitize(raw_bg if bg_unconstrained else F.softplus(raw_bg), "final bg")
+            bg       = sanitize(fixed_bg if raw_bg is None else (raw_bg if bg_unconstrained else F.softplus(raw_bg)), "final bg")
             I_sim    = sanitize(
-                (torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1))
-                .squeeze(-1).view(N_wvl, data_cube.shape[-2], data_cube.shape[-1]),
-                "I_sim"
+                (torch.matmul(P_full, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1))
+                .squeeze(-1).view(N_wvl, H_out, W_out),
+                "Simulated field"
             )
 
         return I_sim.detach(), spectrum.detach(), bg.detach()
@@ -902,7 +949,7 @@ class MUSEObservation:
     def disentangle_flux_batched(
         self,
         λ_batch_size  = 100,
-        solver        = 'nonlinear',
+        solver        = 'linear',
         n_iter        = 1000,
         verbose       = False,
         **disentangle_kwargs
@@ -965,7 +1012,7 @@ class MUSEObservation:
                 srcs,
                 PSFs_batch,
                 data_batch,
-                solver  = solver.replace('non-', 'non'),
+                solver  = solver,
                 n_iter  = n_iter,
                 verbose = verbose,
                 **disentangle_kwargs
@@ -979,11 +1026,10 @@ class MUSEObservation:
             gc.collect()
             torch.cuda.empty_cache()
             
-        
         return I_sim_full, fluxes_full, bg_full
 
 
-    def ExtractBackgroundFromResidue(self, residue, min_radius=2, max_radius=14, border_margin=15, show=False):
+    def ExtractBackgroundFromResidue(self, residue, min_radius=2, max_radius=14, border_margin=15, regime='mean', show=False):
         """
         Estimate a per-wavelength background level from the residue cube by
         averaging over pixels that are not contaminated by sources or borders.
@@ -1049,8 +1095,14 @@ class MUSEObservation:
         # ---- background estimate: mean over valid pixels per λ, no copy -----
         # residue[:, valid_pixels] gathers only the unmasked columns — O(N_λ * N_valid)
         # instead of O(N_λ * H * W) for a full clone.
-        residue_flat  = residue.view(N_λ, H * W)          # view, no copy
-        bg_vals       = residue_flat[:, valid_idx].mean(dim=-1)  # [N_λ]
+        residue_flat  = residue.view(N_λ, H * W) # view, no copy
+        
+        if regime == 'mean':
+            bg_vals = residue_flat[:, valid_idx].mean(dim=-1)  # [N_λ]
+        elif regime == 'median':
+            bg_vals = residue_flat[:, valid_idx].median(dim=-1).values  # [N_λ]
+        else:
+            raise ValueError(f"Invalid regime '{regime}'. Must be 'mean' or 'median'.")
 
         if show:
             display_norm = LogNorm(vmin=1, vmax=float(self.cube_sparse.sum(dim=0).max()))
@@ -1201,12 +1253,12 @@ class MUSEObservation:
         """
         Save a 3D (N_wvl, H, W) or 4D (N_src, N_wvl, H, W) model cube to a FITS file.
 
-        3D input → single image HDU (optionally compressed).
+        3D input -> single image HDU (optionally compressed).
 
-        4D input with sources=None → single zero-padded 4D image HDU (mostly zeros, poor use
+        4D input with sources=None -> single zero-padded 4D image HDU (mostly zeros, poor use
         of space even with compression).
 
-        4D input with sources=<DataFrame> → multi-extension FITS: one compact HDU per source
+        4D input with sources=<DataFrame> -> multi-extension FITS: one compact HDU per source
         (N_wvl, psf_H, psf_W), with the WCS in each extension encoding where the PSF belongs
         in the full field. No zeros are stored at all - this is the recommended format.
         Reading back: for source i, hdul[i+1].data gives its PSF cube; CRVAL1/2 give its
@@ -1291,7 +1343,7 @@ class MUSEObservation:
         # stem = os.path.splitext(os.path.basename(cube_path))[0]
         # suffix = '_modeled_cube_objects' if np.asarray(PSFs_separated).ndim == 4 else '_modeled_cube'
         # output_file = data_folder / f'{stem}{suffix}.fits'
-        # Pass PSFs_separated (N_src, N_wvl, 111, 111) + source positions → compact multi-extension format, no zeros
+        # Pass PSFs_separated (N_src, N_wvl, 111, 111) + source positions -> compact multi-extension format, no zeros
         # SaveModelCubeFITS(PSFs_separated, output_file, λ_full, sources=sources)
 
 

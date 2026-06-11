@@ -41,7 +41,7 @@ data_folder  = MUSE_DATA_FOLDER / 'omega_cluster/OmegaCentaury_data/'
 RAW_FOLDER   = data_folder / "../raw_data"
 CUBES_FOLDER = data_folder / "../reduced_cubes"
 
-files_matches, files_mismatches = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=True)
+files_matches, _ = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=False)
 
 # reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 # reduced_cube = "ADP.2019-05-30T08-10-58.821.fits"
