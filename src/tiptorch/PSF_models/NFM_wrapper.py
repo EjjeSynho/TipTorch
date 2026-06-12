@@ -157,7 +157,7 @@ class PSFModelNFM:
 
 
     @classmethod
-    def load(cls, store_data: dict, *, device=None):
+    def load(cls, store_data: dict, *, device=None, config=None):
         """
         Reconstruct a PSFModelNFM instance from save() output.
 
@@ -167,6 +167,9 @@ class PSFModelNFM:
             Dictionary produced by PSFModelNFM.save().
         device : str | torch.device | None
             Optional device override.  If None, uses the device stored in the save.
+        config : dict | None
+            Fallback config to use when the store was created before config
+            serialization was added (backward compatibility).
         """
         
         def _dtype_from_name(dtype):
@@ -205,8 +208,15 @@ class PSFModelNFM:
         device = torch.device(device if device is not None else store_data.get('device', default_device))
         dtype  = _dtype_from_name(store_data.get('dtype', torch.float32))
 
+        _raw_config = store_data.get('config', config)
+        if _raw_config is None:
+            raise ValueError(
+                "The saved file does not contain a 'config' entry (old format). "
+                "Pass the config explicitly via PSFModelNFM.load(..., config=ob.model_config)."
+            )
+
         new_instance = cls(
-            config         = _restore_config(store_data['config'], device),
+            config         = _restore_config(_raw_config, device),
             multiple_obs   = store_data.get('multiple_obs', store_data.get('multiple_OBs', False)),
             LO_NCPAs       = store_data.get('LO_NCPAs', True),
             chrom_defocus  = store_data.get('chrom_defocus', False),

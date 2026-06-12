@@ -229,7 +229,19 @@ def render_spectral_PSF(spectral_cube, λs):
         plt.title(f'λ = {λs[id]:.2f} nm')
 
 
-def PlotSpetralCubeInRGB(image, wavelengths, min_val=1e-6, max_val=1e2, scale='log', title=None, show=True, saturation=1.0, contrast=1.0, wb_shift=0.0, mg_shift=0.0):
+def PlotSpetralCubeInRGB(
+    image,
+    wavelengths,
+    min_val = 1e-6,
+    max_val = None,
+    scale = 'log',
+    title = None,
+    show = True,
+    saturation = 1.0,
+    contrast = 1.0,
+    wb_shift = 0.0,
+    mg_shift = 0.0
+):
     """
     Map a multi-wavelength image into RGB.
 
@@ -242,9 +254,10 @@ def PlotSpetralCubeInRGB(image, wavelengths, min_val=1e-6, max_val=1e2, scale='l
     min_val : float
         Minimum intensity for clipping. Default suits log scale (1e-6).
         For linear scale, use 0.0.
-    max_val : float
-        Maximum intensity for clipping. Default suits log scale (1e2).
-        For linear scale, use 1.0.
+    max_val : float or None
+        Maximum intensity for clipping. If None, automatically computed from the
+        image histogram (99th percentile in log domain). For linear scale with
+        explicit value, use 1.0.
     scale : {'log', 'linear'}
         Normalisation strategy. 'log' applies log10 before clipping (default).
     title : str, optional
@@ -305,11 +318,19 @@ def PlotSpetralCubeInRGB(image, wavelengths, min_val=1e-6, max_val=1e2, scale='l
     if wb_shift != 0.0 or mg_shift != 0.0:
         wb_gains = np.array(
             [(1.0 + wb_shift) * (1.0 + mg_shift),   # R: warm + magenta
-              1.0              * (1.0 - mg_shift),   # G: green axis only
+              1.0             * (1.0 - mg_shift),   # G: green axis only
              (1.0 - wb_shift) * (1.0 + mg_shift)],  # B: cool + magenta
             dtype=np.float32
         )
         image_RGB = image_RGB * wb_gains
+
+    # Auto-compute max_val from histogram if not provided
+    if max_val is None:
+        if scale == 'log':
+            image_log = np.log10(image_RGB + 1e-10)
+            max_val = np.percentile(image_log, 99)
+        else:
+            max_val = np.percentile(image_RGB, 99)
 
     if scale == 'log':
         lo, hi = np.log10(min_val), np.log10(max_val)
@@ -344,7 +365,7 @@ def PlotSpetralCubeInRGB(image, wavelengths, min_val=1e-6, max_val=1e2, scale='l
     if show:
         plt.show()
 
-    return image_RGB
+    return image_RGB, max_val
 
 
 def save_GIF(array, duration=1e3, scale=1, path='test.gif', colormap=cm.viridis):

@@ -713,7 +713,7 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
     return diff_vis
 
 
-def PlotSourcesProfiles(data, model, sources, radius, select_ids=None, **kwargs):
+def PlotSourcesProfiles(data, model, sources, radius, select_ids=None, show=True, **kwargs):
     # Extract PSFs from the image
     box_size = np.round(radius * 2 + 4).astype(int)
 
@@ -746,7 +746,8 @@ def PlotSourcesProfiles(data, model, sources, radius, select_ids=None, **kwargs)
         ax=ax,
         **kwargs,
     )
-    plt.show()
+    if show:
+        plt.show()
 
 
 def select_sources(src_dict: dict, selected_ids: Union[list, int]) -> dict:

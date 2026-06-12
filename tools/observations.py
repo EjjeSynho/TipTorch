@@ -722,7 +722,16 @@ class MUSEObservation:
                 simulated, PSFs, flux_normalization = self.simulate_sparse(x=None, src_subset=None, return_PSFs=disentangle_spectra)
             
             if disentangle_spectra:
-                I_sim, fluxes, bg_solved = self.disentangle_flux(self.sources.select(None), PSFs, self.cube_sparse, solver='nonlinear', field_crop=self.ROI_plot, fixed_bg=self.bg_prior)
+                I_sim, fluxes, bg_solved = self.disentangle_flux(
+                    self.sources.select(None),
+                    PSFs,
+                    self.cube_sparse,
+                    solver='nonlinear',
+                    fixed_bg=self.bg_prior
+                )#,
+                    # flux_reg=1e-6,
+                    # field_crop=self.ROI_plot,
+                # )
                 simulated = I_sim - bg_solved.view(self.N_wvl, 1, 1) # Leave the pure PSF contribution in the simulated image
                 self.background_sparse = bg_solved
                 
@@ -783,6 +792,8 @@ class MUSEObservation:
         preferred_device = None,
         field_crop       = None,   # (slice_y, slice_x) to restrict pixel space during the solve; output is always full-field
         fixed_bg         = None,   # Optional fixed background [N_wvl] or [N_wvl, 1, 1]; if provided, bg is not solved
+        flux_reg         = 0.0,    # L2 regularization weight on spectrum; prevents blowup from collinear/overlapping PSFs
+        flux_prior       = None,   # [N_wvl, N_src] prior target for spectrum regularization; if None, regularizes towards zero
     ):
         """
         Reconstruct spectral cube by solving  P @ spectrum + bg ≈ I_data.
@@ -856,17 +867,39 @@ class MUSEObservation:
 
         N_wvl, N_pix, N_src = P.shape
 
+        # Tikhonov-regularized lstsq via augmented system  [A ; √r·I_n_reg | 0] x = [b ; √r·prior].
+        # Only the first n_reg columns (spectrum) are penalized; remaining columns (bg) are free.
+        # When flux_reg <= 0, falls back to plain lstsq at no cost.
+        def _lstsq_reg(A, b, n_reg=None, prior=None):
+            n_cols = A.shape[-1]
+            n_reg  = n_cols if n_reg is None else n_reg
+            if flux_reg <= 0:
+                return torch.linalg.lstsq(A, b, rcond=rcond).solution
+            sqrt_r  = torch.tensor(flux_reg, device=device, dtype=dtype).sqrt()
+            eye_blk = sqrt_r * torch.eye(n_reg, device=device, dtype=dtype).unsqueeze(0).expand(N_wvl, -1, -1)
+            if n_reg < n_cols:  # pad zeros for unpenalized columns (e.g. bg scalar)
+                eye_blk = torch.cat([eye_blk, torch.zeros(N_wvl, n_reg, n_cols - n_reg, device=device, dtype=dtype)], dim=-1)
+            prior_v = prior if prior is not None else torch.zeros(N_wvl, n_reg, device=device, dtype=dtype)
+            return torch.linalg.lstsq(
+                torch.cat([A, eye_blk], dim=1),
+                torch.cat([b, (sqrt_r * prior_v).unsqueeze(-1)], dim=1),
+                rcond=rcond
+            ).solution
+
+        _prior = (flux_prior.to(device=device, dtype=dtype) if flux_prior is not None
+                  else torch.zeros(N_wvl, N_src, device=device, dtype=dtype))
+
         # ======================== Linear solver ========================
         if solver == 'linear':
             if fixed_bg is None:
                 ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
                 P_aug = torch.cat([P, ones], dim=-1)
-                sol   = torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution
+                sol      = _lstsq_reg(P_aug, I_data, n_reg=N_src, prior=_prior)
                 spectrum = sol[:, :N_src, :].clamp(min=0)
                 bg       = sol[:, N_src:,  :]
             else:
                 I_centered = I_data - fixed_bg.view(N_wvl, 1, 1)
-                sol = torch.linalg.lstsq(P, I_centered, rcond=rcond).solution
+                sol      = _lstsq_reg(P, I_centered, prior=_prior)
                 spectrum = sol.clamp(min=0)
                 bg       = fixed_bg.view(N_wvl, 1, 1)
             I_sim    = (torch.matmul(P_full, spectrum) + bg).squeeze(-1).view(N_wvl, H_out, W_out)
@@ -887,12 +920,12 @@ class MUSEObservation:
                 if fixed_bg is None:
                     ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
                     P_aug = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
-                    sol           = sanitize(torch.linalg.lstsq(P_aug, I_data, rcond=rcond).solution, "lstsq init")
+                    sol           = sanitize(_lstsq_reg(P_aug, I_data, n_reg=N_src, prior=_prior), "lstsq init")
                     spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
                     bg_init       = sanitize(sol[:,  N_src, 0], "bg_init")
                 else:
                     I_centered = sanitize(I_data - fixed_bg.view(N_wvl, 1, 1), "I_data centered")
-                    sol           = sanitize(torch.linalg.lstsq(P, I_centered, rcond=rcond).solution, "lstsq init")
+                    sol           = sanitize(_lstsq_reg(P, I_centered, prior=_prior), "lstsq init")
                     spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
                     bg_init       = fixed_bg
                 raw_spec_init = softplus_inv(spec_init)
@@ -907,12 +940,14 @@ class MUSEObservation:
         # through raw_spectrum / raw_bg, keeping the computation graph minimal.
         optim_params = [raw_spectrum] + ([] if raw_bg is None else [raw_bg])
         optimizer = torch.optim.Adam(optim_params, lr=lr)
+        _reg_prior = _prior.detach() if flux_reg > 0 else None  # pre-fetch for loop; no grad needed
 
         for i in range(n_iter):
             optimizer.zero_grad(set_to_none=True)
-            spectrum = F.softplus(raw_spectrum)
-            bg       = fixed_bg if raw_bg is None else (raw_bg if bg_unconstrained else F.softplus(raw_bg))
-            loss     = torch.mean((torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1) - I_data) ** 2)
+            spectrum  = F.softplus(raw_spectrum)
+            bg        = fixed_bg if raw_bg is None else (raw_bg if bg_unconstrained else F.softplus(raw_bg))
+            data_loss = torch.mean((torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1) - I_data) ** 2)
+            loss      = data_loss if _reg_prior is None else data_loss + flux_reg * (spectrum - _reg_prior).pow(2).mean()
 
             if not torch.isfinite(loss):
                 if verbose: print(f"iter {i:05d} | non-finite loss, stopping")

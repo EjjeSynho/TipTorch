@@ -418,9 +418,7 @@ def FitMoffat2D_astropy(PSF):
     alpha_init = 2.5  # A reasonable default; adjust as needed.
 
     # Initial model: Moffat + constant offset
-    moffat_init = models.Moffat2D(amplitude=A_init, x_0=x0_init, y_0=y0_init,
-                                  gamma=gamma_init, alpha=alpha_init) \
-                 + models.Const2D(offset_init)
+    moffat_init = models.Moffat2D(amplitude=A_init, x_0=x0_init, y_0=y0_init, gamma=gamma_init, alpha=alpha_init) + models.Const2D(offset_init)
 
     # Fit the model
     fitter = fitting.LevMarLSQFitter()
@@ -508,12 +506,15 @@ def FWHM_fitter(PSF_stack, function='Moffat', verbose=False):
     else:
         func_ = FitGauss2D_astropy
         
-    FWHMs = np.zeros([PSF_stack.shape[0], PSF_stack.shape[1], 2])
+    FWHMs = np.full([PSF_stack.shape[0], PSF_stack.shape[1], 2], np.nan)
     for i in tqdm(range(PSF_stack.shape[0])):
         for l in range(PSF_stack.shape[1]):
-            f_x, f_y, _, _ = func_(PSF_stack[i,l,:,:])
-            FWHMs[i,l,0] = f_x.item()
-            FWHMs[i,l,1] = f_y.item()
+            try:
+                f_x, f_y, _, _ = func_(PSF_stack[i,l,:,:])
+                FWHMs[i,l,0] = f_x.item()
+                FWHMs[i,l,1] = f_y.item()
+            except Exception:
+                pass  # leaves NaNs in place
     return FWHMs
 
 
