@@ -696,7 +696,10 @@ def draw_PSF_stack(
     average=False,
     scale='log',
     min_val=1e-16, max_val=1e16,
-    crop=None, ax=None):
+    crop=None,
+    ax=None,
+    cmap=cm.viridis
+):
     
     from matplotlib.colors import LogNorm
     
@@ -738,7 +741,7 @@ def draw_PSF_stack(
         else:
             norm = None
         
-        ax.imshow(row, norm=norm)
+        ax.imshow(row, norm=norm, cmap=cmap)
         # ax.set_title('Sources average')
         ax.axis('off')
         # plt.show()
@@ -762,7 +765,7 @@ def draw_PSF_stack(
             ax.imshow(row, norm=norm)
             # ax.set_title('Source %d' % src)
             ax.axis('off')
-            plt.show()
+            # plt.show()
 
 
 def plot_chromatic_PSF_slice(

@@ -162,7 +162,7 @@ def collate_batch(batch, device):
     batch_config = MultipleTargetsInDifferentObservations(configs, device=device)
     batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
     batch_config['telescope']['PupilAngle'] = 0.0 #TODO: make this changable with flag?
-    
+    batch_config['DM']['NumberReconstructedLayers'] = torch.tensor(3.0, device=device)
     return PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs
 
 
@@ -1603,21 +1603,59 @@ validation_ids = validation_ids.cpu()
 
 release_gpu_memory()
 
+
 #%%
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
+import pickle
+
+with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
+    muse_df = pickle.load(handle)
 
 id_src = np.random.randint(0, PSFs_data_cube.shape[0])
-print(f"Randomly selected validation sample ID: {id_src}")
-print(f"Corresponding original dataset index: {validation_ids[id_src].item()}")
+true_sample_id = validation_ids[id_src].item()
+
+cube_filename = muse_df.loc[true_sample_id]['Filename']
+
+# print(f"Randomly selected validation sample ID: {id_src}")
+# print(f"Corresponding original dataset index: {true_sample_id}")
+# print(f"Original cube filename: {true_sample_id}_{cube_filename}")
 
 PSF_0 = PSFs_data_cube[id_src]
 PSF_1 = PSFs_pred_cube[id_src]
-
 
 vmin = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 10)
 vmax = np.percentile(PSF_0[PSF_0 > 0].cpu().numpy(), 99.995)
 wvl_select = np.s_[0, N_wvl_total//2, -1]
 PSF_disp = lambda x, w: (x[w,...]).cpu().numpy()
+
+#%
+# plottis = True
+# diff = (PSF_1 - PSF_0).abs()[wvl_select, ...].amax(dim=(1, 2)) / PSF_0[wvl_select, ...].amax(dim=(1, 2)) * 100.0
+# print(f"Maximums {diff.median().item()} %")
+
+#%
+fig, ax = plt.subplots(1, len(wvl_select), figsize=(15, 1.35*len(wvl_select)))
+
+p_errs = []
+for i, lmbd in enumerate(wvl_select):
+    p_errs.append(
+        plot_radial_PSF_profiles(
+            PSF_disp(PSF_0, lmbd),
+            PSF_disp(PSF_1, lmbd),
+            'Data',
+            'TipTorch',
+            cutoff=40,
+            y_min=3e-2,
+            linthresh=1e-2,
+            return_profiles=True,
+            ax=ax[i]
+        )[2].squeeze().max().item()
+    )
+    ax[i].set_title(f"λ = {(λ_full[lmbd]*1e9).round().int().item()} nm")
+plt.show()
+
+p_errs = np.array(p_errs)
+print(p_errs)
 
 draw_PSF_stack(
     PSF_0.numpy()[wvl_select, ...],
@@ -1625,25 +1663,23 @@ draw_PSF_stack(
     average=True,
     min_val=vmin,
     max_val=vmax,
-    crop=100
+    crop=80,
+    cmap='inferno'
 )
 
-#%
-fig, ax = plt.subplots(1, len(wvl_select), figsize=(15, 1.35*len(wvl_select)))
-for i, lmbd in enumerate(wvl_select):
-    plot_radial_PSF_profiles(
-        PSF_disp(PSF_0, lmbd),
-        PSF_disp(PSF_1, lmbd),
-        'Data',
-        'TipTorch',
-        cutoff=40,
-        y_min=3e-2,
-        linthresh=1e-2,
-        return_profiles=True,
-        ax=ax[i]
-    )
-    ax[i].set_title(f"λ = {(λ_full[lmbd]*1e9).round().int().item()} nm")
-plt.show()
+_ax = plt.gca()
+_crop = 80
+for _i, (_lmbd, _p_err) in enumerate(zip(wvl_select, p_errs)):
+    _wvl_nm = int((λ_full[_lmbd] * 1e9).round().item())
+    _ax.text(3 * _crop - 2, _i * _crop + 4, f'λ={_wvl_nm} nm  ΔSR={_p_err:.1f}%',
+             color='white', fontsize=6, va='top', ha='right',
+             bbox=dict(boxstyle='round,pad=0.1', fc='black', alpha=0.4, lw=0))
+
+plt.title(cube_filename)
+
+# if plottis:
+#     plt.savefig(STD_FOLDER / f'plots/predicted_PSF_{true_sample_id}.pdf', dpi=300)
+
 
 #%%
 fig, ax = plt.subplots(1, len(wvl_select), figsize=(15, 1.35*len(wvl_select)))
@@ -1664,16 +1700,45 @@ plt.show()
 #%%
 fig = plt.figure(figsize=(10, 6))
 PSF_avg = lambda x: np.mean(x.cpu().numpy(), axis=1)
-plot_radial_PSF_profiles(
+white_profiles = plot_radial_PSF_profiles(
     PSF_avg(PSFs_data_cube),
     PSF_avg(PSFs_pred_cube),
     'Data',
     'TipTorch',
     title='Spectrally averaged PSF',
     cutoff=40,
-    ax=fig.add_subplot(111)
+    ax=fig.add_subplot(111),
+    return_profiles=True
 )
 plt.title('Spectrally averaged median PSF profile')
+# plt.show()
+# plt.savefig(STD_FOLDER / 'plots/calibrated_prediction_white.pdf', dpi=300)
+
+#%%
+SR_err = white_profiles[2].max(axis=1)
+_ = plt.hist(SR_err, bins=20)
+# Median line\
+plt.axvline((np.median(SR_err)), color='r', linestyle='--', label=f'Median ΔSR = {np.median(SR_err):.2f}%')
+plt.xlabel('Maximum ΔSR (%)')
+plt.ylabel('Number of samples')
+plt.title('Distribution of maximum Strehl Ratio errors across validation samples')
+plt.grid(True)
+plt.legend()
+plt.xlim(0, None)
+# plt.show()
+# plt.savefig(STD_FOLDER / 'plots/calibrated_prediction_hist.pdf', dpi=300)
+
+#%%
+
+diff = (PSFs_pred_cube - PSFs_data_cube).abs().amax(dim=(-2,-1)) / PSFs_data_cube.amax(dim=(-2,-1)) * 100.0
+
+diff = diff.mean(dim=-1).cpu().numpy()
+
+_ = plt.hist(diff, bins=50)
+plt.xlabel('Maximum ΔSR (%)')
+plt.ylabel('Number of samples')
+plt.title('Distribution of maximum Strehl Ratio errors across validation samples')
+plt.grid(True)
 plt.show()
 
 #%%

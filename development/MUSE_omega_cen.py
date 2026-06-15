@@ -24,20 +24,21 @@ data_folder = Path(project_settings["MUSE_data_folder"]) / "omega_cluster"
 
 RAW_FOLDER   = data_folder / "raw_data"
 CUBES_FOLDER = data_folder / "reduced_cubes"
+CACHE_FOLDER = data_folder / "cached_cubes"
 
 #%%
 files_matches, _ = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=False)
 
-# reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
+reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 # reduced_cube = "ADP.2019-05-30T08-10-58.821.fits" # meh
 # reduced_cube = "ADP.2021-05-19T05-26-01.345.fits" # meh
 # reduced_cube = "ADP.2021-05-19T05-26-01.337.fits"
-reduced_cube = "ADP.2021-05-19T05-26-01.303.fits"
+# reduced_cube = "ADP.2021-05-19T05-26-01.303.fits"
 
-raw_file = files_matches.loc[files_matches['cube'] == reduced_cube]['raw'].values[0]
+raw_file   = RAW_FOLDER   / files_matches.loc[files_matches['cube'] == reduced_cube]['raw'].values[0]
+cube_path  = CUBES_FOLDER / reduced_cube
+cache_path = CACHE_FOLDER / f"{cube_path.stem}.pickle"
 
-cube_path  = data_folder / f"reduced_cubes/{reduced_cube}"
-cache_path = data_folder / f"cached_cubes/{cube_path.stem}.pickle"
 
 ob = MUSEObservation(
     raw_file,
@@ -45,8 +46,8 @@ ob = MUSEObservation(
     cache_path,
     PSF_size = 111,
     # model_type='Moffat', #'psfao', #'TipTorch',
-    model_type='psfao', #'TipTorch',
-    # model_type='TipTorch',
+    # model_type='psfao', #'TipTorch',
+    model_type='TipTorch',
     device=default_device
 )
 ob.λ_batch_size = ob.λ_full.shape[0] // 3 + 1
@@ -68,6 +69,40 @@ elif reduced_cube.replace('.fits', '').endswith('337'):
 
 # ob.cube_sparse -= torch.tensor(bg_custom, device=ob.device, dtype=ob.cube_sparse.dtype).view(-1, 1, 1)
 # ob.bg_prior     = torch.zeros(ob.N_wvl, device=ob.device, dtype=ob.cube_sparse.dtype)
+
+#%%
+from tiptorch.tools.utils import seeing, rad2arc
+from astropy.io import fits
+
+with fits.open(cube_path) as hdul:
+    try:
+        OBID1 = hdul[0].header['OBID1']
+    except KeyError:
+        OBID1 = hdul[0].header['HIERARCH ESO OBS ID']
+        
+    EXPTIME = hdul[0].header['EXPTIME'] / 60.0
+
+print(f"Metadata for {reduced_cube}:\n")
+
+seeing = lambda r0, lmbd: rad2arc*0.976*lmbd/r0 # [arcs]
+
+seeings = np.array([seeing(ob.reduced_telemetry[e].item(), 500e-9) for e in ['r0Tot', 'R0'] if np.isfinite(ob.reduced_telemetry[e].item())]).mean()
+seeings = (seeings + ob.reduced_telemetry['Seeing (header)'].item()) / 2.0
+
+NGS_mag = np.array([ob.reduced_telemetry[e].item() for e in ['NGS mag (header)', 'NGS mag (from ph.)', 'NGS mag (from 2x2)']])
+NGS_mag = NGS_mag[np.isfinite(NGS_mag)].mean()
+
+col_w = max(len(e) for e in ['RA (science)', 'DEC (science)', 'Airmass'])
+
+print(f"{'OB ID':<{col_w}}  {OBID1}")
+print(f"{'Exposure time':<{col_w}}  {EXPTIME:.1f} min")
+
+for e in ['RA (science)', 'DEC (science)', 'Airmass']:
+    print(f"{e:<{col_w}}  {ob.reduced_telemetry[e].item():.4f}")
+
+print(f"{'Tau0 (header)':<{col_w}}  {ob.reduced_telemetry['Tau0 (header)'].item()*1e3:1.1f}")
+print(f"{'Seeing':<{col_w}}  {seeings:.2f} arcsec")
+print(f"{'NGS mag':<{col_w}}  {NGS_mag:.2f}")
 
 #%%
 from tools.plotting import PlotSpetralCubeInRGB
