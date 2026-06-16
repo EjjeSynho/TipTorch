@@ -1569,6 +1569,7 @@ logger.info("Loading best model...")
 print("\nLoading best model...")
 
 epoch, train_loss, val_loss = load_checkpoint(calibrator, None, BEST_CALIB_PATH)
+# epoch, train_loss, val_loss = load_checkpoint(calibrator, None, BEST_CALIB_PATH / '.old')
 
 calibrator.eval()
 # logger.info(f"Best validation loss: {val_loss:.6f} at epoch {epoch}")
