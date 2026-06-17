@@ -15,19 +15,15 @@ import argparse
 import pickle
 import numpy as np
 import torch
-import torch.nn as nn
-import torch.optim as optim
 import matplotlib.pyplot as plt
 from copy import deepcopy
 from pathlib import Path
 from datetime import datetime
-from torch.utils.data import DataLoader, Dataset, Subset
-from sklearn.model_selection import train_test_split, KFold, cross_val_score
-from sklearn.ensemble import RandomForestRegressor
+from torch.utils.data import Dataset
 
 from tiptorch._config import *
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
-from calibrators.NFM_calibrator import SmallCalibratorNet
+from calibrators.NFM_calibrator import SmallCalibratorNet, NFMCalibratorTrainer
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -89,9 +85,7 @@ def release_gpu_memory(sync=False):
             torch.cuda.synchronize()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
 # Dataset
-# ─────────────────────────────────────────────────────────────────────────────
 class NFMDataset(Dataset):
     """
     Dataset of MUSE NFM PSF cubes with paired telemetry and fitted parameter values.
@@ -136,641 +130,10 @@ def collate_batch(batch, device):
     batch_config = MultipleTargetsInDifferentObservations(configs, device=device)
     batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
     batch_config['telescope']['PupilAngle'] = 0.0
-    batch_config['DM']['NumberReconstructedLayers'] = torch.tensor(3.0, device=device)
+    batch_config['DM']['NumberReconstructedLayers'] = torch.tensor(batch_config['atmosphere']['Cn2Heights'].shape[-1], device=device)
     return PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Trainer
-# ─────────────────────────────────────────────────────────────────────────────
-class NFMCalibratorTrainer:
-    """
-    PSF-model-in-the-loop trainer for an arbitrary NN calibrator.
-
-    Encapsulates the full training workflow:
-      - wavelength-batched PSF forward passes
-      - pretraining against fitted parameter values
-      - end-to-end PSF loss training with optional per-sample difficulty weighting
-      - K-fold difficulty estimation via out-of-fold losses + random-forest difficulty model
-      - targeted fine-tuning of selected output dimensions
-      - checkpoint save / load / calibrator bundle export
-
-    Parameters
-    ----------
-    PSF_model : PSFModelNFM
-        Initialised (and pruned) PSF model.
-    calibrator : nn.Module
-        Network mapping a [B, N_features] telemetry tensor -> [B, N_outputs] stacked params.
-    dataset : NFMDataset (or compatible)
-        Full labelled dataset. Split internally via train_test_split.
-    outputs_transformer : InputsTransformer
-        Knows how to stack / unstack the calibrator output vector.
-    device : torch.device
-    batch_size, lr, lambda_step : int / float / int
-        Basic training hyper-parameters.
-    predict_LO_NCPAs, predict_Cn2_profile : bool
-    pre_init_astrometry : bool
-        Seed per-sample dx/dy from dataset fitted values instead of zeros.
-    optimize_astrometry : bool
-        Include per-sample dx/dy in the optimizer.
-    weights_dir : Path | None
-        Directory for checkpoints / bundles (default: WEIGHTS_FOLDER/NFM_calibrator).
-    test_size : float
-        Fraction of samples held out for validation.
-    random_state : int
-    """
-
-    def __init__(
-        self,
-        PSF_model,
-        calibrator,
-        dataset,
-        outputs_transformer,
-        device,
-        *,
-        batch_size           = 16,
-        lr                   = 1e-2,
-        lambda_step          = 2,
-        predict_LO_NCPAs     = True,
-        predict_Cn2_profile  = True,
-        pre_init_astrometry  = True,
-        optimize_astrometry  = False,
-        weights_dir          = None,
-        test_size            = 0.20,
-        random_state         = 42,
-    ):
-        self.PSF_model           = PSF_model
-        self.calibrator          = calibrator
-        self.dataset             = dataset
-        self.outputs_transformer = outputs_transformer
-        self.device              = device
-        self.batch_size          = batch_size
-        self.lr                  = lr
-        self.predict_LO_NCPAs    = predict_LO_NCPAs
-        self.predict_Cn2_profile = predict_Cn2_profile
-        self.pre_init_astrometry = pre_init_astrometry
-        self.optimize_astrometry = optimize_astrometry
-        self.weights_dir         = Path(weights_dir) if weights_dir else WEIGHTS_FOLDER / 'NFM_calibrator'
-        self.weights_dir.mkdir(parents=True, exist_ok=True)
-
-        self.N_wvl_total = dataset.C
-        self.H, self.W   = dataset.H, dataset.W
-        self.N_features  = len(dataset.features)
-        self.N_outputs   = outputs_transformer.get_stacked_size()
-
-        # Train / val split and loaders
-        self.train_idx, self.val_idx = train_test_split(
-            np.arange(len(dataset)), test_size=test_size, random_state=random_state,
-        )
-        self.train_loader = self._make_loader(self.train_idx, shuffle=True)
-        self.val_loader   = self._make_loader(self.val_idx,   shuffle=False)
-
-        # Wavelength scheduling
-        self.lambda_full    = PSF_model.λ_sim.clone()
-        self.lambda_id_sets = self._build_wavelength_sets(lambda_step, dataset.C - 1)
-        self.lambda_sets    = [self.lambda_full[ids] for ids in self.lambda_id_sets]
-
-        # Astrometry
-        self._init_astrometry()
-
-        # Phase-bump (first LO coef) and optional NCPA median fallback
-        LO_data = np.array([d['LO_coefs'] for d in dataset.fitted_vals], dtype=np.float32)
-        self.phase_bump   = torch.tensor(LO_data[:, 0], device=device, dtype=torch.float32)
-        self.NCPAs_median = (
-            None if predict_LO_NCPAs else
-            torch.tensor(np.median(LO_data[:, 1:], axis=0)[None, ...], device=device, dtype=torch.float32)
-        )
-
-        self.optimizer, self.scheduler = self._make_optimizer()
-
-        logger.info(
-            f"Trainer ready | dataset={len(dataset)} ({len(self.train_idx)} train / {len(self.val_idx)} val) | "
-            f"N_features={self.N_features} | N_outputs={self.N_outputs} | "
-            f"lambda_sets={len(self.lambda_id_sets)} x ~{len(self.lambda_id_sets[0])} wvl"
-        )
-
-    # ── Helpers ────────────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _build_wavelength_sets(step, max_val):
-        sets, thresh = [], step // 2
-        for offset in range(step):
-            ids = list(range(offset, max_val + 1, step))
-            if ids[0] > thresh:            ids.insert(0, 0)
-            if max_val - ids[-1] > thresh: ids.append(max_val)
-            sets.append(ids)
-        return sets
-
-    def _make_loader(self, indices, shuffle):
-        return DataLoader(
-            dataset=Subset(self.dataset, np.asarray(indices, dtype=int)),
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=0,
-            collate_fn=lambda b: collate_batch(b, device=self.device),
-            drop_last=False,
-        )
-
-    def _init_astrometry(self):
-        n      = len(self.dataset)
-        n_ctrl = len(np.atleast_1d(self.dataset.fitted_vals[0].get('dx_ctrl', [0])))
-        if self.pre_init_astrometry and 'dx_ctrl' in self.dataset.fitted_vals[0]:
-            dx_data = np.array([d['dx_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
-            dy_data = np.array([d['dy_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
-        else:
-            self.optimize_astrometry = True
-            dx_data = np.zeros((n, n_ctrl), dtype=np.float32)
-            dy_data = np.zeros((n, n_ctrl), dtype=np.float32)
-        self.dx = torch.tensor(dx_data, device=self.device, dtype=torch.float32,
-                               requires_grad=self.optimize_astrometry)
-        self.dy = torch.tensor(dy_data, device=self.device, dtype=torch.float32,
-                               requires_grad=self.optimize_astrometry)
-
-    def _make_optimizer(self, lr=None):
-        lr     = lr or self.lr
-        groups = [{'params': self.calibrator.parameters(), 'lr': lr, 'weight_decay': 5e-4}]
-        if self.optimize_astrometry:
-            groups.append({'params': [self.dx, self.dy], 'lr': 1e-3, 'weight_decay': 1e-5})
-        opt = optim.AdamW(groups, lr=lr)
-        sch = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=7, min_lr=1e-6)
-        return opt, sch
-
-    # ── PSF forward ───────────────────────────────────────────────────────────
-
-    def run_model(self, x_dict_NN, config, idx, lambda_ids):
-        """Run the PSF model for a batch at the given wavelength indices."""
-        x_dict = self.PSF_model.inputs_manager.to_dict()
-        x_dict.update({k: v for k, v in x_dict_NN.items() if k in x_dict})
-        x_dict['dx_ctrl'] = self.dx[idx]
-        x_dict['dy_ctrl'] = self.dy[idx]
-        bump = self.phase_bump[idx].unsqueeze(-1)
-        ncpa = x_dict['LO_coefs'] if self.predict_LO_NCPAs else self.NCPAs_median.expand(len(idx), -1)
-        x_dict['LO_coefs'] = torch.hstack((bump, ncpa))
-        wvl = self.lambda_full[lambda_ids].to(device=self.device)
-        config['sources_science']['Wavelength'] = wvl.view(1, -1)
-        self.PSF_model.model.config = config
-        self.PSF_model.SetWavelengths(wvl)
-        return self.PSF_model(x_dict, update_params=False)
-
-    # ── Loss ──────────────────────────────────────────────────────────────────
-
-    def _loss_per_sample(self, PSF_data, PSF_pred, x_dict_pred):
-        diff = PSF_pred - PSF_data
-        w    = 2e4
-        psf  = w * (diff.pow(2).mean(dim=(1, 2, 3)) * 1200.0 + diff.abs().mean(dim=(1, 2, 3)) * 1.6)
-        if self.predict_LO_NCPAs and 'LO_coefs' in x_dict_pred:
-            c  = x_dict_pred['LO_coefs']
-            lo = c.pow(2).sum(-1) * 1e-7
-            lo = lo + torch.clamp(-c[:, 0], min=0).pow(2) * 5e-5
-            lo = lo + torch.clamp(-c[:, 2], min=0).pow(2) * 1e-7
-        else:
-            lo = torch.zeros(PSF_data.shape[0], device=PSF_data.device, dtype=PSF_data.dtype)
-        return psf + lo
-
-    def loss_fn(self, PSF_data, PSF_pred, x_dict_pred, sample_weights=None, return_per_sample=False):
-        per = self._loss_per_sample(PSF_data, PSF_pred, x_dict_pred)
-        if return_per_sample:
-            return per
-        if sample_weights is None:
-            return per.mean()
-        w = sample_weights.to(dtype=per.dtype, device=per.device).view(-1)
-        return (w * per).sum() / (w.sum() + 1e-12)
-
-    # ── Checkpoint ────────────────────────────────────────────────────────────
-
-    def save_checkpoint(self, path, epoch, train_loss, val_loss):
-        data = {
-            'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss,
-            'calibrator_state_dict': self.calibrator.state_dict(),
-            'optimizer_state_dict':  self.optimizer.state_dict(),
-        }
-        if self.optimize_astrometry:
-            data['dx'] = self.dx.detach().clone()
-            data['dy'] = self.dy.detach().clone()
-        torch.save(data, path)
-        logger.debug(f"Checkpoint saved -> {path}")
-
-    def load_checkpoint(self, path, load_optimizer=True):
-        path = Path(path)
-        if not path.exists():
-            logger.error(f"Checkpoint not found: {path}")
-            return None, None, None
-        ckpt = torch.load(path, map_location=self.device)
-        self.calibrator.load_state_dict(ckpt['calibrator_state_dict'])
-        if load_optimizer and 'optimizer_state_dict' in ckpt:
-            self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        if self.optimize_astrometry and 'dx' in ckpt:
-            self.dx.data = ckpt['dx'].to(self.device)
-            self.dy.data = ckpt['dy'].to(self.device)
-        logger.info(f"Checkpoint loaded <- {path} (epoch {ckpt.get('epoch', '?')})")
-        return ckpt.get('epoch'), ckpt.get('train_loss'), ckpt.get('val_loss')
-
-    # ── Pretrain against fitted values ────────────────────────────────────────
-
-    def _calibrator_friendly_fit_dict(self, fitted_vals):
-        """Adapt fitted_vals dict to calibrator output structure (drop phase bump, reconstruct Cn2 GL)."""
-        keys = set(self.outputs_transformer.slices.keys())
-        x = {k: v for k, v in fitted_vals.items() if k in keys}
-        if 'LO_coefs' in x:
-            x['LO_coefs'] = x['LO_coefs'][:, 1:]   # strip phase bump; not predicted
-        if 'Cn2_weights' in x:
-            cn2 = x['Cn2_weights'].clamp(min=1e-6)
-            GL  = (1.0 - cn2.sum(-1, keepdim=True)).clamp(min=1e-6)
-            x['Cn2_weights'] = torch.hstack((GL, cn2))
-        return x
-
-    def pretrain(self, num_epochs=100, patience=15, lr=None, save_path=None):
-        """
-        Pretrain the calibrator to predict fitted parameter values (no PSF model involved).
-        Provides a warm start before end-to-end PSF training.
-        """
-        lr        = lr or self.lr
-        save_path = save_path or (self.weights_dir / 'pretrain_weights.pth')
-        opt       = optim.AdamW(self.calibrator.parameters(), lr=lr, weight_decay=5e-4)
-        sch       = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=10, min_lr=1e-4)
-        criterion = nn.MSELoss()
-        best_loss, best_state, pat_count = float('inf'), None, 0
-
-        for epoch in range(num_epochs):
-            self.calibrator.train()
-            train_loss = 0.0
-            for _, tel, fit, _, _ in self.train_loader:
-                opt.zero_grad()
-                y = self.outputs_transformer.stack(self._calibrator_friendly_fit_dict(fit))
-                loss = criterion(self.calibrator(tel), y)
-                loss.backward()
-                opt.step()
-                train_loss += loss.item()
-
-            self.calibrator.eval()
-            val_loss = 0.0
-            with torch.no_grad():
-                for _, tel, fit, _, _ in self.val_loader:
-                    y = self.outputs_transformer.stack(self._calibrator_friendly_fit_dict(fit))
-                    val_loss += criterion(self.calibrator(tel), y).item()
-
-            avg_t, avg_v = train_loss / len(self.train_loader), val_loss / len(self.val_loader)
-            sch.step(avg_v)
-            is_best = avg_v < best_loss
-            if is_best:
-                best_loss, best_state, pat_count = avg_v, deepcopy(self.calibrator.state_dict()), 0
-            else:
-                pat_count += 1
-
-            print(f"\rPretrain {epoch+1:3d}/{num_epochs} | "
-                  f"train={avg_t:.4e} val={avg_v:.4e} lr={opt.param_groups[0]['lr']:.2e}"
-                  + (" *" if is_best else ""), end='', flush=True)
-            if pat_count >= patience:
-                break
-
-        print()
-        if best_state:
-            self.calibrator.load_state_dict(best_state)
-        torch.save(best_state, save_path)
-        logger.info(f"Pretrain complete. Best val={best_loss:.6f}, saved -> {save_path}")
-
-    # ── Validate ──────────────────────────────────────────────────────────────
-
-    @torch.no_grad()
-    def validate(self, loader=None, return_cubes=False, verbose=False):
-        """
-        Evaluate the calibrator on a data loader.
-
-        Returns avg_loss (scalar) or, when return_cubes=True,
-        (PSFs_pred, PSFs_data, global_ids, NN_predictions, telemetry, avg_loss).
-        """
-        loader = loader or self.val_loader
-        self.calibrator.eval()
-
-        N = len(loader.dataset)
-        if isinstance(loader.dataset, Subset):
-            local_to_global = torch.tensor(loader.dataset.indices, dtype=torch.long)
-        else:
-            local_to_global = torch.arange(N, dtype=torch.long)
-        global_to_local = {int(g): l for l, g in enumerate(local_to_global.tolist())}
-
-        PSFs_pred = PSFs_data = NN_pred = tel_vecs = None
-        if return_cubes:
-            PSFs_pred = torch.zeros((N, self.N_wvl_total, self.H, self.W))
-            PSFs_data = torch.zeros((N, self.N_wvl_total, self.H, self.W))
-            NN_pred   = torch.zeros((N, self.N_outputs))
-            tel_vecs  = torch.zeros((N, self.N_features))
-
-        total_loss, total_batches = 0.0, 0
-        for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
-            lpos   = torch.tensor([global_to_local[int(i)] for i in idxs_b.cpu().tolist()], dtype=torch.long)
-            x_pred = self.calibrator(tel_b)
-            x_dict = self.outputs_transformer.unstack(x_pred)
-
-            if return_cubes:
-                NN_pred[lpos]  = x_pred.cpu()
-                tel_vecs[lpos] = tel_b.cpu()
-
-            for lambda_ids in self.lambda_id_sets:
-                PSF_pred_b   = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
-                total_loss  += self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict).item()
-                total_batches += 1
-                if return_cubes:
-                    for wi, li in enumerate(lambda_ids):
-                        PSFs_pred[lpos, li] = PSF_pred_b[:, wi].cpu()
-                        PSFs_data[lpos, li] = PSF_data_b[:, li].cpu()
-
-            if verbose:
-                logger.info(f"Validated batch idxs={idxs_b.tolist()}")
-
-        avg_loss = total_loss / max(total_batches, 1)
-        if return_cubes:
-            return PSFs_pred, PSFs_data, local_to_global, NN_pred, tel_vecs, avg_loss
-        return avg_loss
-
-    # ── Train ─────────────────────────────────────────────────────────────────
-
-    def train(
-        self,
-        num_epochs         = 500,
-        patience           = 20,
-        nan_recovery       = True,
-        max_nan_recoveries = 10,
-        sample_weights     = None,
-        checkpoint_path    = None,
-        train_loader       = None,
-        val_loader         = None,
-    ):
-        """
-        End-to-end PSF-model training loop with early stopping, NaN recovery,
-        and optional per-sample difficulty weighting.
-
-        Returns (train_losses, val_losses) lists over completed epochs.
-        """
-        train_loader    = train_loader or self.train_loader
-        val_loader      = val_loader   or self.val_loader
-        checkpoint_path = Path(checkpoint_path or (self.weights_dir / 'best_calibrator_checkpoint.pth'))
-
-        if sample_weights is not None:
-            sample_weights = torch.as_tensor(sample_weights, dtype=torch.float32, device=self.device)
-
-        best_val, patience_counter, nan_count = float('inf'), 0, 0
-        train_losses, val_losses = [], []
-
-        for epoch in range(num_epochs):
-            self.calibrator.train()
-            epoch_loss, n_batches, nan_this_epoch = 0.0, 0, False
-
-            for PSF_data_b, tel_b, _, config_b, idxs_b in train_loader:
-                self.optimizer.zero_grad()
-                batch_loss = 0.0
-
-                for lambda_ids in self.lambda_id_sets:
-                    x_pred     = self.calibrator(tel_b)
-                    x_dict     = self.outputs_transformer.unstack(x_pred)
-                    PSF_pred_b = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
-                    sw         = sample_weights[idxs_b] if sample_weights is not None else None
-                    loss       = self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict, sw)
-
-                    if torch.isnan(loss) or torch.isinf(loss):
-                        nan_this_epoch = True
-                        if nan_recovery and nan_count < max_nan_recoveries:
-                            nan_count += 1
-                            logger.error(f"NaN at epoch {epoch}, recovery {nan_count}/{max_nan_recoveries}")
-                            self.load_checkpoint(checkpoint_path)
-                            for pg in self.optimizer.param_groups:
-                                pg['lr'] *= 0.7
-                            self.optimizer.zero_grad(set_to_none=True)
-                        else:
-                            raise ValueError(f"NaN loss after {nan_count} recovery attempt(s)")
-                        break
-
-                    loss.backward()
-                    batch_loss += loss.item()
-                    del PSF_pred_b, x_pred, x_dict, loss
-
-                if nan_this_epoch:
-                    break
-
-                torch.nn.utils.clip_grad_norm_(self.calibrator.parameters(), max_norm=1.0)
-                if self.optimize_astrometry:
-                    torch.nn.utils.clip_grad_norm_([self.dx, self.dy], max_norm=10.0)
-                self.optimizer.step()
-                epoch_loss += batch_loss
-                n_batches  += 1
-
-            release_gpu_memory()
-            if nan_this_epoch:
-                continue
-
-            avg_train = epoch_loss / max(n_batches, 1)
-            train_losses.append(avg_train)
-
-            val_loss = self.validate(loader=val_loader)
-            val_losses.append(val_loss)
-            self.scheduler.step(val_loss)
-
-            is_best = val_loss < best_val
-            if is_best:
-                best_val, patience_counter = val_loss, 0
-                self.save_checkpoint(checkpoint_path, epoch, avg_train, val_loss)
-            else:
-                patience_counter += 1
-
-            lr_cur = self.optimizer.param_groups[0]['lr']
-            msg = (f"Epoch {epoch:4d} | train={avg_train:.4e} val={val_loss:.4e} "
-                   f"lr={lr_cur:.2e} pat={patience_counter}/{patience}" + (" *" if is_best else ""))
-            print(msg)
-            logger.info(msg)
-
-            if epoch % 5 == 0:
-                self.save_checkpoint(
-                    self.weights_dir / f'checkpoint_epoch_{epoch}.pth', epoch, avg_train, val_loss
-                )
-
-            if patience_counter >= patience:
-                logger.info(f"Early stopping at epoch {epoch}")
-                break
-
-        self.load_checkpoint(checkpoint_path)
-        logger.info(f"Training complete. Best val={best_val:.6f}")
-        return train_losses, val_losses
-
-    # ── K-fold difficulty weighting ───────────────────────────────────────────
-
-    def run_kfold_difficulty_weighting(
-        self,
-        base_indices,
-        initial_state_dict,
-        n_splits      = 5,
-        fold_epochs   = 120,
-        fold_patience = 12,
-        alpha         = 0.30,
-        clip          = (0.5, 2.0),
-        random_state  = 42,
-    ):
-        """
-        Estimate out-of-fold PSF losses, fit a random-forest difficulty model, and
-        return dataset-length sample weights for the final training run.
-
-        Only samples in base_indices are weighted; all others receive weight 1.0.
-        The calibrator and optimizer are reset to initial_state_dict afterwards.
-        """
-        base_indices = np.asarray(base_indices, dtype=int)
-        kf           = KFold(n_splits=min(n_splits, len(base_indices)), shuffle=True, random_state=random_state)
-        kfold_dir    = self.weights_dir / 'kfold_difficulty'
-        kfold_dir.mkdir(exist_ok=True)
-        oof_losses   = np.full(len(self.dataset), np.nan, dtype=np.float32)
-
-        for fold_id, (tr_rel, va_rel) in enumerate(kf.split(base_indices)):
-            fold_train_idx = base_indices[tr_rel]
-            fold_val_idx   = base_indices[va_rel]
-            logger.info(f"Fold {fold_id+1}/{n_splits}: train={len(fold_train_idx)}, val={len(fold_val_idx)}")
-            self.calibrator.load_state_dict(deepcopy(initial_state_dict))
-            self.optimizer, self.scheduler = self._make_optimizer()
-            self.train(
-                num_epochs=fold_epochs, patience=fold_patience,
-                train_loader=self._make_loader(fold_train_idx, shuffle=True),
-                val_loader=self._make_loader(fold_val_idx,   shuffle=False),
-                checkpoint_path=kfold_dir / f'fold_{fold_id:02d}_best.pth',
-            )
-            val_ids, fold_l = self._evaluate_per_sample_losses(
-                self._make_loader(fold_val_idx, shuffle=False)
-            )
-            oof_losses[val_ids] = fold_l
-            release_gpu_memory(sync=True)
-
-        X  = np.array([[*self.dataset.telemetry[int(i)].values()] for i in base_indices], dtype=np.float32)
-        y  = np.log10(oof_losses[base_indices] + 1e-12)
-        rf = RandomForestRegressor(n_estimators=300, random_state=random_state, n_jobs=-1)
-        cv_r2 = cross_val_score(rf, X, y, cv=min(n_splits, len(base_indices)), scoring='r2')
-        logger.info(f"RF difficulty CV R2 = {cv_r2.mean():.4f} +/- {cv_r2.std():.4f}")
-        rf.fit(X, y)
-
-        weights_train = self._difficulty_to_weights(rf.predict(X), alpha=alpha, clip=clip)
-        weights_all   = np.ones(len(self.dataset), dtype=np.float32)
-        weights_all[base_indices] = weights_train
-
-        # Reset to the same starting point for the final training run
-        self.calibrator.load_state_dict(deepcopy(initial_state_dict))
-        self.optimizer, self.scheduler = self._make_optimizer()
-
-        logger.info(f"Difficulty weights: min={weights_train.min():.3f} "
-                    f"mean={weights_train.mean():.3f} max={weights_train.max():.3f}")
-        return torch.as_tensor(weights_all, dtype=torch.float32, device=self.device)
-
-    @torch.no_grad()
-    def _evaluate_per_sample_losses(self, loader):
-        self.calibrator.eval()
-        global_ids = np.asarray(
-            loader.dataset.indices if isinstance(loader.dataset, Subset) else range(len(loader.dataset)),
-            dtype=int,
-        )
-        loss_acc = {int(i): [] for i in global_ids}
-        for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
-            x_pred = self.calibrator(tel_b)
-            x_dict = self.outputs_transformer.unstack(x_pred)
-            for lambda_ids in self.lambda_id_sets:
-                PSF_pred_b = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
-                per = self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict,
-                                   return_per_sample=True).cpu().numpy()
-                for gid, lv in zip(idxs_b.cpu().numpy().astype(int), per):
-                    loss_acc[int(gid)].append(float(lv))
-                del PSF_pred_b, per
-            del x_pred, x_dict
-        return global_ids, np.array([np.mean(loss_acc[int(i)]) for i in global_ids], dtype=np.float32)
-
-    @staticmethod
-    def _difficulty_to_weights(pred_log_loss, alpha=0.30, clip=(0.5, 2.0)):
-        d = np.asarray(pred_log_loss, dtype=np.float64)
-        w = np.clip(np.exp(alpha * (d - np.median(d))) , None, None)
-        w = w / np.mean(w)
-        w = np.clip(w, clip[0], clip[1])
-        return (w / np.mean(w)).astype(np.float32)
-
-    # ── Fine-tune selected outputs ─────────────────────────────────────────────
-
-    def tune_calibrator(self, tuned_params, num_epochs=50, lr=1e-3):
-        """
-        Fine-tune only specific output dimensions while anchoring the rest to a frozen reference.
-
-        tuned_params : list[str] - keys present in outputs_transformer.slices.
-        """
-        ref = deepcopy(self.calibrator)
-        ref.eval()
-        for p in ref.parameters():
-            p.requires_grad_(False)
-
-        mask = torch.zeros(self.N_outputs, dtype=torch.bool, device=self.device)
-        for k in tuned_params:
-            mask[self.outputs_transformer.slices[k]] = True
-        mask = mask.unsqueeze(0)   # [1, N_outputs] for broadcasting
-
-        opt_tune = optim.AdamW(self.calibrator.parameters(), lr=lr, weight_decay=5e-4)
-        sch_tune = optim.lr_scheduler.ReduceLROnPlateau(opt_tune, factor=0.5, patience=5)
-        best_loss, best_state = float('inf'), None
-
-        fixed_mask = ~mask.squeeze(0)
-        for epoch in range(num_epochs):
-            self.calibrator.train()
-            for PSF_data_b, tel_b, _, config_b, idxs_b in self.train_loader:
-                opt_tune.zero_grad()
-
-                # Anchor: computed once per batch (lambda-independent), separate forward pass
-                if fixed_mask.any():
-                    x_anch = self.calibrator(tel_b)
-                    with torch.no_grad():
-                        x_ref = ref(tel_b)
-                    (x_anch[:, fixed_mask] - x_ref[:, fixed_mask]).pow(2).mean().mul(100.0).backward()
-                    del x_anch
-                else:
-                    with torch.no_grad():
-                        x_ref = ref(tel_b)
-
-                # PSF loss: fresh forward pass per lambda set to keep peak memory low
-                for lambda_ids in self.lambda_id_sets:
-                    x_tuned = self.calibrator(tel_b)
-                    x_comb  = torch.where(mask, x_tuned, x_ref.detach())
-                    x_dict  = self.outputs_transformer.unstack(x_comb)
-                    PSF_pred_b = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
-                    loss       = self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict)
-                    loss.backward()
-                    del PSF_pred_b, loss, x_dict, x_tuned, x_comb
-                opt_tune.step()
-
-            val_loss = self.validate()
-            sch_tune.step(val_loss)
-            if val_loss < best_loss:
-                best_loss, best_state = val_loss, deepcopy(self.calibrator.state_dict())
-            print(f"Tune {epoch+1}/{num_epochs} | val={val_loss:.4e}" + (" *" if val_loss == best_loss else ""))
-
-        if best_state:
-            self.calibrator.load_state_dict(best_state)
-        logger.info(f"Tuning complete. Best val={best_loss:.6f}")
-
-    # ── Save calibrator bundle ─────────────────────────────────────────────────
-
-    def save_calibrator(self, path):
-        """Export a self-contained calibrator bundle loadable by NFMCalibrator."""
-        state = {
-            'net_state_dict': self.calibrator.state_dict(),
-            'net_arch': {
-                'n_features':   self.N_features,
-                'n_outputs':    self.N_outputs,
-                'hidden_dim':   self.calibrator.network[0].out_features,
-                'dropout_rate': self.calibrator.network[3].p,
-            },
-            'input_feature_names':  self.dataset.features,
-            'output_feature_names': list(self.outputs_transformer.slices.keys()),
-            'outputs_transformer':  self.outputs_transformer.save(),
-            'predict_LO_NCPAs':     self.predict_LO_NCPAs,
-            'predict_Cn2_profile':  self.predict_Cn2_profile,
-            'LO_modes_max':         self.PSF_model.Z_mode_max,
-            'N_spline_nodes':       getattr(self.PSF_model, 'N_wvl_ctrl', None),
-            'predict_phase_bump':   False,
-        }
-        torch.save(state, path)
-        logger.info(f"Calibrator bundle saved -> {path}")
-
-
-# =============================================================================
-# Setup
-# =============================================================================
 #%%
 dataset     = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
 N_wvl_total = dataset.C
@@ -782,6 +145,7 @@ from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
 _tmp_batch  = tuple([dataset[i] for i in np.random.randint(0, len(dataset), size=args.batch_size)])
 _, _, _, _tmp_config, _ = collate_batch(_tmp_batch, device=default_device)
+
 
 if 'PSF_model' in locals():
     del PSF_model
@@ -805,18 +169,12 @@ release_gpu_memory(sync=True)
 # Remove parameters that are fixed externally and do not need to be predicted
 for _key in ['Jxy', 'bg_ctrl', 'dx_ctrl', 'dy_ctrl', 'L0',
              'F_norm', 'F_norm_lambda_ctrl', 'src_dirs_x', 'src_dirs_y',
-             'wind_speed_single', 'wind_dir_single']:
+             'wind_speed_single', 'wind_dir_single', 'F_norm_λ_ctrl']:
     try:
         PSF_model.inputs_manager.delete(_key)
+
     except Exception:
         pass   # key may have an alternate name; delete what is present
-
-# Handle unicode key variants
-for _key in ['F_norm_λ_ctrl']:
-    try:
-        PSF_model.inputs_manager.delete(_key)
-    except Exception:
-        pass
 
 if PSF_model.use_Moffat:
     PSF_model.inputs_manager.delete('theta')
@@ -868,10 +226,7 @@ trainer = NFMCalibratorTrainer(
     optimize_astrometry = False,
 )
 
-# =============================================================================
-# Pretraining
-# =============================================================================
-#%%
+#%% ===========================  Pretraining ==================================================
 pretrain_path = trainer.weights_dir / 'pretrain_weights.pth'
 if (not args.continue_training) or not pretrain_path.exists():
     trainer.pretrain(num_epochs=100, patience=15, save_path=pretrain_path)
@@ -884,10 +239,8 @@ release_gpu_memory(sync=True)
 val_loss_pretrain = trainer.validate()
 logger.info(f"Post-pretrain validation loss: {val_loss_pretrain:.6f}")
 
-# =============================================================================
-# Main training
-# =============================================================================
-#%%
+
+#%% ======================== Main training ========================================
 if args.continue_training and BEST_CALIB_PATH.exists():
     trainer.load_checkpoint(BEST_CALIB_PATH)
 
@@ -909,7 +262,7 @@ if args.run_kfold_difficulty:
 if BEST_CALIB_PATH.exists():
     os.rename(BEST_CALIB_PATH, BEST_CALIB_PATH.with_name(BEST_CALIB_PATH.stem + '_backup.pth'))
 
-#%%
+#%% ======================== Main training ========================================
 train_losses, val_losses = trainer.train(
     num_epochs         = 500,
     patience           = 20,
@@ -936,10 +289,7 @@ except Exception:
 # Optional: fine-tune selected parameters after main training
 trainer.tune_calibrator(tuned_params=['F_ctrl', 'dn'], num_epochs=20, lr=1e-3)
 
-# =============================================================================
-# Evaluation & diagnostics
-# =============================================================================
-#%%
+#%% ========================== Evaluation & diagnostics ===============================================
 trainer.load_checkpoint(BEST_CALIB_PATH)
 calibrator.eval()
 
@@ -949,6 +299,7 @@ PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, telemetry_vecs, 
 PSFs_pred_cube = PSFs_pred_cube.cpu()
 PSFs_data_cube = PSFs_data_cube.cpu()
 validation_ids = validation_ids.cpu()
+
 release_gpu_memory()
 print(f"Validation loss: {final_val_loss:.6f} | PSF cubes {PSFs_pred_cube.shape}")
 
@@ -1328,8 +679,4 @@ for ax in axes_flat[N_PARAM_PLOTS:]:
 
 fig.suptitle('SHAP dependence: dominant feature per parameter\n(colour = second-strongest feature)', fontsize=11)
 plt.show()
-
-
-#%%
-
 

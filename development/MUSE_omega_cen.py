@@ -153,7 +153,7 @@ sources_df.set_index('ID', inplace=True)
 sources_df.dropna(inplace=True)
 sources = sources_df[['x, [asec]', 'y, [asec]', 'flux (total, normalized)']].copy()
 sources.rename(
-    columns={
+    columns = {
         'x, [asec]': 'x_peak',
         'y, [asec]': 'y_peak',
         'flux (total, normalized)': 'peak_value'
