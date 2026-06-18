@@ -449,7 +449,7 @@ class NFMCalibratorTrainer:
         if (len(self.lambda_id_sets) == 1):
             self.PSF_model.model.Update(grids=False, pupils=False, tomography=True)
         else:
-            self.PSF_model.SetWavelengths(wvl, suppress_pupil_update=True) # suppressing pupil update to save a bit of compute since the pupil doesn't depend on wavelength
+            self.PSF_model.SetWavelengths(wvl)
         
         # Do not update inputs_manager with graph-connected tensors to avoid cross-batch graph retention.
         return self.PSF_model(x_dict, update_params=False)

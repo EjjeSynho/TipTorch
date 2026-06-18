@@ -667,7 +667,7 @@ class PSFModelNFM:
         self.inputs_manager[key] = value
     
     
-    def SetWavelengths(self, wavelengths: torch.Tensor, suppress_pupil_update=False):
+    def SetWavelengths(self, wavelengths: torch.Tensor):
         # Cheap pointer check first (same tensor object → same values, no GPU sync needed)
         if self.λ_sim.data_ptr() == wavelengths.data_ptr():
             return
@@ -676,7 +676,7 @@ class PSFModelNFM:
             torch.allclose(wavelengths.flatten(), self.λ_sim.flatten(), atol=1e-12):
             return
 
-        self.model.SetWavelengths(wavelengths, suppress_pupil_update=suppress_pupil_update)
+        self.model.SetWavelengths(wavelengths)
         self.λ_sim = wavelengths
         if self.use_splines:
             self.λ_sim_normed = self.norm_wvl(self.λ_sim) # [0...1], simulated wavelengths normalized to [0...1] range for spline evaluation

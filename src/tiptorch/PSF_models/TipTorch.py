@@ -13,26 +13,43 @@ from pathlib import Path
 
 
 class TipTorch(torch.nn.Module):
-    
-    def InitPupils(self):       
-        # If not provided externally, TipTorch tries to load pupil and apodizer from the config file
+
+    def _load_pupil_and_apodizer(self):
+        # If not provided externally, TipTorch tries to load pupil and apodizer from the config file.
         if self.pupil is None:
             pupil_path = Path(self.config['telescope']['PathPupil'])
-            self.pupil = self.make_tensor( to_little_endian(fits.getdata(pupil_path)) )  
-        
+            self.pupil = self.make_tensor(to_little_endian(fits.getdata(pupil_path)))
+
         if self.apodizer is None and self.config['telescope']['PathApodizer'] is not None:
             apodizer_path = Path(self.config['telescope']['PathApodizer'])
-            self.apodizer = self.make_tensor( to_little_endian(fits.getdata(apodizer_path)) )
+            self.apodizer = self.make_tensor(to_little_endian(fits.getdata(apodizer_path)))
+
+        if self.apodizer is not None:
             assert self.pupil.shape[-1] == self.apodizer.shape[-1], "Pupil and apodizer must have the same size"
-         
-        # Compute pupil OTFs
-        phase_size = self.pupil.shape[-1]
-        self.pupil_padder = torch.nn.ZeroPad2d( int(round(phase_size*self.sampling_min/2-phase_size/2)) )
+
+
+    def UpdateStaticOTF(self):
+        """Recompute diffraction-limited static OTF for the current grid sampling."""
+        if self.pupil is None:
+            raise RuntimeError('Cannot update static OTF: pupil is not initialized. Call InitPupils() first.')
         
-        # Compute the diffraction-limited OTF from the pupil (and apodizer if present)
+        if not hasattr(self, 'sampling_min') or not hasattr(self, 'nOtf'):
+            raise RuntimeError('Cannot update static OTF: grids are not initialized. Call InitGrids() first.')
+
+        phase_size = self.pupil.shape[-1]
+        self.pupil_padder = torch.nn.ZeroPad2d(int(round(phase_size * self.sampling_min / 2 - phase_size / 2)))
+
+        # Compute the diffraction-limited OTF from the pupil (and apodizer if present).
         pupil_phase = self.pupil * self.apodizer if self.apodizer is not None else self.pupil
-        self.OTF_static_default = self.Phase2OTF(pupil_phase) # diffraction-limited reference, kept for DL PSF computation
-        self.OTF_static = self.OTF_static_default.clone()     # live OTF used by the model, persists until explicitly updated
+        self.OTF_static_default = self.Phase2OTF(pupil_phase)
+        # Live OTF is reset to the diffraction-limited reference whenever sampling changes.
+        self.OTF_static = self.OTF_static_default.clone()
+        return self.OTF_static
+    
+    
+    def InitPupils(self):       
+        self._load_pupil_and_apodizer()
+        self.UpdateStaticOTF()
         
 
     def InitValues(self):
@@ -48,8 +65,8 @@ class TipTorch(torch.nn.Module):
         # Science sources positions relative to the center of FOV, input in [arc]
         src_zenith  = self.config['sources_science']['Zenith'].flatten() / self.rad2arc  # [N_src]
         src_azimuth = torch.deg2rad(self.config['sources_science']['Azimuth']).flatten() # [N_src]
-        self.src_dirs_x  = torch.tan(src_zenith) * torch.cos(src_azimuth) # [N_src]
-        self.src_dirs_y  = torch.tan(src_zenith) * torch.sin(src_azimuth) # [N_src]
+        self.src_dirs_x = torch.tan(src_zenith) * torch.cos(src_azimuth) # [N_src]
+        self.src_dirs_y = torch.tan(src_zenith) * torch.sin(src_azimuth) # [N_src]
         
         self.on_axis = False # can be assigned externally to simplify tomographic/anisoplanatic computations
         
@@ -447,7 +464,11 @@ class TipTorch(torch.nn.Module):
         if self.is_float: self._to_float()
         
         if grids:  self.InitGrids()
-        if pupils: self.InitPupils()
+        if pupils:
+            self.InitPupils()
+        elif grids and self.pupil is not None:
+            # Grid-dependent static OTF must be refreshed even when pupil data did not change.
+            self.UpdateStaticOTF()
         
         # If the number of sources have changed, reinitialize the tomography projector
         if (self.tomography and tomography) or (self.tomography and grids):
@@ -1355,22 +1376,17 @@ class TipTorch(torch.nn.Module):
         return error_budget
 
 
-    def SetWavelengths(self, wavelengths: torch.Tensor, suppress_pupil_update=False):
-        ''' Set new simulated wavelengths in [nm]
-        Args:
-            wavelengths (torch.Tensor): New wavelengths in [nm]
-            suppress_pupil_update (bool): If True, pupils will not be updated to match the new wavelengths.
-                                          Use with caution, since it only works correctly if one is sure that static OTF will be updated externally afterwards.  
-        '''
+    def SetWavelengths(self, wavelengths: torch.Tensor):
+        ''' Set new simulated wavelengths in [nm] '''
         self.config['sources_science']['Wavelength'] = wavelengths.view(1,-1) # [nm]
-        self.Update(grids=True, pupils=not suppress_pupil_update, tomography=True)
+        self.Update(grids=True, pupils=False, tomography=True) # Avoid an expensive update of pupil masks
         self.wavelengths = wavelengths # [nm]
 
 
     def SetImageSize(self, img_size: int):
         ''' Set new image size in pixels '''
         self.config['sensor_science']['FieldOfView'] = img_size
-        self.Update(grids=True, pupils=True, tomography=True)
+        self.Update(grids=True, pupils=False, tomography=True)
 
 
     def _to_device_recursive(self, obj, device):
