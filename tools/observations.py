@@ -406,6 +406,7 @@ class MUSEObservation:
         fit_fluxes   = src_fluxes [fit_subset.ids]
         fit_weights  = src_weights[fit_subset.ids]
         fit_spectral = w_spectral [fit_subset.ids]
+        fit_weights_normalized = fit_weights / fit_weights.sum() * len(fit_weights)  # Sum to N_sources
 
         fit_relative = torch.clamp(fit_fluxes / fit_fluxes.max().item(), min=0.1, max=1.0) * fit_weights
         # Weighted mean normalisation so loss stays within ~10⁰–10¹ range
@@ -413,7 +414,7 @@ class MUSEObservation:
 
         return FitWeights(
             subset     = fit_subset,
-            per_src    = fit_weights,
+            per_src    = fit_weights_normalized, #fit_weights,
             spectral   = fit_spectral,
             total      = w_total,
             LO         = 1e-7   if not self.suppress_LO_flag   else 1e3,
@@ -572,7 +573,7 @@ class MUSEObservation:
 
         return simulated_range, PSFs_range, flux_normalization, λ_range
 
-
+    # TODO: FIX WEIGHTING per sample
     def _loss_PSF(self, PSF_data: torch.Tensor, PSF_pred: torch.Tensor, fit_weights: FitWeights):
         diff = PSF_data - PSF_pred
         residuals = diff * fit_weights.spectral * fit_weights.per_src.view(-1, 1, 1, 1) # apply both spectral and source weights to the residuals

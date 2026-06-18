@@ -571,7 +571,7 @@ class NFMCalibratorTrainer:
                 pat_count += 1
 
             print(f"\rPretrain {epoch+1:3d}/{num_epochs} | "
-                  f"train={avg_t:.4e} val={avg_v:.4e} lr={opt.param_groups[0]['lr']:.2e}"
+                  f"train={avg_t:.4f} val={avg_v:.4f} lr={opt.param_groups[0]['lr']:.2e}"
                   + (" *" if is_best else ""), end='', flush=True)
             if pat_count >= patience:
                 break
@@ -618,7 +618,7 @@ class NFMCalibratorTrainer:
             x_dict = self.outputs_transformer.unstack(x_pred)
 
             if return_cubes:
-                NN_pred[lpos]  = x_pred.cpu()
+                NN_pred [lpos] = x_pred.cpu()
                 tel_vecs[lpos] = tel_b.cpu()
 
             # Inner loop over wavelength subsets to limit memory use and keep lambda coverage complete.
@@ -715,8 +715,8 @@ class NFMCalibratorTrainer:
 
             release_gpu_memory()
             if nan_this_epoch:
-                continue
-
+                continue #  I have become comfortably NaN
+            
             avg_train = epoch_loss / max(n_batches, 1)
             train_losses.append(avg_train)
 
@@ -732,7 +732,7 @@ class NFMCalibratorTrainer:
                 patience_counter += 1
 
             lr_cur = self.optimizer.param_groups[0]['lr']
-            msg = (f"Epoch {epoch:4d} | train={avg_train:.4e} val={val_loss:.4e} "
+            msg = (f"Epoch {epoch:4d} | train={avg_train:.4f} val={val_loss:.4f} "
                    f"lr={lr_cur:.2e} pat={patience_counter}/{patience}" + (" *" if is_best else ""))
             print(msg)
             logger.info(msg)
@@ -762,35 +762,81 @@ class NFMCalibratorTrainer:
         alpha         = 0.30,
         clip          = (0.5, 2.0),
         random_state  = 42,
+        force_retrain = False,
+        load_only     = False,
     ):
         """
-        Estimate out-of-fold PSF losses, fit a random-forest difficulty model, and
-        return dataset-length sample weights for the final training run.
+        Estimate out-of-fold PSF losses, fit a random-forest difficulty model, and return dataset-length sample weights
+        for the final training run. Weights help to focus subsequent training more on poorly predicted samples.
 
         Only samples in base_indices are weighted; all others receive weight 1.0.
         The calibrator and optimizer are reset to initial_state_dict afterwards.
+
+        Parameters
+        ----------
+        force_retrain : bool
+            If True, retrain all folds even if checkpoints exist.
+        load_only : bool
+            If True, only load existing fold checkpoints; raise error if any are missing.
         """
         base_indices = np.asarray(base_indices, dtype=int)
-        kf           = KFold(n_splits=min(n_splits, len(base_indices)), shuffle=True, random_state=random_state)
-        kfold_dir    = self.weights_dir / 'kfold_difficulty'
+        kf         = KFold(n_splits=min(n_splits, len(base_indices)), shuffle=True, random_state=random_state)
+        oof_losses = np.full(len(self.dataset), np.nan, dtype=np.float32)
+        kfold_dir  = self.weights_dir / 'kfold_difficulty'
         kfold_dir.mkdir(exist_ok=True)
-        oof_losses   = np.full(len(self.dataset), np.nan, dtype=np.float32)
+
+        # Determine which folds need to be trained vs. loaded
+        fold_checkpoints = [kfold_dir / f'fold_{fold_id:02d}_best.pth' for fold_id in range(min(n_splits, len(base_indices)))]
+        folds_exist = [ckpt.exists() for ckpt in fold_checkpoints]
+        n_folds = len(fold_checkpoints)
+
+        if load_only:
+            # User explicitly requested load-only mode; verify all folds exist
+            missing_folds = [fold_id for fold_id, exists in enumerate(folds_exist) if not exists]
+            if missing_folds:
+                raise FileNotFoundError(
+                    f"load_only=True but checkpoints missing for folds: {missing_folds}. "
+                    f"Set force_retrain=True to train them, or use load_only=False for default behavior."
+                )
+            logger.info(f"Loading {n_folds} pre-trained fold checkpoints from {kfold_dir}")
+        elif not force_retrain and any(folds_exist):
+            # Auto-detect: use existing checkpoints where available, train the rest
+            n_existing = sum(folds_exist)
+            logger.info(f"Found {n_existing}/{n_folds} pre-trained fold checkpoints. Training {n_folds - n_existing} new folds.")
+        else:
+            # Default or force_retrain: train all folds
+            if force_retrain and any(folds_exist):
+                logger.warning(f"force_retrain=True; retraining all {n_folds} folds (discarding {sum(folds_exist)} existing checkpoints).")
+            else:
+                logger.info(f"Training {n_folds} K-fold splits from scratch.")
 
         for fold_id, (tr_rel, va_rel) in enumerate(kf.split(base_indices)):
             fold_train_idx = base_indices[tr_rel]
             fold_val_idx   = base_indices[va_rel]
-            logger.info(f"Fold {fold_id+1}/{n_splits}: train={len(fold_train_idx)}, val={len(fold_val_idx)}")
-            self.calibrator.load_state_dict(deepcopy(initial_state_dict))
-            self.optimizer, self.scheduler = self._make_optimizer()
-            self.train(
-                num_epochs=fold_epochs, patience=fold_patience,
-                train_loader=self._make_loader(fold_train_idx, shuffle=True),
-                val_loader=self._make_loader(fold_val_idx,   shuffle=False),
-                checkpoint_path=kfold_dir / f'fold_{fold_id:02d}_best.pth',
-            )
-            val_ids, fold_l = self._evaluate_per_sample_losses(
-                self._make_loader(fold_val_idx, shuffle=False)
-            )
+            fold_ckpt_path = fold_checkpoints[fold_id]
+
+            # Decide whether to load or train this fold
+            should_load = (not force_retrain) and fold_ckpt_path.exists()
+
+            if should_load:
+                logger.info(f"Fold {fold_id+1}/{n_folds}: Loading pre-trained checkpoint from {fold_ckpt_path}")
+                self.calibrator.load_state_dict(deepcopy(initial_state_dict))
+                self.load_checkpoint(fold_ckpt_path, load_optimizer=False)
+            else:
+                logger.info(f"Fold {fold_id+1}/{n_folds}: Training (train={len(fold_train_idx)}, val={len(fold_val_idx)})")
+                self.calibrator.load_state_dict(deepcopy(initial_state_dict))
+                self.optimizer, self.scheduler = self._make_optimizer()
+
+                self.train(
+                    num_epochs = fold_epochs,
+                    patience   = fold_patience,
+                    train_loader = self._make_loader(fold_train_idx, shuffle=True),
+                    val_loader   = self._make_loader(fold_val_idx,   shuffle=False),
+                    checkpoint_path=fold_ckpt_path,
+                )
+
+            # Evaluate per-sample losses on validation set
+            val_ids, fold_l = self._evaluate_per_sample_losses(self._make_loader(fold_val_idx, shuffle=False))
             oof_losses[val_ids] = fold_l
             release_gpu_memory(sync=True)
 
@@ -799,7 +845,7 @@ class NFMCalibratorTrainer:
         rf = RandomForestRegressor(n_estimators=300, random_state=random_state, n_jobs=-1)
         cv_r2 = cross_val_score(rf, X, y, cv=min(n_splits, len(base_indices)), scoring='r2')
         logger.info(f"RF difficulty CV R2 = {cv_r2.mean():.4f} +/- {cv_r2.std():.4f}")
-        rf.fit(X, y)
+        rf.fit(X, y) # High R² means that telemetry has nfo on if calibrator struggles to predict a PSF.
 
         weights_train = self._difficulty_to_weights(rf.predict(X), alpha=alpha, clip=clip)
         weights_all   = np.ones(len(self.dataset), dtype=np.float32)
@@ -809,8 +855,7 @@ class NFMCalibratorTrainer:
         self.calibrator.load_state_dict(deepcopy(initial_state_dict))
         self.optimizer, self.scheduler = self._make_optimizer()
 
-        logger.info(f"Difficulty weights: min={weights_train.min():.3f} "
-                    f"mean={weights_train.mean():.3f} max={weights_train.max():.3f}")
+        logger.info(f"Difficulty weights: min={weights_train.min():.3f} mean={weights_train.mean():.3f} max={weights_train.max():.3f}")
         return torch.as_tensor(weights_all, dtype=torch.float32, device=self.device)
 
 
@@ -826,14 +871,17 @@ class NFMCalibratorTrainer:
         for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
             x_pred = self.calibrator(tel_b)
             x_dict = self.outputs_transformer.unstack(x_pred)
+            
             for lambda_ids in self.lambda_id_sets:
                 PSF_pred_b = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
-                per = self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict,
-                                   return_per_sample=True).cpu().numpy()
+                per = self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict, return_per_sample=True).cpu().numpy()
+                
                 for gid, lv in zip(idxs_b.cpu().numpy().astype(int), per):
                     loss_acc[int(gid)].append(float(lv))
+                    
                 del PSF_pred_b, per
             del x_pred, x_dict
+            
         return global_ids, np.array([np.mean(loss_acc[int(i)]) for i in global_ids], dtype=np.float32)
 
 
@@ -899,9 +947,11 @@ class NFMCalibratorTrainer:
 
             val_loss = self.validate()
             sch_tune.step(val_loss)
+            
             if val_loss < best_loss:
                 best_loss, best_state = val_loss, deepcopy(self.calibrator.state_dict())
-            print(f"Tune {epoch+1}/{num_epochs} | val={val_loss:.4e}" + (" *" if val_loss == best_loss else ""))
+                
+            print(f"Tune {epoch+1}/{num_epochs} | val={val_loss:.4f}" + (" *" if val_loss == best_loss else ""))
 
         if best_state:
             self.calibrator.load_state_dict(best_state)
