@@ -1355,10 +1355,15 @@ class TipTorch(torch.nn.Module):
         return error_budget
 
 
-    def SetWavelengths(self, wavelengths: torch.Tensor):
-        ''' Set new simulated wavelengths in [nm] '''
+    def SetWavelengths(self, wavelengths: torch.Tensor, suppress_pupil_update=False):
+        ''' Set new simulated wavelengths in [nm]
+        Args:
+            wavelengths (torch.Tensor): New wavelengths in [nm]
+            suppress_pupil_update (bool): If True, pupils will not be updated to match the new wavelengths.
+                                          Use with caution, since it only works correctly if one is sure that static OTF will be updated externally afterwards.  
+        '''
         self.config['sources_science']['Wavelength'] = wavelengths.view(1,-1) # [nm]
-        self.Update(grids=True, pupils=True, tomography=True)
+        self.Update(grids=True, pupils=not suppress_pupil_update, tomography=True)
         self.wavelengths = wavelengths # [nm]
 
 

@@ -23,8 +23,7 @@ from torch.utils.data import Dataset
 
 from tiptorch._config import *
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
-from calibrators.NFM_calibrator import SmallCalibratorNet, NFMCalibratorTrainer
-
+from calibrators.NFM_calibrator import SmallCalibratorNet, NFMCalibratorTrainer, release_gpu_memory
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
@@ -77,14 +76,6 @@ logger = logging.getLogger(__name__)
 logger.info(f"Log file: {log_filename}")
 
 
-def release_gpu_memory(sync=False):
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        if sync:
-            torch.cuda.synchronize()
-
-
 # Dataset
 class NFMDataset(Dataset):
     """
@@ -104,6 +95,7 @@ class NFMDataset(Dataset):
         for i in range(len(self.sample_ids)):
             if isinstance(self.configs[i], list):
                 self.configs[i] = self.configs[i][0]
+                
             for old_k, new_k in _rename.items():
                 if old_k in self.fitted_vals[i] and new_k not in self.fitted_vals[i]:
                     self.fitted_vals[i][new_k] = self.fitted_vals[i].pop(old_k)
@@ -119,19 +111,18 @@ class NFMDataset(Dataset):
         fit  = {k: torch.tensor(v, dtype=torch.float32) for k, v in self.fitted_vals[idx].items()}
         return PSFs, tel, fit, self.configs[idx], idx
 
-
-def collate_batch(batch, device):
-    PSF_cubes, telemetry_vecs, fitted_vals, configs, idxs = zip(*batch)
-    PSF_cubes      = torch.stack(PSF_cubes,      0).to(device=device, non_blocking=True)
-    telemetry_vecs = torch.stack(telemetry_vecs, 0).to(device=device, non_blocking=True)
-    idxs           = torch.tensor(idxs, dtype=torch.long, device=device)
-    fitted_vals    = {k: torch.stack([fv[k] for fv in fitted_vals], 0).to(device=device, non_blocking=True)
-                      for k in fitted_vals[0]}
-    batch_config = MultipleTargetsInDifferentObservations(configs, device=device)
-    batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
-    batch_config['telescope']['PupilAngle'] = 0.0
-    batch_config['DM']['NumberReconstructedLayers'] = torch.tensor(batch_config['atmosphere']['Cn2Heights'].shape[-1], device=device)
-    return PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs
+    @staticmethod
+    def collate_batch(batch, device):
+        PSF_cubes, telemetry_vecs, fitted_vals, configs, idxs = zip(*batch)
+        PSF_cubes      = torch.stack(PSF_cubes,      0).to(device=device, non_blocking=True)
+        telemetry_vecs = torch.stack(telemetry_vecs, 0).to(device=device, non_blocking=True)
+        idxs           = torch.tensor(idxs, dtype=torch.long, device=device)
+        fitted_vals    = {k: torch.stack([fv[k] for fv in fitted_vals], 0).to(device=device, non_blocking=True) for k in fitted_vals[0]}
+        batch_config = MultipleTargetsInDifferentObservations(configs, device=device)
+        batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
+        batch_config['telescope']['PupilAngle'] = 0.0
+        batch_config['DM']['NumberReconstructedLayers'] = torch.tensor(batch_config['atmosphere']['Cn2Heights'].shape[-1], device=device)
+        return PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs
 
 
 #%%
@@ -144,7 +135,7 @@ logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {d
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
 _tmp_batch  = tuple([dataset[i] for i in np.random.randint(0, len(dataset), size=args.batch_size)])
-_, _, _, _tmp_config, _ = collate_batch(_tmp_batch, device=default_device)
+_, _, _, _tmp_config, _ = dataset.collate_batch(_tmp_batch, device=default_device)
 
 
 if 'PSF_model' in locals():
@@ -191,7 +182,7 @@ print(PSF_model.inputs_manager)
 outputs_transformer = deepcopy(PSF_model.inputs_manager.get_transformer())
 _buf = outputs_transformer.unstack(PSF_model.inputs_manager.stack())
 if 'LO_coefs' in _buf:
-    _buf['LO_coefs'] = _buf['LO_coefs'][:, 1:]   # strip phase-bump column; not predicted
+    _buf['LO_coefs'] = _buf['LO_coefs'][:, 1:] # strip phase-bump column; not predicted
 _ = outputs_transformer.stack(_buf)
 del _buf
 
@@ -209,7 +200,7 @@ calibrator = SmallCalibratorNet(
     dropout_rate = 0.2,
 ).to(default_device)
 
-#%%
+
 # Instantiate the trainer
 trainer = NFMCalibratorTrainer(
     PSF_model           = PSF_model,
@@ -219,11 +210,12 @@ trainer = NFMCalibratorTrainer(
     device              = default_device,
     batch_size          = args.batch_size,
     lr                  = 1e-2,
-    lambda_step         = 2,
+    lambda_step         = 1,
     predict_LO_NCPAs    = predict_LO_NCPAs,
     predict_Cn2_profile = predict_Cn2_profile,
     pre_init_astrometry = True,
     optimize_astrometry = False,
+    collate_fn          = NFMDataset.collate_batch,
 )
 
 #%% ===========================  Pretraining ==================================================

@@ -1,24 +1,32 @@
 import sys
 sys.path.insert(0, str(__import__('pathlib').Path(__file__).resolve().parent.parent.parent))
 
+import gc
 import warnings
+import logging
+from typing import Callable, Optional
 import torch
 import torch.nn as nn
 import pandas as pd
-from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe, TELEMETRY_CACHE
-from tiptorch.managers.input_manager import InputsTransformer
-from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
 import pickle
-
 import numpy as np
 import torch.optim as optim
+
+from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
+from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe, TELEMETRY_CACHE
+from tiptorch.managers.input_manager import InputsTransformer
+
 from copy import deepcopy
 from pathlib import Path
 from torch.utils.data import DataLoader, Subset
-from sklearn.model_selection import train_test_split, KFold, cross_val_score
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split, KFold, cross_val_score
 
 from tiptorch._config import *
+
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 class SmallCalibratorNet(nn.Module):
@@ -65,6 +73,14 @@ class SmallCalibratorNet(nn.Module):
     def forward(self, x):
         return self.network(x)
 
+
+def release_gpu_memory(sync=False):
+    """Best-effort VRAM cleanup without affecting model state."""
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        if sync:
+            torch.cuda.synchronize()
 
 
 class NFMCalibrator():
@@ -290,6 +306,7 @@ class NFMCalibratorTrainer:
         weights_dir          = None,
         test_size            = 0.20,
         random_state         = 42,
+        collate_fn: Optional[Callable] = None,
     ):
         self.PSF_model           = PSF_model
         self.calibrator          = calibrator
@@ -302,6 +319,7 @@ class NFMCalibratorTrainer:
         self.predict_Cn2_profile = predict_Cn2_profile
         self.pre_init_astrometry = pre_init_astrometry
         self.optimize_astrometry = optimize_astrometry
+        self.collate_fn          = collate_fn
         self.weights_dir         = Path(weights_dir) if weights_dir else WEIGHTS_FOLDER / 'NFM_calibrator'
         self.weights_dir.mkdir(parents=True, exist_ok=True)
 
@@ -319,7 +337,7 @@ class NFMCalibratorTrainer:
 
         # Wavelength scheduling
         self.lambda_full    = PSF_model.λ_sim.clone()
-        self.lambda_id_sets = self._build_wavelength_sets(lambda_step, dataset.C - 1)
+        self.lambda_id_sets = [list(range(dataset.C))] if lambda_step == 1 else self._build_wavelength_sets(lambda_step, dataset.C-1)
         self.lambda_sets    = [self.lambda_full[ids] for ids in self.lambda_id_sets]
 
         # Astrometry
@@ -355,12 +373,23 @@ class NFMCalibratorTrainer:
 
 
     def _make_loader(self, indices, shuffle):
+        collate_fn = self.collate_fn
+        if collate_fn is not None:
+            collator = lambda b: collate_fn(b, device=self.device)
+        elif hasattr(self.dataset, 'collate_batch'):
+            collator = lambda b: self.dataset.collate_batch(b, device=self.device)
+        else:
+            raise ValueError(
+                "NFMCalibratorTrainer requires a collate function. "
+                "Pass collate_fn=... or define dataset.collate_batch(batch, device)."
+            )
+
         return DataLoader(
-            dataset=Subset(self.dataset, np.asarray(indices, dtype=int)),
+            dataset=Subset(self.dataset, [int(i) for i in indices]),
             batch_size=self.batch_size,
             shuffle=shuffle,
             num_workers=0,
-            collate_fn=lambda b: collate_batch(b, device=self.device),
+            collate_fn=collator,
             drop_last=False,
         )
 
@@ -394,28 +423,48 @@ class NFMCalibratorTrainer:
     # ── PSF forward ───────────────────────────────────────────────────────────
     def run_model(self, x_dict_NN, config, idx, lambda_ids):
         """Run the PSF model for a batch at the given wavelength indices."""
+        # NOTE: idx are dataset ids (global sample ids), not per-batch local offsets.
+        self.PSF_model.model.N_obs = len(idx)
         x_dict = self.PSF_model.inputs_manager.to_dict()
+        # Update only parameters predicted by the calibrator and keep the rest from manager defaults.
         x_dict.update({k: v for k, v in x_dict_NN.items() if k in x_dict})
+        # Astrometric shifts are stored as full-dataset tensors and indexed per current batch.
         x_dict['dx_ctrl'] = self.dx[idx]
         x_dict['dy_ctrl'] = self.dy[idx]
+
+        # Re-attach the phase bump as the first LO coefficient.
         bump = self.phase_bump[idx].unsqueeze(-1)
         ncpa = x_dict['LO_coefs'] if self.predict_LO_NCPAs else self.NCPAs_median.expand(len(idx), -1)
         x_dict['LO_coefs'] = torch.hstack((bump, ncpa))
+
+        # Predict only a subset of wavelengths at once to reduce peak GPU memory.
         wvl = self.lambda_full[lambda_ids].to(device=self.device)
         config['sources_science']['Wavelength'] = wvl.view(1, -1)
         self.PSF_model.model.config = config
-        self.PSF_model.SetWavelengths(wvl)
         
+        # Update TipTorch internal config to match the new wavelength set. It will trigger the iternal update
+        # of the PSF model state. But if it's only one wavelengths set, then trigger the update manually.
+        # Grids don't need to be updated since they are defined at the full wavelength resolution, and the PSF model will slice them accordingly.
+        # Pupils don't depend on wavelength, so no need to update them either.
+        if (len(self.lambda_id_sets) == 1):
+            self.PSF_model.model.Update(grids=False, pupils=False, tomography=True)
+        else:
+            self.PSF_model.SetWavelengths(wvl, suppress_pupil_update=True) # suppressing pupil update to save a bit of compute since the pupil doesn't depend on wavelength
+        
+        # Do not update inputs_manager with graph-connected tensors to avoid cross-batch graph retention.
         return self.PSF_model(x_dict, update_params=False)
 
 
     # ── Loss ──────────────────────────────────────────────────────────────────
     def _loss_per_sample(self, PSF_data, PSF_pred, x_dict_pred):
         diff = PSF_pred - PSF_data
+        # Empirical scaling to keep PSF reconstruction and regularization terms numerically balanced.
         w    = 2e4
+        # Per-sample PSF reconstruction loss.
         PSF  = w * (diff.pow(2).mean(dim=(1, 2, 3)) * 1200.0 + diff.abs().mean(dim=(1, 2, 3)) * 1.6)
         if self.predict_LO_NCPAs and 'LO_coefs' in x_dict_pred:
             c  = x_dict_pred['LO_coefs']
+            # L2 regularization of predicted LO modes with sign penalties used in legacy training.
             LO = c.pow(2).sum(-1) * 1e-7
             LO = LO + torch.clamp(-c[:, 0], min=0).pow(2) * 5e-5
             LO = LO + torch.clamp(-c[:, 2], min=0).pow(2) * 1e-7
@@ -470,11 +519,13 @@ class NFMCalibratorTrainer:
     # ── Pretrain against fitted values ────────────────────────────────────────
     def _calibrator_friendly_fit_dict(self, fitted_vals):
         """Adapt fitted_vals dict to calibrator output structure (drop phase bump, reconstruct Cn2 GL)."""
+        # Keep only targets represented in the current output transformer.
         keys = set(self.outputs_transformer.slices.keys())
         x = {k: v for k, v in fitted_vals.items() if k in keys}
         if 'LO_coefs' in x:
             x['LO_coefs'] = x['LO_coefs'][:, 1:]   # strip phase bump; not predicted
         if 'Cn2_weights' in x:
+            # Dataset stores Cn2 profile without the GL layer; reconstruct it for full-profile supervision.
             cn2 = x['Cn2_weights'].clamp(min=1e-6)
             GL  = (1.0 - cn2.sum(-1, keepdim=True)).clamp(min=1e-6)
             x['Cn2_weights'] = torch.hstack((GL, cn2))
@@ -553,6 +604,7 @@ class NFMCalibratorTrainer:
 
         PSFs_pred = PSFs_data = NN_pred = tel_vecs = None
         if return_cubes:
+            # Validation can return full cubes for diagnostics; tensors are kept on CPU by default.
             PSFs_pred = torch.zeros((N, self.N_wvl_total, self.H, self.W))
             PSFs_data = torch.zeros((N, self.N_wvl_total, self.H, self.W))
             NN_pred   = torch.zeros((N, self.N_outputs))
@@ -560,6 +612,7 @@ class NFMCalibratorTrainer:
 
         total_loss, total_batches = 0.0, 0
         for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
+            # Map global dataset ids to local positions in this loader split.
             lpos   = torch.tensor([global_to_local[int(i)] for i in idxs_b.cpu().tolist()], dtype=torch.long)
             x_pred = self.calibrator(tel_b)
             x_dict = self.outputs_transformer.unstack(x_pred)
@@ -568,6 +621,7 @@ class NFMCalibratorTrainer:
                 NN_pred[lpos]  = x_pred.cpu()
                 tel_vecs[lpos] = tel_b.cpu()
 
+            # Inner loop over wavelength subsets to limit memory use and keep lambda coverage complete.
             for lambda_ids in self.lambda_id_sets:
                 PSF_pred_b   = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
                 total_loss  += self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict).item()
@@ -622,6 +676,7 @@ class NFMCalibratorTrainer:
                 self.optimizer.zero_grad()
                 batch_loss = 0.0
 
+                # Backpropagate per wavelength subset to reduce peak graph memory.
                 for lambda_ids in self.lambda_id_sets:
                     x_pred     = self.calibrator(tel_b)
                     x_dict     = self.outputs_transformer.unstack(x_pred)
@@ -631,6 +686,7 @@ class NFMCalibratorTrainer:
 
                     if torch.isnan(loss) or torch.isinf(loss):
                         nan_this_epoch = True
+                        # Legacy NaN-recovery path: reload best checkpoint and decrease LR.
                         if nan_recovery and nan_count < max_nan_recoveries:
                             nan_count += 1
                             logger.error(f"NaN at epoch {epoch}, recovery {nan_count}/{max_nan_recoveries}")
@@ -649,6 +705,7 @@ class NFMCalibratorTrainer:
                 if nan_this_epoch:
                     break
 
+                # Gradient clipping helps keep training stable for both NN and optional astrometry tensors.
                 torch.nn.utils.clip_grad_norm_(self.calibrator.parameters(), max_norm=1.0)
                 if self.optimize_astrometry:
                     torch.nn.utils.clip_grad_norm_([self.dx, self.dy], max_norm=10.0)
@@ -764,6 +821,7 @@ class NFMCalibratorTrainer:
             loader.dataset.indices if isinstance(loader.dataset, Subset) else range(len(loader.dataset)),
             dtype=int,
         )
+        # Collect per-sample losses across all wavelength subsets and average per sample.
         loss_acc = {int(i): [] for i in global_ids}
         for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
             x_pred = self.calibrator(tel_b)
@@ -820,6 +878,7 @@ class NFMCalibratorTrainer:
                     x_anch = self.calibrator(tel_b)
                     with torch.no_grad():
                         x_ref = ref(tel_b)
+                    # Soft-fix strategy: keep untuned outputs close to the frozen reference model.
                     (x_anch[:, fixed_mask] - x_ref[:, fixed_mask]).pow(2).mean().mul(100.0).backward()
                     del x_anch
                 else:
@@ -829,6 +888,7 @@ class NFMCalibratorTrainer:
                 # PSF loss: fresh forward pass per lambda set to keep peak memory low
                 for lambda_ids in self.lambda_id_sets:
                     x_tuned = self.calibrator(tel_b)
+                    # Use tuned outputs only on selected dimensions; other dims come from reference.
                     x_comb  = torch.where(mask, x_tuned, x_ref.detach())
                     x_dict  = self.outputs_transformer.unstack(x_comb)
                     PSF_pred_b = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
