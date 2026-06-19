@@ -117,7 +117,7 @@ print(f'Failed files: {bad_files}')
 
 #%%
 # Ensure unique sample IDs, assign IDs based on observation date
-ReaasignIDsByDate(CUBES_CACHE, verbose=True)
+ReasignIDsByDate(CUBES_CACHE, verbose=True)
 
 #%% ================================ Render the STD stars dataset ================================
 for file in tqdm(os.listdir(CUBES_CACHE)):

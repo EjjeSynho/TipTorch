@@ -9,7 +9,7 @@ CUBES_CACHE    = STD_FOLDER / 'cached_cubes/'
 
 
 
-def ReaasignIDsByDate(cubes_cache_dir, verbose=True):
+def ReasignIDsByDate(cubes_cache_dir, verbose=True):
     """
     Renames all cached pickle files so their numeric ID prefix reflects
     chronological order: the earliest observation gets ID 0, the next ID 1,
