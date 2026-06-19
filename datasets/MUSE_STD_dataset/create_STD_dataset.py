@@ -8,8 +8,6 @@ except NameError:
     pass
 
 import sys
-
-
 import pickle
 import os
 import numpy as np
@@ -74,9 +72,8 @@ else:
 #     exposures_df = pd.read_csv(exposures_file)
 #     exposures_df.set_index('filename', inplace=True)
 
-
 #%% ================================ Cache MUSE NFM STD stars cubes ================================
-bad_ids = []
+bad_files = []
 
 rewrite = False
 # rewrite = True
@@ -112,15 +109,17 @@ for file_id in tqdm(ids_process):
             pickle.dump(sample, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     except Exception as e:
-        if verbose: print(f'Error with file {file_id}: {e}')
-        bad_ids.append(file_id)
+        if verbose: print(f'Error with file {fname_new}: {e}')
+        bad_files.append(fname_new)
         continue
 
-print(f'Failed ids: {bad_ids}')
+print(f'Failed files: {bad_files}')
 
+#%%
+# Ensure unique sample IDs, assign IDs based on observation date
+ReaasignIDsByDate(CUBES_CACHE, verbose=True)
 
 #%% ================================ Render the STD stars dataset ================================
-
 for file in tqdm(os.listdir(CUBES_CACHE)):
     if (fx:=file.replace(".pickle",".png")) in os.listdir(STD_FOLDER / f'MUSE_images/') and not rewrite:
         if verbose: print(f'File {fx} already exists. Skipping...')
@@ -136,8 +135,11 @@ for file in tqdm(os.listdir(CUBES_CACHE)):
         if verbose: print(f'{e}')
         continue
 
-
 #%% ================================ Label PSFs ================================
+# Re-sync labels.txt ID prefixes to match the current state of the cache after the previous renaming
+if (STD_FOLDER / 'labels.txt').exists():
+    SyncLabelsToCubes(STD_FOLDER / 'labels.txt', CUBES_CACHE, verbose=True)
+
 # Execute the data labeler script
 result = subprocess.run([sys.executable, 'STD_stars_labeler.py'],
                         capture_output=True,
@@ -222,26 +224,24 @@ from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe
 
 verbose = True
 
-# Manually exclude all mostly missing/highly-correlated/repeating values from the dataset
+# Filter and reduce the telemetry dataframe
 muse_df_pruned = reduce_dataframe(filter_dataframe(muse_df.copy()))
 
-median_imputer = SimpleImputer(strategy='median')
+numeric_cols = muse_df_pruned.select_dtypes(include="number").columns
+nan_mask     = muse_df_pruned[numeric_cols].isna().values  # (N_samples, N_numeric_cols)
+
+median_imputer   = SimpleImputer(strategy='median')
 telemetry_scaler = StandardScaler()
 
-nan_mask = muse_df_pruned.isna().values # get the mask of NaN values
-numeric_cols = muse_df_pruned.select_dtypes(include="number").columns
+# Fill NaNs with median so the scaler can be fitted on complete data
+muse_df_filled = muse_df_pruned.copy()
+muse_df_filled[numeric_cols] = median_imputer.fit_transform(muse_df_pruned[numeric_cols])
 
-muse_df_pruned_buf_   = muse_df_pruned.copy()
+# Fit scaler on NaN-free data, then standardize the original (NaNs are preserved)
+telemetry_scaler.fit(muse_df_filled[numeric_cols])
+
 muse_df_pruned_scaled = muse_df_pruned.copy()
-
-# Temporarly fill NaNs with median to compute the scaling
-muse_df_pruned_buf_[numeric_cols] = median_imputer.fit_transform(muse_df_pruned[numeric_cols])
-
-# Standartize pruned dataset
-_ = telemetry_scaler.fit_transform(muse_df_pruned_buf_[numeric_cols])
 muse_df_pruned_scaled[numeric_cols] = telemetry_scaler.transform(muse_df_pruned[numeric_cols])
-
-del muse_df_pruned_buf_
 
 #%%
 if verbose:
@@ -260,10 +260,9 @@ if verbose:
 
 # Impute missing values
 iterative_imputer = IterativeImputer(max_iter=200, random_state=3, verbose=(2 if verbose else 0))
-
+# 
 # iterative_imputer = IterativeImputer(
 #     estimator = ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=16),
-#     # estimator = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=16),
 #     random_state = 42,
 #     max_iter = 30,
 #     verbose = (2 if verbose else 0))
@@ -324,8 +323,8 @@ with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'wb') as handl
 with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'wb') as handle:
     pickle.dump(telemetry_scaler, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-#%%
 
+#%%
 # Now, one must run the fitting routine to get the fitted PSF parameters values for each PSF sample
 # 1. launch 'launch_fitting.py' to run the fitting jobs in parallel on multiple GPUs
 # 2. Run 'STD_fitted_df.py' to read the fitted parameters, analyze the fitting results and store the final fitted parameters dataframe
@@ -367,7 +366,7 @@ for id in tqdm(good_samples):
         telemetry_records.append(reduced_telemetry.loc[id].to_dict())
         fitted_values.append(muse_fitted_df.loc[id].to_dict())
         good_ids.append(id)
-        PSF_cubes.append(np.moveaxis(PSF_data.squeeze(0).numpy(), 0, -1)) # 1 x N_wvl x H x W  -->  H x W x N_wvl
+        PSF_cubes.append(np.moveaxis(PSF_data.squeeze(0).numpy(), 0, -1)) # [1 x N_wvl x H x W]  -->  [H x W x N_wvl]
         configs.append(model_config)
 
     except Exception as e:
@@ -380,9 +379,9 @@ if len(bad_ids) > 0:
     for bad_id in bad_ids:
         print(bad_id)
 
-good_ids = np.array(good_ids) # N_samples
-PSF_cubes = np.stack(PSF_cubes, axis=0) # N_samples x H x W x N_wvl
-telemetry_records = np.stack(telemetry_records, axis=0) # N_samples x N_features
+good_ids = np.array(good_ids) # [N_samples]
+PSF_cubes = np.stack(PSF_cubes, axis=0) # [N_samples x H x W x N_wvl]
+telemetry_records = np.stack(telemetry_records, axis=0) # [N_samples x N_features]
 
 try:
     # Store dataset caches

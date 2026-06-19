@@ -7,6 +7,171 @@ RAW_FOLDER     = STD_FOLDER / 'raw/'
 CUBES_CACHE    = STD_FOLDER / 'cached_cubes/'
 
 
+
+
+def ReaasignIDsByDate(cubes_cache_dir, verbose=True):
+    """
+    Renames all cached pickle files so their numeric ID prefix reflects
+    chronological order: the earliest observation gets ID 0, the next ID 1,
+    and so on.  The observation date is parsed from the basename, e.g.
+
+        M.MUSE.2019-11-13T12-43-58.070.pickle  ->  65_M.MUSE.2019-...
+
+    Date parsing uses the ISO-8601-like fragment 'YYYY-MM-DDTHH-MM-SS.mmm'
+    embedded in the filename (colons replaced by dashes as stored on disk).
+
+    Args:
+        cubes_cache_dir: Path to cached cubes directory
+        verbose:         Print progress information
+
+    Returns:
+        list of (old_filename, new_filename) for every renamed file
+    """
+    import re
+    from datetime import datetime
+
+    id_pattern   = re.compile(r'^(?:\d+_)?(.+)$')          # strip optional leading ID_
+    date_pattern = re.compile(
+        r'(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d+)'   # YYYY-MM-DDTHH-MM-SS.mmm
+    )
+
+    def parse_date(basename):
+        m = date_pattern.search(basename)
+        if not m:
+            return None
+        # Restore colons so strptime can parse it
+        return datetime.strptime(m.group(1), '%Y-%m-%dT%H-%M-%S.%f')
+
+    # Collect (datetime, current_full_filename, base_filename)
+    samples = []
+    for pfile in os.listdir(cubes_cache_dir):
+        if not pfile.endswith('.pickle'):
+            continue
+        m = id_pattern.match(pfile)
+        if not m:
+            continue
+        base = m.group(1)       # filename without the leading ID prefix
+        dt   = parse_date(base)
+        if dt is None:
+            if verbose:
+                print(f"  WARNING: cannot parse date from '{pfile}' — skipping")
+            continue
+        samples.append((dt, pfile, base))
+
+    samples.sort(key=lambda x: x[0])   # chronological order
+
+    rename_plan = []  # (old_path, new_path, old_name, new_name)
+    for new_id, (dt, full_filename, base_filename) in enumerate(samples):
+        new_name = f"{new_id}_{base_filename}"
+        if full_filename != new_name:
+            rename_plan.append((
+                os.path.join(cubes_cache_dir, full_filename),
+                os.path.join(cubes_cache_dir, new_name),
+                full_filename, new_name
+            ))
+
+    if rename_plan:
+        if verbose:
+            print(f"Reassigning IDs by date: {len(rename_plan)} file(s) will be renamed...")
+
+        # Two-pass rename via .tmp to avoid conflicts
+        for old_path, new_path, old_name, new_name in rename_plan:
+            if os.path.exists(old_path):
+                os.rename(old_path, new_path + '.tmp')
+
+        for old_path, new_path, old_name, new_name in rename_plan:
+            if os.path.exists(new_path + '.tmp'):
+                os.rename(new_path + '.tmp', new_path)
+                if verbose:
+                    print(f"  {old_name} -> {new_name}")
+    else:
+        if verbose:
+            print("IDs are already in chronological order. Nothing to rename.")
+
+    return [(old_name, new_name) for old_path, new_path, old_name, new_name in rename_plan]
+
+
+def SyncLabelsToCubes(labels_file, cubes_cache_dir, verbose=True):
+    """
+    Re-synchronizes the numeric ID prefix in every labels.txt entry so that
+    it matches the actual ID of the corresponding cached pickle file.
+
+    Matching is done purely by basename (the part after 'ID_'), making this
+    function robust to any prior renaming.  Entries with no matching pickle
+    file are left unchanged with a warning.
+
+    Args:
+        labels_file:     Path to labels.txt
+        cubes_cache_dir: Path to cached cubes directory
+        verbose:         Print progress information
+
+    Returns:
+        Number of label entries updated
+    """
+    import re
+
+    if not os.path.exists(labels_file):
+        raise FileNotFoundError(f"Labels file not found: {labels_file}")
+
+    id_pattern = re.compile(r'^(\d+)_(.+)$')
+
+    # Build lookup: base pickle name (no ID prefix) -> current ID on disk
+    base_to_id = {}
+    for pfile in os.listdir(cubes_cache_dir):
+        if not pfile.endswith('.pickle'):
+            continue
+        m = id_pattern.match(pfile)
+        if m:
+            base_to_id[m.group(2)] = int(m.group(1))  # e.g. 'M.MUSE....pickle' -> 42
+
+    with open(labels_file, 'r') as f:
+        lines = f.readlines()
+
+    updated_lines = []
+    n_updated = 0
+
+    for line in lines:
+        if ': ' not in line:
+            updated_lines.append(line)
+            continue
+
+        filename_part, labels_part = line.strip().split(': ', 1)
+        m = id_pattern.match(filename_part)
+
+        if not m:
+            updated_lines.append(line)
+            continue
+
+        current_id  = int(m.group(1))
+        base_png    = m.group(2)                            # e.g. 'M.MUSE....png'
+        base_pickle = base_png.replace('.png', '.pickle')
+
+        if base_pickle not in base_to_id:
+            if verbose:
+                print(f"  WARNING: no pickle found for '{base_png}' — skipping")
+            updated_lines.append(line)
+            continue
+
+        correct_id = base_to_id[base_pickle]
+
+        if current_id != correct_id:
+            new_entry = f"{correct_id}_{base_png}: {labels_part}\n"
+            updated_lines.append(new_entry)
+            if verbose:
+                print(f"  {filename_part} -> {correct_id}_{base_png}")
+            n_updated += 1
+        else:
+            updated_lines.append(line)
+
+    with open(labels_file, 'w') as f:
+        f.writelines(updated_lines)
+
+    if verbose:
+        print(f"\nLabels sync complete: {n_updated} entr{'y' if n_updated == 1 else 'ies'} updated.")
+
+    return n_updated
+
+
 def LoadSTDStarCacheByID(id):
     ''' Searches a specific STD star by its ID in the list of cached cubes. '''
     with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:

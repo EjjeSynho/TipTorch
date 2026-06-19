@@ -179,15 +179,17 @@ def load_and_fit_sample(id):
 
     # Pre-defined STDs
     prior_STD = {
-        'r0':   0.2,
-        'L0':   25,
+        'r0': 0.2,
+        'L0': 25,
         'wind_speed_single': 5.0
     }
+
 
     def compute_MAP_err(param: str):
         diff = PSF_model.inputs_manager[param] - prior_mean[param]
         loss_values = diff / prior_STD[param]
         return loss_values.pow(2).mean()
+
 
     def loss_MAP():
         # Enforce priors on parameters
@@ -204,6 +206,7 @@ def load_and_fit_sample(id):
         
         w = 0.025 # Empirical weight to balance the loss magnitude with the PSF loss
         return loss * w
+
 
     def loss_fn(x_, w_MSE, w_MAE, w_bump, w_LO):    
         diff = (func(x_)-PSF_0) #* wvl_weights
@@ -339,7 +342,7 @@ def load_and_fit_sample(id):
     config_manager.Convert(config_dict, framework='numpy')
 
     save_data = {
-        'comments':    'NFM fitting with splines and LO NCPAs',
+        'comments':    'NFM fitting with re-normalized dn',
         'input_vec':   to_store(x0),
         'config':      config_dict,
         'OPD_map':     OPD_map,

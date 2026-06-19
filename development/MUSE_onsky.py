@@ -56,7 +56,6 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 428 # good one, no DM mismathc yet
 # ids = 434 # good one, no DM mismathc yet
 
-
 # ids = 440 # good one, but DM correction mismatch
 # ids = 449 # good one, but DM correction mismatch
 # ids = 446 # good one, but DM correction mismatch

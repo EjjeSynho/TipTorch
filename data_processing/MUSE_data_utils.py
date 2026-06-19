@@ -2116,7 +2116,6 @@ def reduce_dataframe(df):
     df_['LGS photons, [photons/m^2/s]'] = \
         df_[[f'LGS{i} photons, [photons/m^2/s]' for i in range(1,5)]].median(axis=1, skipna=True)
     
-
     for i in range(1, 5):
         df_[f'AOS.LGS{i}.SLOPERMS'] = (df_[f'AOS.LGS{i}.SLOPERMSX']**2 + df_[f'AOS.LGS{i}.SLOPERMSY']**2)**0.5
         df_[f'LGS{i}_SLOPERMS']     = (df_[f'LGS{i}_SLOPERMSX']**2 + df_[f'LGS{i}_SLOPERMSY']**2)**0.5
@@ -2135,8 +2134,9 @@ def reduce_dataframe(df):
     # Compute anisoplanatic angle
     df_ = compute_anisoplanatic_angle(df_)
 
+
     entries_to_drop = [
-        # These features are just collapsed to a median one instead of FETURE1, FEATURE2...
+        # These features are just collapsed to a median one instead of having (EATURE1, FEATURE2, ... FEATUREN)
         *[f'LGS{i}_R0' for i in range(1, 5)],
         *[f'LGS{i}_L0' for i in range(1, 5)],
         *[f'LGS{i}_SEEING' for i in range(1, 5)],
@@ -2157,13 +2157,17 @@ def reduce_dataframe(df):
         *[f'LGS{i}_FWHM_GAIN'  for i in range(1, 5)],
         
         *[f'CN2_FRAC_ALT{i}' for i in range(1, 9)],
-        *[f'CN2_ALT{i}' for i in range(1, 9)],
-        *[f'ALT{i}' for i in range(1, 9)],
-        *[f'L0_ALT{i}' for i in range(1, 9)],
-        *[f'SLODAR_CNSQ{i}' for i in range(2, 9)],
-        *[f'MASS_TURB{i}' for i in range(0, 7)],
+        *[f'CN2_ALT{i}'      for i in range(1, 9)],
+        *[f'ALT{i}'          for i in range(1, 9)],
+        *[f'L0_ALT{i}'       for i in range(1, 9)],
+        *[f'SLODAR_CNSQ{i}'  for i in range(2, 9)],
+        *[f'MASS_TURB{i}'    for i in range(0, 7)],
         
-        # These features miss most of the values
+        # These features are non-relevant or non-informative
+        'Relative Flux RMS',
+        'window',
+        
+        # These features miss most of their values
         'SLODAR_TOTAL_CN2',
         'SLODAR_FRACGL_300',
         'SLODAR_FRACGL_500',
@@ -2189,6 +2193,7 @@ def reduce_dataframe(df):
         'Pixel scale (science)',
         
         # These features has strong correlaions with other ones
+        'Pupil angle',
         'DIMM_SEEING',
         'Wind Speed at 30m [m/s]',
         'R0',
@@ -2217,14 +2222,20 @@ def reduce_dataframe(df):
         'RA (science)',
         'DEC (science)',
 
-        # These features are non-numeric
+        # since STD stars are usually the same stars, this feature can damage the generalization capability of the model
+        'NGS RA',
+        'NGS DEC',
+
+        # These features are non-systematic
         'Filename',
         'Science target',
         'name',
         'time',
-        'Bad quality',
+        
+        # These features are non-numeric and used for labeling
         'Corrupted',
         'Good quality',
+        'Bad quality',
         'Has streaks',
         'Low AO errs',
         'Medium quality',
@@ -2235,6 +2246,18 @@ def reduce_dataframe(df):
     # Remove columns with specific names
     entries_to_drop_in_df = [entry for entry in entries_to_drop if entry in df_.columns]
     df_.drop(columns=entries_to_drop_in_df, inplace=True)
+    
+    rename_IRLOS_features = [
+        'window',
+        'frequency',
+        'gain',
+        'plate scale, [mas/pix]',
+        'conversion, [e-/ADU]'
+    ]
+    # Rename columns for better readability
+    df_ = df_.rename(columns={
+        feature: f'IRLOS {feature}' for feature in rename_IRLOS_features if feature in df_.columns
+    })
     
     return df_
 
@@ -2315,7 +2338,6 @@ def create_normalizing_transforms(df):
         ('Derot. angle',  [Uniform]),
         ('NGS RA',        [Uniform]),
         ('NGS DEC',       [Uniform]),
-        # ('Pixel scale (science)', [Uniform]),
         ('window',    [Uniform]),
         ('frequency', [Uniform]),
         ('gain',      [Uniform]),
