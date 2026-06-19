@@ -430,15 +430,85 @@ print(f"Worst predicted sample IDs (highest loss): {true_worst_ids}")
 print(f"Middle sample IDs (medium loss): {true_sus_ids}")
 
 #%%
+peak_err = (PSFs_data_cube - PSFs_pred_cube).amax(dim=(-2,-1)) / PSFs_data_cube.amax(dim=(-2,-1))
+peak_err = peak_err.cpu().numpy()[:, wvl_select,...]
+
 profile_errs = np.stack([p[2].max(axis=-1) for p in p_errs])
 
+loss_np = loss_SR.cpu().numpy()
+x_fit = np.linspace(loss_SR.min().item(), loss_SR.max().item(), 100)
+
+# Calculate correlations between loss and profile errors
+from scipy.stats import pearsonr, spearmanr
+
+print("\nCorrelation between loss function and profile errors:")
+print(f"{'Wavelength [nm]':<20} {'Pearson r':>12} {'p-value':>12} {'Spearman ρ':>12} {'p-value':>12}")
+print("-" * 70)
+
 for wvl in range(len(wvl_select)):
-    plt.scatter(loss_SR, profile_errs[wvl]/100, s=12, alpha=0.6,label=f"λ = {int((lambda_full[wvl_select[wvl]] * 1e9).round().item())} nm")
+    wvl_nm = int((lambda_full[wvl_select[wvl]] * 1e9).round().item())
+    errs = profile_errs[wvl]/100
+    
+    pearson_r,  pearson_p  = pearsonr (loss_np, errs)
+    spearman_r, spearman_p = spearmanr(loss_np, errs)
+    
+    print(f"{wvl_nm:<20} {pearson_r:>12.4f} {pearson_p:>12.2e} {spearman_r:>12.4f} {spearman_p:>12.2e}")
+    
+    plt.scatter(loss_SR, errs, s=5, alpha=0.6, label=f"λ = {wvl_nm} nm (r={pearson_r:.3f})")
+    
+    # Add best fitting line per wavelength
+    coeffs = np.polyfit(loss_np, errs, 1)
+    fit_line = np.poly1d(coeffs)
+    plt.plot(x_fit, fit_line(x_fit), '--', linewidth=1.5, alpha=0.8)
+
+# Overall correlation across all wavelengths
+all_loss = np.tile(loss_np, len(wvl_select))
+all_errs = profile_errs.flatten() / 100
+pearson_all,  pearson_p_all  = pearsonr(all_loss, all_errs)
+spearman_all, spearman_p_all = spearmanr(all_loss, all_errs)
+print(f"{'All wavelengths':<20} {pearson_all:>12.4f} {pearson_p_all:>12.2e} {spearman_all:>12.4f} {spearman_p_all:>12.2e}")
 
 plt.xlabel('Per-sample loss')
 plt.ylabel('Max ΔSR across radii')
 plt.legend()
 plt.grid(True)
+plt.xlim(0, None)
+plt.ylim(0, None)
+plt.tight_layout()
+plt.show()
+
+#%%
+for wvl in range(len(wvl_select)):
+    wvl_nm = int((lambda_full[wvl_select[wvl]] * 1e9).round().item())
+    errs = profile_errs[wvl]/100.0
+    
+    peak_errs_wvl = peak_err[:, wvl]
+    
+    pearson_r,  pearson_p  = pearsonr (peak_errs_wvl, errs)
+    spearman_r, spearman_p = spearmanr(peak_errs_wvl, errs)
+    
+    print(f"{wvl_nm:<20} {pearson_r:>12.4f} {pearson_p:>12.2e} {spearman_r:>12.4f} {spearman_p:>12.2e}")
+    
+    plt.scatter(peak_errs_wvl, errs, s=5, alpha=0.6, label=f"λ = {wvl_nm} nm (r={pearson_r:.3f})")
+    
+    # Add best fitting line per wavelength
+    coeffs = np.polyfit(peak_errs_wvl, errs, 1)
+    fit_line = np.poly1d(coeffs)
+    plt.plot(peak_errs_wvl, fit_line(peak_errs_wvl), '--', linewidth=1.5, alpha=0.8)
+
+# Overall correlation across all wavelengths
+# all_loss = np.tile(loss_np, len(wvl_select))
+# all_errs = profile_errs.flatten() / 100
+# pearson_all,  pearson_p_all  = pearsonr(all_loss, all_errs)
+# spearman_all, spearman_p_all = spearmanr(all_loss, all_errs)
+# print(f"{'All wavelengths':<20} {pearson_all:>12.4f} {pearson_p_all:>12.2e} {spearman_all:>12.4f} {spearman_p_all:>12.2e}")
+
+plt.xlabel('Peak relative error (max pixel-wise ΔSR)')
+plt.ylabel('Max ΔSR across radii')
+plt.legend()
+plt.grid(True)
+plt.xlim(0, None)
+plt.ylim(0, None)
 plt.tight_layout()
 plt.show()
 
