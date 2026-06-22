@@ -1772,6 +1772,36 @@ def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
     return Cn2_alt, Cn2_frac
 
 
+def _pad_Cn2_to_n_layers(Cn2_alt, Cn2_frac, n_layers, median_Cn2_alts):
+    """
+    If fewer than n_layers data points are available for K-means, pad with
+    zero-weight layers placed at the closest-greater altitudes taken from the
+    median profile so that KMeans always receives at least n_layers samples.
+    """
+    n_present = len(Cn2_alt)
+    if n_present >= n_layers:
+        return Cn2_alt, Cn2_frac
+
+    n_pad    = n_layers - n_present
+    last_alt = Cn2_alt[-1] if n_present > 0 else 0.0
+
+    # Pick the n_pad smallest median altitudes that exceed the last present altitude
+    candidates = np.sort(median_Cn2_alts[median_Cn2_alts > last_alt])
+    pad_alts   = candidates[:n_pad]
+
+    # Fallback: if median profile has no greater altitudes, space linearly
+    if len(pad_alts) < n_pad:
+        start    = (pad_alts[-1] if len(pad_alts) else last_alt) + 3.0
+        extra    = np.arange(n_pad - len(pad_alts)) * 3.0 + start
+        pad_alts = np.concatenate([pad_alts, extra])
+
+    Cn2_alt  = np.concatenate([Cn2_alt,  pad_alts])
+    Cn2_frac = np.concatenate([Cn2_frac, np.ones(n_pad)*1e-2])
+    Cn2_frac = Cn2_frac / Cn2_frac.sum()  # renormalize to keep sum = 1
+
+    return Cn2_alt, Cn2_frac
+
+
 def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, convert_config=True, plotting=False):
     """
     Specialized routine for loading configs for the cached MUSE NFM data samples.
@@ -1814,12 +1844,14 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, co
         if np.isclose(Cn2_frac, 1.0, atol=1e-6).any():
             raise ValueError("Recorded Cn2 data contains unphysical layer with weight close to one")
         
-        
     except (KeyError, ValueError, AttributeError) as e:
         print(f"Warning: Cn2 profile data is missing or invalid ({e}). Using median profile.")
         Cn2_alt, Cn2_frac = median_Cn2_alts, median_Cn2_fracs
-        
-    Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_Kmeans(Cn2_alt, Cn2_frac, n_layers=3, enforce_0_GL=True, min_separation=3.0)
+
+    N_simplified_layers = 3
+
+    Cn2_alt, Cn2_frac = _pad_Cn2_to_n_layers(Cn2_alt, Cn2_frac, N_simplified_layers, median_Cn2_alts)
+    Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_Kmeans(Cn2_alt, Cn2_frac, n_layers=N_simplified_layers, enforce_0_GL=True, min_separation=3.0)
 
     if plotting:
         plt.plot(Cn2_frac, Cn2_alt, 'o-')
@@ -2063,7 +2095,8 @@ def recompute_simplified_Cn2(df: pd.DataFrame, n_layers: int) -> pd.DataFrame:
             Cn2_alt_binned_sample  = np.full(n_layers, np.nan)
             Cn2_frac_binned_sample = np.full(n_layers, np.nan)
         else:
-            Cn2_alt_sample, Cn2_frac_sample = process_AOF_Cn2_profile(Cn2_alt_sample, Cn2_frac_sample, median_Cn2_alts)    
+            Cn2_alt_sample, Cn2_frac_sample = process_AOF_Cn2_profile(Cn2_alt_sample, Cn2_frac_sample, median_Cn2_alts)
+            Cn2_alt_sample, Cn2_frac_sample = _pad_Cn2_to_n_layers(Cn2_alt_sample, Cn2_frac_sample, n_layers, median_Cn2_alts)
             Cn2_alt_binned_sample, Cn2_frac_binned_sample = recompute_Cn2_Kmeans(Cn2_alt_sample, Cn2_frac_sample, n_layers=n_layers, enforce_0_GL=True, min_separation=3.0)
         
         Cn2_alts_binned.append(Cn2_alt_binned_sample)

@@ -698,7 +698,7 @@ def recompute_Cn2_Kmeans(Cn2_alts, Cn2_weights, n_layers=5, enforce_0_GL=False, 
     Cn2_alts = np.asarray(Cn2_alts, float)
     Cn2_weights = np.asarray(Cn2_weights, float)
     
-    x =  Cn2_alts
+    x = Cn2_alts
 
     # Weighted KMeans
     kmeans = KMeans(n_clusters=n_layers, random_state=42, n_init=10)
