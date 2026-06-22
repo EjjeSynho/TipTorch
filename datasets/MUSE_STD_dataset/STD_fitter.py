@@ -26,13 +26,13 @@ from tiptorch._config import project_settings, default_device
 import warnings
 
 """
-Does the fitting of the PSF model parameters for MUSE_NFM STD stars dataset and saves the fitted parameters
-Arguments are be passed as:
-- Device specification: e.g., "cuda:0" or "cpu"
-- Start and end IDs for fitting a subset of the dataset: e.g., "50 150"
-- Output folder path for saving fitted parameters: e.g., "F:/ESO/Data/MUSE
+    Does the fitting of the PSF model parameters for MUSE_NFM STD stars dataset and stores the fitted values
+    Arguments are be passed as:
+    - Device specification: e.g., "cuda:N" or "cpu"
+    - Start and end IDs for fitting a subset of the dataset: e.g., "50 150"
+    - Output folder path for saving fitted parameters: e.g., "F:/ESO/Data/MUSE
 
-Example usage: python fitter_MUSE.py cpu 50 150
+    Example usage: python STD_fitter.py cuda:0 50 150
 """
 
 # Default output folder for fitted parameters, can be overridden by passing a path as an argument

@@ -72,10 +72,10 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 482 # good one
 # ids = 475 # good one, mb DM correction radius mismatch
 # ids = 468 # good one
-ids = 462 # good one
+# ids = 462 # good one
 # ids = 455 # good one, slight sausage
 # ids = 359 # good one
-
+ids = 368
 
 # ids = [206, 359, 462, 468, 475]
 # ids = 206
@@ -140,7 +140,7 @@ blurry_PSF_flag = muse_df.loc[ids]['Bad quality'].item()
 
 fit_wind_dir    = True
 fit_wind_speed  = False
-fit_outerscale  = False
+fit_outerscale  = True
 fit_Cn2_profile = True
     
 if N_src > 1:

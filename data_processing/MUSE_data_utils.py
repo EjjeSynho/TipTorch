@@ -1741,10 +1741,10 @@ def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
     Cn2_frac = Cn2_frac.copy()
     
     # Remove unphysical values
-    Cn2_alt [Cn2_alt > 100] = np.nan
-    Cn2_alt [Cn2_alt < 0]   = np.nan
-    Cn2_frac[Cn2_frac > 1]  = np.nan
-    Cn2_frac[Cn2_frac < 0]  = np.nan
+    Cn2_alt [Cn2_alt > 100]     = np.nan
+    Cn2_alt [Cn2_alt < 1e-12]   = np.nan
+    Cn2_frac[Cn2_frac > 1]      = np.nan
+    Cn2_frac[Cn2_frac < 1e-12]  = np.nan
     Cn2_alt[-1] = np.nan if Cn2_alt[-1] < 1e-12 else Cn2_alt[-1]
 
     # Replace NaN values with median ones
@@ -1774,8 +1774,8 @@ def process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts):
 
 def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, convert_config=True, plotting=False):
     """
-    Spcialized routine for loading configs for the cached MUSE NFM data samples.
-    It largely overloads the standart config creation routine from the ConfigManager class and tailors it to MUSE NFM PSF data format.
+    Specialized routine for loading configs for the cached MUSE NFM data samples.
+    It largely overloads the standard config creation routine from the ConfigManager class and tailors it to MUSE NFM PSF data format.
     """
     if PSF_data is None:
         PSF_data = sample['images']['cube']
@@ -1801,7 +1801,7 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, co
         # Attempt to extract the profile from the sample data
         if sample.get('Raw Cn2 data') is None:
             raise ValueError("No raw Cn2 data recorded")
-            
+        
         Cn2_alt  = np.array([sample['All data'][f'ALT{i}'].item()          for i in range(1, 9)])
         Cn2_frac = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
 
@@ -1809,13 +1809,18 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, co
         if np.all(np.isnan(Cn2_alt)) or np.all(np.isnan(Cn2_frac)):
             raise ValueError("Recorded Cn2 data consists of NaNs")
 
+        Cn2_alt, Cn2_frac = process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts)
+        # Check if there is a layer with weight close to one (unphysical)
+        if np.isclose(Cn2_frac, 1.0, atol=1e-6).any():
+            raise ValueError("Recorded Cn2 data contains unphysical layer with weight close to one")
+        
+        
     except (KeyError, ValueError, AttributeError) as e:
         print(f"Warning: Cn2 profile data is missing or invalid ({e}). Using median profile.")
         Cn2_alt, Cn2_frac = median_Cn2_alts, median_Cn2_fracs
-
-    Cn2_alt, Cn2_frac = process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts)    
+        
     Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_Kmeans(Cn2_alt, Cn2_frac, n_layers=3, enforce_0_GL=True, min_separation=3.0)
-    
+
     if plotting:
         plt.plot(Cn2_frac, Cn2_alt, 'o-')
         plt.plot(median_Cn2_fracs, median_Cn2_alts, '--', alpha=0.5, label='Median Cn2 profile')
@@ -1857,9 +1862,9 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, co
     config_dict['sources_science']['Wavelength'] = wvls
 
     config_dict['sources_LO']['Wavelength'] = (1215 + 1625)/2.0 * 1e-9 # Mean approx. wavelengths of IRLOS between J and H
-    config_dict['sources_HO']['Zenith']     = [[10,]*4] # [arcsec], LGSs angular separation from on-axis
+    config_dict['sources_HO']['Zenith']     = [[10.,]*4] # [arcsec], LGSs angular separation from on-axis
     
-    config_dict['sensor_science']['PixelScale'] = sample['MUSE header data']['Pixel scale (science)'].item()
+    config_dict['sensor_science']['PixelScale']  = sample['MUSE header data']['Pixel scale (science)'].item()
     config_dict['sensor_science']['FieldOfView'] = FoV_science
 
     try:
