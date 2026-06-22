@@ -18,7 +18,6 @@ import subprocess
 import pandas as pd
 from STD_dataset_utils import *
 
-
 #%%
 # Check the existence of all necessary folders and create them if they don't exist
 std_stars_folders = [CUBES_FOLDER, RAW_FOLDER, STD_FOLDER, CUBES_CACHE, TELEMETRY_CACHE, STD_FOLDER / 'NFM_cubes_temp/']

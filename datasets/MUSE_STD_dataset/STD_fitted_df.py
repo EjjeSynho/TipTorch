@@ -20,25 +20,29 @@ wavelength = np.round(wvl_bins[wvl_ids]).astype(int)
 norm_wvl = Uniform0_1(a=475.e-9, b=935.e-9) # MUSE NFM wavelength range
 
 #%%
-pootis = STD_FOLDER / 'muse_fitted_df.pickle'
+# If fitted dataset already exuists, check if it has NaN samples
+if (f_ := STD_FOLDER / 'muse_fitted_df.pickle').exists():
+    print(f"Loading fitted parameters dataframe from {f_}")
 
-with open(pootis, 'rb') as handle:
-    data = pickle.load(handle)
+    with open(f_, 'rb') as handle:
+        data = pickle.load(handle)
 
-#%%
-# Detect NaN ids
-nan_ids = []
-for key, values in data['fitted_values'].items():
-    for i, val in enumerate(values):
-        if isinstance(val, list) and any(np.isnan(val)):
-            nan_ids.append(i)
-        elif isinstance(val, (float, int)) and np.isnan(val):
-            nan_ids.append(i)
+    # Detect NaN ids
+    nan_ids = []
+    for key, values in data['fitted_values'].items():
+        for i, val in enumerate(values):
+            if isinstance(val, list) and any(np.isnan(val)):
+                nan_ids.append(i)
+            elif isinstance(val, (float, int)) and np.isnan(val):
+                nan_ids.append(i)
 
-nan_ids = set(nan_ids)
+    nan_ids = set(nan_ids)
 
-for nan_id in nan_ids:
-    print(data['fitted_values'].iloc[nan_id])
+    if len(nan_ids) > 0:
+        print(f"Found {len(nan_ids)} samples with NaN values in fitted parameters:")
+        
+        for nan_id in nan_ids:
+            print(data['fitted_values'].iloc[nan_id])
 
 #%%
 IRLOS_phases_dict = {}
