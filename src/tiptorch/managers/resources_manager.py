@@ -8,9 +8,7 @@ from pathlib import Path, PurePosixPath
 
 import pooch
 
-from tiptorch._config import CACHE_PATH, RESOURCE_PACKS_DIR, TEMP_DIR, REGISTRY_URL
-
-#%%
+#%% - Note: tiptorch._config is imported lazily inside functions to avoid circular import
 # ──────────────────────────────────────────────────────────────
 #  Helpers
 # ──────────────────────────────────────────────────────────────
@@ -90,6 +88,7 @@ def pack_all(output_dir: Path | None = None, overwrite: bool = False) -> list[Pa
 
     Returns a list of created ZIP paths.
     """
+    from tiptorch._config import CACHE_PATH, RESOURCE_PACKS_DIR, TEMP_DIR, REGISTRY_URL
     out = output_dir or TEMP_DIR
     out.mkdir(parents=True, exist_ok=True)
 
@@ -140,6 +139,7 @@ def build_registry(scan_dir: Path | None = None) -> Path:
 
     Returns the path to the written registry file.
     """
+    from tiptorch._config import TEMP_DIR
     scan = scan_dir or TEMP_DIR
     reg: dict = {"version": 1, "packs": {}}
 
@@ -165,6 +165,7 @@ def fetch_registry() -> dict:
     Download the registry JSON from GDrive using the hard-coded
     ``REGISTRY_GDRIVE_ID``.  Returns the parsed dict.
     """
+    from tiptorch._config import REGISTRY_URL, TEMP_DIR
     if not REGISTRY_URL:
         raise RuntimeError("'registry_url' is not set in project_config.json. "
                            "A developer must upload the registry and set the URL.")
@@ -202,6 +203,7 @@ def fetch_resource_pack(name: str, registry: dict, overwrite: bool = False) -> N
     if not url:
         raise ValueError(f"No download URL for '{name}' in registry.")
 
+    from tiptorch._config import CACHE_PATH, RESOURCE_PACKS_DIR, TEMP_DIR
     # If the pack-list already exists locally, assume it's installed
     installed = RESOURCE_PACKS_DIR / f"{name}.txt"
     if installed.exists() and not overwrite:
@@ -259,6 +261,7 @@ def sync_resource_packs() -> None:
     - If the remote registry is unreachable or ``registry_url`` is not
       configured, emits a warning and returns silently.
     """
+    from tiptorch._config import REGISTRY_URL, RESOURCE_PACKS_DIR
     if not REGISTRY_URL:
         return
 

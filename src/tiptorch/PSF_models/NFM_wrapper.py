@@ -444,13 +444,13 @@ class PSFModelNFM:
         # Normalized parameters values are (approximately) distributed in the range between -1 and 1.
         # It helps with the convergence by avoiding extreme parameter values while PSF fitting or NNs training.
         # Normalization is ONLY applied when parameters are stacked in the single vector
-        norm_F           = Uniform(a=0.5,   b=1.0)
+        norm_F           = Uniform(a=0.0,   b=1.0)
         norm_bg          = Uniform(a=-5e-6, b=5e-6)
         norm_r0          = Uniform(a=0.08,  b=0.15)
         norm_L0          = Uniform(a=6,     b=34)
         norm_dxy         = Uniform(a=-1,    b=1)
         norm_J           = Uniform(a=0,     b=30)
-        norm_dn          = Uniform(a=50,    b=100)
+        norm_dn          = Uniform(a=25,    b=50)
         norm_amp         = Uniform(a=0,     b=10)
         norm_b           = Uniform(a=0,     b=0.1)
         norm_alpha       = Uniform(a=-1,    b=10)

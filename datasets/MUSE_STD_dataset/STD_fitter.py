@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 import gc
 import pickle
@@ -151,8 +152,8 @@ def load_and_fit_sample(id):
     non_point_flag  = psf_df.loc[id]['Non-point'].item()
 
     fit_wind_dir    = False
-    fit_wind_speed  = False
-    fit_outerscale  = False
+    fit_wind_speed  = True #False
+    fit_outerscale  = True #False
     fit_Cn2_profile = True
 
     if N_src > 1:

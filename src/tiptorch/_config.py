@@ -60,8 +60,11 @@ def update_config(updates: dict) -> None:
 
     config.update(updates)
 
-    with open(path_to_config, "w") as f:
-        json.dump(config, f, indent=4)
+    # Only write if something actually changed — avoids race conditions when
+    # multiple subprocesses import this module concurrently.
+    if config != json.loads(path_to_config.read_text("utf-8")):
+        with open(path_to_config, "w") as f:
+            json.dump(config, f, indent=4)
 
     project_settings.update(config)
 
@@ -175,3 +178,5 @@ def ensure_resources() -> None:
 # Trigger resource synchronization on import
 ensure_resources()
 
+
+# %%

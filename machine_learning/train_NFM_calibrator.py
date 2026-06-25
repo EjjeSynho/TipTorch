@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 from pathlib import Path
 from datetime import datetime
+
 from torch.utils.data import Dataset
 
 from tiptorch._config import *
@@ -212,6 +213,7 @@ trainer = NFMCalibratorTrainer(
     lambda_step         = 1,
     predict_LO_NCPAs    = predict_LO_NCPAs,
     predict_Cn2_profile = predict_Cn2_profile,
+    random_state        = 43,
     pre_init_astrometry = True,
     optimize_astrometry = False,
     collate_fn          = NFMDataset.collate_batch,
@@ -234,7 +236,7 @@ logger.info(f"Post-pretrain validation loss: {val_loss_pretrain:.6f}")
 if args.continue_training and BEST_CALIB_PATH.exists():
     trainer.load_checkpoint(BEST_CALIB_PATH)
 
-BASE_STATE     = deepcopy(calibrator.state_dict())
+BASE_STATE = deepcopy(calibrator.state_dict())
 sample_weights = None
 
 if args.run_kfold_difficulty:
@@ -265,6 +267,11 @@ train_losses, val_losses = trainer.train(
 release_gpu_memory()
 logger.info(f"Training done. Final train={train_losses[-1]:.6f} val={val_losses[-1]:.6f} best={min(val_losses):.6f}")
 
+# Quit here if not run with IPython (e.g. from command line)
+if not (hasattr(sys, 'ps1') or sys.flags.interactive):
+    logger.info("Non-interactive environment detected. Exiting after training.")
+    sys.exit(0)
+    
 fig, ax = plt.subplots(figsize=(9, 4))
 ax.plot(train_losses, label='Train')
 ax.plot(val_losses,   label='Val')

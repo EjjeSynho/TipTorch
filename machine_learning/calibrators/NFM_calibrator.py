@@ -518,10 +518,14 @@ class NFMCalibratorTrainer:
 
     # ── Pretrain against fitted values ────────────────────────────────────────
     def _calibrator_friendly_fit_dict(self, fitted_vals):
-        """Adapt fitted_vals dict to calibrator output structure (drop phase bump, reconstruct Cn2 GL)."""
-        # Keep only targets represented in the current output transformer.
-        keys = set(self.outputs_transformer.slices.keys())
-        x = {k: v for k, v in fitted_vals.items() if k in keys}
+        """Adapt fitted_vals dict to calibrator output structure (drop phase bump, reconstruct Cn2 GL).
+
+        Keys are returned in the exact order of ``outputs_transformer.slices`` so that any
+        downstream ``stack()`` call rebuilds slices in the same order as the original setup.
+        """
+        # Iterate in SLICE order (not fitted_vals order) to keep the layout stable.
+        keys = list(self.outputs_transformer.slices.keys())
+        x = {k: fitted_vals[k] for k in keys if k in fitted_vals}
         if 'LO_coefs' in x:
             x['LO_coefs'] = x['LO_coefs'][:, 1:]   # strip phase bump; not predicted
         if 'Cn2_weights' in x:
@@ -530,6 +534,30 @@ class NFMCalibratorTrainer:
             GL  = (1.0 - cn2.sum(-1, keepdim=True)).clamp(min=1e-6)
             x['Cn2_weights'] = torch.hstack((GL, cn2))
         return x
+
+
+    def _pretrain_target_vector(self, fitted_vals, device):
+        """Build the supervised pretraining target vector WITHOUT modifying outputs_transformer.slices.
+
+        Unlike calling ``outputs_transformer.stack()``, this method applies each parameter's
+        forward transform in the EXISTING slice order and writes the result into a pre-allocated
+        output tensor.  Missing keys (params absent from fitted_vals) are left as zero, which is
+        the neutral value in the normalised space used by most transforms here.
+
+        This prevents the ``stack()`` side-effect that resets ``slices`` to whatever key order
+        ``fitted_vals`` happens to have, which would corrupt subsequent ``unstack`` calls.
+        """
+        x = self._calibrator_friendly_fit_dict(fitted_vals)
+        B = next(iter(x.values())).shape[0]
+        y = torch.zeros(B, self.N_outputs, device=device, dtype=torch.float32)
+        for key, sl in self.outputs_transformer.slices.items():
+            if key not in x:
+                continue
+            val = x[key]
+            if val.dim() == 1:
+                val = val.unsqueeze(-1)
+            y[:, sl] = self.outputs_transformer.transforms[key](val)
+        return y
 
 
     def pretrain(self, num_epochs=100, patience=15, lr=None, save_path=None):
@@ -549,7 +577,7 @@ class NFMCalibratorTrainer:
             train_loss = 0.0
             for _, tel, fit, _, _ in self.train_loader:
                 opt.zero_grad()
-                y = self.outputs_transformer.stack(self._calibrator_friendly_fit_dict(fit))
+                y = self._pretrain_target_vector(fit, device=tel.device)
                 loss = criterion(self.calibrator(tel), y)
                 loss.backward()
                 opt.step()
@@ -559,7 +587,7 @@ class NFMCalibratorTrainer:
             val_loss = 0.0
             with torch.no_grad():
                 for _, tel, fit, _, _ in self.val_loader:
-                    y = self.outputs_transformer.stack(self._calibrator_friendly_fit_dict(fit))
+                    y = self._pretrain_target_vector(fit, device=tel.device)
                     val_loss += criterion(self.calibrator(tel), y).item()
 
             avg_t, avg_v = train_loss / len(self.train_loader), val_loss / len(self.val_loader)
