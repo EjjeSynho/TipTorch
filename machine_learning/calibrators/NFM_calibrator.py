@@ -459,9 +459,9 @@ class NFMCalibratorTrainer:
     def _loss_per_sample(self, PSF_data, PSF_pred, x_dict_pred):
         diff = PSF_pred - PSF_data
         # Empirical scaling to keep PSF reconstruction and regularization terms numerically balanced.
-        w    = 2e4
+        w = 2e4
         # Per-sample PSF reconstruction loss.
-        PSF  = w * (diff.pow(2).mean(dim=(1, 2, 3)) * 1200.0 + diff.abs().mean(dim=(1, 2, 3)) * 1.6)
+        PSF = w * (diff.pow(2).mean(dim=(1, 2, 3)) * 1200.0 + diff.abs().mean(dim=(1, 2, 3)) * 1.6)
         if self.predict_LO_NCPAs and 'LO_coefs' in x_dict_pred:
             c  = x_dict_pred['LO_coefs']
             # L2 regularization of predicted LO modes with sign penalties used in legacy training.
