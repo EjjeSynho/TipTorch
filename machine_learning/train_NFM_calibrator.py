@@ -157,10 +157,20 @@ with torch.no_grad():
 del _tmp_batch, _tmp_config
 release_gpu_memory(sync=True)
 
+# fixed_params = [
+#     'Jxy', 'bg_ctrl', 'dx_ctrl', 'dy_ctrl', 'L0',
+#     'F_norm', 'F_norm_lambda_ctrl', 'src_dirs_x', 'src_dirs_y',
+#     'wind_speed_single', 'wind_dir_single', 'F_norm_λ_ctrl'
+# ]
+
+fixed_params = [
+    'Jxy', 'bg_ctrl', 'dx_ctrl', 'dy_ctrl',
+    'F_norm', 'F_norm_lambda_ctrl', 'src_dirs_x', 'src_dirs_y',
+    'wind_dir_single', 'F_norm_λ_ctrl'
+]
+
 # Remove parameters that are fixed externally and do not need to be predicted
-for _key in ['Jxy', 'bg_ctrl', 'dx_ctrl', 'dy_ctrl', 'L0',
-             'F_norm', 'F_norm_lambda_ctrl', 'src_dirs_x', 'src_dirs_y',
-             'wind_speed_single', 'wind_dir_single', 'F_norm_λ_ctrl']:
+for _key in fixed_params:
     try:
         PSF_model.inputs_manager.delete(_key)
 
@@ -173,8 +183,12 @@ if PSF_model.use_Moffat:
 
 predict_LO_NCPAs    = True
 predict_Cn2_profile = True
-PSF_model.inputs_manager.set_optimizable(['LO_coefs'],    predict_LO_NCPAs)
-PSF_model.inputs_manager.set_optimizable(['Cn2_weights'], predict_Cn2_profile)
+predict_wind_speed  = True
+
+PSF_model.inputs_manager.set_optimizable(['LO_coefs'],          predict_LO_NCPAs)
+PSF_model.inputs_manager.set_optimizable(['Cn2_weights'],       predict_Cn2_profile)
+PSF_model.inputs_manager.set_optimizable(['wind_speed_single'], predict_wind_speed)
+
 print(PSF_model.inputs_manager)
 
 #%%
@@ -190,6 +204,15 @@ N_outputs  = outputs_transformer.get_stacked_size()
 N_features = len(dataset.features)
 release_gpu_memory()
 print(f"Calibrator: {N_features} inputs -> {N_outputs} outputs")
+
+# Build readable output names from the transformer
+output_names = []
+for param_name, slc in outputs_transformer.slices.items():
+    width = slc.stop - slc.start
+    if width == 1:
+        output_names.append(param_name)
+    else:
+        output_names.extend([f"{param_name}[{i}]" for i in range(width)])
 
 #%%
 # Calibrator network  (can be swapped for any nn.Module with the same I/O contract)
@@ -295,6 +318,89 @@ validation_ids = validation_ids.cpu()
 
 release_gpu_memory()
 print(f"Validation loss: {final_val_loss:.6f} | PSF cubes {PSFs_pred_cube.shape}")
+
+
+#%%
+stds  = NN_predictions.std(dim=0)
+means = NN_predictions.mean(dim=0)
+
+plt.bar(np.arange(len(means)), means.cpu().numpy(), yerr=stds.cpu().numpy(), alpha=0.7, capsize=3)
+plt.xticks(ticks=np.arange(len(means)), labels=output_names, rotation=45, ha='right')
+
+# Select features with low varibility relative to their mean (e.g., < 5% std/mean)
+# low_var_features = (stds / means) < 0.05
+# print(f"Low variability features: {low_var_features.sum().item()} / {len(low_var_features)}:")
+# for i, is_low_var in enumerate(low_var_features):
+#     if is_low_var:
+#         print(f"  {output_names[i]}: mean={means[i].item():.4f}, std={stds[i].item():.4f}, std/mean={stds[i].item()/means[i].item():.4f}")
+
+selected_mean_features = []
+feature_keywords = {'J_ctrl', 'F_ctrl', 'LO_coefs', 'wind_speed_single', 'L0'}
+
+for i, name in enumerate(output_names):
+    if any(keyword in name for keyword in feature_keywords):
+        selected_mean_features.append((name, means[i].item(), stds[i].item()))
+
+
+#%%
+from tiptorch.tools.utils import r0
+
+# TODO: something is very wrong with the binned Cn2_weights
+
+with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as handle:
+    telemetry_scaler = pickle.load(handle)
+
+x_vec = telemetry_scaler.inverse_transform(telemetry_vecs.cpu().numpy())
+
+X = {
+    'r0': r0(muse_df['Seeing (header)'].loc[validation_ids].to_numpy(), 500e-9),
+    'L0': muse_df['L0Tot'].loc[validation_ids].to_numpy(),
+    'wind_speed_single': muse_df['Wind speed (header)'].loc[validation_ids].to_numpy(),
+    'Cn2_weights_2': x_vec[input_features.index('Cn2_frac_binned_2')],
+    'Cn2_weights_3': x_vec[input_features.index('Cn2_frac_binned_3')]
+}
+X['Cn2_weights_1'] = 1.0 - X['Cn2_weights_2'] - X['Cn2_weights_3']
+
+features_of_interest = list(X.keys()) + ['Cn2_weights']
+
+Y = {k: v.cpu().numpy() for k, v in trainer.outputs_transformer.unstack(NN_predictions).items() if k in features_of_interest}
+Y['Cn2_weights_1'] = Y['Cn2_weights'][:, 0]
+Y['Cn2_weights_2'] = Y['Cn2_weights'][:, 1]
+Y['Cn2_weights_3'] = Y['Cn2_weights'][:, 2]
+
+Y['wind_speed_single'] = np.abs(Y['wind_speed_single'])
+
+_ = Y.pop('Cn2_weights', None)
+
+#%%
+common_keys = [k for k in X if k in Y]
+n_keys = len(common_keys)
+ncols = min(3, n_keys)
+nrows = int(np.ceil(n_keys / ncols))
+
+fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4.5, nrows * 3.5))
+axes_flat = np.array(axes).ravel()
+
+for i, key in enumerate(common_keys):
+    ax = axes_flat[i]
+    x_vals = np.asarray(X[key]).ravel()
+    y_vals = np.asarray(Y[key]).ravel()
+
+    bins = np.linspace(min(x_vals.min(), y_vals.min()), max(x_vals.max(), y_vals.max()), 30)
+    ax.hist(x_vals, bins=bins, alpha=0.6, label='Input (X)', color='tab:blue',   density=True)
+    ax.hist(y_vals, bins=bins, alpha=0.6, label='Predicted (Y)', color='tab:orange', density=True)
+    ax.set_title(key)
+    ax.set_xlabel('Value')
+    ax.set_ylabel('Density')
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+for ax in axes_flat[n_keys:]:
+    ax.set_visible(False)
+
+fig.suptitle('Input vs. Predicted distributions', fontsize=13)
+plt.tight_layout()
+plt.show()
 
 #%%
 trainer.save_calibrator(trainer.weights_dir / 'NFM_calibrator_bundle.pth')
@@ -485,6 +591,8 @@ plt.tight_layout()
 plt.show()
 
 #%%
+print("\nCorrelation between peak pixel-wise error and profile errors:")
+
 for wvl in range(len(wvl_select)):
     wvl_nm = int((lambda_full[wvl_select[wvl]] * 1e9).round().item())
     errs = profile_errs[wvl]/100.0
@@ -633,7 +741,7 @@ width = 0.125
 
 groups = [
     (med_best,  q16_best,  q84_best,  'Best (low loss)',   'tab:green'),
-    (med_sus,   q16_sus,   q84_sus,   'Middle',        'tab:orange'),
+    (med_sus,   q16_sus,   q84_sus,   'Middle',            'tab:orange'),
     (med_worst, q16_worst, q84_worst, 'Worst (high loss)', 'tab:red'),
 ]
 
@@ -653,15 +761,6 @@ plt.show()
 
 #%%
 # Similar plot for telemetry OUTPUTS (calibrator predictions) based on category
-# Build readable output names from the transformer
-output_names = []
-for param_name, slc in outputs_transformer.slices.items():
-    width = slc.stop - slc.start
-    if width == 1:
-        output_names.append(param_name)
-    else:
-        output_names.extend([f"{param_name}[{i}]" for i in range(width)])
-
 # Extract output vectors for each category
 out_vecs_best  = NN_predictions[best_sample_ids]
 out_vecs_worst = NN_predictions[worst_sample_ids]
@@ -693,7 +792,7 @@ ax.set_title('Calibrator output distributions: median ± 1σ quantile (best / mi
 ax.legend()
 ax.grid(True, axis='y', alpha=0.4)
 plt.tight_layout()
-plt.ylim(-1, 1.5)
+plt.ylim(-2.5, 2.5)
 plt.show()
 
 #%%
@@ -774,7 +873,7 @@ N_background = min(100, len(shap_tel_np))
 rng          = np.random.default_rng(42)
 bg_idx       = rng.choice(len(shap_tel_np), size=N_background, replace=False)
 background   = torch.tensor(shap_tel_np[bg_idx], dtype=torch.float32, device=default_device)
-X_explain    = torch.tensor(shap_tel_np,          dtype=torch.float32, device=default_device)
+X_explain    = torch.tensor(shap_tel_np,         dtype=torch.float32, device=default_device)
 
 #%%
 # ── 2.  Build explainer and compute SHAP values ───────────────────────────────
@@ -811,10 +910,10 @@ assert len(output_neuron_names) == N_outputs, f"Name count mismatch: {len(output
 # cell is self-consistent even when run independently in an interactive session.
 shap_input_features = dataset.features[:mean_abs_shap.shape[0]]
 # Replace certain names in the features list:
-shap_input_features[shap_input_features.index('gain')] = 'LO WFS gain'
-shap_input_features[shap_input_features.index('window')] = 'LO WFS window'
+# shap_input_features[shap_input_features.index('gain')] = 'LO WFS gain'
+# shap_input_features[shap_input_features.index('window')] = 'LO WFS window'
 shap_input_features[shap_input_features.index('theta0')] = 'Θ₀'
-shap_input_features[shap_input_features.index('frequency')] = 'LO WFS frequency'
+# shap_input_features[shap_input_features.index('frequency')] = 'LO WFS frequency'
 shap_input_features[shap_input_features.index('NGS mag (from ph.)')] = 'NGS mag'
 shap_input_features[shap_input_features.index('LGS photons, [photons/m^2/s]')] = 'LGS flux, [ph./m²/s]'
 
@@ -1013,3 +1112,5 @@ for ax in axes_flat[N_PARAM_PLOTS:]:
 fig.suptitle('SHAP dependence: dominant feature per parameter\n(colour = second-strongest feature)', fontsize=11)
 plt.show()
 
+
+# %%
