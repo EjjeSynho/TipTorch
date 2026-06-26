@@ -170,6 +170,36 @@ def SyncLabelsToCubes(labels_file, cubes_cache_dir, verbose=True):
     return n_updated
 
 
+def FindDuplicatesFITS(folder):
+    ''' Finds duplicates in a folder of FITS files based on ESO OBS ID, TPL START, and DATE-OBS values. '''
+    records = []
+    for file in sorted(os.listdir(folder)):
+        fpath = folder / file
+        if not fpath.is_file():
+            continue
+        try:
+            with fits.open(fpath) as hdul:
+                hdr = hdul[0].header
+                records.append({
+                    'file':     file,
+                    'OB_ID':    hdr.get('ESO OBS ID',       hdr.get('HIERARCH ESO OBS ID',    None)),
+                    'TPL_START': hdr.get('ESO TPL START',   hdr.get('HIERARCH ESO TPL START', None)),
+                    'DATE_OBS': hdr.get('DATE-OBS',         None),
+                })
+        except Exception as e:
+            print(f"  Warning: could not read {file}: {e}")
+
+    df_cubes = pd.DataFrame(records)
+
+    for key in ['OB_ID', 'TPL_START', 'DATE_OBS']:
+        dups = df_cubes[df_cubes.duplicated(subset=[key], keep=False) & df_cubes[key].notna()]
+        if dups.empty:
+            print(f"No duplicates found for {key}")
+        else:
+            print(f"\nDuplicates on {key}:")
+            print(dups[['file', key]].sort_values(key).to_string(index=False))
+
+
 def LoadSTDStarCacheByID(id):
     ''' Searches a specific STD star by its ID in the list of cached cubes. '''
     with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:

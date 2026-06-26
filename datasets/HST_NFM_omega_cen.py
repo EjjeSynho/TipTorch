@@ -25,7 +25,7 @@ from pathlib import Path
 from tqdm import tqdm
 
 from tiptorch._config import project_settings
-from MUSE_STD_dataset.STD_dataset_utils import MatchRawWithCubes
+from MUSE_STD_dataset.STD_dataset_utils import MatchRawWithCubes, FindDuplicatesFITS
 
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
 
@@ -41,20 +41,24 @@ data_folder  = MUSE_DATA_FOLDER / 'omega_cluster/OmegaCentaury_data/'
 RAW_FOLDER   = data_folder / "../raw_data"
 CUBES_FOLDER = data_folder / "../reduced_cubes"
 
+FindDuplicatesFITS(CUBES_FOLDER)
 files_matches, _ = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=False)
 
 # reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 # reduced_cube = "ADP.2019-05-30T08-10-58.821.fits"
 # reduced_cube = "ADP.2021-05-19T05-26-01.345.fits"
 # reduced_cube = "ADP.2021-05-19T05-26-01.337.fits"
-reduced_cube = "ADP.2021-05-19T05-26-01.303.fits"
+# reduced_cube = "ADP.2021-05-19T05-26-01.303.fits"
+# reduced_cube = "DATACUBEFINALscipost_20191102T010934_fb6f4016.fits"
+reduced_cube = "DATACUBEFINALscipost_20220531T034028_d33feab3.fits"
+# reduced_cube = "ADP.2022-06-20T16-50-01.871.fits"
+
 
 raw_file = files_matches.loc[files_matches['cube'] == reduced_cube]['raw'].values[0]
 
 cube_path  = MUSE_DATA_FOLDER / f"omega_cluster/reduced_cubes/{reduced_cube}"
 raw_path   = MUSE_DATA_FOLDER / f"omega_cluster/raw_data/{raw_file}"
 cache_path = MUSE_DATA_FOLDER / f"omega_cluster/cached_cubes/{cube_path.stem}.pickle"
-
 
 #%%
 print("Loading the Astrometric part of the catalog...")
@@ -267,8 +271,12 @@ df_HST_sources = df_sel.drop(columns = ['RA', 'DEC'])
 df_HST_sources = df_HST_sources.rename(columns={'x, [asec]': 'x', 'y, [asec]': 'y'})
 df_HST_sources['flux'] = df_flux.sum(axis=1)
 
-df_HST_sources['x'] += hst_x_offset  # Empirical WCS pre-alignment offsets
-df_HST_sources['y'] += hst_y_offset
+# Emprical correction
+dx_emp = 0.5
+dy_emp = 1.5
+
+df_HST_sources['x'] += hst_x_offset + dx_emp # Empirical WCS pre-alignment offsets
+df_HST_sources['y'] += hst_y_offset + dy_emp
 
 # Flux-weighted centroid shift from N brightest sources (pre-ICP coarse alignment)
 n_bright_prealign  = 5    # set 0 to disable
@@ -314,8 +322,7 @@ print(f"Median HST/MUSE flux ratio (for top {n_compare} sources): {flux_ratio_me
 flux_HST_norm  = flux_HST  / np.max(flux_HST) / flux_ratio_median
 flux_MUSE_norm = flux_MUSE / np.max(flux_HST) 
 
-#%%
-
+#%
 def weighted_affine_fit_proximity(
     df_src: pd.DataFrame,
     df_dst: pd.DataFrame,
@@ -464,7 +471,7 @@ x_hst_sel = df_HST_sources_filtered['x'].to_numpy()
 y_hst_sel = df_HST_sources_filtered['y'].to_numpy()
 flux_hst_norm_sel  = df_HST_sources_filtered['flux'].values  / np.max(flux_HST) / flux_ratio_median
 
-#%%
+#%
 # Plot the matches
 plt.figure(figsize=(10, 10))
 
