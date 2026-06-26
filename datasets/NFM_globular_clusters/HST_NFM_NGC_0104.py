@@ -38,12 +38,14 @@ from data_processing.MUSE_data_utils import LoadCachedDataMUSE
 from MUSE_STD_dataset.STD_dataset_utils import FindDuplicatesFITS, MatchRawWithCubes
 from tools.multisources import DetectSources
 
+# Using HACKS + HUGS datasets: https://archive.stsci.edu/hlsp/hacks, https://archive.stsci.edu/prepds/hugs/
+
 #%%
 MUSE_DATA_FOLDER = Path(project_settings["MUSE_data_folder"])
-data_folder = MUSE_DATA_FOLDER / "omega_cluster/NGC0104_data"
-RAW_FOLDER = data_folder / "../raw_data"
-CUBES_FOLDER = data_folder / "../reduced_cubes"
-METADATA_FOLDER = data_folder / "../metadata"
+data_folder      = MUSE_DATA_FOLDER / "omega_cluster/NGC0104_data"
+RAW_FOLDER       = data_folder / "../raw_data"
+CUBES_FOLDER     = data_folder / "../reduced_cubes"
+METADATA_FOLDER  = data_folder / "../metadata"
 
 CATALOG_METHOD = 1
 MATCH_RADIUS = 30 * u.arcsec
