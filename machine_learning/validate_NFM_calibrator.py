@@ -60,12 +60,11 @@ elif 'cfg' not in dir():
 
 #%%
 # ── Load post-training metadata ───────────────────────────────────────────────
-_meta_path = WEIGHTS_FOLDER / 'NFM_calibrator' / f'{cfg["name"]}_meta.json'
+_meta_path = WEIGHTS_FOLDER / cfg["weights_subdir"] / f'{cfg["name"]}_meta.json'
+
 if not _meta_path.exists():
-    raise FileNotFoundError(
-        f"Training metadata not found: {_meta_path}. "
-        "Run train_NFM_calibrator.py first."
-    )
+    raise FileNotFoundError(f"Training metadata not found: {_meta_path}. Run train_NFM_calibrator.py first.")
+
 with open(_meta_path) as _f:
     train_meta = json.load(_f)
 
@@ -75,11 +74,7 @@ N_wvl_total     = train_meta['N_wvl_total']
 N_outputs       = train_meta['N_outputs']
 input_features  = train_meta['input_feature_names']
 
-logger.info(
-    f"Metadata loaded: name={train_meta['name']} | "
-    f"best_val={train_meta['best_val_loss']:.6f} | "
-    f"completed={train_meta['training_completed_at']}"
-)
+logger.info(f"Metadata loaded: name={train_meta['name']} | best_val={train_meta['best_val_loss']:.6f} | completed={train_meta['training_completed_at']}")
 
 #%%
 # ── Ensure consistent dataset split ──────────────────────────────────────────

@@ -76,7 +76,9 @@ DEFAULT_CONFIG = {
         "Jxy", "bg_ctrl", "dx_ctrl", "dy_ctrl",
         "F_norm", "F_norm_lambda_ctrl", "src_dirs_x", "src_dirs_y",
         "wind_dir_single", "F_norm_λ_ctrl"
-    ]
+    ],
+    "weights_subdir":     "NFM_calibrator",
+    "max_train_samples":  null
 }
 
 _parser = argparse.ArgumentParser(description="Train NFM Calibrator")
@@ -105,7 +107,7 @@ else:
 MUSE_DATA_FOLDER  = Path(project_settings["MUSE_data_folder"])
 STD_FOLDER        = Path(project_settings["MUSE_STD_data_folder"])
 DATASET_CACHE     = STD_FOLDER / 'dataset_cache'
-WEIGHTS_DIR_CALIB = WEIGHTS_FOLDER / 'NFM_calibrator'
+WEIGHTS_DIR_CALIB = WEIGHTS_FOLDER / cfg["weights_subdir"]
 BEST_CALIB_PATH   = WEIGHTS_DIR_CALIB / f'{cfg["name"]}_checkpoint.pth'
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -240,6 +242,19 @@ trainer = NFMCalibratorTrainer(
 
 # Persist the train/val split so the validation script can reproduce it exactly
 _split_path = trainer.weights_dir / f'{cfg["name"]}_split.npz'
+
+# ── Optional training-set subsampling (data-ablation experiments) ─────────────
+_max_n = cfg["max_train_samples"]
+if _max_n is not None and _max_n < len(trainer.train_idx):
+    _rng_sub = np.random.default_rng(cfg["trainer"]["random_state"])
+    trainer.train_idx    = _rng_sub.choice(trainer.train_idx, size=int(_max_n), replace=False)
+    trainer.train_loader = trainer._make_loader(trainer.train_idx, shuffle=True)
+    logger.info(
+        f"Training subset: {len(trainer.train_idx)} / "
+        f"{len(trainer.train_idx) + len(trainer.val_idx)} samples "
+        f"(max_train_samples={_max_n})"
+    )
+
 np.savez(_split_path, train_idx=trainer.train_idx, val_idx=trainer.val_idx)
 logger.info(f"Dataset split saved -> {_split_path}")
 

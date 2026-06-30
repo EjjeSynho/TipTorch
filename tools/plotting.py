@@ -231,7 +231,7 @@ def render_spectral_PSF(spectral_cube, λs):
 
 def PlotSpetralCubeInRGB(
     image,
-    wavelengths,
+    wavelengths = None,
     min_val = 1e-6,
     max_val = None,
     scale = 'log',
@@ -284,12 +284,13 @@ def PlotSpetralCubeInRGB(
     image_RGB : ndarray, shape (H, W, 3)
         The raw (pre-normalisation) RGB array.
     """
-    if wavelengths is None:
-        raise ValueError("wavelengths must be provided")
-
     image_t = image if torch.is_tensor(image) else torch.as_tensor(image)
     if image_t.ndim != 3:
         raise ValueError(f"Expected image with shape (N_waves, H, W), got {tuple(image_t.shape)}")
+        
+    if wavelengths is None:
+        # Map spectral ramge to visible spectrum (440-750 nm) if not provided
+        wavelengths = np.linspace(440, 750, image_t.shape[0])
 
     wavelengths    = np.asarray(wavelengths)
     RGB_weights_np = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths], dtype=np.float32).T

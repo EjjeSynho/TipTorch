@@ -481,8 +481,6 @@ simulated_full = ob.SimulateField(full_spectrum=True, N_λ_per_batch=10, disenta
 from tools.plotting import PlotSpetralCubeInRGB
 
 # Mapping MUSE spectral range to visible spectrum range for RGB conversion
-λ_vis = np.linspace(440, 750, ob.N_wvl_full)  # MUSE covers ~465-930nm, so we map it to 440-750nm for visualization
-
 color_kwargs ={
     'saturation' :  2.0,
     'contrast'   :  1.75,
@@ -490,8 +488,7 @@ color_kwargs ={
     'mg_shift'   :  0.15,
     'min_val'    :  1000,
     'max_val'    :  4*7.5e6,
-    'show'       :  False,    
-    'wavelengths':  λ_vis
+    'show'       :  False
 }
 
 model_full = simulated_full[ob.ROI_plot] + ob.background_full.view(-1, 1, 1).numpy()
