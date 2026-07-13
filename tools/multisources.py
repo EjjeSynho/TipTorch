@@ -657,7 +657,7 @@ def plot_ROIs_as_grid(ROIs, cols=5):
     
     
 
-def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
+def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, sources=None, show=True):
     """
     Visualize source data, model, and their difference.
 
@@ -667,6 +667,12 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
         norm (ImageNormalize, optional): Normalization for visualization
         mask (float or array-like): Mask to apply to the difference
         ROI (slice, optional): Region of interest to visualize
+        sources (pd.DataFrame, SourcesSubset, or SourcesData, optional):
+            Source table with 'x_peak' / 'y_peak' columns, or any object whose
+            `.table` attribute carries those columns. When provided, source
+            positions are overlaid as markers on every panel. Coordinates are
+            automatically shifted to match the cropped image frame when ROI is used.
+        show (bool): Whether to call plt.show() after each panel
     """
     def process_array(x):
         # Convert to numpy
@@ -700,7 +706,32 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
         vmax = max(data_vis.max(), model_vis.max(), diff_vis.max())
         norm = ImageNormalize(vmin=vmin, vmax=vmax, stretch=LinearStretch())
 
-    # Plot all three images
+    # ── Source positions, aligned to the (possibly cropped) image frame ────────
+    sources_xy = None
+    if sources is not None:
+        # Accept SourcesSubset / SourcesData (anything with .table) or a bare DataFrame
+        src_df = sources
+        # Extract the pixel offset introduced by ROI cropping.
+        # ROI is a single np.s_[..., y0:y1, x0:x1] object, i.e. a tuple
+        # (Ellipsis, slice(y0, y1), slice(x0, x1)) — pick the last two slice entries.
+        x_offset, y_offset = 0, 0
+        if ROI is not None:
+            roi_slices = [s for s in ROI if isinstance(s, slice)]
+            if len(roi_slices) >= 2:
+                y_offset = roi_slices[-2].start or 0
+                x_offset = roi_slices[-1].start or 0
+
+        xs = src_df['x_peak'].to_numpy() - x_offset
+        ys = src_df['y_peak'].to_numpy() - y_offset
+        sources_xy = np.stack([xs, ys], axis=1)   # [N, 2]  in cropped-image pixels
+
+        # Circle size proportional to white (spectrally summed) flux
+        peak_vals = src_df['peak_value'].to_numpy().astype(float)
+        peak_vals = np.clip(peak_vals, 0, None)
+        flux_norm = peak_vals / peak_vals.max() if peak_vals.max() > 0 else np.ones_like(peak_vals)
+        circle_sizes = 10 + flux_norm * 500   # scatter marker area: faint~40, bright~440
+
+    # ── Plot all three panels ──────────────────────────────────────────────────
     titles = ['Data', 'Model', 'Difference']
     images = [data_vis, model_vis, diff_vis]
 
@@ -708,7 +739,21 @@ def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, show=True):
         plt.imshow(img, norm=norm, origin='lower')
         plt.title(title)
         plt.axis('off')
-        if show: plt.show()
+        
+        if sources_xy is not None:
+            # Cross markers at each source centre
+            plt.scatter(sources_xy[:, 0], sources_xy[:, 1],
+                        marker='+', s=10, linewidths=1.2, c='red', zorder=10)
+            # Thin open circles whose size encodes the white-light flux
+            plt.scatter(sources_xy[:, 0], sources_xy[:, 1],
+                        s=circle_sizes, marker='o',
+                        facecolors='none', edgecolors='red',
+                        linewidths=0.5, zorder=9)
+            # for i, (x, y) in enumerate(sources_xy):
+            #     plt.text(x + 2, y + 2, str(i), color='red', fontsize=7,
+            #              va='bottom', ha='left', zorder=11)
+        if show:
+            plt.show()
 
     return diff_vis
 

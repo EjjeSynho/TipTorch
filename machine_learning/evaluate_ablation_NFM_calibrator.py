@@ -194,9 +194,7 @@ agg_results = {}
 for n in n_train_vals:
     rows = groups[n]
     agg_results[n] = {
-        key: _agg(rows, key)
-        for key in ("val_loss", "peak_err_mean", "fwhm_err_mean",
-                    "fwhm_err_sample_median", "profile_err_median")
+        key: _agg(rows, key) for key in ("val_loss", "peak_err_mean", "fwhm_err_mean", "fwhm_err_sample_median", "profile_err_median")
     }
 
 # Print summary table
@@ -253,7 +251,8 @@ for ax, (key, ylabel, scale) in zip(axes, METRICS):
 
 fig.suptitle('NFM Calibrator - Data Ablation Study', fontsize=13)
 plt.tight_layout()
-plt.show()
+# plt.show()
+plt.savefig(ABLATION_DIR / 'ablation_eval_summary.pdf', dpi=200)
 
 #%% ── 5. FWHM error per wavelength for each n_train ─────────────────────────
 # Use the mean-PSF FWHM profile across all runs in each group

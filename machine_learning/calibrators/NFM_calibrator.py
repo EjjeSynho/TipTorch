@@ -138,7 +138,9 @@ class NFMCalibrator():
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     ):
         self.device = device
-        state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        self.checkpoint_path = Path(checkpoint_path)
+        self._bundle_state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        state = self._bundle_state
 
         # Initialize NN architecture from saved state
         self.net = SmallCalibratorNet(
@@ -168,6 +170,36 @@ class NFMCalibrator():
         # Aux params
         self.LO_modes_max   = state.get('LO_modes_max', None)
         self.N_spline_nodes = state.get('N_spline_nodes', None)
+
+    @staticmethod
+    def _tree_to_cpu(obj):
+        """Recursively detach tensors and move them to CPU for portable serialization."""
+        if torch.is_tensor(obj):
+            return obj.detach().cpu().clone()
+        if isinstance(obj, dict):
+            return {k: NFMCalibrator._tree_to_cpu(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(NFMCalibrator._tree_to_cpu(v) for v in obj)
+        return deepcopy(obj)
+
+    def save(self, path, **metadata):
+        """
+        Save a calibrator bundle with the current network weights.
+
+        The original loaded bundle is used as the template, so telemetry scalers,
+        output transforms, and architecture metadata are preserved. This is useful
+        for science-data fine-tuning, where the tuned calibrator must be stored
+        separately from the baseline STD-trained bundle.
+        """
+        state = deepcopy(self._bundle_state)
+        state['net_state_dict'] = self._tree_to_cpu(self.net.state_dict())
+        if metadata:
+            state['fine_tuning'] = metadata
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self._tree_to_cpu(state), path)
+        logger.info(f"Calibrator bundle saved -> {path}")
+        return path
 
 
     def prepare_telemetry(self, reduced_telemetry: pd.DataFrame) -> torch.Tensor:

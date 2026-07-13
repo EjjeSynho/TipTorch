@@ -11,7 +11,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
+from copy import deepcopy
 from tqdm import tqdm
+from pathlib import Path
+from datetime import datetime
 from matplotlib.colors import LogNorm
 from typing import Optional
 from dataclasses import dataclass
@@ -102,6 +105,7 @@ class MUSEObservation:
         
         self.simulated_sparse = None # stores simulated field
         self.simulated_full   = None # stores simulated field for the full MUSE-NFM spectrum
+        self.calibrator       = None # NFMCalibrator used to initialize / fine-tune the physical model
         
         
 
@@ -191,7 +195,7 @@ class MUSEObservation:
         return spectra_sparse, spectra_full
 
 
-    def InitSimulation(self) -> None:
+    def InitSimulation(self, path_to_calibrator: str|Path|None = None) -> None:
         if self.sources is None:
              raise ValueError("Sources must be initialized before initializing the PSF model. Please run ExtractSources() first.")
         
@@ -219,11 +223,15 @@ class MUSEObservation:
                 λ_max           = self.λ_full.max().item() * 1e-9, # [m]
                 num_λ_slices    = len(self.λ_full)
             )
-            #  Get the initial guess for the PSF model parameters
-            calibrator = NFMCalibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth', device=self.device)
-            _ = calibrator.check_compatibility(self.PSF_model)
+                        
+            # Get the initial guess for the PSF model parameters via calibrator NN
+            if path_to_calibrator is None:
+                path_to_calibrator = WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth'
+                
+            self.calibrator = NFMCalibrator(path_to_calibrator, device=self.device)
+            _ = self.calibrator.check_compatibility(self.PSF_model)
             # Change PSF model parameters based on NN's predictions
-            calibrator.calibrate(self.reduced_telemetry, self.PSF_model)
+            self.calibrator.calibrate(self.reduced_telemetry, self.PSF_model)
 
             # Disable optimization of some variables
             self.PSF_model.inputs_manager.set_optimizable('bg_ctrl',  False)
@@ -600,6 +608,248 @@ class MUSEObservation:
         # Final composite loss
         return LO_loss + phase_bump_positive + first_defocus_penalty
 
+    def _calibrator_output_mask(self, calibrator: NFMCalibrator, tuned_params):
+        if tuned_params is None:
+            return torch.ones(
+                calibrator.outputs_transformer.get_stacked_size(),
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+        if isinstance(tuned_params, str):
+            tuned_params = [tuned_params]
+
+        unknown = [k for k in tuned_params if k not in calibrator.outputs_transformer.slices]
+        if unknown:
+            available = list(calibrator.outputs_transformer.slices.keys())
+            raise KeyError(f"Unknown calibrator output(s): {unknown}. Available outputs: {available}")
+
+        mask = torch.zeros(
+            calibrator.outputs_transformer.get_stacked_size(),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        for key in tuned_params:
+            mask[calibrator.outputs_transformer.slices[key]] = True
+        return mask
+
+    def _calibrator_prediction_to_psf_inputs(self, calibrator: NFMCalibrator, x_stacked: torch.Tensor) -> dict:
+        x_dict = calibrator.outputs_transformer.unstack(x_stacked)
+
+        if 'LO_coefs' in x_dict:
+            coefs = x_dict['LO_coefs']
+            phase_bump = torch.zeros(coefs.shape[0], 1, device=coefs.device, dtype=coefs.dtype)
+            x_dict['LO_coefs'] = torch.cat([phase_bump, coefs], dim=-1)
+
+        x_dict = calibrator._adapt_to_PSF_model(x_dict, self.PSF_model)
+        psf_inputs = self.PSF_model.inputs_manager.to_dict()
+        psf_inputs.update({k: v for k, v in x_dict.items() if k in psf_inputs})
+        return psf_inputs
+
+    def _simulate_sparse_from_calibrator(
+        self,
+        x_stacked: torch.Tensor,
+        calibrator: NFMCalibrator,
+        src_subset: Optional[SourcesSubset],
+    ) -> torch.Tensor:
+        if src_subset is None:
+            src_subset = self.sources.select(None)
+
+        x_dict = self._calibrator_prediction_to_psf_inputs(calibrator, x_stacked)
+        all_selected = len(src_subset.ids) == self.N_src
+        F_norm = x_dict['F_norm'] if all_selected else x_dict['F_norm'][src_subset.ids]
+
+        PSFs_ = self.PSF_model(
+            x_dict,
+            src_ids=None if all_selected else src_subset.ids,
+            update_params=True,
+        )
+        PSF_norm_factor = self.PSF_model.evaluate_splines(
+            x_dict['F_norm_λ_ctrl'],
+            self.PSF_model.λ_sim_normed,
+        )
+        flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor
+        PSFs = PSFs_ * (flux_normalization * src_subset.spectra_sparse).view(-1, self.N_wvl, 1, 1)
+        return add_ROIs(self.canvas_sparse * 0.0, PSFs, src_subset.slices_local, src_subset.slices_global)
+
+    def FineTuneCalibrator(
+        self,
+        tuned_params=('F_ctrl', 'dn', 'J_ctrl', 'LO_coefs'),
+        num_epochs=30,
+        lr=1e-4,
+        patience=8,
+        weight_decay=1e-4,
+        output_path=None,
+        prediction_anchor=5.0,
+        weight_anchor=1e-4,
+        regularization_looseness=1.0,
+        grad_clip=0.5,
+        calibrator_path=None,
+        restore_best=True,
+        verbose=True,
+    ):
+        """
+        Fine-tune the NFM calibrator NN directly on this science observation.
+
+        The loss is computed through the normal OB rendering path: all selected
+        sources are drawn into the shared field canvas, so overlaps, off-axis
+        source positions, and different source fluxes are preserved. Untuned
+        calibrator outputs are clamped to the frozen reference prediction, while
+        the tuned network is regularized toward its starting weights.
+
+        Increase ``regularization_looseness`` above 1 to let the NN move farther
+        from its initial predictions, or set ``prediction_anchor`` /
+        ``weight_anchor`` directly for finer control.
+        """
+        if self.model_type != 'tiptorch':
+            raise ValueError("Calibrator fine-tuning is only available for model_type='TipTorch'.")
+        if self.sources is None or self.N_src == 0:
+            raise ValueError("Sources must be extracted before fine-tuning. Run ExtractSources() first.")
+        if not hasattr(self, 'PSF_model'):
+            raise ValueError("PSF model must be initialized before fine-tuning. Run InitSimulation() first.")
+
+        if self.calibrator is None or calibrator_path is not None:
+            self.calibrator = NFMCalibrator(
+                WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth' if calibrator_path is None else calibrator_path,
+                device=self.device,
+            )
+            _ = self.calibrator.check_compatibility(self.PSF_model)
+
+        calibrator = self.calibrator
+        calibrator.net.train()
+
+        if regularization_looseness <= 0:
+            raise ValueError("regularization_looseness must be positive.")
+        effective_prediction_anchor = prediction_anchor / regularization_looseness
+        effective_weight_anchor = weight_anchor / regularization_looseness
+
+        tel = calibrator.prepare_telemetry(self.reduced_telemetry)
+        tuned_mask = self._calibrator_output_mask(calibrator, tuned_params).unsqueeze(0)
+        fixed_mask = ~tuned_mask.squeeze(0)
+        fit_weights = self._compute_fitting_weights()
+        fit_subset = fit_weights.subset
+
+        with torch.no_grad():
+            x_ref = calibrator.net(tel).detach()
+        ref_state = {name: p.detach().clone() for name, p in calibrator.net.named_parameters()}
+
+        optimizer = torch.optim.AdamW(calibrator.net.parameters(), lr=lr, weight_decay=weight_decay)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=max(1, patience // 2), min_lr=1e-7
+        )
+
+        best_loss = float('inf')
+        best_state = deepcopy(calibrator.net.state_dict())
+        bad_epochs = 0
+        history = []
+
+        for epoch in range(num_epochs):
+            optimizer.zero_grad(set_to_none=True)
+            x_tuned = calibrator.net(tel)
+            x_combined = torch.where(tuned_mask, x_tuned, x_ref)
+            model = self._simulate_sparse_from_calibrator(x_combined, calibrator, fit_subset)
+
+            data_loss = self.loss(None, self.cube_sparse, lambda _: model, fit_weights)
+            anchor_loss = torch.zeros((), device=self.device, dtype=data_loss.dtype)
+            if fixed_mask.any():
+                anchor_loss = (x_tuned[:, fixed_mask] - x_ref[:, fixed_mask]).pow(2).mean()
+
+            drift_loss = torch.zeros((), device=self.device, dtype=data_loss.dtype)
+            drift_count = 0
+            for name, param in calibrator.net.named_parameters():
+                drift_loss = drift_loss + (param - ref_state[name]).pow(2).mean()
+                drift_count += 1
+            drift_loss = drift_loss / max(drift_count, 1)
+
+            loss = data_loss + effective_prediction_anchor * anchor_loss + effective_weight_anchor * drift_loss
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"Non-finite calibrator fine-tuning loss at epoch {epoch + 1}.")
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(calibrator.net.parameters(), max_norm=grad_clip)
+            optimizer.step()
+            with torch.no_grad():
+                self.PSF_model.update_manager_params(
+                    self._calibrator_prediction_to_psf_inputs(calibrator, x_combined.detach())
+                )
+
+            loss_value = float(loss.detach().cpu())
+            data_value = float(data_loss.detach().cpu())
+            history.append({
+                'epoch': epoch + 1,
+                'loss': loss_value,
+                'data_loss': data_value,
+                'anchor_loss': float(anchor_loss.detach().cpu()),
+                'weight_drift_loss': float(drift_loss.detach().cpu()),
+                'prediction_anchor': effective_prediction_anchor,
+                'weight_anchor': effective_weight_anchor,
+                'lr': optimizer.param_groups[0]['lr'],
+            })
+
+            scheduler.step(loss_value)
+            is_best = loss_value < best_loss
+            if is_best:
+                best_loss = loss_value
+                best_state = deepcopy(calibrator.net.state_dict())
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+
+            if verbose:
+                print(
+                    f"Calibrator tune {epoch + 1:03d}/{num_epochs} | "
+                    f"loss={loss_value:.4f} data={data_value:.4f} "
+                    f"lr={optimizer.param_groups[0]['lr']:.2e}" + (" *" if is_best else "")
+                )
+
+            del model, x_tuned, x_combined, data_loss, anchor_loss, drift_loss, loss
+            if bad_epochs >= patience:
+                if verbose:
+                    print(f"Early stopping calibrator fine-tuning at epoch {epoch + 1}.")
+                break
+
+        if restore_best and best_state is not None:
+            calibrator.net.load_state_dict(best_state)
+
+        calibrator.net.eval()
+        
+        with torch.no_grad():
+            x_best = calibrator.net(tel)
+            x_best = torch.where(tuned_mask, x_best, x_ref)
+            x_best_dict = self._calibrator_prediction_to_psf_inputs(calibrator, x_best)
+            self.PSF_model.update_manager_params(x_best_dict)
+            
+            _ = self.PSF_model()
+            self._update_flux_norm()
+
+        if output_path is None:
+            stem = Path(self.cube_path).stem.replace(' ', '_')
+            output_path = WEIGHTS_FOLDER / 'NFM_calibrator' / f'{stem}_science_tuned_bundle.pth'
+
+        saved_path = calibrator.save(
+            output_path,
+            source='MUSEObservation.FineTuneCalibrator',
+            tuned_params=list(tuned_params) if tuned_params is not None and not isinstance(tuned_params, str) else tuned_params,
+            num_epochs=len(history),
+            best_loss=best_loss,
+            prediction_anchor=prediction_anchor,
+            weight_anchor=weight_anchor,
+            regularization_looseness=regularization_looseness,
+            effective_prediction_anchor=effective_prediction_anchor,
+            effective_weight_anchor=effective_weight_anchor,
+            completed_at=datetime.now().isoformat(timespec='seconds'),
+            raw_path=str(self.raw_path),
+            cube_path=str(self.cube_path),
+            cache_path=str(self.cache_path),
+        )
+
+        release = getattr(torch.cuda, 'empty_cache', None)
+        gc.collect()
+        if release is not None:
+            release()
+
+        return {'history': history, 'best_loss': best_loss, 'path': saved_path}
+
 
     def loss(self, x_, data, model, fit_weights: FitWeights):
         model = model(x_) # generate the batch of PSFs
@@ -728,11 +978,12 @@ class MUSEObservation:
                     PSFs,
                     self.cube_sparse,
                     solver='nonlinear',
-                    fixed_bg=self.bg_prior
+                    fixed_bg=self.bg_prior,
+                    flux_reg=1e-7,
                 )#,
-                    # flux_reg=1e-6,
+                    # grad_clip = 0.5,
                     # field_crop=self.ROI_plot,
-                # )
+
                 simulated = I_sim - bg_solved.view(self.N_wvl, 1, 1) # Leave the pure PSF contribution in the simulated image
                 self.background_sparse = bg_solved
                 

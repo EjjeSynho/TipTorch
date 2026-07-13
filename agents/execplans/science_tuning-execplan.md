@@ -25,3 +25,13 @@ The goal of this plan is to allow fine-tuning the NFM calibrator NN directly on 
 - When tuning the calibrator, make sure that the tuned version is stored separately and does not overwrite the original calibrator weights
 
 Append your thoughts and conclusions to the end of this fle. Good luck!
+
+## Implementation notes and conclusions
+
+- Implemented science-data fine-tuning as `MUSEObservation.FineTuneCalibrator(...)`, rather than reusing the STD training loader. The loop uses the observation's normal sparse-field rendering path: calibrator telemetry prediction -> PSF model inputs -> per-source PSFs -> shared OB canvas with overlapping sources.
+- The optimizer is `AdamW` with low default learning rate, weight decay, gradient clipping, ReduceLROnPlateau scheduling, and early stopping. This matches the requested first-order training style and avoids the L-BFGS optimizer used for direct PSF-model fitting.
+- To reduce overfitting and forgetting, only selected calibrator output dimensions are allowed to affect the rendered model; untuned outputs are clamped to the frozen reference prediction. The network is also regularized toward its starting weights.
+- The regularization is now intentionally adjustable: `regularization_looseness > 1` divides both anchoring penalties, while `prediction_anchor` and `weight_anchor` can still be set directly. The defaults were relaxed from the initial conservative values so science fine-tuning can visibly move the NN prediction.
+- `NFMCalibrator` now keeps the loaded bundle state and can save a new bundle via `save(...)`. Science-tuned weights are written to a separate path by default, so the original STD-trained calibrator is not overwritten.
+- `development/MUSE_quasar.py` now calls `ob.FineTuneCalibrator(...)` after `InitSimulation()` and before `FitPSFModel(...)`, saving a science-tuned bundle for reuse on similar observations.
+- Verification performed here: Python syntax compilation for the touched modules. Full runtime validation still needs the local MUSE science files plus the baseline calibrator bundle.

@@ -240,7 +240,8 @@ def PlotSpetralCubeInRGB(
     saturation = 1.0,
     contrast = 1.0,
     wb_shift = 0.0,
-    mg_shift = 0.0
+    mg_shift = 0.0,
+    fig_size = (6, 6)
 ):
     """
     Map a multi-wavelength image into RGB.
@@ -357,10 +358,12 @@ def PlotSpetralCubeInRGB(
 
     norm_image = (np.clip(image_scaled, lo, hi) - lo) / (hi - lo)
 
-    plt.figure()
+    plt.figure(figsize=fig_size, dpi=300)
     plt.imshow(norm_image, origin="lower")
+    
     if title:
         plt.title(title)
+        
     plt.axis('off')
 
     if show:
