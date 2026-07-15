@@ -155,7 +155,7 @@ for epoch in range(NUM_EPOCHS):
     # Keep PSF model inputs in sync so _loss_LO reads up-to-date values next iteration
     with torch.no_grad():
         ob.PSF_model.update_manager_params(
-            ob._calibrator_prediction_to_psf_inputs(calibrator, x_combined.detach())
+            ob._calibrator_prediction_to_PSF_inputs(calibrator, x_combined.detach())
         )
 
     total_val  = float(total_loss.detach().cpu())
@@ -196,7 +196,7 @@ calibrator.net.eval()
 with torch.no_grad():
     x_best     = calibrator.net(tel)
     x_best     = torch.where(tuned_mask, x_best, x_ref)
-    ob.PSF_model.update_manager_params(ob._calibrator_prediction_to_psf_inputs(calibrator, x_best))
+    ob.PSF_model.update_manager_params(ob._calibrator_prediction_to_PSF_inputs(calibrator, x_best))
     ob._update_flux_norm()
 
 gc.collect()

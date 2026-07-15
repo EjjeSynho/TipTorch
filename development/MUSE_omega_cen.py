@@ -189,7 +189,8 @@ sources['weight'] = 1.0
 # sources = sources.nlargest(200, 'peak_value')
 
 ob.sources_table = sources
-ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
+
+# ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
 
 # ob.DisplaySources(draw_box_size=5)
 
@@ -509,13 +510,13 @@ data_full  = ob.cube_full[ob.ROI_plot]
 diff_full  = np.abs(model_full - data_full)
 
 _ = PlotSpetralCubeInRGB( model_full, title="Model (full spectrum)", **color_kwargs )
-plt.savefig(data_folder / f"plots/model_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
+# plt.savefig(data_folder / f"plots/model_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
 
 _ = PlotSpetralCubeInRGB( data_full, title="Data (full spectrum)", **color_kwargs )
-plt.savefig(data_folder / f"plots/data_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
+# plt.savefig(data_folder / f"plots/data_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
 
 _ = PlotSpetralCubeInRGB( diff_full, title="Difference", **color_kwargs )
-plt.savefig(data_folder / f"plots/diff_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
+# plt.savefig(data_folder / f"plots/diff_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
 
 # del model_full, data_full, diff_full
 # torch.cuda.empty_cache()

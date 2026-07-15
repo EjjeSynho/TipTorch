@@ -51,6 +51,7 @@ class FitWeights:
     LO:         float
     MSE:        float = 900.0
     MAE:        float = 2.6
+    log:        float = 500.0
     positive:   float = 2.0
     unit_flux:  float = 0.2
 
@@ -179,7 +180,7 @@ class MUSEObservation:
 
     def ExtractSpectraFromCore(self, sources_table, cube_sparse, cube_full):
         if len(sources_table) == 0:
-            raise ValueError("No sources detected. Please run DetectSources() or AddSources() before extracting spectra.")
+            raise ValueError("No sources detected. Please (re-)run DetectSources() or AddSources() before initializing sources info.")
         
         # Contains the spectrum per source AVERAGED across the PSF core pixels. The core mask here must match EXACTLY the one
         # used for the flux normalization factor estimation later        
@@ -197,7 +198,8 @@ class MUSEObservation:
 
     def InitSimulation(self, path_to_calibrator: str|Path|None = None) -> None:
         if self.sources is None:
-             raise ValueError("Sources must be initialized before initializing the PSF model. Please run ExtractSources() first.")
+            # raise ValueError("Sources table must be initialized before initializing the PSF model. Please (re-)run ExtractSources() or AddSources() first.")
+            self.ExtractSources(verbose=True, max_nan_fraction=0.7)
         
         # The model config is also updated to simulate only sparse λs
         self.model_config['sources_science']['Wavelength'] = torch.tensor(self.λ_sparse, device=self.device, dtype=torch.float32) * 1e-9 #[m]
@@ -275,7 +277,7 @@ class MUSEObservation:
         self._update_flux_norm() # Update the flux normalization factor based on the initial guess for the PSF shape
 
 
-    def DetectSources(self, nsigma=35, threshold='auto'):
+    def DetectSources(self, nsigma=35, threshold='auto', verbose=False):
         # Simple sources detector function. For now, make sure that only point sources are included. This function also defines the
         # order in which sources are indexed ad processed later, so it's important to use it before extracting the source images
         # and spectra. The order can be defined by the brightness of the sources in the descending order
@@ -285,13 +287,54 @@ class MUSEObservation:
             nsigma = nsigma,
             box_size = 11,
             sort_by_brightness = True,
-            weight_from_flux = False
+            weight_from_flux = False,
+            verbose = verbose
         )
 
 
     def AddSources(self, sources_coords, weights=0.0):
         # If some sources are missing from the automatic detection, they can be added manually by providing their coordinates in the same format as the sources dataframe
         self.sources_table = AddSources(self.cube_sparse, sources_coords, self.sources_table, weights=weights, weight_from_flux=False)
+
+
+    def DeleteSources(self, src_ids):
+        """
+        Delete source(s) by ID in-place.
+
+        When called after ExtractSources(), removes from the extracted SourcesData
+        and updates N_src. When called before ExtractSources(), removes from the
+        raw sources_table instead. If a PSF model has already been initialized,
+        a warning is issued and InitSimulation() must be re-run afterward.
+
+        Parameters
+        ----------
+        src_ids : int or list of int
+            Source ID(s) to delete, using the current indexing shown by DisplaySources().
+        """
+        import warnings
+        if isinstance(src_ids, (int, np.integer)):
+            src_ids = [int(src_ids)]
+        else:
+            src_ids = [int(i) for i in src_ids]
+
+        if self.sources is not None:
+            self.sources.delete(src_ids)
+            self.N_src = len(self.sources)
+            if hasattr(self, 'PSF_model') and self.PSF_model is not None:
+                warnings.warn(
+                    "Sources deleted after PSF model initialization. "
+                    "Please re-run InitSimulation() to rebuild the model."
+                )
+        elif self.sources_table is not None:
+            valid = [i for i in src_ids if i in self.sources_table.index]
+            invalid = [i for i in src_ids if i not in self.sources_table.index]
+            if invalid:
+                warnings.warn(f"Source IDs not found in sources_table and will be skipped: {invalid}")
+            if valid:
+                self.sources_table = self.sources_table.drop(index=valid).reset_index(drop=True)
+                self.sources_table.index.name = 'ID'
+        else:
+            raise ValueError("No sources to delete. Run DetectSources() or AddSources() first.")
 
 
     def ExtractSources(self, verbose=False, max_nan_fraction=0.3):
@@ -587,11 +630,20 @@ class MUSEObservation:
         residuals = diff * fit_weights.spectral * fit_weights.per_src.view(-1, 1, 1, 1) # apply both spectral and source weights to the residuals
         MSE_loss = residuals.pow(2).mean() * fit_weights.MSE
         MAE_loss = residuals.abs().mean()  * fit_weights.MAE
+
+        # Logarithmic loss: measures relative errors in log-space, making it naturally scale-invariant
+        # and more sensitive to PSF wing structure where MSE/MAE have little influence.
+        # eps is adaptive to the data peak to keep both arguments strictly positive at all flux levels.
+        eps = PSF_data.detach().amax().clamp(min=1e-10) * 1e-5
+        log_diff = torch.log(PSF_data.clamp(min=eps)) - torch.log(PSF_pred.clamp(min=eps))
+        log_residuals = log_diff * fit_weights.spectral * fit_weights.per_src.view(-1, 1, 1, 1)
+        log_loss = log_residuals.pow(2).mean() * fit_weights.log
+
         # Since x input in simulate_sparse() updates the values inside the PSF_model (including F_norm), they now can be used directly here
         F_penalty = (self.PSF_model.inputs_manager['F_ctrl'] - 1.0).abs().mean()
         # Soft non-negativity penalty: penalize when residuals (data - model) are negative to prevent ouversubtracting simulated PSFs
         force_positive_diff = torch.nn.functional.relu(-diff).mean()
-        return (MSE_loss + MAE_loss) * fit_weights.total + F_penalty * fit_weights.unit_flux + force_positive_diff * fit_weights.positive
+        return (MSE_loss + MAE_loss + log_loss) * fit_weights.total + F_penalty * fit_weights.unit_flux + force_positive_diff * fit_weights.positive
 
 
     def _loss_LO(self, fit_weights: FitWeights):
@@ -607,6 +659,7 @@ class MUSEObservation:
         first_defocus_penalty = self.force_positive_coef(self.PSF_model.inputs_manager['LO_coefs'][:, 2]) * fit_weights.LO  #NOTE: won't work with the chromatic defocus
         # Final composite loss
         return LO_loss + phase_bump_positive + first_defocus_penalty
+
 
     def _calibrator_output_mask(self, calibrator: NFMCalibrator, tuned_params):
         if tuned_params is None:
@@ -633,7 +686,8 @@ class MUSEObservation:
             mask[calibrator.outputs_transformer.slices[key]] = True
         return mask
 
-    def _calibrator_prediction_to_psf_inputs(self, calibrator: NFMCalibrator, x_stacked: torch.Tensor) -> dict:
+
+    def _calibrator_prediction_to_PSF_inputs(self, calibrator: NFMCalibrator, x_stacked: torch.Tensor) -> dict:
         x_dict = calibrator.outputs_transformer.unstack(x_stacked)
 
         if 'LO_coefs' in x_dict:
@@ -646,6 +700,7 @@ class MUSEObservation:
         psf_inputs.update({k: v for k, v in x_dict.items() if k in psf_inputs})
         return psf_inputs
 
+
     def _simulate_sparse_from_calibrator(
         self,
         x_stacked: torch.Tensor,
@@ -655,7 +710,7 @@ class MUSEObservation:
         if src_subset is None:
             src_subset = self.sources.select(None)
 
-        x_dict = self._calibrator_prediction_to_psf_inputs(calibrator, x_stacked)
+        x_dict = self._calibrator_prediction_to_PSF_inputs(calibrator, x_stacked)
         all_selected = len(src_subset.ids) == self.N_src
         F_norm = x_dict['F_norm'] if all_selected else x_dict['F_norm'][src_subset.ids]
 
@@ -671,6 +726,7 @@ class MUSEObservation:
         flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor
         PSFs = PSFs_ * (flux_normalization * src_subset.spectra_sparse).view(-1, self.N_wvl, 1, 1)
         return add_ROIs(self.canvas_sparse * 0.0, PSFs, src_subset.slices_local, src_subset.slices_global)
+
 
     def FineTuneCalibrator(
         self,
@@ -770,7 +826,7 @@ class MUSEObservation:
             optimizer.step()
             with torch.no_grad():
                 self.PSF_model.update_manager_params(
-                    self._calibrator_prediction_to_psf_inputs(calibrator, x_combined.detach())
+                    self._calibrator_prediction_to_PSF_inputs(calibrator, x_combined.detach())
                 )
 
             loss_value = float(loss.detach().cpu())
@@ -816,7 +872,7 @@ class MUSEObservation:
         with torch.no_grad():
             x_best = calibrator.net(tel)
             x_best = torch.where(tuned_mask, x_best, x_ref)
-            x_best_dict = self._calibrator_prediction_to_psf_inputs(calibrator, x_best)
+            x_best_dict = self._calibrator_prediction_to_PSF_inputs(calibrator, x_best)
             self.PSF_model.update_manager_params(x_best_dict)
             
             _ = self.PSF_model()
@@ -1027,12 +1083,13 @@ class MUSEObservation:
             ROI  = self.ROI_plot
         )
    
+   
     @staticmethod
     def disentangle_flux(
         srcs: SourcesSubset,
         PSFs,
         data_cube,
-        solver           = 'linear',   # 'linear' | 'nonlinear'
+        solver           = 'linear',  # 'linear' | 'nonlinear'
         rcond            = 1e-2,
         n_iter           = 1000,
         lr               = 1e-2,
@@ -1048,7 +1105,8 @@ class MUSEObservation:
         flux_prior       = None,   # [N_wvl, N_src] prior target for spectrum regularization; if None, regularizes towards zero
     ):
         """
-        Reconstruct spectral cube by solving  P @ spectrum + bg ≈ I_data.
+        Does spectral disentangling of the sources in the field by solving a linear system of equations. The PSFs are assumed to be known and fixed.
+        In essence, reconstructs spectral cube by solving  P @ spectrum + bg ≈ I_data.
         Can do this with a single linear least-squares solve or with an iterative non-linear optimization
         enforcing non-negativity on the spectra and optionally on the background as well.
 
@@ -1484,6 +1542,20 @@ class MUSEObservation:
         
         plt.grid(alpha=0.3)
         plt.tight_layout()
+        plt.show()
+
+
+    def PlotStrehlRatio(self):
+        if self.PSF_model is None:
+            raise ValueError("PSF model must be initialized before plotting Strehl ratio. Please run InitPSFModel() first.")
+        
+        Strehls_per_λ = self.PSF_model.ComputeStrehl()
+        
+        plt.title('Strehl ratio vs. λ (for the 1st source)')
+        plt.plot(self.λ_sparse, 100.0 * Strehls_per_λ.flatten().cpu())
+        plt.ylabel('Strehl ratio, [%]')
+        plt.xlabel('Wavelength, [nm]')
+        plt.grid()
         plt.show()
 
 

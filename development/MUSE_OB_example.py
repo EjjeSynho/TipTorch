@@ -47,27 +47,31 @@ if not isinstance(data_folder, Path):
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_11_59.783.fits.fz"
 # cache_path = data_folder / "cached_cubes/CUBE_0002.pickle"
 
-cube_path  = data_folder / "reduced_cubes/CUBE_0003.fits"
-raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
-cache_path = data_folder / "cached_cubes/CUBE_0003.pickle"
+# cube_path  = data_folder / "reduced_cubes/CUBE_0003.fits"
+# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
+# cache_path = data_folder / "cached_cubes/CUBE_0003.pickle"
 
-# cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
-# raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
-# cache_path = data_folder / "cached_cubes/CUBE_0021.pickle"
+cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
+raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
+cache_path = data_folder / "cached_cubes/CUBE_0021.pickle"
 
 ob = MUSEObservation(raw_path, cube_path, cache_path, device=device)
 
 #%%
-ob.DetectSources(nsigma=35, threshold='auto')
+# ob.DetectSources(nsigma=35, threshold='auto')
+ob.DetectSources(nsigma=35, threshold=4e2, verbose=True)
 # ob.AddSources([[100, 200]], weights=0.0)
 # NOTE: If some sources must be filtered out, do it here by modifying the ob.sources_table before initializing the sources for simulation
 
-#%%
-ob.ExtractSources()
+# ob.DeleteSources([1, 2])  # Example: delete sources with IDs 1 and 2
+
 ob.DisplaySources(draw_box_size=20)
 
 #%%
-ob.PlotSourceSpectra()
+# ob.ExtractSources()
+
+#%%
+# ob.PlotSourceSpectra()
 ob.InitSimulation()
 
 #%%
@@ -80,13 +84,7 @@ model = ob.SimulateField()
 ob.DisplaySimulation(plot_profiles=True)
 
 #%%
-Strehls_per_λ = ob.PSF_model.ComputeStrehl()
-plt.title('Strehl ratio vs. λ (for the 1st source)')
-plt.plot(ob.λ_sparse, 100.0 * Strehls_per_λ.flatten().cpu())
-plt.ylabel('Strehl ratio, [%]')
-plt.xlabel('Wavelength, [nm]')
-plt.grid()
-plt.show()
+
 
 #%%
 _ = ob.SimulateField(full_spectrum=True)

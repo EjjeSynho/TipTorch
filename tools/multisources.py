@@ -291,9 +291,37 @@ class SourcesData:
             return self.select(list(range(len(self)))[src_ids])
         return self.select(src_ids)
 
+    def delete(self, src_ids: Union[int, np.integer, Sequence[int]]) -> None:
+        """Remove source(s) by ID in-place and rebuild the proximity table."""
+        if isinstance(src_ids, (int, np.integer)):
+            src_ids = [int(src_ids)]
+        ids_to_delete = set(int(i) for i in src_ids)
+        bad = [i for i in ids_to_delete if i < 0 or i >= len(self)]
+        if bad:
+            raise IndexError(f"Source IDs out of range: {bad}; valid range is [0, {len(self) - 1}]")
 
-def DisplaySources(data_src, sources_df, src_box_size, vmin, vmax, norm=LogNorm, shape='box', ROI=None):
-    from photutils.aperture import CircularAperture
+        keep = [i for i in range(len(self)) if i not in ids_to_delete]
+
+        self.table = self.table.iloc[keep].reset_index(drop=True)
+        self.table.index.name = "src_id"
+        self.table["src_id"] = np.arange(len(self.table), dtype=int)
+
+        self.imgs_sparse   = [self.imgs_sparse[i]   for i in keep] if self.imgs_sparse   is not None else None
+        self.slices_local  = [self.slices_local[i]  for i in keep]
+        self.slices_global = [self.slices_global[i] for i in keep]
+
+        for attr in ('spectra_sparse', 'spectra_full', 'spectra_sparse_true',
+                     'spectra_full_true', 'spectra_res_sparse', 'spectra_res_full'):
+            val = getattr(self, attr)
+            if val is not None:
+                setattr(self, attr, val[keep])
+
+        self.create_proximity_table()
+
+
+def DisplaySources(data_src, sources_df, src_box_size, vmin, vmax, norm=LogNorm, shape='box', ROI=None, figsize=(20, 20)): 
+    from photutils.aperture import CircularAperture, RectangularAperture
+    
     if isinstance(data_src, torch.Tensor):
         data_src = data_src.sum(dim=0).cpu().numpy() if data_src.ndim == 3 else data_src.cpu().numpy()
     
@@ -312,7 +340,7 @@ def DisplaySources(data_src, sources_df, src_box_size, vmin, vmax, norm=LogNorm,
     srcs_pos = np.transpose((sources_df['x_peak'] - x_offset, sources_df['y_peak'] - y_offset))
     norm_field = norm(vmin=vmin, vmax=vmax)
 
-    _ = plt.figure(figsize=(20, 20))
+    _ = plt.figure(figsize=figsize)
 
     plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
 
@@ -337,7 +365,14 @@ def DetectSources(data_cube, threshold=None, nsigma=3.0, box_size=11, sort_by_br
     
     def _detect_sources(data_src, threshold, box_size, eps=2, verbose=False):
         sources = find_peaks(data_src, threshold=threshold, box_size=box_size)
-        if verbose: print(f"Detected {len(sources)} sources")
+
+        if sources is None:
+            if verbose:
+                print("No sources detected.")
+            return pd.DataFrame(columns=['x_peak', 'y_peak', 'peak_value'])
+
+        if verbose:
+            print(f"Detected {len(sources)} sources")
 
         # Helps in the case if a single source was detected as multiple
         positions = np.transpose((sources['x_peak'], sources['y_peak']))
@@ -364,15 +399,19 @@ def DetectSources(data_cube, threshold=None, nsigma=3.0, box_size=11, sort_by_br
         """
         flat = data_src.ravel()
         flat = flat[np.isfinite(flat) & (flat > 0)]
+        
         if len(flat) == 0:
             return 0.0
+        
         _, bg_level, _ = sigma_clipped_stats(flat, sigma=nsigma)
         below_bg = flat[flat < bg_level]
+        
         if len(below_bg) > 10:
             # Reflect sub-background pixels around bg_level for an unbiased noise sigma
             noise_sigma = np.std(np.concatenate([below_bg, 2.0 * bg_level - below_bg]))
         else:
             _, bg_level, noise_sigma = sigma_clipped_stats(flat, sigma=nsigma)
+            
         return bg_level + nsigma * noise_sigma
 
     data_src = data_cube.sum(dim=0).cpu().numpy() if isinstance(data_cube, torch.Tensor) else data_cube.sum(axis=0)
@@ -384,6 +423,11 @@ def DetectSources(data_cube, threshold=None, nsigma=3.0, box_size=11, sort_by_br
             print(f"[auto] threshold from histogram = {threshold:.2f}")
 
     sources_df = _detect_sources(data_src, threshold=threshold, box_size=box_size, verbose=verbose)
+
+    if len(sources_df) == 0:
+        if verbose:
+            print("No sources detected. Change threshold or nsigma to detect sources.")
+        return sources_df
 
     # Draw the detected sources
     if display and draw_box_size is not None:
@@ -465,6 +509,9 @@ def AddSources(data_cube, coords, sources_df=None, weights=None, weight_from_flu
 
     result_df.index.name = 'ID'
     return result_df
+
+
+
 
 
 def ExtractSourceImages(data_cube, srcs_coords, box_size, filter_sources=True, max_nan_fraction=0.3, debug_draw=False):
