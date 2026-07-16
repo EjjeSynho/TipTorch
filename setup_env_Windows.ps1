@@ -7,9 +7,9 @@
   • Detects Intel CPU → adds Intel Python conda channel with priority.  
   • Detects NVIDIA GPU via nvidia-smi → if present, installs PyTorch with CUDA support.  
   • Generates an environment.yml with:
-      – nodefaults, conda-forge channels (+ Intel channel on Intel CPUs)  
-      – python + NumPy/SciPy/Sklearn + Intel MKL on Intel systems  
-      – common libs + pip requirements (pytorch-minimize, photutils, etc.)  
+      - nodefaults, conda-forge channels (+ Intel channel on Intel CPUs)  
+      - python + NumPy/SciPy/Sklearn + Intel MKL on Intel systems  
+      - common libs + pip requirements (pytorch-minimize, photutils, etc.)  
   • Invokes mamba (or conda) to build the env verbosely.
   • Installs PyTorch (CUDA or CPU) via pip after environment creation.
   • Installs CuPy and cuda-python on CUDA systems.

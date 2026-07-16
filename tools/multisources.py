@@ -6,16 +6,17 @@ from typing import Union
 from sklearn.cluster import DBSCAN
 from matplotlib import pyplot as plt
 from astropy.visualization import simple_norm
-from astropy.visualization import LinearStretch, ImageNormalize
 from astropy.stats import sigma_clipped_stats
 from photutils.detection import find_peaks
-from photutils.aperture import RectangularAperture
 from matplotlib.colors import LogNorm
 from scipy import ndimage
 from typing import Optional, Union, Sequence
 from dataclasses import dataclass
 
-from tools.plotting import plot_radial_PSF_profiles
+import matplotlib.patches as mpatches
+import matplotlib.colors as mcolors
+
+from tools.plotting import plot_radial_PSF_profiles, _cube_to_RGB_array
 
 """
 This module is used to manage the multi-source simulations. It contains functions to 
@@ -319,45 +320,185 @@ class SourcesData:
         self.create_proximity_table()
 
 
-def DisplaySources(data_src, sources_df, src_box_size, vmin, vmax, norm=LogNorm, shape='box', ROI=None, figsize=(20, 20)): 
-    from photutils.aperture import CircularAperture, RectangularAperture
-    
-    if isinstance(data_src, torch.Tensor):
-        data_src = data_src.sum(dim=0).cpu().numpy() if data_src.ndim == 3 else data_src.cpu().numpy()
-    
-    # Apply ROI if provided and extract offsets for coordinate adjustment
-    x_offset, y_offset = 0, 0
-    if ROI is not None:
-        data_src = data_src[ROI]
-        # Extract offsets from ROI slices
-        if isinstance(ROI, tuple):
-            slices = [s for s in ROI if isinstance(s, slice)]
-            if len(slices) >= 2:
-                y_slice, x_slice = slices[-2:]
-                y_offset = y_slice.start if y_slice.start is not None else 0
-                x_offset = x_slice.start if x_slice.start is not None else 0
-    
-    srcs_pos = np.transpose((sources_df['x_peak'] - x_offset, sources_df['y_peak'] - y_offset))
-    norm_field = norm(vmin=vmin, vmax=vmax)
 
-    _ = plt.figure(figsize=figsize)
+def DisplayField(
+    cube,
+    *,
+    sources = None,
+    wavelengths = None,
+    cmap = 'gray',
+    show_markers = True,
+    show_ids = False,
+    show_weights = False,
+    roi = None,
+    title = None,
+    norm  = None,
+    vmin  = None,
+    vmax  = None,
+    scale = 'log',
+    saturation = 1.0,
+    contrast   = 1.0,
+    wb_shift   = 0.0,
+    mg_shift   = 0.0,
+    marker_shape = 'circle',
+    marker_color = 'gold',
+    marker_size = None,
+    min_marker_size = 4,
+    max_marker_size = 20,
+    show = True,
+    ax = None,
+    figsize = (6, 6),
+):
+    """
+    Unified display: render a spectral cube with a colormap (∑ over λ) or as an RGB image (wavelength→colour mapping), with optional source overlays.
 
-    plt.imshow(np.abs(data_src), norm=norm_field, origin='lower', cmap='gray')
+    Parameters
+    ----------
+    cube : array-like or torch.Tensor, shape (N_λ, H, W) or (H, W)
+    sources : SourcesData | SourcesSubset | pd.DataFrame | None
+    wavelengths : array-like or None
+        Physical wavelengths [nm] for RGB mapping. None → uniform 440-750 nm.
+    cmap : str or None
+        ``None``  → RGB colour mapping via wavelength-to-colour weights.
+        Any Matplotlib colormap name (e.g. ``'gray'``, ``'inferno'``,
+        ``'viridis'``) → sum λ and display with that colormap. Default ``'gray'``.
+    show_markers : bool - draw a circle (or rectangle) per source. Default True.
+    show_ids : bool     - annotate each marker with its source index. Default False.
+    show_weights : bool - fill markers with alpha ∝ source weight. Default False.
+    roi : tuple of slices or None
+        Region of interest, e.g. ``np.s_[..., y0:y1, x0:x1]``.
+    title : str or None
+    figsize : tuple   (used only when ax=None)
+    norm : matplotlib Normalize or None
+        Pre-built norm for cmap display; overrides scale/vmin/vmax when set.
+    vmin, vmax : float or None  - cmap clipping bounds (ignored when norm is set)
+    scale : {'log', 'linear'}
+        Intensity scale for both cmap mode (auto-norm) and RGB mode. Default 'log'.
+    saturation, contrast, wb_shift, mg_shift : float  - RGB colour adjustments
+    marker_shape : {'circle', 'box'}
+    marker_color : str          - any Matplotlib colour spec, default 'gold'
+    marker_size : float or None - fixed radius [pixels]; None → log-scaled by flux
+    min_marker_size, max_marker_size : float  - log-scaled radius range [pixels]
+    show : bool   (used only when ax=None)
+    ax : matplotlib.axes.Axes or None
 
-    if shape == 'circle':
-        apertures = CircularAperture(srcs_pos, r=src_box_size / 2)
-    else:
-        apertures = RectangularAperture(srcs_pos, src_box_size, src_box_size)
+    Returns
+    -------
+    ax : matplotlib.axes.Axes
+    """
+    # ── Local helpers (closures over DisplayField parameters) ─────────────────
+    def _roi_offsets(roi_):
+        if roi_ is None:
+            return 0, 0
+        slices = [s for s in roi_ if isinstance(s, slice)]
+        if len(slices) >= 2:
+            return (slices[-1].start or 0), (slices[-2].start or 0)
+        return 0, 0
+
+    def _draw_source_markers(ax_, src_df_, x_offset=0, y_offset=0):
+        """Draw per-source markers, capturing style params from outer scope."""
+        if src_df_ is None or len(src_df_) == 0:
+            return
+        xs   = src_df_['x_peak'].to_numpy() - x_offset
+        ys   = src_df_['y_peak'].to_numpy() - y_offset
+        peak = np.clip(src_df_['peak_value'].to_numpy().astype(float), 1e-10, None)
+        wts  = src_df_['weight'].to_numpy().astype(float) if 'weight' in src_df_.columns else np.ones(len(xs))
+
+        if marker_size is not None:
+            radii = np.full(len(xs), float(marker_size))
+        else:
+            log_p = np.log10(peak)
+            span  = log_p.max() - log_p.min()
+            radii = min_marker_size + (log_p - log_p.min()) / (span + 1e-10) * (max_marker_size - min_marker_size)
+
+        base       = np.array(mcolors.to_rgba(marker_color))
+        edge_color = (*base[:3], 0.9)
+
+        for i, (x, y, r) in enumerate(zip(xs, ys, radii)):
+            fill_alpha = float(np.clip(wts[i], 0, 1)) * 0.75 if show_weights else 0.0
+            
+            if marker_shape == 'circle':
+                if fill_alpha > 0:
+                    ax_.add_patch(mpatches.Circle((x, y), r, facecolor=(*base[:3], fill_alpha), edgecolor='none', zorder=8))
+                ax_.add_patch(mpatches.Circle((x, y), r, fill=False, edgecolor=edge_color, linewidth=0.8, zorder=9))
+            else:  # 'box'
+                side = 2 * r
+                if fill_alpha > 0:
+                    ax_.add_patch(mpatches.Rectangle((x - r, y - r), side, side, facecolor=(*base[:3], fill_alpha), edgecolor='none', zorder=8))
+                ax_.add_patch(mpatches.Rectangle((x - r, y - r), side, side, fill=False, edgecolor=edge_color, linewidth=0.8, zorder=9))
+            
+            if show_ids:
+                ax_.text(x + r * 0.8, y + r * 0.8, str(src_df_.index[i]), color=marker_color, fontsize=6, va='bottom', ha='left', zorder=11)
+
+    def _get_sources_table(sources):
+        """Normalise SourcesData / SourcesSubset / DataFrame to a DataFrame (or None)."""
+        if sources is None:
+            return None
+
+        return sources.table if hasattr(sources, 'table') else sources
+
+    # ── Prepare array ──────────────────────────────────────────────────────────
+    arr = cube.detach().cpu().numpy() if isinstance(cube, torch.Tensor) else np.asarray(cube)
+    arr = np.abs(arr)
+    if roi is not None:
+        arr = arr[roi]
+
+    # ── Figure / axes ──────────────────────────────────────────────────────────
+    own_figure = ax is None
+    if own_figure:
+        _, ax = plt.subplots(figsize=figsize)
+
+    # ── Render image ───────────────────────────────────────────────────────────
+    if cmap is None and arr.ndim == 3:
+        # RGB mode: wavelength -> colour mapping
+        # vmin/vmax override min_val/max_val for a unified intensity interface
+        display_img, _, _ = _cube_to_RGB_array(
+            arr,
+            wavelengths,
+            vmin,
+            vmax,
+            scale,
+            saturation,
+            contrast,
+            wb_shift,
+            mg_shift
+        )
+        ax.imshow(display_img, origin='lower')
         
-    apertures.plot(color='gold', lw=2, alpha=0.45)
+    else:
+        # cmap mode: collapse λ and display with chosen colormap
+        img_2d = arr.sum(axis=0) if arr.ndim == 3 else arr
+        img_2d = np.nan_to_num(img_2d)
+        
+        if norm is None:
+            pos  = img_2d[img_2d > 0]
+            v_lo = float(vmin if vmin is not None else (max(1.0, pos.min()) if len(pos) else 1.0))
+            v_hi = float(vmax if vmax is not None else max(img_2d.max(), v_lo * 2))
+            if scale == 'log':
+                norm = LogNorm(vmin=v_lo, vmax=v_hi)
+            else:
+                from matplotlib.colors import Normalize
+                norm = Normalize(vmin=v_lo, vmax=v_hi)
+        
+        ax.imshow(img_2d, norm=norm, origin='lower', cmap=cmap if cmap is not None else 'gray')
 
-    for idx, row in sources_df.iterrows():
-        x, y = row['x_peak'] - x_offset, row['y_peak'] - y_offset
-        offset = src_box_size / 2
-        plt.text(x - offset + 1, y - offset + 1, str(idx),
-                 color='gold', fontsize=7, va='bottom', ha='left',
-                 bbox=dict(boxstyle='square,pad=0', fc='none', ec='none'))
-    plt.show()
+    ax.axis('off')
+    if title:
+        ax.set_title(title)
+
+    # ── Source markers ─────────────────────────────────────────────────────────
+    if show_markers:
+        src_df = _get_sources_table(sources)
+        if src_df is not None and len(src_df):
+            x_off, y_off = _roi_offsets(roi)
+            _draw_source_markers(ax, src_df, x_offset=x_off, y_offset=y_off)
+
+    if own_figure:
+        plt.tight_layout()
+        if show:
+            plt.show()
+
+    return ax
 
 
 def DetectSources(data_cube, threshold=None, nsigma=3.0, box_size=11, sort_by_brightness=True, weight_from_flux=False, display=False, draw_box_size=None, verbose=False):
@@ -433,7 +574,9 @@ def DetectSources(data_cube, threshold=None, nsigma=3.0, box_size=11, sort_by_br
     if display and draw_box_size is not None:
         draw_box_size = box_size if draw_box_size is None else int(draw_box_size)
         bg = float(np.nanmedian(data_src[data_src > 0]))
-        DisplaySources(data_src, sources_df, draw_box_size, bg * 0.9, threshold * 10)
+        DisplayField(data_src, sources=sources_df, show_markers=True, show_ids=True,
+                     marker_shape='box', marker_size=draw_box_size/2,
+                     vmin=bg*0.9, vmax=threshold*10)
 
     # Sort in descending order of flux (peak value)
     if sort_by_brightness:
@@ -509,9 +652,6 @@ def AddSources(data_cube, coords, sources_df=None, weights=None, weight_from_flu
 
     result_df.index.name = 'ID'
     return result_df
-
-
-
 
 
 def ExtractSourceImages(data_cube, srcs_coords, box_size, filter_sources=True, max_nan_fraction=0.3, debug_draw=False):
@@ -702,108 +842,6 @@ def plot_ROIs_as_grid(ROIs, cols=5):
     # plt.tight_layout()
     plt.show()
     
-    
-
-def VisualizeSources(data, model, norm=None, mask=1.0, ROI=None, sources=None, show=True):
-    """
-    Visualize source data, model, and their difference.
-
-    Parameters:
-        data (torch.Tensor or np.ndarray): Source data (2D or 3D)
-        model (torch.Tensor or np.ndarray): Model data (2D or 3D)
-        norm (ImageNormalize, optional): Normalization for visualization
-        mask (float or array-like): Mask to apply to the difference
-        ROI (slice, optional): Region of interest to visualize
-        sources (pd.DataFrame, SourcesSubset, or SourcesData, optional):
-            Source table with 'x_peak' / 'y_peak' columns, or any object whose
-            `.table` attribute carries those columns. When provided, source
-            positions are overlaid as markers on every panel. Coordinates are
-            automatically shifted to match the cropped image frame when ROI is used.
-        show (bool): Whether to call plt.show() after each panel
-    """
-    def process_array(x):
-        # Convert to numpy
-        if isinstance(x, torch.Tensor):
-            x_np = x.abs().cpu().numpy()
-        else:
-            x_np = np.abs(x)
-        
-        # Sum along first dimension if 3D, otherwise keep 2D as-is
-        if x_np.ndim > 2:
-            x_np = x_np.sum(axis=0)
-
-        # Apply ROI if specified
-        return np.nan_to_num(x_np[ROI]) if ROI is not None else np.nan_to_num(x_np)
-
-    # Process input arrays
-    data_vis  = process_array(data)
-    model_vis = process_array(model)
-
-    # Handle mask type conversion
-    if not isinstance(mask, float):
-        mask = torch.as_tensor(mask, dtype=data.dtype, device=data.device) if isinstance(data, torch.Tensor) else \
-               mask.cpu().numpy() if isinstance(mask, torch.Tensor) else mask
-
-    # Calculate difference
-    diff_vis = process_array((data - model) * mask)
-
-    # Create default normalization if none provided
-    if norm is None:
-        vmin = min(data_vis.min(), model_vis.min(), diff_vis.min())
-        vmax = max(data_vis.max(), model_vis.max(), diff_vis.max())
-        norm = ImageNormalize(vmin=vmin, vmax=vmax, stretch=LinearStretch())
-
-    # ── Source positions, aligned to the (possibly cropped) image frame ────────
-    sources_xy = None
-    if sources is not None:
-        # Accept SourcesSubset / SourcesData (anything with .table) or a bare DataFrame
-        src_df = sources
-        # Extract the pixel offset introduced by ROI cropping.
-        # ROI is a single np.s_[..., y0:y1, x0:x1] object, i.e. a tuple
-        # (Ellipsis, slice(y0, y1), slice(x0, x1)) — pick the last two slice entries.
-        x_offset, y_offset = 0, 0
-        if ROI is not None:
-            roi_slices = [s for s in ROI if isinstance(s, slice)]
-            if len(roi_slices) >= 2:
-                y_offset = roi_slices[-2].start or 0
-                x_offset = roi_slices[-1].start or 0
-
-        xs = src_df['x_peak'].to_numpy() - x_offset
-        ys = src_df['y_peak'].to_numpy() - y_offset
-        sources_xy = np.stack([xs, ys], axis=1)   # [N, 2]  in cropped-image pixels
-
-        # Circle size proportional to white (spectrally summed) flux
-        peak_vals = src_df['peak_value'].to_numpy().astype(float)
-        peak_vals = np.clip(peak_vals, 0, None)
-        flux_norm = peak_vals / peak_vals.max() if peak_vals.max() > 0 else np.ones_like(peak_vals)
-        circle_sizes = 10 + flux_norm * 500   # scatter marker area: faint~40, bright~440
-
-    # ── Plot all three panels ──────────────────────────────────────────────────
-    titles = ['Data', 'Model', 'Difference']
-    images = [data_vis, model_vis, diff_vis]
-
-    for img, title in zip(images, titles):
-        plt.imshow(img, norm=norm, origin='lower')
-        plt.title(title)
-        plt.axis('off')
-        
-        if sources_xy is not None:
-            # Cross markers at each source centre
-            plt.scatter(sources_xy[:, 0], sources_xy[:, 1],
-                        marker='+', s=10, linewidths=1.2, c='red', zorder=10)
-            # Thin open circles whose size encodes the white-light flux
-            plt.scatter(sources_xy[:, 0], sources_xy[:, 1],
-                        s=circle_sizes, marker='o',
-                        facecolors='none', edgecolors='red',
-                        linewidths=0.5, zorder=9)
-            # for i, (x, y) in enumerate(sources_xy):
-            #     plt.text(x + 2, y + 2, str(i), color='red', fontsize=7,
-            #              va='bottom', ha='left', zorder=11)
-        if show:
-            plt.show()
-
-    return diff_vis
-
 
 def PlotSourcesProfiles(data, model, sources, radius, select_ids=None, show=True, **kwargs):
     # Extract PSFs from the image

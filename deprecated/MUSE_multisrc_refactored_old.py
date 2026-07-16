@@ -1446,7 +1446,7 @@ def plot_wavelength_rgb(image, wavelengths=None, min_val=1e-3, max_val=1e1, titl
         image = image.cpu().numpy()
         
     wavelengths = np.asarray(wavelengths)
-    rgb_weights = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths]).T
+    rgb_weights = np.array([wavelength_to_RGB(λ, show_invisible=True) for λ in wavelengths]).T
 
     weighted = rgb_weights[:, :, None, None] * image[None, :, :, :]
     image_RGB = np.abs(weighted.sum(axis=1))  # shape: (3, height, width)

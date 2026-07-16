@@ -13,27 +13,25 @@ import torch.nn.functional as F
 
 from copy import deepcopy
 from tqdm import tqdm
+from typing import Optional
 from pathlib import Path
 from datetime import datetime
-from matplotlib.colors import LogNorm
-from typing import Optional
 from dataclasses import dataclass
+from matplotlib.colors import LogNorm
 
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
 from fitting.PSF_optimizer import OptimizePSFModel
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
-from tiptorch.PSF_models.NFM_Moffat  import MoffatPSFModelNFM
+from tiptorch.PSF_models.NFM_Moffat import MoffatPSFModelNFM
 from tiptorch.tools.utils import mask_square, generate_random_colors, rad2mas, rad2arc
-from tools.plotting import PlotSpetralCubeInRGB
 from tools.multisources import (
     add_ROIs,
     AddSources,
     SourcesData,
     SourcesSubset,
     DetectSources,
-    DisplaySources,
-    VisualizeSources,
+    DisplayField,
     add_ROIs_separately,
     ExtractSourceImages,
     ROI_from_valid_mask,
@@ -277,6 +275,22 @@ class MUSEObservation:
         self._update_flux_norm() # Update the flux normalization factor based on the initial guess for the PSF shape
 
 
+    def _invalidate_extracted_state(self, reason: str):
+        """Reset extracted SourcesData / N_src when the raw sources_table changes,
+        keeping the two collections in sync. Warns if a PSF model was already built."""
+        import warnings
+        if self.sources is not None:
+            self.sources = None
+            self.N_src = 0
+            if hasattr(self, 'PSF_model') and self.PSF_model is not None:
+                warnings.warn(
+                    f"{reason}: extracted sources and PSF model are now stale. "
+                    "Re-run ExtractSources() and InitSimulation()."
+                )
+            else:
+                warnings.warn(f"{reason}: previously extracted sources have been discarded. Re-run ExtractSources().")
+
+
     def DetectSources(self, nsigma=35, threshold='auto', verbose=False):
         # Simple sources detector function. For now, make sure that only point sources are included. This function also defines the
         # order in which sources are indexed ad processed later, so it's important to use it before extracting the source images
@@ -290,21 +304,27 @@ class MUSEObservation:
             weight_from_flux = False,
             verbose = verbose
         )
+        # Detection replaces the raw table, so any previously extracted sources become stale.
+        self._invalidate_extracted_state("DetectSources() replaced the raw sources_table")
 
 
     def AddSources(self, sources_coords, weights=0.0):
         # If some sources are missing from the automatic detection, they can be added manually by providing their coordinates in the same format as the sources dataframe
         self.sources_table = AddSources(self.cube_sparse, sources_coords, self.sources_table, weights=weights, weight_from_flux=False)
+        # New rows in the raw table must be re-extracted before they can be used by the model.
+        self._invalidate_extracted_state("AddSources() modified the raw sources_table")
 
 
     def DeleteSources(self, src_ids):
         """
         Delete source(s) by ID in-place.
 
-        When called after ExtractSources(), removes from the extracted SourcesData
-        and updates N_src. When called before ExtractSources(), removes from the
-        raw sources_table instead. If a PSF model has already been initialized,
-        a warning is issued and InitSimulation() must be re-run afterward.
+        Sources are always removed from the raw sources_table. When called after
+        ExtractSources(), the corresponding entries are also removed from the
+        extracted SourcesData and N_src is updated (since both collections are
+        kept row-aligned by ExtractSources, IDs refer to the same rows in both).
+        If a PSF model has already been initialized, a warning is issued and
+        InitSimulation() must be re-run afterward.
 
         Parameters
         ----------
@@ -312,29 +332,40 @@ class MUSEObservation:
             Source ID(s) to delete, using the current indexing shown by DisplaySources().
         """
         import warnings
+
         if isinstance(src_ids, (int, np.integer)):
             src_ids = [int(src_ids)]
         else:
             src_ids = [int(i) for i in src_ids]
 
+        if self.sources is None and self.sources_table is None:
+            raise ValueError("No sources to delete. Run DetectSources() or AddSources() first.")
+
+        # Validate against the raw sources_table (the authoritative index space).
+        # After ExtractSources(), sources_table and sources.table are aligned row-by-row,
+        # so the same integer positions apply to both collections.
+        if self.sources_table is not None:
+            valid   = [i for i in src_ids if i in self.sources_table.index]
+            invalid = [i for i in src_ids if i not in self.sources_table.index]
+        else:
+            valid   = [i for i in src_ids if 0 <= i < len(self.sources)]
+            invalid = [i for i in src_ids if i < 0 or i >= len(self.sources)]
+
+        if invalid:
+            warnings.warn(f"Source IDs not found and will be skipped: {invalid}")
+        if not valid:
+            return
+
+        if self.sources_table is not None:
+            self.sources_table = self.sources_table.drop(index=valid).reset_index(drop=True)
+            self.sources_table.index.name = 'ID'
+
         if self.sources is not None:
-            self.sources.delete(src_ids)
+            # sources.delete uses positional indexing; positions match the raw table row order.
+            self.sources.delete(valid)
             self.N_src = len(self.sources)
             if hasattr(self, 'PSF_model') and self.PSF_model is not None:
-                warnings.warn(
-                    "Sources deleted after PSF model initialization. "
-                    "Please re-run InitSimulation() to rebuild the model."
-                )
-        elif self.sources_table is not None:
-            valid = [i for i in src_ids if i in self.sources_table.index]
-            invalid = [i for i in src_ids if i not in self.sources_table.index]
-            if invalid:
-                warnings.warn(f"Source IDs not found in sources_table and will be skipped: {invalid}")
-            if valid:
-                self.sources_table = self.sources_table.drop(index=valid).reset_index(drop=True)
-                self.sources_table.index.name = 'ID'
-        else:
-            raise ValueError("No sources to delete. Run DetectSources() or AddSources() first.")
+                warnings.warn("Sources deleted after PSF model initialization. Please re-run InitSimulation() to rebuild the model.")
 
 
     def ExtractSources(self, verbose=False, max_nan_fraction=0.3):
@@ -342,10 +373,12 @@ class MUSEObservation:
         # Filtering means, that the sources on the edge of the filed will be removed since they don't have enough pixels
         srcs_image_data = ExtractSourceImages(self.cube_sparse, self.sources_table, box_size=self.PSF_size, filter_sources=True, max_nan_fraction=max_nan_fraction, debug_draw=False)
         # Extract spectra from the PSF core for each filtered source
-        spectra_sparse, spectra_full = self.ExtractSpectraFromCore(srcs_image_data["src_data"], self.cube_sparse, self.cube_full)
+        extracted_table = srcs_image_data["src_data"]
+        N_filtered      = len(self.sources_table) - len(extracted_table)
+        spectra_sparse, spectra_full = self.ExtractSpectraFromCore(extracted_table, self.cube_sparse, self.cube_full)
         # These are the sources which are included in the model
         self.sources = SourcesData(
-            table          = srcs_image_data["src_data"],
+            table          = extracted_table,
             imgs_sparse    = srcs_image_data["src_images"],
             slices_local   = srcs_image_data["ROI_local"],
             slices_global  = srcs_image_data["ROI_global"],
@@ -353,10 +386,15 @@ class MUSEObservation:
             spectra_sparse = spectra_sparse,
         )
         self.N_src = len(self.sources)
-        
+
+        # Keep sources_table in sync with the extracted SourcesData: edge-filtered sources
+        # are dropped from the raw table so both collections describe the same set of sources.
+        self.sources_table = self.sources.table.copy()
+        self.sources_table.index.name = 'ID'
+
         if verbose:
             print(f"Extracted {self.N_src} source{'s' if self.N_src != 1 else ''}.")
-            print(f"Num. of filtered sources on the edge of the field: {len(self.sources_table) - self.N_src}")
+            print(f"Num. of filtered sources on the edge of the field: {N_filtered}")
             
 
     @torch.no_grad()
@@ -460,7 +498,7 @@ class MUSEObservation:
         fit_weights_normalized = fit_weights / fit_weights.sum() * len(fit_weights)  # Sum to N_sources
 
         fit_relative = torch.clamp(fit_fluxes / fit_fluxes.max().item(), min=0.1, max=1.0) * fit_weights
-        # Weighted mean normalisation so loss stays within ~10⁰–10¹ range
+        # Weighted mean normalisation so loss stays within ~10⁰-10¹ range
         w_total = fit_relative.sum() / (fit_fluxes * fit_relative).sum()
 
         return FitWeights(
@@ -596,8 +634,10 @@ class MUSEObservation:
         target_device = 'cpu' if force_cpu else self.device
         N_λ_range     = len(λ_range)
 
-        # Evaluate the chromatic PSF normalisation factor at the simulated sub-range wavelengths
-        λ_range_normed       = self.PSF_model.norm_wvl(λ_range.to(self.PSF_model.device)).to(target_device)
+        # Evaluate the chromatic PSF normalisation factor at the simulated sub-range wavelengths.
+        # The spline (F_norm_λ_ctrl, λ_ctrl_norm) lives on self.device, so we must evaluate there
+        # and only afterwards move the result to target_device.
+        λ_range_normed        = self.PSF_model.norm_wvl(λ_range.to(self.PSF_model.device))
         PSF_norm_factor_range = self.PSF_model.evaluate_splines(
             self.PSF_model.inputs_manager['F_norm_λ_ctrl'], λ_range_normed
         ).to(target_device)
@@ -970,6 +1010,7 @@ class MUSEObservation:
         gc.collect()
         torch.cuda.empty_cache()
         
+    
 
     def SimulateField(self, full_spectrum=False, N_src_per_batch=None, N_λ_per_batch=None, disentangle_spectra=True, force_cpu=True) -> torch.Tensor:
         ''' Simulate all sources within the field. If full_spectrum is True, simulates the full spectrum instead of the sparse λ-subset. '''
@@ -1058,6 +1099,126 @@ class MUSEObservation:
         return simulated if not force_cpu else simulated.cpu()
 
 
+    @torch.no_grad()
+    def SimulatePSFAtPosition(
+        self,
+        x_pix,
+        y_pix,
+        *,
+        full_spectrum     = False,
+        apply_crop_factor = True,
+        λ_batch_size      = None,
+        force_cpu         = True,
+        verbose           = False,
+    ):
+        """
+        Simulate a single PSF at an arbitrary field position (in the science-cube
+        pixel frame) and paste it into a zero canvas of the same spatial shape as
+        the science cube. The PSF is independent of the sources stored in this
+        observation - only the current PSF model parameters and the requested
+        position are used.
+
+        The chromatic crop factor (F_norm_λ) is applied so the PSF has the correct
+        physical amplitude vs. λ, but the per-source F_norm scaling and any source
+        spectrum are NOT applied - the returned PSF represents unit total flux per
+        wavelength slice.
+
+        Parameters
+        ----------
+        x_pix, y_pix : float
+            Position in the full-field pixel frame (same convention as
+            self.sources.table['x_peak'] / ['y_peak']). Sub-pixel values are
+            allowed; ROI placement is quantised to the nearest integer pixel
+            while the PSF is generated with sub-pixel angular offset via
+            src_dirs_x / src_dirs_y.
+        full_spectrum : bool
+            If True, simulate over the full MUSE-NFM spectrum (N_wvl_full slices).
+            Otherwise simulate over the current sparse wavelength grid.
+        apply_crop_factor : bool
+            Multiply the PSF by the chromatic crop factor (F_norm_λ).
+        λ_batch_size, force_cpu, verbose :
+            Forwarded to the underlying PSF-model machinery.
+
+        Returns
+        -------
+        field : torch.Tensor  [N_λ, H, W]
+            Zero canvas with the simulated PSF pasted at (x_pix, y_pix).
+        PSF   : torch.Tensor  [N_λ, N_pix, N_pix]
+            The raw PSF stamp (crop factor optionally applied, no spectrum).
+        ROI   : dict
+            {
+                "global": (slice_y, slice_x),  # location in the full field
+                "local":  (slice_y, slice_x),  # visible portion of the PSF stamp
+            }
+        """
+        if getattr(self, 'PSF_model', None) is None:
+            raise ValueError(
+                "PSF model must be initialised before calling SimulatePSFAtPosition. "
+                "Run InitSimulation() first."
+            )
+        if not hasattr(self.PSF_model, 'RenderPSFAtDirection'):
+            raise NotImplementedError(
+                f"SimulatePSFAtPosition requires a PSF model exposing RenderPSFAtDirection "
+                f"(currently only PSFModelNFM). Got {type(self.PSF_model).__name__}."
+            )
+
+        # ── 1. Convert pixel position → angular direction (radians) ──────────
+        pixel_scale = self.model_config['sensor_science']['PixelScale']  # [mas/pix]
+        dx_pix = float(x_pix) - float(self.field_center[0, 0])
+        dy_pix = float(y_pix) - float(self.field_center[0, 1])
+        dir_x  = dx_pix * pixel_scale / rad2mas  # [rad]
+        dir_y  = dy_pix * pixel_scale / rad2mas
+
+        # ── 2. Simulate the raw PSF via the NFM wrapper ──────────────────────
+        PSF = self.PSF_model.RenderPSFAtDirection(
+            dir_x         = dir_x,
+            dir_y         = dir_y,
+            full_spectrum = full_spectrum,
+            λ_batch_size  = λ_batch_size if λ_batch_size is not None else self.λ_batch_size,
+            force_cpu     = force_cpu,
+            verbose       = verbose,
+        )
+
+        # ── 3. Apply the chromatic crop factor (F_norm_λ) if requested ───────
+        # Mirrors the flux-normalisation logic used in simulate_sparse / simulate_full,
+        # but without the per-source F_norm scaling or any source spectrum.
+        if apply_crop_factor and 'F_norm_λ_ctrl' in self.PSF_model.get_param_names():
+            λ_normed = self.PSF_model.λ_full_normed if full_spectrum else self.PSF_model.λ_sim_normed
+            crop = self.PSF_model.evaluate_splines(
+                self.PSF_model.inputs_manager['F_norm_λ_ctrl'], λ_normed
+            ).to(PSF.device)
+            PSF = PSF * crop.reshape(-1, 1, 1)
+
+        # ── 4. Compute ROI slices for pasting the PSF into the full field ────
+        canvas_ref = self.cube_full if full_spectrum else self.cube_sparse
+        H, W = canvas_ref.shape[-2], canvas_ref.shape[-1]
+
+        N_pix = self.PSF_size
+        half  = N_pix // 2
+        extra = N_pix % 2
+        xi, yi = int(round(float(x_pix))), int(round(float(y_pix)))
+        x_min, x_max = xi - half, xi + half + extra
+        y_min, y_max = yi - half, yi + half + extra
+
+        x_min_img, x_max_img = max(x_min, 0), min(x_max, W)
+        y_min_img, y_max_img = max(y_min, 0), min(y_max, H)
+        x_min_roi = max(0, -x_min)
+        y_min_roi = max(0, -y_min)
+        x_max_roi = x_min_roi + (x_max_img - x_min_img)
+        y_max_roi = y_min_roi + (y_max_img - y_min_img)
+
+        global_slice = (slice(y_min_img, y_max_img), slice(x_min_img, x_max_img))
+        local_slice  = (slice(y_min_roi, y_max_roi), slice(x_min_roi, x_max_roi))
+
+        # ── 5. Paste into a fresh canvas matching the science cube shape ─────
+        N_λ = PSF.shape[0]
+        canvas = torch.zeros((N_λ, H, W), dtype=PSF.dtype, device=PSF.device)
+        if (x_max_img > x_min_img) and (y_max_img > y_min_img):
+            canvas[:, global_slice[0], global_slice[1]] = PSF[:, local_slice[0], local_slice[1]]
+
+        return canvas, PSF, {"global": global_slice, "local": local_slice}
+
+
     def GetSpectrum(self, source_id=None):
         if self.sources is None:
             raise ValueError("Sources must be initialized before getting spectra. Please run ExtractSources() first.")
@@ -1068,19 +1229,30 @@ class MUSEObservation:
         return self.sources.spectra_full if source_id is None else self.sources.spectra_full[source_id]
         
 
-    def DisplaySources(self, draw_box_size=20):
+    def DisplaySources(self, cmap=None):
         if self.sources_table is None:
             raise ValueError("Sources must be initialized before displaying. Please run DetectSources() or AddSources() first.")
         
-        # If sources were not yet initialized or filtered, but just detected.
-        # Otherwise, use the sources table from the sources data which is already filtered and has the right order of sources
-        DisplaySources(
+        # RGB plotting setting optimal for displaying the sparse data
+        color_kwargs = {
+            'saturation':  2.0,
+            'contrast'  :  1.0,
+            'wb_shift'  : -0.1,
+            'mg_shift'  :  0.075
+        }
+        
+        src_table = self.sources_table if self.sources is None else self.sources.table
+        DisplayField(
             self.cube_sparse,
-            self.sources_table if self.sources is None else self.sources.table,
-            src_box_size = draw_box_size,
-            vmin = 10,
-            vmax = (self.sources_table if self.sources is None else self.sources.table)['peak_value'].max() * 0.85,
-            ROI  = self.ROI_plot
+            sources      = src_table,
+            roi          = self.ROI_plot,
+            show_markers = True,
+            show_ids     = True,
+            cmap         = cmap,
+            vmin         = 10,
+            vmax         = src_table['peak_value'].max() * 0.85,
+            figsize      = (8, 8),
+            **color_kwargs
         )
    
    
@@ -1229,15 +1401,16 @@ class MUSEObservation:
             with torch.no_grad():
                 if fixed_bg is None:
                     ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
-                    P_aug = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
-                    sol           = sanitize(_lstsq_reg(P_aug, I_data, n_reg=N_src, prior=_prior), "lstsq init")
-                    spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
-                    bg_init       = sanitize(sol[:,  N_src, 0], "bg_init")
+                    P_aug      = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
+                    sol        = sanitize(_lstsq_reg(P_aug, I_data, n_reg=N_src, prior=_prior), "lstsq init")
+                    spec_init  = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
+                    bg_init    = sanitize(sol[:,  N_src, 0], "bg_init")
                 else:
                     I_centered = sanitize(I_data - fixed_bg.view(N_wvl, 1, 1), "I_data centered")
-                    sol           = sanitize(_lstsq_reg(P, I_centered, prior=_prior), "lstsq init")
-                    spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
-                    bg_init       = fixed_bg
+                    sol        = sanitize(_lstsq_reg(P, I_centered, prior=_prior), "lstsq init")
+                    spec_init  = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
+                    bg_init    = fixed_bg
+                    
                 raw_spec_init = softplus_inv(spec_init)
                 raw_bg_init   = bg_init if bg_unconstrained else softplus_inv(bg_init.clamp_min(0))
         else:
@@ -1560,46 +1733,75 @@ class MUSEObservation:
 
 
     def DisplaySimulation(self, plot_profiles=True, plot_full_spectrum=False) -> None:
+        to_np = lambda x: x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
+
+        # Render the entire MUSE NFM spectrum
         if plot_full_spectrum:
             if self.simulated_full is None:
                 print("Full spectrum simulation not found, simulating now...")
                 self.SimulateField(full_spectrum=True)
-            
-            # Mapping MUSE spectral range to visible spectrum range for RGB conversion
-            λ_vis = np.linspace(440, 750, self.N_wvl_full)
 
-            # Shared vmin/vmax across data, model, and residual
-            def _to_np(x): return x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
-            data_white = _to_np(self.cube_full     [self.ROI_plot]).sum(axis=0)
-            sim_white  = _to_np(self.simulated_full[self.ROI_plot]).sum(axis=0)
-            res_white  = np.abs(_to_np(self.residue_full[self.ROI_plot])).sum(axis=0)
+            λ_vis    = np.linspace(440, 750, self.N_wvl_full)
+            data_arr = to_np(self.cube_full     [self.ROI_plot])
+            sim_arr  = to_np(self.simulated_full[self.ROI_plot])
+            diff_arr = np.abs(data_arr - sim_arr)
 
-            all_white = np.stack([data_white, sim_white, res_white])
+            all_white = np.stack([data_arr.sum(axis=0), sim_arr.sum(axis=0), diff_arr.sum(axis=0)])
             vmax = float(np.nanmax(all_white))
             pos  = all_white[all_white > 0]
             vmin = float(max(1.0, np.nanpercentile(pos, 1)) if pos.size > 0 else 1.0)
 
-            for cube, title in [(self.residue_full, "Difference"), (self.cube_full, "Data"), (self.simulated_full, "Model")]:
-                _ = PlotSpetralCubeInRGB(
-                    cube[self.ROI_plot],
+            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            
+            for ax, arr, title in zip(axes, [data_arr, sim_arr, diff_arr], ['Data', 'Model', 'Difference']):
+                DisplayField(
+                    arr,
                     wavelengths=λ_vis,
-                    title=title,
-                    min_val=vmin, max_val=vmax,
+                    cmap=None,
                     scale='log',
-                    show=title != "Difference"
+                    vmin=vmin,
+                    vmax=vmax,
+                    title=title,
+                    show=False,
+                    ax=ax
                 )
-            
+                
+            plt.tight_layout()
+            plt.show()
+
             if plot_profiles:
-                PlotSourcesProfiles(self.cube_full, self.simulated_full, self.sources.table, radius=16, title='Source radial profiles (full spectrum)')                
+                PlotSourcesProfiles(self.cube_full, self.simulated_full, self.sources.table, radius=16, title='Source radial profiles (full spectrum)')
         
+        # Plot fast sparse representation
         else:
-            data_white = self.cube_sparse.sum(dim=0)
-            sim_white  = self.simulated_sparse.sum(dim=0)
-            vmax = float(max(data_white.max(), sim_white.max()))
-            vmin = float(max(1.0, min(data_white[data_white > 0].min(), sim_white[sim_white > 0].min())))
+            data_np  = to_np(self.cube_sparse)
+            model_np = to_np(self.simulated_sparse)
+            mask_np  = to_np(self.valid_mask)
+            diff_np  = (data_np - model_np) * mask_np
+
+            dw   = np.abs(data_np.sum(axis=0))
+            mw   = np.abs(model_np.sum(axis=0))
+            vmax = float(max(dw.max(), mw.max()))
+            pos  = np.concatenate([dw[dw > 0], mw[mw > 0]])
+            vmin = float(max(1.0, pos.min())) if len(pos) else 1.0
             display_norm = LogNorm(vmin=vmin, vmax=vmax)
-            VisualizeSources(self.cube_sparse, self.simulated_sparse, norm=display_norm, mask=self.valid_mask, ROI=self.ROI_plot)
-            
+
+            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            for ax, arr, title in zip(axes, [data_np, model_np, diff_np], ['Data', 'Model', 'Difference']):
+                DisplayField(
+                    arr,
+                    sources=self.sources,
+                    roi=self.ROI_plot,
+                    norm=display_norm,
+                    show_markers=self.sources is not None,
+                    show=False,
+                    ax=ax,
+                    title=title
+                )
+                
+            plt.tight_layout()
+            plt.show()
+
             if plot_profiles:
                 PlotSourcesProfiles(self.cube_sparse, self.simulated_sparse, self.sources.table, radius=16, title='Source radial profiles (sparse spectrum)')
             
@@ -1667,10 +1869,10 @@ class MUSEObservation:
                 hdr = fits.Header()
                 # Spatial WCS: reference pixel is the PSF centre; CRVAL encodes its position
                 # in the full field (FITS 1-based convention, hence +1)
-                hdr['CRPIX1'] = crpix_x;               hdr['CRVAL1'] = float(sources.iloc[i]['x_peak']) + 1
-                hdr['CDELT1'] = 1;                      hdr['CUNIT1'] = 'pixel'; hdr['CTYPE1'] = 'PIXEL'
-                hdr['CRPIX2'] = crpix_y;               hdr['CRVAL2'] = float(sources.iloc[i]['y_peak']) + 1
-                hdr['CDELT2'] = 1;                      hdr['CUNIT2'] = 'pixel'; hdr['CTYPE2'] = 'PIXEL'
+                hdr['CRPIX1'] = crpix_x;   hdr['CRVAL1'] = float(sources.iloc[i]['x_peak']) + 1
+                hdr['CDELT1'] = 1;         hdr['CUNIT1'] = 'pixel'; hdr['CTYPE1'] = 'PIXEL'
+                hdr['CRPIX2'] = crpix_y;   hdr['CRVAL2'] = float(sources.iloc[i]['y_peak']) + 1
+                hdr['CDELT2'] = 1;         hdr['CUNIT2'] = 'pixel'; hdr['CTYPE2'] = 'PIXEL'
                 _wcs_λ(hdr, λ_full)
                 hdr['SRCIDX']  = (i,     'Source index (0-based)')
                 hdul.append(_make_hdu(data[i], hdr))

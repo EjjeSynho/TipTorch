@@ -58,24 +58,21 @@ cache_path = data_folder / "cached_cubes/CUBE_0021.pickle"
 ob = MUSEObservation(raw_path, cube_path, cache_path, device=device)
 
 #%%
-# ob.DetectSources(nsigma=35, threshold='auto')
-ob.DetectSources(nsigma=35, threshold=4e2, verbose=True)
+ob.DetectSources(nsigma=35, threshold='auto')
+# ob.DetectSources(nsigma=35, threshold=4e2, verbose=True)
 # ob.AddSources([[100, 200]], weights=0.0)
 # NOTE: If some sources must be filtered out, do it here by modifying the ob.sources_table before initializing the sources for simulation
 
 # ob.DeleteSources([1, 2])  # Example: delete sources with IDs 1 and 2
 
-ob.DisplaySources(draw_box_size=20)
-
-#%%
-# ob.ExtractSources()
+ob.DisplaySources()
 
 #%%
 # ob.PlotSourceSpectra()
 ob.InitSimulation()
 
 #%%
-ob.FitPSFModel(repeat=3, max_iter=200)
+ob.FitPSFModel(repeat=2, max_iter=200)
 # ob.FitPSFModel(fit=['astrometry'], repeat=3, max_iter=200)
 # ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
 
@@ -84,10 +81,9 @@ model = ob.SimulateField()
 ob.DisplaySimulation(plot_profiles=True)
 
 #%%
-
+_ = ob.SimulateField(full_spectrum=True)
 
 #%%
-_ = ob.SimulateField(full_spectrum=True)
 ob.DisplaySimulation(plot_profiles=True, plot_full_spectrum=True)
 
 #%%

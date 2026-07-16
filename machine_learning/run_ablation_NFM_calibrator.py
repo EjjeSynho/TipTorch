@@ -114,7 +114,7 @@ _BASE_DEFAULT = {
 }
 
 # ── Parse CLI ─────────────────────────────────────────────────────────────────
-_parser = argparse.ArgumentParser(description="NFM Calibrator – Data Ablation Study")
+_parser = argparse.ArgumentParser(description="NFM Calibrator - Data Ablation Study")
 _parser.add_argument('--config', type=str, default=None,
                      help='Path to the same JSON config used for training')
 try:
