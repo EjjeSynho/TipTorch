@@ -19,6 +19,27 @@ import pandas as pd
 from STD_dataset_utils import *
 
 #%%
+with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
+    muse_df = pickle.load(handle)
+    
+#%%
+with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
+    # reduced_telemetry = pickle.load(handle)['telemetry imputed df']
+    reduced_telemetry = pickle.load(handle)['telemetry normalized imputed df']
+   
+#%%
+cn2_1 = 1 - reduced_telemetry['Cn2_frac_binned_2'] - reduced_telemetry['Cn2_frac_binned_3']
+cn2_2 = reduced_telemetry['Cn2_frac_binned_2']
+cn2_3 = reduced_telemetry['Cn2_frac_binned_3']
+
+fig, ax = plt.subplots(figsize=(20, 15))
+ax.hist(cn2_1, bins=100, alpha=0.5, label='Cn2_frac_1')
+ax.hist(cn2_2, bins=100, alpha=0.5, label='Cn2_frac_2')
+ax.hist(cn2_3, bins=100, alpha=0.5, label='Cn2_frac_3')
+ax.legend()
+plt.show()
+
+#%%
 # Check the existence of all necessary folders and create them if they don't exist
 std_stars_folders = [CUBES_FOLDER, RAW_FOLDER, STD_FOLDER, CUBES_CACHE, TELEMETRY_CACHE, STD_FOLDER / 'NFM_cubes_temp/']
 for folder in std_stars_folders:
