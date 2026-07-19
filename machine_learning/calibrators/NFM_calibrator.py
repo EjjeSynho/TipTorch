@@ -18,15 +18,63 @@ from tiptorch.managers.input_manager import InputsTransformer
 
 from copy import deepcopy
 from pathlib import Path
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import Dataset, DataLoader, Subset
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import train_test_split, KFold, cross_val_score
 
 from tiptorch._config import *
+from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+class NFMDataset(Dataset):
+    """
+    Dataset of MUSE NFM PSF cubes with paired telemetry and fitted parameter values.
+    Each sample: (PSF_cube [C,H,W], telemetry [D], fitted_params dict, config, dataset_idx).
+    """
+    def __init__(self, data_path):
+        data = torch.load(data_path, weights_only=False)
+        self.PSF_cubes   = data['PSF_cubes']
+        self.telemetry   = data['telemetry']
+        self.sample_ids  = data['sample_ids']
+        self.configs     = data['model_configs']
+        self.fitted_vals = data['fitted_param_values']
+        self.features    = list(data['telemetry'][0].keys())
+
+        _rename = {p: p + '_ctrl' for p in ['J', 'F', 'bg', 'dx', 'dy']}
+        for i in range(len(self.sample_ids)):
+            if isinstance(self.configs[i], list):
+                self.configs[i] = self.configs[i][0]
+            for old_k, new_k in _rename.items():
+                if old_k in self.fitted_vals[i] and new_k not in self.fitted_vals[i]:
+                    self.fitted_vals[i][new_k] = self.fitted_vals[i].pop(old_k)
+
+        self.N, self.H, self.W, self.C = self.PSF_cubes.shape
+
+    def __len__(self):
+        return self.N
+
+    def __getitem__(self, idx):
+        PSFs = torch.from_numpy(self.PSF_cubes[idx].astype(np.float32)).permute(2, 0, 1)
+        tel  = torch.from_numpy(np.array(list(self.telemetry[idx].values()), dtype=np.float32))
+        fit  = {k: torch.tensor(v, dtype=torch.float32) for k, v in self.fitted_vals[idx].items()}
+        return PSFs, tel, fit, self.configs[idx], idx
+
+    @staticmethod
+    def collate_batch(batch, device):
+        PSF_cubes, telemetry_vecs, fitted_vals, configs, idxs = zip(*batch)
+        PSF_cubes      = torch.stack(PSF_cubes,      0).to(device=device, non_blocking=True)
+        telemetry_vecs = torch.stack(telemetry_vecs, 0).to(device=device, non_blocking=True)
+        idxs           = torch.tensor(idxs, dtype=torch.long, device=device)
+        fitted_vals    = {k: torch.stack([fv[k] for fv in fitted_vals], 0).to(device=device, non_blocking=True) for k in fitted_vals[0]}
+        batch_config = MultipleTargetsInDifferentObservations(configs, device=device)
+        batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
+        batch_config['telescope']['PupilAngle'] = 0.0
+        batch_config['DM']['NumberReconstructedLayers'] = torch.tensor(batch_config['atmosphere']['Cn2Heights'].shape[-1], device=device)
+        return PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs
 
 
 class SmallCalibratorNet(nn.Module):
@@ -90,7 +138,9 @@ class NFMCalibrator():
         device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
     ):
         self.device = device
-        state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        self.checkpoint_path = Path(checkpoint_path)
+        self._bundle_state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+        state = self._bundle_state
 
         # Initialize NN architecture from saved state
         self.net = SmallCalibratorNet(
@@ -120,6 +170,36 @@ class NFMCalibrator():
         # Aux params
         self.LO_modes_max   = state.get('LO_modes_max', None)
         self.N_spline_nodes = state.get('N_spline_nodes', None)
+
+    @staticmethod
+    def _tree_to_cpu(obj):
+        """Recursively detach tensors and move them to CPU for portable serialization."""
+        if torch.is_tensor(obj):
+            return obj.detach().cpu().clone()
+        if isinstance(obj, dict):
+            return {k: NFMCalibrator._tree_to_cpu(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(NFMCalibrator._tree_to_cpu(v) for v in obj)
+        return deepcopy(obj)
+
+    def save(self, path, **metadata):
+        """
+        Save a calibrator bundle with the current network weights.
+
+        The original loaded bundle is used as the template, so telemetry scalers,
+        output transforms, and architecture metadata are preserved. This is useful
+        for science-data fine-tuning, where the tuned calibrator must be stored
+        separately from the baseline STD-trained bundle.
+        """
+        state = deepcopy(self._bundle_state)
+        state['net_state_dict'] = self._tree_to_cpu(self.net.state_dict())
+        if metadata:
+            state['fine_tuning'] = metadata
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(self._tree_to_cpu(state), path)
+        logger.info(f"Calibrator bundle saved -> {path}")
+        return path
 
 
     def prepare_telemetry(self, reduced_telemetry: pd.DataFrame) -> torch.Tensor:
@@ -306,6 +386,8 @@ class NFMCalibratorTrainer:
         weights_dir          = None,
         test_size            = 0.20,
         random_state         = 42,
+        train_idx            = None,
+        val_idx              = None,
         collate_fn: Optional[Callable] = None,
     ):
         self.PSF_model           = PSF_model
@@ -329,9 +411,13 @@ class NFMCalibratorTrainer:
         self.N_outputs   = outputs_transformer.get_stacked_size()
 
         # Train / val split and loaders
-        self.train_idx, self.val_idx = train_test_split(
-            np.arange(len(dataset)), test_size=test_size, random_state=random_state,
-        )
+        if train_idx is not None and val_idx is not None:
+            self.train_idx = np.asarray(train_idx, dtype=int)
+            self.val_idx   = np.asarray(val_idx,   dtype=int)
+        else:
+            self.train_idx, self.val_idx = train_test_split(
+                np.arange(len(dataset)), test_size=test_size, random_state=random_state,
+            )
         self.train_loader = self._make_loader(self.train_idx, shuffle=True)
         self.val_loader   = self._make_loader(self.val_idx,   shuffle=False)
 
@@ -1008,3 +1094,900 @@ class NFMCalibratorTrainer:
         }
         torch.save(state, path)
         logger.info(f"Calibrator bundle saved -> {path}")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  Factor-multiplier calibrator
+#
+#  For r0, L0, wind_speed, Cn2_weights: the network predicts per-sample
+#  positive multipliers ∈ (0, +∞) that are applied to telemetry-derived base
+#  values (e.g. the seeing / outer-scale / wind-profile estimates already stored
+#  in the dataset).  This way the network only needs to learn *corrections* to
+#  the instrument telemetry rather than absolute physical values.
+#
+#  dn, J_ctrl  — predicted fully (normalised), same role as in NFMCalibrator.
+#  F_ctrl      — a single dataset-level learnable constant vector (one set of
+#                weights shared across all samples), optimised end-to-end.
+#  LO_coefs    — same dataset-level constant approach; per-sample phase bump
+#                (first coef) is kept separately and prepended at run time.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_FACTOR_PARAM_KEYS = ('r0', 'L0', 'wind_speed', 'Cn2_weights')
+_DIRECT_PARAM_KEYS = ('dn', 'J_ctrl')
+_CONST_PARAM_KEYS  = ('F_ctrl', 'LO_coefs')
+
+
+class SmallFactorNet(nn.Module):
+    """
+    Compact network for the factor-multiplier calibrator.
+
+    The output is split into two heads:
+      • factors  [B, n_factor_outputs] — positive multipliers via softplus
+      • direct   [B, n_direct_outputs] — unconstrained predictions for dn / J_ctrl
+
+    Args:
+        n_features      : number of input telemetry features
+        n_factor_outputs: total stacked dimension for factor params
+        n_direct_outputs: total stacked dimension for direct params (dn, J_ctrl)
+        hidden_dim      : width of hidden layers (default: 32)
+        dropout_rate    : dropout probability (default: 0.3)
+    """
+
+    def __init__(self, n_features, n_factor_outputs, n_direct_outputs, hidden_dim=32, dropout_rate=0.3):
+        super().__init__()
+        self.n_factor_outputs = n_factor_outputs
+        self.n_direct_outputs = n_direct_outputs
+
+        self.network = nn.Sequential(
+            nn.Linear(n_features, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout_rate),
+
+            nn.Linear(hidden_dim, n_factor_outputs + n_direct_outputs),
+        )
+        self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight, gain=0.5)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
+
+    def forward(self, x):
+        """
+        Returns
+        -------
+        factors : Tensor [B, n_factor_outputs]  — multipliers ∈ (0, +∞)
+        direct  : Tensor [B, n_direct_outputs]  — raw logits for dn / J_ctrl
+        """
+        raw = self.network(x)
+        return (
+            torch.nn.functional.softplus(raw[:, :self.n_factor_outputs]),
+            raw[:, self.n_factor_outputs:],
+        )
+
+
+class NFMFactorCalibrator:
+    """
+    Inference wrapper for the factor-multiplier NFM calibrator.
+
+    At inference time:
+      • r0, L0, wind_speed, Cn2_weights — telemetry-derived base values are
+        multiplied element-wise by the network's predicted factors.
+      • dn, J_ctrl  — predicted fully via the direct head.
+      • F_ctrl      — dataset-level constant loaded from the saved bundle.
+      • LO_coefs    — dataset-level constant; per-sample phase bump prepended.
+
+    The caller must supply ``base_params`` at inference (a dict mapping each
+    active factor key to a [B, dim] tensor of telemetry-derived estimates).
+    """
+
+    def __init__(
+        self,
+        checkpoint_path,
+        device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu'),
+    ):
+        self.device = device
+        state = torch.load(checkpoint_path, map_location=device, weights_only=False)
+
+        arch = state['net_arch']
+        self.net = SmallFactorNet(
+            n_features       = arch['n_features'],
+            n_factor_outputs = arch['n_factor_outputs'],
+            n_direct_outputs = arch['n_direct_outputs'],
+            hidden_dim       = arch['hidden_dim'],
+            dropout_rate     = arch['dropout_rate'],
+        ).to(device)
+        self.net.load_state_dict(state['net_state_dict'])
+        self.net.eval()
+
+        # Transformers / slices
+        self.direct_transformer  = InputsTransformer.load(data=state['direct_transformer'])
+        self.active_factor_keys  = state['active_factor_keys']
+        # factor_slices stored as {key: [start, stop]}; restore as slice objects
+        self.factor_slices = {k: slice(v[0], v[1]) for k, v in state['factor_slices'].items()}
+
+        # Dataset-level constants
+        self.F_ctrl_const   = torch.tensor(state['F_ctrl_const'],   device=device, dtype=torch.float32)
+        self.LO_coefs_const = torch.tensor(state['LO_coefs_const'], device=device, dtype=torch.float32)
+
+        # Telemetry preprocessing (mirrors NFMCalibrator)
+        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'rb') as f:
+            self.telemetry_imputer = pickle.load(f)
+        self.telemetry_imputer.verbose = 0
+
+        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as f:
+            self.telemetry_scaler = pickle.load(f)
+        self.features = self.telemetry_scaler.feature_names_in_
+
+        self.LO_modes_max   = state.get('LO_modes_max', None)
+        self.N_spline_nodes = state.get('N_spline_nodes', None)
+
+    def prepare_telemetry(self, reduced_telemetry: pd.DataFrame) -> torch.Tensor:
+        telemetry_pruned = reduce_dataframe(filter_dataframe(reduced_telemetry))
+        telemetry_ = self.telemetry_scaler.transform(telemetry_pruned[self.features])
+        telemetry_ = pd.DataFrame(telemetry_, columns=self.features, index=telemetry_pruned.index)
+        telemetry_ = self.telemetry_imputer.transform(telemetry_)
+        return torch.tensor(telemetry_, dtype=torch.float32, device=self.device)
+
+    def forward(self, reduced_telemetry: pd.DataFrame, base_params: dict) -> dict:
+        """
+        Parameters
+        ----------
+        reduced_telemetry : pd.DataFrame
+        base_params : dict[str, Tensor]
+            Telemetry-derived base values for each active factor key.
+            Shapes: [B, dim_k] (or [B] for scalars like r0, L0).
+            For Cn2_weights: provide the FULL profile including the GL layer.
+        """
+        tel = self.prepare_telemetry(reduced_telemetry)
+        B   = tel.shape[0]
+
+        with torch.no_grad():
+            factors, direct = self.net(tel)
+
+        x_dict = {}
+
+        # Factor params: base × predicted_factor
+        for key in self.active_factor_keys:
+            sl   = self.factor_slices[key]
+            base = base_params[key].to(device=self.device, dtype=torch.float32)
+            if base.dim() == 1:
+                base = base.unsqueeze(-1)
+            x_dict[key] = base * factors[:, sl]
+
+        # Direct params
+        x_dict.update(self.direct_transformer.unstack(direct))
+
+        # Dataset constants
+        x_dict['F_ctrl']   = self.F_ctrl_const.expand(B, -1)
+        phase_bump = torch.zeros(B, 1, device=self.device, dtype=torch.float32)
+        x_dict['LO_coefs'] = torch.cat([phase_bump, self.LO_coefs_const.expand(B, -1)], dim=-1)
+
+        return x_dict
+
+    def __call__(self, reduced_telemetry: pd.DataFrame, base_params: dict) -> dict:
+        return self.forward(reduced_telemetry, base_params)
+
+
+class NFMFactorCalibratorTrainer:
+    """
+    PSF-model-in-the-loop trainer for the factor-multiplier NFM calibrator.
+
+    Network output split:
+      • Factors  (softplus) for r0, L0, wind_speed, Cn2_weights — multiplied with
+        per-sample telemetry-derived base values supplied via ``base_params``.
+      • Direct predictions for dn, J_ctrl — passed through ``direct_transformer``.
+      • F_ctrl, LO_coefs — dataset-level ``nn.Parameter`` constants (one shared
+        vector for the entire dataset), optimised end-to-end alongside the network.
+
+    Parameters
+    ----------
+    PSF_model : PSFModelNFM
+        Initialised and pruned PSF model.
+    calibrator : SmallFactorNet
+        Network mapping [B, N_features] → (factors [B, n_factor_out], direct [B, n_direct_out]).
+    dataset : NFMDataset (or compatible)
+        Full labelled dataset.
+    direct_transformer : InputsTransformer
+        Transformer for the direct-prediction params only (dn, J_ctrl).
+    base_params : dict[str, Tensor | np.ndarray]
+        Full-dataset telemetry-derived base values, shape [N_dataset, param_dim].
+        Required keys: subset of _FACTOR_PARAM_KEYS present in the dataset.
+        For Cn2_weights: MUST include the GL layer as the first column.
+    device : torch.device
+    batch_size, lr, lambda_step, ... : same semantics as NFMCalibratorTrainer.
+    """
+
+    def __init__(
+        self,
+        PSF_model,
+        calibrator,
+        dataset,
+        direct_transformer,
+        base_params: dict,
+        device,
+        *,
+        batch_size          = 16,
+        lr                  = 1e-2,
+        lambda_step         = 2,
+        pre_init_astrometry = True,
+        optimize_astrometry = False,
+        weights_dir         = None,
+        test_size           = 0.20,
+        random_state        = 42,
+        train_idx           = None,
+        val_idx             = None,
+        collate_fn: Optional[Callable] = None,
+    ):
+        self.PSF_model          = PSF_model
+        self.calibrator         = calibrator
+        self.dataset            = dataset
+        self.direct_transformer = direct_transformer
+        self.device             = device
+        self.batch_size         = batch_size
+        self.lr                 = lr
+        self.collate_fn         = collate_fn
+        self.pre_init_astrometry  = pre_init_astrometry
+        self.optimize_astrometry  = optimize_astrometry
+        self.weights_dir = Path(weights_dir) if weights_dir else WEIGHTS_FOLDER / 'NFM_factor_calibrator'
+        self.weights_dir.mkdir(parents=True, exist_ok=True)
+
+        self.N_wvl_total = dataset.C
+        self.H, self.W   = dataset.H, dataset.W
+        self.N_features  = len(dataset.features)
+        self.N_direct    = direct_transformer.get_stacked_size()
+
+        # Determine active factor keys and build offset slices
+        self.active_factor_keys = [k for k in _FACTOR_PARAM_KEYS if k in base_params]
+        self._build_factor_slices(base_params)
+
+        # Validate network dimensions against supplied base_params / direct_transformer
+        n_factor_total = sum(s.stop - s.start for s in self.factor_slices.values())
+        if calibrator.n_factor_outputs != n_factor_total:
+            raise ValueError(
+                f"calibrator.n_factor_outputs={calibrator.n_factor_outputs} but total "
+                f"factor dim from base_params={n_factor_total}. "
+                f"Reconstruct SmallFactorNet with n_factor_outputs={n_factor_total}."
+            )
+        if calibrator.n_direct_outputs != self.N_direct:
+            raise ValueError(
+                f"calibrator.n_direct_outputs={calibrator.n_direct_outputs} but "
+                f"direct_transformer expects {self.N_direct} outputs."
+            )
+
+        # Store base params as full-dataset float32 tensors [N, dim]
+        self.base_params = {}
+        for key in self.active_factor_keys:
+            bp = base_params[key]
+            if isinstance(bp, np.ndarray):
+                bp = torch.from_numpy(bp)
+            bp = bp.to(dtype=torch.float32, device=device)
+            if bp.dim() == 1:
+                bp = bp.unsqueeze(-1)
+            self.base_params[key] = bp
+
+        # Train / val split and loaders
+        if train_idx is not None and val_idx is not None:
+            self.train_idx = np.asarray(train_idx, dtype=int)
+            self.val_idx   = np.asarray(val_idx,   dtype=int)
+        else:
+            self.train_idx, self.val_idx = train_test_split(
+                np.arange(len(dataset)), test_size=test_size, random_state=random_state,
+            )
+        self.train_loader = self._make_loader(self.train_idx, shuffle=True)
+        self.val_loader   = self._make_loader(self.val_idx,   shuffle=False)
+
+        # Wavelength scheduling (reuse helper from NFMCalibratorTrainer)
+        self.lambda_full    = PSF_model.λ_sim.clone()
+        self.lambda_id_sets = (
+            [list(range(dataset.C))] if lambda_step == 1 else
+            NFMCalibratorTrainer._build_wavelength_sets(lambda_step, dataset.C - 1)
+        )
+        self.lambda_sets = [self.lambda_full[ids] for ids in self.lambda_id_sets]
+
+        # Astrometry
+        self._init_astrometry()
+
+        # Per-sample phase bump (first LO coef, not predicted)
+        LO_data = np.array([d['LO_coefs'] for d in dataset.fitted_vals], dtype=np.float32)
+        self.phase_bump = torch.tensor(LO_data[:, 0], device=device, dtype=torch.float32)
+
+        # Dataset-level learnable constants for F_ctrl and LO_coefs
+        self.F_ctrl_const, self.LO_coefs_const = self._init_const_params(dataset)
+
+        self.optimizer, self.scheduler = self._make_optimizer()
+
+        logger.info(
+            f"FactorTrainer ready | dataset={len(dataset)} "
+            f"({len(self.train_idx)} train / {len(self.val_idx)} val) | "
+            f"factor_keys={self.active_factor_keys} | "
+            f"n_factor_out={calibrator.n_factor_outputs} | n_direct_out={self.N_direct}"
+        )
+
+    # ── Helpers ────────────────────────────────────────────────────────────────
+
+    def _build_factor_slices(self, base_params):
+        """Build contiguous slice objects for each active factor key."""
+        self.factor_slices = {}
+        offset = 0
+        for key in self.active_factor_keys:
+            bp   = base_params[key]
+            ndim = bp.ndim if isinstance(bp, np.ndarray) else bp.dim()
+            dim  = int(bp.shape[-1]) if ndim > 1 else 1
+            self.factor_slices[key] = slice(offset, offset + dim)
+            offset += dim
+
+    def _init_const_params(self, dataset):
+        """Initialise F_ctrl and LO_coefs constants from dataset fitted-value medians."""
+        F_ctrl_rows = [d['F_ctrl'] for d in dataset.fitted_vals if 'F_ctrl' in d]
+        LO_data     = np.array([d['LO_coefs'] for d in dataset.fitted_vals], dtype=np.float32)
+
+        F_ctrl_init = (
+            np.median(np.stack(F_ctrl_rows, axis=0), axis=0).astype(np.float32)
+            if F_ctrl_rows else np.zeros(1, dtype=np.float32)
+        )
+        LO_init = np.median(LO_data[:, 1:], axis=0)  # strip per-sample phase bump
+
+        F_ctrl_const   = nn.Parameter(torch.tensor(F_ctrl_init[None],  dtype=torch.float32, device=self.device))
+        LO_coefs_const = nn.Parameter(torch.tensor(LO_init[None],      dtype=torch.float32, device=self.device))
+        return F_ctrl_const, LO_coefs_const
+
+    def _make_loader(self, indices, shuffle):
+        if self.collate_fn is not None:
+            collator = lambda b: self.collate_fn(b, device=self.device)
+        elif hasattr(self.dataset, 'collate_batch'):
+            collator = lambda b: self.dataset.collate_batch(b, device=self.device)
+        else:
+            raise ValueError(
+                "NFMFactorCalibratorTrainer requires a collate function. "
+                "Pass collate_fn=... or define dataset.collate_batch(batch, device)."
+            )
+        return DataLoader(
+            dataset=Subset(self.dataset, [int(i) for i in indices]),
+            batch_size=self.batch_size,
+            shuffle=shuffle,
+            num_workers=0,
+            collate_fn=collator,
+            drop_last=False,
+        )
+
+    def _init_astrometry(self):
+        n      = len(self.dataset)
+        n_ctrl = len(np.atleast_1d(self.dataset.fitted_vals[0].get('dx_ctrl', [0])))
+        if self.pre_init_astrometry and 'dx_ctrl' in self.dataset.fitted_vals[0]:
+            dx_data = np.array([d['dx_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
+            dy_data = np.array([d['dy_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
+        else:
+            self.optimize_astrometry = True
+            dx_data = np.zeros((n, n_ctrl), dtype=np.float32)
+            dy_data = np.zeros((n, n_ctrl), dtype=np.float32)
+        self.dx = torch.tensor(dx_data, device=self.device, dtype=torch.float32, requires_grad=self.optimize_astrometry)
+        self.dy = torch.tensor(dy_data, device=self.device, dtype=torch.float32, requires_grad=self.optimize_astrometry)
+
+    def _make_optimizer(self, lr=None):
+        lr     = lr or self.lr
+        groups = [
+            {'params': self.calibrator.parameters(),              'lr': lr,       'weight_decay': 5e-4},
+            {'params': [self.F_ctrl_const, self.LO_coefs_const], 'lr': lr * 0.1, 'weight_decay': 1e-5},
+        ]
+        if self.optimize_astrometry:
+            groups.append({'params': [self.dx, self.dy], 'lr': 1e-3, 'weight_decay': 1e-5})
+        opt = optim.AdamW(groups, lr=lr)
+        sch = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=7, min_lr=1e-6)
+        return opt, sch
+
+    # ── Parameter assembly ────────────────────────────────────────────────────
+
+    def _assemble_x_dict(self, tel_b: torch.Tensor, idxs_b: torch.Tensor) -> dict:
+        """
+        Build the PSF-model parameter dict for one batch.
+
+        LO_coefs is returned WITHOUT the phase bump; it is prepended in run_model
+        so that the graph stays consistent with the rest of the codebase.
+        """
+        B = tel_b.shape[0]
+        factors, direct = self.calibrator(tel_b)
+
+        x_dict = {}
+
+        # Factor params: per-sample base value × predicted multiplier
+        for key in self.active_factor_keys:
+            base = self.base_params[key][idxs_b]         # [B, dim_k]
+            f    = factors[:, self.factor_slices[key]]   # [B, dim_k]
+            x_dict[key] = base * f
+
+        # Direct params: unstack via transformer
+        x_dict.update(self.direct_transformer.unstack(direct))
+
+        # Dataset constants: broadcast over batch
+        x_dict['F_ctrl']   = self.F_ctrl_const.expand(B, -1)
+        x_dict['LO_coefs'] = self.LO_coefs_const.expand(B, -1)  # phase bump added in run_model
+
+        return x_dict
+
+    # ── PSF forward ───────────────────────────────────────────────────────────
+
+    def run_model(self, x_dict_NN: dict, config, idx, lambda_ids):
+        """Run the PSF model for a batch at the given wavelength indices."""
+        self.PSF_model.model.N_obs = len(idx)
+        x_dict = self.PSF_model.inputs_manager.to_dict()
+        x_dict.update({k: v for k, v in x_dict_NN.items() if k in x_dict})
+        x_dict['dx_ctrl'] = self.dx[idx]
+        x_dict['dy_ctrl'] = self.dy[idx]
+
+        # Prepend per-sample phase bump to the shared LO_coefs constant
+        bump = self.phase_bump[idx].unsqueeze(-1)
+        x_dict['LO_coefs'] = torch.hstack((bump, x_dict_NN['LO_coefs']))
+
+        wvl = self.lambda_full[lambda_ids].to(device=self.device)
+        config['sources_science']['Wavelength'] = wvl.view(1, -1)
+        self.PSF_model.model.config = config
+
+        if len(self.lambda_id_sets) == 1:
+            self.PSF_model.model.Update(grids=False, pupils=False, tomography=True)
+        else:
+            self.PSF_model.SetWavelengths(wvl)
+
+        return self.PSF_model(x_dict, update_params=False)
+
+    # ── Loss ──────────────────────────────────────────────────────────────────
+
+    def _loss_per_sample(self, PSF_data, PSF_pred, x_dict_NN):
+        diff = PSF_pred - PSF_data
+        w    = 2e4
+        PSF  = w * (diff.pow(2).mean(dim=(1, 2, 3)) * 1200.0 + diff.abs().mean(dim=(1, 2, 3)) * 1.6)
+        # Mild regularisation on the shared LO modes constant (broadcasts over batch)
+        c  = x_dict_NN['LO_coefs']   # [B, N_modes-1], no phase bump
+        LO = c.pow(2).mean(dim=-1) * 1e-7
+        return PSF + LO
+
+    def loss_fn(self, PSF_data, PSF_pred, x_dict_NN, sample_weights=None, return_per_sample=False):
+        per = self._loss_per_sample(PSF_data, PSF_pred, x_dict_NN)
+        if return_per_sample:
+            return per
+        if sample_weights is None:
+            return per.mean()
+        w = sample_weights.to(dtype=per.dtype, device=per.device).view(-1)
+        return (w * per).sum() / (w.sum() + 1e-12)
+
+    # ── Checkpoint ────────────────────────────────────────────────────────────
+
+    def save_checkpoint(self, path, epoch, train_loss, val_loss):
+        data = {
+            'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss,
+            'calibrator_state_dict': self.calibrator.state_dict(),
+            'optimizer_state_dict':  self.optimizer.state_dict(),
+            'F_ctrl_const':          self.F_ctrl_const.detach().cpu(),
+            'LO_coefs_const':        self.LO_coefs_const.detach().cpu(),
+        }
+        if self.optimize_astrometry:
+            data['dx'] = self.dx.detach().clone()
+            data['dy'] = self.dy.detach().clone()
+        torch.save(data, path)
+        logger.debug(f"[FactorTrainer] Checkpoint saved -> {path}")
+
+    def load_checkpoint(self, path, load_optimizer=True):
+        path = Path(path)
+        if not path.exists():
+            logger.error(f"[FactorTrainer] Checkpoint not found: {path}")
+            return None, None, None
+        ckpt = torch.load(path, map_location=self.device)
+        self.calibrator.load_state_dict(ckpt['calibrator_state_dict'])
+        if load_optimizer and 'optimizer_state_dict' in ckpt:
+            self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+        if 'F_ctrl_const' in ckpt:
+            self.F_ctrl_const.data   = ckpt['F_ctrl_const'].to(self.device)
+        if 'LO_coefs_const' in ckpt:
+            self.LO_coefs_const.data = ckpt['LO_coefs_const'].to(self.device)
+        if self.optimize_astrometry and 'dx' in ckpt:
+            self.dx.data = ckpt['dx'].to(self.device)
+            self.dy.data = ckpt['dy'].to(self.device)
+        logger.info(f"[FactorTrainer] Checkpoint loaded <- {path} (epoch {ckpt.get('epoch', '?')})")
+        return ckpt.get('epoch'), ckpt.get('train_loss'), ckpt.get('val_loss')
+
+    # ── Pretrain against fitted values ────────────────────────────────────────
+
+    def _factor_pretrain_targets(self, fitted_vals: dict, idxs: torch.Tensor) -> torch.Tensor:
+        """
+        Compute supervised factor targets = fitted_val / base_val for each active
+        factor key.  Returns a [B, n_factor_outputs] tensor of target ratios.
+
+        For Cn2_weights the GL layer is reconstructed from the stored per-layer
+        profile (which excludes GL) before dividing by the full base.
+        """
+        targets = []
+        for key in self.active_factor_keys:
+            fv = fitted_vals[key]
+            if fv.dim() == 1:
+                fv = fv.unsqueeze(-1)
+            if key == 'Cn2_weights':
+                cn2 = fv.clamp(min=1e-6)
+                GL  = (1.0 - cn2.sum(-1, keepdim=True)).clamp(min=1e-6)
+                fv  = torch.hstack((GL, cn2))
+            base  = self.base_params[key][idxs]
+            ratio = (fv / (base.abs() + 1e-12)).clamp(min=1e-3, max=1e3)
+            targets.append(ratio)
+        return torch.cat(targets, dim=-1)  # [B, n_factor_outputs]
+
+    def _direct_pretrain_targets(self, fitted_vals: dict, device) -> torch.Tensor:
+        """
+        Build the supervised target vector for the direct-prediction head
+        (normalised space, mirrors NFMCalibratorTrainer._pretrain_target_vector).
+        """
+        direct_keys = [k for k in _DIRECT_PARAM_KEYS if k in fitted_vals]
+        if not direct_keys:
+            B = next(iter(fitted_vals.values())).shape[0]
+            return torch.zeros(B, self.N_direct, device=device, dtype=torch.float32)
+
+        B = fitted_vals[direct_keys[0]].shape[0]
+        y = torch.zeros(B, self.N_direct, device=device, dtype=torch.float32)
+        for key, sl in self.direct_transformer.slices.items():
+            if key not in fitted_vals:
+                continue
+            val = fitted_vals[key]
+            if val.dim() == 1:
+                val = val.unsqueeze(-1)
+            y[:, sl] = self.direct_transformer.transforms[key](val)
+        return y
+
+    def pretrain(self, num_epochs=100, patience=15, lr=None, save_path=None):
+        """
+        Pretrain the factor / direct heads against supervision derived from the
+        fitted PSF parameter values (no PSF model forward pass involved).
+
+        Factor head target  = fitted_val / base_val  (ratio supervised directly
+        in softplus output space; idealised initialisation near 1.0).
+        Direct head target  = normalised fitted_val via direct_transformer.
+        Dataset constants   are not touched here — they are initialised from
+        medians in __init__ and will be refined during end-to-end training.
+        """
+        lr        = lr or self.lr
+        save_path = save_path or (self.weights_dir / 'pretrain_weights.pth')
+        opt       = optim.AdamW(self.calibrator.parameters(), lr=lr, weight_decay=5e-4)
+        sch       = optim.lr_scheduler.ReduceLROnPlateau(opt, 'min', factor=0.5, patience=10, min_lr=1e-4)
+        criterion = nn.MSELoss()
+        best_loss, best_state, pat_count = float('inf'), None, 0
+
+        for epoch in range(num_epochs):
+            self.calibrator.train()
+            train_loss = 0.0
+            for _, tel, fit, _, idxs in self.train_loader:
+                opt.zero_grad()
+                factors, direct = self.calibrator(tel)
+                f_tgt = self._factor_pretrain_targets(fit, idxs)
+                d_tgt = self._direct_pretrain_targets(fit, device=tel.device)
+                loss  = criterion(factors, f_tgt) + criterion(direct, d_tgt)
+                loss.backward()
+                opt.step()
+                train_loss += loss.item()
+
+            self.calibrator.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for _, tel, fit, _, idxs in self.val_loader:
+                    factors, direct = self.calibrator(tel)
+                    f_tgt = self._factor_pretrain_targets(fit, idxs)
+                    d_tgt = self._direct_pretrain_targets(fit, device=tel.device)
+                    val_loss += (criterion(factors, f_tgt) + criterion(direct, d_tgt)).item()
+
+            avg_t, avg_v = train_loss / len(self.train_loader), val_loss / len(self.val_loader)
+            sch.step(avg_v)
+            is_best = avg_v < best_loss
+            if is_best:
+                best_loss, best_state, pat_count = avg_v, deepcopy(self.calibrator.state_dict()), 0
+            else:
+                pat_count += 1
+
+            print(f"\r[Factor] Pretrain {epoch+1:3d}/{num_epochs} | "
+                  f"train={avg_t:.4f} val={avg_v:.4f} lr={opt.param_groups[0]['lr']:.2e}"
+                  + (" *" if is_best else ""), end='', flush=True)
+            if pat_count >= patience:
+                break
+
+        print()
+        if best_state:
+            self.calibrator.load_state_dict(best_state)
+        torch.save(best_state, save_path)
+        logger.info(f"[Factor] Pretrain done. Best val={best_loss:.6f}, saved -> {save_path}")
+
+    # ── Validate ──────────────────────────────────────────────────────────────
+
+    @torch.no_grad()
+    def validate(self, loader=None, return_cubes=False, verbose=False):
+        """
+        Evaluate the calibrator on a data loader.
+
+        Returns avg_loss or, when return_cubes=True,
+        (PSFs_pred, PSFs_data, local_to_global, NN_factors, NN_direct, tel_vecs, avg_loss).
+        """
+        loader = loader or self.val_loader
+        self.calibrator.eval()
+
+        N = len(loader.dataset)
+        local_to_global = torch.tensor(
+            loader.dataset.indices if isinstance(loader.dataset, Subset) else list(range(N)),
+            dtype=torch.long,
+        )
+        global_to_local = {int(g): l for l, g in enumerate(local_to_global.tolist())}
+
+        PSFs_pred = PSFs_data = NN_factors = NN_direct = tel_vecs = None
+        if return_cubes:
+            PSFs_pred  = torch.zeros((N, self.N_wvl_total, self.H, self.W))
+            PSFs_data  = torch.zeros((N, self.N_wvl_total, self.H, self.W))
+            NN_factors = torch.zeros((N, self.calibrator.n_factor_outputs))
+            NN_direct  = torch.zeros((N, self.calibrator.n_direct_outputs))
+            tel_vecs   = torch.zeros((N, self.N_features))
+
+        total_loss, total_batches = 0.0, 0
+        for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
+            lpos      = torch.tensor([global_to_local[int(i)] for i in idxs_b.cpu().tolist()], dtype=torch.long)
+            x_dict_NN = self._assemble_x_dict(tel_b, idxs_b)
+
+            if return_cubes:
+                fac_b, dir_b = self.calibrator(tel_b)
+                NN_factors[lpos] = fac_b.cpu()
+                NN_direct [lpos] = dir_b.cpu()
+                tel_vecs  [lpos] = tel_b.cpu()
+
+            for lambda_ids in self.lambda_id_sets:
+                PSF_pred_b   = self.run_model(x_dict_NN, config_b, idxs_b, lambda_ids)
+                total_loss  += self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict_NN).item()
+                total_batches += 1
+                if return_cubes:
+                    for wi, li in enumerate(lambda_ids):
+                        PSFs_pred[lpos, li] = PSF_pred_b[:, wi].cpu()
+                        PSFs_data[lpos, li] = PSF_data_b[:, li].cpu()
+
+            if verbose:
+                logger.info(f"[Factor] Validated batch idxs={idxs_b.tolist()}")
+
+        avg_loss = total_loss / max(total_batches, 1)
+        if return_cubes:
+            return PSFs_pred, PSFs_data, local_to_global, NN_factors, NN_direct, tel_vecs, avg_loss
+        return avg_loss
+
+    # ── Train ─────────────────────────────────────────────────────────────────
+
+    def train(
+        self,
+        num_epochs         = 500,
+        patience           = 20,
+        nan_recovery       = True,
+        max_nan_recoveries = 10,
+        sample_weights     = None,
+        checkpoint_path    = None,
+        train_loader       = None,
+        val_loader         = None,
+    ):
+        """
+        End-to-end PSF-model training loop with early stopping and NaN recovery.
+        Jointly optimises the network (factor + direct heads) and the dataset-level
+        F_ctrl / LO_coefs constants.
+
+        Returns (train_losses, val_losses).
+        """
+        train_loader    = train_loader or self.train_loader
+        val_loader      = val_loader   or self.val_loader
+        checkpoint_path = Path(checkpoint_path or (self.weights_dir / 'best_factor_calibrator_checkpoint.pth'))
+
+        if sample_weights is not None:
+            sample_weights = torch.as_tensor(sample_weights, dtype=torch.float32, device=self.device)
+
+        best_val, patience_counter, nan_count = float('inf'), 0, 0
+        train_losses, val_losses = [], []
+
+        for epoch in range(num_epochs):
+            self.calibrator.train()
+            epoch_loss, n_batches, nan_this_epoch = 0.0, 0, False
+
+            for PSF_data_b, tel_b, _, config_b, idxs_b in train_loader:
+                self.optimizer.zero_grad()
+                batch_loss = 0.0
+
+                for lambda_ids in self.lambda_id_sets:
+                    x_dict_NN  = self._assemble_x_dict(tel_b, idxs_b)
+                    PSF_pred_b = self.run_model(x_dict_NN, config_b, idxs_b, lambda_ids)
+                    sw   = sample_weights[idxs_b] if sample_weights is not None else None
+                    loss = self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict_NN, sw)
+
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        nan_this_epoch = True
+                        if nan_recovery and nan_count < max_nan_recoveries:
+                            nan_count += 1
+                            logger.error(f"[Factor] NaN at epoch {epoch}, recovery {nan_count}/{max_nan_recoveries}")
+                            self.load_checkpoint(checkpoint_path)
+                            for pg in self.optimizer.param_groups:
+                                pg['lr'] *= 0.7
+                            self.optimizer.zero_grad(set_to_none=True)
+                        else:
+                            raise ValueError(f"NaN loss after {nan_count} recovery attempt(s)")
+                        break
+
+                    loss.backward()
+                    batch_loss += loss.item()
+                    del PSF_pred_b, x_dict_NN, loss
+
+                if nan_this_epoch:
+                    break
+
+                torch.nn.utils.clip_grad_norm_(self.calibrator.parameters(), max_norm=1.0)
+                torch.nn.utils.clip_grad_norm_([self.F_ctrl_const, self.LO_coefs_const], max_norm=1.0)
+                if self.optimize_astrometry:
+                    torch.nn.utils.clip_grad_norm_([self.dx, self.dy], max_norm=10.0)
+                self.optimizer.step()
+                epoch_loss += batch_loss
+                n_batches  += 1
+
+            release_gpu_memory()
+            if nan_this_epoch:
+                continue
+
+            avg_train = epoch_loss / max(n_batches, 1)
+            train_losses.append(avg_train)
+            val_loss = self.validate(loader=val_loader)
+            val_losses.append(val_loss)
+            self.scheduler.step(val_loss)
+
+            is_best = val_loss < best_val
+            if is_best:
+                best_val, patience_counter = val_loss, 0
+                self.save_checkpoint(checkpoint_path, epoch, avg_train, val_loss)
+            else:
+                patience_counter += 1
+
+            lr_cur = self.optimizer.param_groups[0]['lr']
+            msg = (f"[Factor] Epoch {epoch:4d} | train={avg_train:.4f} val={val_loss:.4f} "
+                   f"lr={lr_cur:.2e} pat={patience_counter}/{patience}" + (" *" if is_best else ""))
+            print(msg)
+            logger.info(msg)
+
+            if epoch % 5 == 0:
+                self.save_checkpoint(
+                    self.weights_dir / f'checkpoint_epoch_{epoch}.pth', epoch, avg_train, val_loss
+                )
+
+            if patience_counter >= patience:
+                logger.info(f"[Factor] Early stopping at epoch {epoch}")
+                break
+
+        self.load_checkpoint(checkpoint_path)
+        logger.info(f"[Factor] Training complete. Best val={best_val:.6f}")
+        return train_losses, val_losses
+
+    # ── K-fold difficulty weighting ───────────────────────────────────────────
+
+    @torch.no_grad()
+    def _evaluate_per_sample_losses(self, loader):
+        self.calibrator.eval()
+        global_ids = np.asarray(
+            loader.dataset.indices if isinstance(loader.dataset, Subset) else range(len(loader.dataset)),
+            dtype=int,
+        )
+        loss_acc = {int(i): [] for i in global_ids}
+        for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
+            x_dict_NN = self._assemble_x_dict(tel_b, idxs_b)
+            for lambda_ids in self.lambda_id_sets:
+                PSF_pred_b = self.run_model(x_dict_NN, config_b, idxs_b, lambda_ids)
+                per = self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict_NN,
+                                   return_per_sample=True).cpu().numpy()
+                for gid, lv in zip(idxs_b.cpu().numpy().astype(int), per):
+                    loss_acc[int(gid)].append(float(lv))
+                del PSF_pred_b, per
+            del x_dict_NN
+        return global_ids, np.array([np.mean(loss_acc[int(i)]) for i in global_ids], dtype=np.float32)
+
+    def run_kfold_difficulty_weighting(
+        self,
+        base_indices,
+        initial_state_dict,
+        n_splits      = 5,
+        fold_epochs   = 120,
+        fold_patience = 12,
+        alpha         = 0.30,
+        clip          = (0.5, 2.0),
+        random_state  = 42,
+        force_retrain = False,
+        load_only     = False,
+    ):
+        """
+        Same interface as NFMCalibratorTrainer.run_kfold_difficulty_weighting.
+        Resets the calibrator and optimizer to ``initial_state_dict`` after weighting.
+        """
+        base_indices = np.asarray(base_indices, dtype=int)
+        kf           = KFold(n_splits=min(n_splits, len(base_indices)), shuffle=True, random_state=random_state)
+        oof_losses   = np.full(len(self.dataset), np.nan, dtype=np.float32)
+        kfold_dir    = self.weights_dir / 'kfold_difficulty'
+        kfold_dir.mkdir(exist_ok=True)
+
+        fold_checkpoints = [kfold_dir / f'fold_{fid:02d}_best.pth' for fid in range(min(n_splits, len(base_indices)))]
+        folds_exist = [c.exists() for c in fold_checkpoints]
+        n_folds     = len(fold_checkpoints)
+
+        if load_only:
+            missing = [fid for fid, e in enumerate(folds_exist) if not e]
+            if missing:
+                raise FileNotFoundError(
+                    f"load_only=True but checkpoints missing for folds: {missing}. "
+                    f"Set force_retrain=True to train them."
+                )
+
+        for fold_id, (tr_rel, va_rel) in enumerate(kf.split(base_indices)):
+            fold_train_idx = base_indices[tr_rel]
+            fold_val_idx   = base_indices[va_rel]
+            fold_ckpt      = fold_checkpoints[fold_id]
+
+            if not force_retrain and fold_ckpt.exists():
+                logger.info(f"[Factor] Fold {fold_id+1}/{n_folds}: Loading {fold_ckpt}")
+                self.calibrator.load_state_dict(deepcopy(initial_state_dict))
+                self.load_checkpoint(fold_ckpt, load_optimizer=False)
+            else:
+                logger.info(f"[Factor] Fold {fold_id+1}/{n_folds}: Training")
+                self.calibrator.load_state_dict(deepcopy(initial_state_dict))
+                self.optimizer, self.scheduler = self._make_optimizer()
+                self.train(
+                    num_epochs   = fold_epochs,
+                    patience     = fold_patience,
+                    train_loader = self._make_loader(fold_train_idx, shuffle=True),
+                    val_loader   = self._make_loader(fold_val_idx,   shuffle=False),
+                    checkpoint_path = fold_ckpt,
+                )
+
+            val_ids, fold_l = self._evaluate_per_sample_losses(self._make_loader(fold_val_idx, shuffle=False))
+            oof_losses[val_ids] = fold_l
+            release_gpu_memory(sync=True)
+
+        X  = np.array([[*self.dataset.telemetry[int(i)].values()] for i in base_indices], dtype=np.float32)
+        y  = np.log10(oof_losses[base_indices] + 1e-12)
+        rf = RandomForestRegressor(n_estimators=300, random_state=random_state, n_jobs=-1)
+        cv_r2 = cross_val_score(rf, X, y, cv=min(n_splits, len(base_indices)), scoring='r2')
+        logger.info(f"[Factor] RF difficulty CV R2 = {cv_r2.mean():.4f} +/- {cv_r2.std():.4f}")
+        rf.fit(X, y)
+
+        weights_train = NFMCalibratorTrainer._difficulty_to_weights(rf.predict(X), alpha=alpha, clip=clip)
+        weights_all   = np.ones(len(self.dataset), dtype=np.float32)
+        weights_all[base_indices] = weights_train
+
+        # Reset to the same starting point for the final full training run
+        self.calibrator.load_state_dict(deepcopy(initial_state_dict))
+        self.optimizer, self.scheduler = self._make_optimizer()
+
+        logger.info(
+            f"[Factor] Difficulty weights: min={weights_train.min():.3f} "
+            f"mean={weights_train.mean():.3f} max={weights_train.max():.3f}"
+        )
+        return torch.as_tensor(weights_all, dtype=torch.float32, device=self.device)
+
+    # ── Save calibrator bundle ─────────────────────────────────────────────────
+
+    def save_calibrator(self, path):
+        """Export a self-contained bundle loadable by NFMFactorCalibrator."""
+        # factor_slices stored as plain [start, stop] pairs (slice objects are not pickleable)
+        factor_slices_serial = {k: [s.start, s.stop] for k, s in self.factor_slices.items()}
+        state = {
+            'net_state_dict':       self.calibrator.state_dict(),
+            'net_arch': {
+                'n_features':       self.N_features,
+                'n_factor_outputs': self.calibrator.n_factor_outputs,
+                'n_direct_outputs': self.calibrator.n_direct_outputs,
+                'hidden_dim':       self.calibrator.network[0].out_features,
+                'dropout_rate':     self.calibrator.network[3].p,
+            },
+            'direct_transformer':   self.direct_transformer.save(),
+            'factor_slices':        factor_slices_serial,
+            'active_factor_keys':   self.active_factor_keys,
+            'F_ctrl_const':         self.F_ctrl_const.detach().cpu().numpy(),
+            'LO_coefs_const':       self.LO_coefs_const.detach().cpu().numpy(),
+            'input_feature_names':  self.dataset.features,
+            'LO_modes_max':         self.PSF_model.Z_mode_max,
+            'N_spline_nodes':       getattr(self.PSF_model, 'N_wvl_ctrl', None),
+        }
+        torch.save(state, path)
+        logger.info(f"[Factor] Calibrator bundle saved -> {path}")

@@ -422,7 +422,7 @@ plt.title('Fitted vs Header wind speed')
 plt.show()
 
 #%%
-from tools.plotting import wavelength_to_rgb
+from tools.plotting import wavelength_to_RGB
 import seaborn as sns
 
 SR_err_df   = (SR_fit_df - SR_data_df).abs() / SR_data_df * 100
@@ -435,7 +435,7 @@ bins = np.linspace(0, 40, 21) # Define constant bins
 plt.figure(figsize=(10, 6))
 for i, wvl in enumerate(wavelength[::2]):  # Skip every second wavelength
     data = SR_err_df[wvl].dropna().clip(upper=40)
-    sns.histplot(data, bins=bins+i*0.05, alpha=0.1, label=f'{wvl} nm', color=wavelength_to_rgb(wvl_normed[i*2]),  element="step", fill=True, linewidth=2)
+    sns.histplot(data, bins=bins+i*0.05, alpha=0.1, label=f'{wvl} nm', color=wavelength_to_RGB(wvl_normed[i*2]),  element="step", fill=True, linewidth=2)
 
 plt.xlim(0, 40)
 plt.ylim(0, 250)

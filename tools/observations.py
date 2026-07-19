@@ -11,26 +11,27 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
+from copy import deepcopy
 from tqdm import tqdm
-from matplotlib.colors import LogNorm
 from typing import Optional
+from pathlib import Path
+from datetime import datetime
 from dataclasses import dataclass
+from matplotlib.colors import LogNorm
 
 from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE
 from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
 from fitting.PSF_optimizer import OptimizePSFModel
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
-from tiptorch.PSF_models.NFM_Moffat  import MoffatPSFModelNFM
+from tiptorch.PSF_models.NFM_Moffat import MoffatPSFModelNFM
 from tiptorch.tools.utils import mask_square, generate_random_colors, rad2mas, rad2arc
-from tools.plotting import PlotSpetralCubeInRGB
 from tools.multisources import (
     add_ROIs,
     AddSources,
     SourcesData,
     SourcesSubset,
     DetectSources,
-    DisplaySources,
-    VisualizeSources,
+    DisplayField,
     add_ROIs_separately,
     ExtractSourceImages,
     ROI_from_valid_mask,
@@ -48,6 +49,7 @@ class FitWeights:
     LO:         float
     MSE:        float = 900.0
     MAE:        float = 2.6
+    log:        float = 500.0
     positive:   float = 2.0
     unit_flux:  float = 0.2
 
@@ -102,6 +104,7 @@ class MUSEObservation:
         
         self.simulated_sparse = None # stores simulated field
         self.simulated_full   = None # stores simulated field for the full MUSE-NFM spectrum
+        self.calibrator       = None # NFMCalibrator used to initialize / fine-tune the physical model
         
         
 
@@ -175,7 +178,7 @@ class MUSEObservation:
 
     def ExtractSpectraFromCore(self, sources_table, cube_sparse, cube_full):
         if len(sources_table) == 0:
-            raise ValueError("No sources detected. Please run DetectSources() or AddSources() before extracting spectra.")
+            raise ValueError("No sources detected. Please (re-)run DetectSources() or AddSources() before initializing sources info.")
         
         # Contains the spectrum per source AVERAGED across the PSF core pixels. The core mask here must match EXACTLY the one
         # used for the flux normalization factor estimation later        
@@ -191,9 +194,10 @@ class MUSEObservation:
         return spectra_sparse, spectra_full
 
 
-    def InitSimulation(self) -> None:
+    def InitSimulation(self, path_to_calibrator: str|Path|None = None) -> None:
         if self.sources is None:
-             raise ValueError("Sources must be initialized before initializing the PSF model. Please run ExtractSources() first.")
+            # raise ValueError("Sources table must be initialized before initializing the PSF model. Please (re-)run ExtractSources() or AddSources() first.")
+            self.ExtractSources(verbose=True, max_nan_fraction=0.7)
         
         # The model config is also updated to simulate only sparse λs
         self.model_config['sources_science']['Wavelength'] = torch.tensor(self.λ_sparse, device=self.device, dtype=torch.float32) * 1e-9 #[m]
@@ -219,11 +223,15 @@ class MUSEObservation:
                 λ_max           = self.λ_full.max().item() * 1e-9, # [m]
                 num_λ_slices    = len(self.λ_full)
             )
-            #  Get the initial guess for the PSF model parameters
-            calibrator = NFMCalibrator(WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth', device=self.device)
-            _ = calibrator.check_compatibility(self.PSF_model)
+                        
+            # Get the initial guess for the PSF model parameters via calibrator NN
+            if path_to_calibrator is None:
+                path_to_calibrator = WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth'
+                
+            self.calibrator = NFMCalibrator(path_to_calibrator, device=self.device)
+            _ = self.calibrator.check_compatibility(self.PSF_model)
             # Change PSF model parameters based on NN's predictions
-            calibrator.calibrate(self.reduced_telemetry, self.PSF_model)
+            self.calibrator.calibrate(self.reduced_telemetry, self.PSF_model)
 
             # Disable optimization of some variables
             self.PSF_model.inputs_manager.set_optimizable('bg_ctrl',  False)
@@ -267,7 +275,23 @@ class MUSEObservation:
         self._update_flux_norm() # Update the flux normalization factor based on the initial guess for the PSF shape
 
 
-    def DetectSources(self, nsigma=35, threshold='auto'):
+    def _invalidate_extracted_state(self, reason: str):
+        """Reset extracted SourcesData / N_src when the raw sources_table changes,
+        keeping the two collections in sync. Warns if a PSF model was already built."""
+        import warnings
+        if self.sources is not None:
+            self.sources = None
+            self.N_src = 0
+            if hasattr(self, 'PSF_model') and self.PSF_model is not None:
+                warnings.warn(
+                    f"{reason}: extracted sources and PSF model are now stale. "
+                    "Re-run ExtractSources() and InitSimulation()."
+                )
+            else:
+                warnings.warn(f"{reason}: previously extracted sources have been discarded. Re-run ExtractSources().")
+
+
+    def DetectSources(self, nsigma=35, threshold='auto', verbose=False):
         # Simple sources detector function. For now, make sure that only point sources are included. This function also defines the
         # order in which sources are indexed ad processed later, so it's important to use it before extracting the source images
         # and spectra. The order can be defined by the brightness of the sources in the descending order
@@ -277,13 +301,71 @@ class MUSEObservation:
             nsigma = nsigma,
             box_size = 11,
             sort_by_brightness = True,
-            weight_from_flux = False
+            weight_from_flux = False,
+            verbose = verbose
         )
+        # Detection replaces the raw table, so any previously extracted sources become stale.
+        self._invalidate_extracted_state("DetectSources() replaced the raw sources_table")
 
 
     def AddSources(self, sources_coords, weights=0.0):
         # If some sources are missing from the automatic detection, they can be added manually by providing their coordinates in the same format as the sources dataframe
         self.sources_table = AddSources(self.cube_sparse, sources_coords, self.sources_table, weights=weights, weight_from_flux=False)
+        # New rows in the raw table must be re-extracted before they can be used by the model.
+        self._invalidate_extracted_state("AddSources() modified the raw sources_table")
+
+
+    def DeleteSources(self, src_ids):
+        """
+        Delete source(s) by ID in-place.
+
+        Sources are always removed from the raw sources_table. When called after
+        ExtractSources(), the corresponding entries are also removed from the
+        extracted SourcesData and N_src is updated (since both collections are
+        kept row-aligned by ExtractSources, IDs refer to the same rows in both).
+        If a PSF model has already been initialized, a warning is issued and
+        InitSimulation() must be re-run afterward.
+
+        Parameters
+        ----------
+        src_ids : int or list of int
+            Source ID(s) to delete, using the current indexing shown by DisplaySources().
+        """
+        import warnings
+
+        if isinstance(src_ids, (int, np.integer)):
+            src_ids = [int(src_ids)]
+        else:
+            src_ids = [int(i) for i in src_ids]
+
+        if self.sources is None and self.sources_table is None:
+            raise ValueError("No sources to delete. Run DetectSources() or AddSources() first.")
+
+        # Validate against the raw sources_table (the authoritative index space).
+        # After ExtractSources(), sources_table and sources.table are aligned row-by-row,
+        # so the same integer positions apply to both collections.
+        if self.sources_table is not None:
+            valid   = [i for i in src_ids if i in self.sources_table.index]
+            invalid = [i for i in src_ids if i not in self.sources_table.index]
+        else:
+            valid   = [i for i in src_ids if 0 <= i < len(self.sources)]
+            invalid = [i for i in src_ids if i < 0 or i >= len(self.sources)]
+
+        if invalid:
+            warnings.warn(f"Source IDs not found and will be skipped: {invalid}")
+        if not valid:
+            return
+
+        if self.sources_table is not None:
+            self.sources_table = self.sources_table.drop(index=valid).reset_index(drop=True)
+            self.sources_table.index.name = 'ID'
+
+        if self.sources is not None:
+            # sources.delete uses positional indexing; positions match the raw table row order.
+            self.sources.delete(valid)
+            self.N_src = len(self.sources)
+            if hasattr(self, 'PSF_model') and self.PSF_model is not None:
+                warnings.warn("Sources deleted after PSF model initialization. Please re-run InitSimulation() to rebuild the model.")
 
 
     def ExtractSources(self, verbose=False, max_nan_fraction=0.3):
@@ -291,10 +373,12 @@ class MUSEObservation:
         # Filtering means, that the sources on the edge of the filed will be removed since they don't have enough pixels
         srcs_image_data = ExtractSourceImages(self.cube_sparse, self.sources_table, box_size=self.PSF_size, filter_sources=True, max_nan_fraction=max_nan_fraction, debug_draw=False)
         # Extract spectra from the PSF core for each filtered source
-        spectra_sparse, spectra_full = self.ExtractSpectraFromCore(srcs_image_data["src_data"], self.cube_sparse, self.cube_full)
+        extracted_table = srcs_image_data["src_data"]
+        N_filtered      = len(self.sources_table) - len(extracted_table)
+        spectra_sparse, spectra_full = self.ExtractSpectraFromCore(extracted_table, self.cube_sparse, self.cube_full)
         # These are the sources which are included in the model
         self.sources = SourcesData(
-            table          = srcs_image_data["src_data"],
+            table          = extracted_table,
             imgs_sparse    = srcs_image_data["src_images"],
             slices_local   = srcs_image_data["ROI_local"],
             slices_global  = srcs_image_data["ROI_global"],
@@ -302,10 +386,15 @@ class MUSEObservation:
             spectra_sparse = spectra_sparse,
         )
         self.N_src = len(self.sources)
-        
+
+        # Keep sources_table in sync with the extracted SourcesData: edge-filtered sources
+        # are dropped from the raw table so both collections describe the same set of sources.
+        self.sources_table = self.sources.table.copy()
+        self.sources_table.index.name = 'ID'
+
         if verbose:
             print(f"Extracted {self.N_src} source{'s' if self.N_src != 1 else ''}.")
-            print(f"Num. of filtered sources on the edge of the field: {len(self.sources_table) - self.N_src}")
+            print(f"Num. of filtered sources on the edge of the field: {N_filtered}")
             
 
     @torch.no_grad()
@@ -409,7 +498,7 @@ class MUSEObservation:
         fit_weights_normalized = fit_weights / fit_weights.sum() * len(fit_weights)  # Sum to N_sources
 
         fit_relative = torch.clamp(fit_fluxes / fit_fluxes.max().item(), min=0.1, max=1.0) * fit_weights
-        # Weighted mean normalisation so loss stays within ~10⁰–10¹ range
+        # Weighted mean normalisation so loss stays within ~10⁰-10¹ range
         w_total = fit_relative.sum() / (fit_fluxes * fit_relative).sum()
 
         return FitWeights(
@@ -545,8 +634,10 @@ class MUSEObservation:
         target_device = 'cpu' if force_cpu else self.device
         N_λ_range     = len(λ_range)
 
-        # Evaluate the chromatic PSF normalisation factor at the simulated sub-range wavelengths
-        λ_range_normed       = self.PSF_model.norm_wvl(λ_range.to(self.PSF_model.device)).to(target_device)
+        # Evaluate the chromatic PSF normalisation factor at the simulated sub-range wavelengths.
+        # The spline (F_norm_λ_ctrl, λ_ctrl_norm) lives on self.device, so we must evaluate there
+        # and only afterwards move the result to target_device.
+        λ_range_normed        = self.PSF_model.norm_wvl(λ_range.to(self.PSF_model.device))
         PSF_norm_factor_range = self.PSF_model.evaluate_splines(
             self.PSF_model.inputs_manager['F_norm_λ_ctrl'], λ_range_normed
         ).to(target_device)
@@ -579,11 +670,20 @@ class MUSEObservation:
         residuals = diff * fit_weights.spectral * fit_weights.per_src.view(-1, 1, 1, 1) # apply both spectral and source weights to the residuals
         MSE_loss = residuals.pow(2).mean() * fit_weights.MSE
         MAE_loss = residuals.abs().mean()  * fit_weights.MAE
+
+        # Logarithmic loss: measures relative errors in log-space, making it naturally scale-invariant
+        # and more sensitive to PSF wing structure where MSE/MAE have little influence.
+        # eps is adaptive to the data peak to keep both arguments strictly positive at all flux levels.
+        eps = PSF_data.detach().amax().clamp(min=1e-10) * 1e-5
+        log_diff = torch.log(PSF_data.clamp(min=eps)) - torch.log(PSF_pred.clamp(min=eps))
+        log_residuals = log_diff * fit_weights.spectral * fit_weights.per_src.view(-1, 1, 1, 1)
+        log_loss = log_residuals.pow(2).mean() * fit_weights.log
+
         # Since x input in simulate_sparse() updates the values inside the PSF_model (including F_norm), they now can be used directly here
         F_penalty = (self.PSF_model.inputs_manager['F_ctrl'] - 1.0).abs().mean()
         # Soft non-negativity penalty: penalize when residuals (data - model) are negative to prevent ouversubtracting simulated PSFs
         force_positive_diff = torch.nn.functional.relu(-diff).mean()
-        return (MSE_loss + MAE_loss) * fit_weights.total + F_penalty * fit_weights.unit_flux + force_positive_diff * fit_weights.positive
+        return (MSE_loss + MAE_loss + log_loss) * fit_weights.total + F_penalty * fit_weights.unit_flux + force_positive_diff * fit_weights.positive
 
 
     def _loss_LO(self, fit_weights: FitWeights):
@@ -599,6 +699,252 @@ class MUSEObservation:
         first_defocus_penalty = self.force_positive_coef(self.PSF_model.inputs_manager['LO_coefs'][:, 2]) * fit_weights.LO  #NOTE: won't work with the chromatic defocus
         # Final composite loss
         return LO_loss + phase_bump_positive + first_defocus_penalty
+
+
+    def _calibrator_output_mask(self, calibrator: NFMCalibrator, tuned_params):
+        if tuned_params is None:
+            return torch.ones(
+                calibrator.outputs_transformer.get_stacked_size(),
+                dtype=torch.bool,
+                device=self.device,
+            )
+
+        if isinstance(tuned_params, str):
+            tuned_params = [tuned_params]
+
+        unknown = [k for k in tuned_params if k not in calibrator.outputs_transformer.slices]
+        if unknown:
+            available = list(calibrator.outputs_transformer.slices.keys())
+            raise KeyError(f"Unknown calibrator output(s): {unknown}. Available outputs: {available}")
+
+        mask = torch.zeros(
+            calibrator.outputs_transformer.get_stacked_size(),
+            dtype=torch.bool,
+            device=self.device,
+        )
+        for key in tuned_params:
+            mask[calibrator.outputs_transformer.slices[key]] = True
+        return mask
+
+
+    def _calibrator_prediction_to_PSF_inputs(self, calibrator: NFMCalibrator, x_stacked: torch.Tensor) -> dict:
+        x_dict = calibrator.outputs_transformer.unstack(x_stacked)
+
+        if 'LO_coefs' in x_dict:
+            coefs = x_dict['LO_coefs']
+            phase_bump = torch.zeros(coefs.shape[0], 1, device=coefs.device, dtype=coefs.dtype)
+            x_dict['LO_coefs'] = torch.cat([phase_bump, coefs], dim=-1)
+
+        x_dict = calibrator._adapt_to_PSF_model(x_dict, self.PSF_model)
+        psf_inputs = self.PSF_model.inputs_manager.to_dict()
+        psf_inputs.update({k: v for k, v in x_dict.items() if k in psf_inputs})
+        return psf_inputs
+
+
+    def _simulate_sparse_from_calibrator(
+        self,
+        x_stacked: torch.Tensor,
+        calibrator: NFMCalibrator,
+        src_subset: Optional[SourcesSubset],
+    ) -> torch.Tensor:
+        if src_subset is None:
+            src_subset = self.sources.select(None)
+
+        x_dict = self._calibrator_prediction_to_PSF_inputs(calibrator, x_stacked)
+        all_selected = len(src_subset.ids) == self.N_src
+        F_norm = x_dict['F_norm'] if all_selected else x_dict['F_norm'][src_subset.ids]
+
+        PSFs_ = self.PSF_model(
+            x_dict,
+            src_ids=None if all_selected else src_subset.ids,
+            update_params=True,
+        )
+        PSF_norm_factor = self.PSF_model.evaluate_splines(
+            x_dict['F_norm_λ_ctrl'],
+            self.PSF_model.λ_sim_normed,
+        )
+        flux_normalization = F_norm.view(-1, 1) * PSF_norm_factor
+        PSFs = PSFs_ * (flux_normalization * src_subset.spectra_sparse).view(-1, self.N_wvl, 1, 1)
+        return add_ROIs(self.canvas_sparse * 0.0, PSFs, src_subset.slices_local, src_subset.slices_global)
+
+
+    def FineTuneCalibrator(
+        self,
+        tuned_params=('F_ctrl', 'dn', 'J_ctrl', 'LO_coefs'),
+        num_epochs=30,
+        lr=1e-4,
+        patience=8,
+        weight_decay=1e-4,
+        output_path=None,
+        prediction_anchor=5.0,
+        weight_anchor=1e-4,
+        regularization_looseness=1.0,
+        grad_clip=0.5,
+        calibrator_path=None,
+        restore_best=True,
+        verbose=True,
+    ):
+        """
+        Fine-tune the NFM calibrator NN directly on this science observation.
+
+        The loss is computed through the normal OB rendering path: all selected
+        sources are drawn into the shared field canvas, so overlaps, off-axis
+        source positions, and different source fluxes are preserved. Untuned
+        calibrator outputs are clamped to the frozen reference prediction, while
+        the tuned network is regularized toward its starting weights.
+
+        Increase ``regularization_looseness`` above 1 to let the NN move farther
+        from its initial predictions, or set ``prediction_anchor`` /
+        ``weight_anchor`` directly for finer control.
+        """
+        if self.model_type != 'tiptorch':
+            raise ValueError("Calibrator fine-tuning is only available for model_type='TipTorch'.")
+        if self.sources is None or self.N_src == 0:
+            raise ValueError("Sources must be extracted before fine-tuning. Run ExtractSources() first.")
+        if not hasattr(self, 'PSF_model'):
+            raise ValueError("PSF model must be initialized before fine-tuning. Run InitSimulation() first.")
+
+        if self.calibrator is None or calibrator_path is not None:
+            self.calibrator = NFMCalibrator(
+                WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth' if calibrator_path is None else calibrator_path,
+                device=self.device,
+            )
+            _ = self.calibrator.check_compatibility(self.PSF_model)
+
+        calibrator = self.calibrator
+        calibrator.net.train()
+
+        if regularization_looseness <= 0:
+            raise ValueError("regularization_looseness must be positive.")
+        effective_prediction_anchor = prediction_anchor / regularization_looseness
+        effective_weight_anchor = weight_anchor / regularization_looseness
+
+        tel = calibrator.prepare_telemetry(self.reduced_telemetry)
+        tuned_mask = self._calibrator_output_mask(calibrator, tuned_params).unsqueeze(0)
+        fixed_mask = ~tuned_mask.squeeze(0)
+        fit_weights = self._compute_fitting_weights()
+        fit_subset = fit_weights.subset
+
+        with torch.no_grad():
+            x_ref = calibrator.net(tel).detach()
+        ref_state = {name: p.detach().clone() for name, p in calibrator.net.named_parameters()}
+
+        optimizer = torch.optim.AdamW(calibrator.net.parameters(), lr=lr, weight_decay=weight_decay)
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode='min', factor=0.5, patience=max(1, patience // 2), min_lr=1e-7
+        )
+
+        best_loss = float('inf')
+        best_state = deepcopy(calibrator.net.state_dict())
+        bad_epochs = 0
+        history = []
+
+        for epoch in range(num_epochs):
+            optimizer.zero_grad(set_to_none=True)
+            x_tuned = calibrator.net(tel)
+            x_combined = torch.where(tuned_mask, x_tuned, x_ref)
+            model = self._simulate_sparse_from_calibrator(x_combined, calibrator, fit_subset)
+
+            data_loss = self.loss(None, self.cube_sparse, lambda _: model, fit_weights)
+            anchor_loss = torch.zeros((), device=self.device, dtype=data_loss.dtype)
+            if fixed_mask.any():
+                anchor_loss = (x_tuned[:, fixed_mask] - x_ref[:, fixed_mask]).pow(2).mean()
+
+            drift_loss = torch.zeros((), device=self.device, dtype=data_loss.dtype)
+            drift_count = 0
+            for name, param in calibrator.net.named_parameters():
+                drift_loss = drift_loss + (param - ref_state[name]).pow(2).mean()
+                drift_count += 1
+            drift_loss = drift_loss / max(drift_count, 1)
+
+            loss = data_loss + effective_prediction_anchor * anchor_loss + effective_weight_anchor * drift_loss
+            if not torch.isfinite(loss):
+                raise FloatingPointError(f"Non-finite calibrator fine-tuning loss at epoch {epoch + 1}.")
+
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(calibrator.net.parameters(), max_norm=grad_clip)
+            optimizer.step()
+            with torch.no_grad():
+                self.PSF_model.update_manager_params(
+                    self._calibrator_prediction_to_PSF_inputs(calibrator, x_combined.detach())
+                )
+
+            loss_value = float(loss.detach().cpu())
+            data_value = float(data_loss.detach().cpu())
+            history.append({
+                'epoch': epoch + 1,
+                'loss': loss_value,
+                'data_loss': data_value,
+                'anchor_loss': float(anchor_loss.detach().cpu()),
+                'weight_drift_loss': float(drift_loss.detach().cpu()),
+                'prediction_anchor': effective_prediction_anchor,
+                'weight_anchor': effective_weight_anchor,
+                'lr': optimizer.param_groups[0]['lr'],
+            })
+
+            scheduler.step(loss_value)
+            is_best = loss_value < best_loss
+            if is_best:
+                best_loss = loss_value
+                best_state = deepcopy(calibrator.net.state_dict())
+                bad_epochs = 0
+            else:
+                bad_epochs += 1
+
+            if verbose:
+                print(
+                    f"Calibrator tune {epoch + 1:03d}/{num_epochs} | "
+                    f"loss={loss_value:.4f} data={data_value:.4f} "
+                    f"lr={optimizer.param_groups[0]['lr']:.2e}" + (" *" if is_best else "")
+                )
+
+            del model, x_tuned, x_combined, data_loss, anchor_loss, drift_loss, loss
+            if bad_epochs >= patience:
+                if verbose:
+                    print(f"Early stopping calibrator fine-tuning at epoch {epoch + 1}.")
+                break
+
+        if restore_best and best_state is not None:
+            calibrator.net.load_state_dict(best_state)
+
+        calibrator.net.eval()
+        
+        with torch.no_grad():
+            x_best = calibrator.net(tel)
+            x_best = torch.where(tuned_mask, x_best, x_ref)
+            x_best_dict = self._calibrator_prediction_to_PSF_inputs(calibrator, x_best)
+            self.PSF_model.update_manager_params(x_best_dict)
+            
+            _ = self.PSF_model()
+            self._update_flux_norm()
+
+        if output_path is None:
+            stem = Path(self.cube_path).stem.replace(' ', '_')
+            output_path = WEIGHTS_FOLDER / 'NFM_calibrator' / f'{stem}_science_tuned_bundle.pth'
+
+        saved_path = calibrator.save(
+            output_path,
+            source='MUSEObservation.FineTuneCalibrator',
+            tuned_params=list(tuned_params) if tuned_params is not None and not isinstance(tuned_params, str) else tuned_params,
+            num_epochs=len(history),
+            best_loss=best_loss,
+            prediction_anchor=prediction_anchor,
+            weight_anchor=weight_anchor,
+            regularization_looseness=regularization_looseness,
+            effective_prediction_anchor=effective_prediction_anchor,
+            effective_weight_anchor=effective_weight_anchor,
+            completed_at=datetime.now().isoformat(timespec='seconds'),
+            raw_path=str(self.raw_path),
+            cube_path=str(self.cube_path),
+            cache_path=str(self.cache_path),
+        )
+
+        release = getattr(torch.cuda, 'empty_cache', None)
+        gc.collect()
+        if release is not None:
+            release()
+
+        return {'history': history, 'best_loss': best_loss, 'path': saved_path}
 
 
     def loss(self, x_, data, model, fit_weights: FitWeights):
@@ -664,6 +1010,7 @@ class MUSEObservation:
         gc.collect()
         torch.cuda.empty_cache()
         
+    
 
     def SimulateField(self, full_spectrum=False, N_src_per_batch=None, N_λ_per_batch=None, disentangle_spectra=True, force_cpu=True) -> torch.Tensor:
         ''' Simulate all sources within the field. If full_spectrum is True, simulates the full spectrum instead of the sparse λ-subset. '''
@@ -728,11 +1075,12 @@ class MUSEObservation:
                     PSFs,
                     self.cube_sparse,
                     solver='nonlinear',
-                    fixed_bg=self.bg_prior
+                    fixed_bg=self.bg_prior,
+                    flux_reg=1e-7,
                 )#,
-                    # flux_reg=1e-6,
+                    # grad_clip = 0.5,
                     # field_crop=self.ROI_plot,
-                # )
+
                 simulated = I_sim - bg_solved.view(self.N_wvl, 1, 1) # Leave the pure PSF contribution in the simulated image
                 self.background_sparse = bg_solved
                 
@@ -751,6 +1099,126 @@ class MUSEObservation:
         return simulated if not force_cpu else simulated.cpu()
 
 
+    @torch.no_grad()
+    def SimulatePSFAtPosition(
+        self,
+        x_pix,
+        y_pix,
+        *,
+        full_spectrum     = False,
+        apply_crop_factor = True,
+        λ_batch_size      = None,
+        force_cpu         = True,
+        verbose           = False,
+    ):
+        """
+        Simulate a single PSF at an arbitrary field position (in the science-cube
+        pixel frame) and paste it into a zero canvas of the same spatial shape as
+        the science cube. The PSF is independent of the sources stored in this
+        observation - only the current PSF model parameters and the requested
+        position are used.
+
+        The chromatic crop factor (F_norm_λ) is applied so the PSF has the correct
+        physical amplitude vs. λ, but the per-source F_norm scaling and any source
+        spectrum are NOT applied - the returned PSF represents unit total flux per
+        wavelength slice.
+
+        Parameters
+        ----------
+        x_pix, y_pix : float
+            Position in the full-field pixel frame (same convention as
+            self.sources.table['x_peak'] / ['y_peak']). Sub-pixel values are
+            allowed; ROI placement is quantised to the nearest integer pixel
+            while the PSF is generated with sub-pixel angular offset via
+            src_dirs_x / src_dirs_y.
+        full_spectrum : bool
+            If True, simulate over the full MUSE-NFM spectrum (N_wvl_full slices).
+            Otherwise simulate over the current sparse wavelength grid.
+        apply_crop_factor : bool
+            Multiply the PSF by the chromatic crop factor (F_norm_λ).
+        λ_batch_size, force_cpu, verbose :
+            Forwarded to the underlying PSF-model machinery.
+
+        Returns
+        -------
+        field : torch.Tensor  [N_λ, H, W]
+            Zero canvas with the simulated PSF pasted at (x_pix, y_pix).
+        PSF   : torch.Tensor  [N_λ, N_pix, N_pix]
+            The raw PSF stamp (crop factor optionally applied, no spectrum).
+        ROI   : dict
+            {
+                "global": (slice_y, slice_x),  # location in the full field
+                "local":  (slice_y, slice_x),  # visible portion of the PSF stamp
+            }
+        """
+        if getattr(self, 'PSF_model', None) is None:
+            raise ValueError(
+                "PSF model must be initialised before calling SimulatePSFAtPosition. "
+                "Run InitSimulation() first."
+            )
+        if not hasattr(self.PSF_model, 'RenderPSFAtDirection'):
+            raise NotImplementedError(
+                f"SimulatePSFAtPosition requires a PSF model exposing RenderPSFAtDirection "
+                f"(currently only PSFModelNFM). Got {type(self.PSF_model).__name__}."
+            )
+
+        # ── 1. Convert pixel position → angular direction (radians) ──────────
+        pixel_scale = self.model_config['sensor_science']['PixelScale']  # [mas/pix]
+        dx_pix = float(x_pix) - float(self.field_center[0, 0])
+        dy_pix = float(y_pix) - float(self.field_center[0, 1])
+        dir_x  = dx_pix * pixel_scale / rad2mas  # [rad]
+        dir_y  = dy_pix * pixel_scale / rad2mas
+
+        # ── 2. Simulate the raw PSF via the NFM wrapper ──────────────────────
+        PSF = self.PSF_model.RenderPSFAtDirection(
+            dir_x         = dir_x,
+            dir_y         = dir_y,
+            full_spectrum = full_spectrum,
+            λ_batch_size  = λ_batch_size if λ_batch_size is not None else self.λ_batch_size,
+            force_cpu     = force_cpu,
+            verbose       = verbose,
+        )
+
+        # ── 3. Apply the chromatic crop factor (F_norm_λ) if requested ───────
+        # Mirrors the flux-normalisation logic used in simulate_sparse / simulate_full,
+        # but without the per-source F_norm scaling or any source spectrum.
+        if apply_crop_factor and 'F_norm_λ_ctrl' in self.PSF_model.get_param_names():
+            λ_normed = self.PSF_model.λ_full_normed if full_spectrum else self.PSF_model.λ_sim_normed
+            crop = self.PSF_model.evaluate_splines(
+                self.PSF_model.inputs_manager['F_norm_λ_ctrl'], λ_normed
+            ).to(PSF.device)
+            PSF = PSF * crop.reshape(-1, 1, 1)
+
+        # ── 4. Compute ROI slices for pasting the PSF into the full field ────
+        canvas_ref = self.cube_full if full_spectrum else self.cube_sparse
+        H, W = canvas_ref.shape[-2], canvas_ref.shape[-1]
+
+        N_pix = self.PSF_size
+        half  = N_pix // 2
+        extra = N_pix % 2
+        xi, yi = int(round(float(x_pix))), int(round(float(y_pix)))
+        x_min, x_max = xi - half, xi + half + extra
+        y_min, y_max = yi - half, yi + half + extra
+
+        x_min_img, x_max_img = max(x_min, 0), min(x_max, W)
+        y_min_img, y_max_img = max(y_min, 0), min(y_max, H)
+        x_min_roi = max(0, -x_min)
+        y_min_roi = max(0, -y_min)
+        x_max_roi = x_min_roi + (x_max_img - x_min_img)
+        y_max_roi = y_min_roi + (y_max_img - y_min_img)
+
+        global_slice = (slice(y_min_img, y_max_img), slice(x_min_img, x_max_img))
+        local_slice  = (slice(y_min_roi, y_max_roi), slice(x_min_roi, x_max_roi))
+
+        # ── 5. Paste into a fresh canvas matching the science cube shape ─────
+        N_λ = PSF.shape[0]
+        canvas = torch.zeros((N_λ, H, W), dtype=PSF.dtype, device=PSF.device)
+        if (x_max_img > x_min_img) and (y_max_img > y_min_img):
+            canvas[:, global_slice[0], global_slice[1]] = PSF[:, local_slice[0], local_slice[1]]
+
+        return canvas, PSF, {"global": global_slice, "local": local_slice}
+
+
     def GetSpectrum(self, source_id=None):
         if self.sources is None:
             raise ValueError("Sources must be initialized before getting spectra. Please run ExtractSources() first.")
@@ -761,27 +1229,39 @@ class MUSEObservation:
         return self.sources.spectra_full if source_id is None else self.sources.spectra_full[source_id]
         
 
-    def DisplaySources(self, draw_box_size=20):
+    def DisplaySources(self, cmap=None):
         if self.sources_table is None:
             raise ValueError("Sources must be initialized before displaying. Please run DetectSources() or AddSources() first.")
         
-        # If sources were not yet initialized or filtered, but just detected.
-        # Otherwise, use the sources table from the sources data which is already filtered and has the right order of sources
-        DisplaySources(
+        # RGB plotting setting optimal for displaying the sparse data
+        color_kwargs = {
+            'saturation':  2.0,
+            'contrast'  :  1.0,
+            'wb_shift'  : -0.1,
+            'mg_shift'  :  0.075
+        }
+        
+        src_table = self.sources_table if self.sources is None else self.sources.table
+        DisplayField(
             self.cube_sparse,
-            self.sources_table if self.sources is None else self.sources.table,
-            src_box_size = draw_box_size,
-            vmin = 10,
-            vmax = (self.sources_table if self.sources is None else self.sources.table)['peak_value'].max() * 0.85,
-            ROI  = self.ROI_plot
+            sources      = src_table,
+            roi          = self.ROI_plot,
+            show_markers = True,
+            show_ids     = True,
+            cmap         = cmap,
+            vmin         = 10,
+            vmax         = src_table['peak_value'].max() * 0.85,
+            figsize      = (8, 8),
+            **color_kwargs
         )
+   
    
     @staticmethod
     def disentangle_flux(
         srcs: SourcesSubset,
         PSFs,
         data_cube,
-        solver           = 'linear',   # 'linear' | 'nonlinear'
+        solver           = 'linear',  # 'linear' | 'nonlinear'
         rcond            = 1e-2,
         n_iter           = 1000,
         lr               = 1e-2,
@@ -797,7 +1277,8 @@ class MUSEObservation:
         flux_prior       = None,   # [N_wvl, N_src] prior target for spectrum regularization; if None, regularizes towards zero
     ):
         """
-        Reconstruct spectral cube by solving  P @ spectrum + bg ≈ I_data.
+        Does spectral disentangling of the sources in the field by solving a linear system of equations. The PSFs are assumed to be known and fixed.
+        In essence, reconstructs spectral cube by solving  P @ spectrum + bg ≈ I_data.
         Can do this with a single linear least-squares solve or with an iterative non-linear optimization
         enforcing non-negativity on the spectra and optionally on the background as well.
 
@@ -920,15 +1401,16 @@ class MUSEObservation:
             with torch.no_grad():
                 if fixed_bg is None:
                     ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
-                    P_aug = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
-                    sol           = sanitize(_lstsq_reg(P_aug, I_data, n_reg=N_src, prior=_prior), "lstsq init")
-                    spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
-                    bg_init       = sanitize(sol[:,  N_src, 0], "bg_init")
+                    P_aug      = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
+                    sol        = sanitize(_lstsq_reg(P_aug, I_data, n_reg=N_src, prior=_prior), "lstsq init")
+                    spec_init  = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
+                    bg_init    = sanitize(sol[:,  N_src, 0], "bg_init")
                 else:
                     I_centered = sanitize(I_data - fixed_bg.view(N_wvl, 1, 1), "I_data centered")
-                    sol           = sanitize(_lstsq_reg(P, I_centered, prior=_prior), "lstsq init")
-                    spec_init     = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
-                    bg_init       = fixed_bg
+                    sol        = sanitize(_lstsq_reg(P, I_centered, prior=_prior), "lstsq init")
+                    spec_init  = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
+                    bg_init    = fixed_bg
+                    
                 raw_spec_init = softplus_inv(spec_init)
                 raw_bg_init   = bg_init if bg_unconstrained else softplus_inv(bg_init.clamp_min(0))
         else:
@@ -1236,47 +1718,90 @@ class MUSEObservation:
         plt.show()
 
 
+    def PlotStrehlRatio(self):
+        if self.PSF_model is None:
+            raise ValueError("PSF model must be initialized before plotting Strehl ratio. Please run InitPSFModel() first.")
+        
+        Strehls_per_λ = self.PSF_model.ComputeStrehl()
+        
+        plt.title('Strehl ratio vs. λ (for the 1st source)')
+        plt.plot(self.λ_sparse, 100.0 * Strehls_per_λ.flatten().cpu())
+        plt.ylabel('Strehl ratio, [%]')
+        plt.xlabel('Wavelength, [nm]')
+        plt.grid()
+        plt.show()
+
+
     def DisplaySimulation(self, plot_profiles=True, plot_full_spectrum=False) -> None:
+        to_np = lambda x: x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
+
+        # Render the entire MUSE NFM spectrum
         if plot_full_spectrum:
             if self.simulated_full is None:
                 print("Full spectrum simulation not found, simulating now...")
                 self.SimulateField(full_spectrum=True)
-            
-            # Mapping MUSE spectral range to visible spectrum range for RGB conversion
-            λ_vis = np.linspace(440, 750, self.N_wvl_full)
 
-            # Shared vmin/vmax across data, model, and residual
-            def _to_np(x): return x.numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
-            data_white = _to_np(self.cube_full     [self.ROI_plot]).sum(axis=0)
-            sim_white  = _to_np(self.simulated_full[self.ROI_plot]).sum(axis=0)
-            res_white  = np.abs(_to_np(self.residue_full[self.ROI_plot])).sum(axis=0)
+            λ_vis    = np.linspace(440, 750, self.N_wvl_full)
+            data_arr = to_np(self.cube_full     [self.ROI_plot])
+            sim_arr  = to_np(self.simulated_full[self.ROI_plot])
+            diff_arr = np.abs(data_arr - sim_arr)
 
-            all_white = np.stack([data_white, sim_white, res_white])
+            all_white = np.stack([data_arr.sum(axis=0), sim_arr.sum(axis=0), diff_arr.sum(axis=0)])
             vmax = float(np.nanmax(all_white))
             pos  = all_white[all_white > 0]
             vmin = float(max(1.0, np.nanpercentile(pos, 1)) if pos.size > 0 else 1.0)
 
-            for cube, title in [(self.residue_full, "Difference"), (self.cube_full, "Data"), (self.simulated_full, "Model")]:
-                _ = PlotSpetralCubeInRGB(
-                    cube[self.ROI_plot],
+            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            
+            for ax, arr, title in zip(axes, [data_arr, sim_arr, diff_arr], ['Data', 'Model', 'Difference']):
+                DisplayField(
+                    arr,
                     wavelengths=λ_vis,
-                    title=title,
-                    min_val=vmin, max_val=vmax,
+                    cmap=None,
                     scale='log',
-                    show=title != "Difference"
+                    vmin=vmin,
+                    vmax=vmax,
+                    title=title,
+                    show=False,
+                    ax=ax
                 )
-            
+                
+            plt.tight_layout()
+            plt.show()
+
             if plot_profiles:
-                PlotSourcesProfiles(self.cube_full, self.simulated_full, self.sources.table, radius=16, title='Source radial profiles (full spectrum)')                
+                PlotSourcesProfiles(self.cube_full, self.simulated_full, self.sources.table, radius=16, title='Source radial profiles (full spectrum)')
         
+        # Plot fast sparse representation
         else:
-            data_white = self.cube_sparse.sum(dim=0)
-            sim_white  = self.simulated_sparse.sum(dim=0)
-            vmax = float(max(data_white.max(), sim_white.max()))
-            vmin = float(max(1.0, min(data_white[data_white > 0].min(), sim_white[sim_white > 0].min())))
+            data_np  = to_np(self.cube_sparse)
+            model_np = to_np(self.simulated_sparse)
+            mask_np  = to_np(self.valid_mask)
+            diff_np  = (data_np - model_np) * mask_np
+
+            dw   = np.abs(data_np.sum(axis=0))
+            mw   = np.abs(model_np.sum(axis=0))
+            vmax = float(max(dw.max(), mw.max()))
+            pos  = np.concatenate([dw[dw > 0], mw[mw > 0]])
+            vmin = float(max(1.0, pos.min())) if len(pos) else 1.0
             display_norm = LogNorm(vmin=vmin, vmax=vmax)
-            VisualizeSources(self.cube_sparse, self.simulated_sparse, norm=display_norm, mask=self.valid_mask, ROI=self.ROI_plot)
-            
+
+            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            for ax, arr, title in zip(axes, [data_np, model_np, diff_np], ['Data', 'Model', 'Difference']):
+                DisplayField(
+                    arr,
+                    sources=self.sources,
+                    roi=self.ROI_plot,
+                    norm=display_norm,
+                    show_markers=self.sources is not None,
+                    show=False,
+                    ax=ax,
+                    title=title
+                )
+                
+            plt.tight_layout()
+            plt.show()
+
             if plot_profiles:
                 PlotSourcesProfiles(self.cube_sparse, self.simulated_sparse, self.sources.table, radius=16, title='Source radial profiles (sparse spectrum)')
             
@@ -1344,10 +1869,10 @@ class MUSEObservation:
                 hdr = fits.Header()
                 # Spatial WCS: reference pixel is the PSF centre; CRVAL encodes its position
                 # in the full field (FITS 1-based convention, hence +1)
-                hdr['CRPIX1'] = crpix_x;               hdr['CRVAL1'] = float(sources.iloc[i]['x_peak']) + 1
-                hdr['CDELT1'] = 1;                      hdr['CUNIT1'] = 'pixel'; hdr['CTYPE1'] = 'PIXEL'
-                hdr['CRPIX2'] = crpix_y;               hdr['CRVAL2'] = float(sources.iloc[i]['y_peak']) + 1
-                hdr['CDELT2'] = 1;                      hdr['CUNIT2'] = 'pixel'; hdr['CTYPE2'] = 'PIXEL'
+                hdr['CRPIX1'] = crpix_x;   hdr['CRVAL1'] = float(sources.iloc[i]['x_peak']) + 1
+                hdr['CDELT1'] = 1;         hdr['CUNIT1'] = 'pixel'; hdr['CTYPE1'] = 'PIXEL'
+                hdr['CRPIX2'] = crpix_y;   hdr['CRVAL2'] = float(sources.iloc[i]['y_peak']) + 1
+                hdr['CDELT2'] = 1;         hdr['CUNIT2'] = 'pixel'; hdr['CTYPE2'] = 'PIXEL'
                 _wcs_λ(hdr, λ_full)
                 hdr['SRCIDX']  = (i,     'Source index (0-based)')
                 hdul.append(_make_hdu(data[i], hdr))

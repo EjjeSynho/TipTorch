@@ -29,17 +29,21 @@ CACHE_FOLDER = data_folder / "cached_cubes"
 #%%
 files_matches, _ = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=False)
 
-reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
+# reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 # reduced_cube = "ADP.2019-05-30T08-10-58.821.fits" # meh
 # reduced_cube = "ADP.2021-05-19T05-26-01.345.fits" # meh
 # reduced_cube = "ADP.2021-05-19T05-26-01.337.fits"
-# reduced_cube = "ADP.2021-05-19T05-26-01.303.fits"
+
+# reduced_cube = "DATACUBEFINALscipost_20191102T010934_fb6f4016.fits"
+# reduced_cube = "DATACUBEFINALscipost_20220531T034028_d33feab3.fits" # One source is nuts
+reduced_cube = "ADP.2022-06-20T16-50-01.871.pickle"
 
 raw_file   = RAW_FOLDER   / files_matches.loc[files_matches['cube'] == reduced_cube]['raw'].values[0]
 cube_path  = CUBES_FOLDER / reduced_cube
 cache_path = CACHE_FOLDER / f"{cube_path.stem}.pickle"
 
 
+#%%
 ob = MUSEObservation(
     raw_file,
     cube_path,
@@ -51,7 +55,6 @@ ob = MUSEObservation(
     device=default_device
 )
 ob.λ_batch_size = ob.λ_full.shape[0] // 3 + 1
-
 
 if reduced_cube.replace('.fits', '').endswith('303'):
     bg_custom = np.array([-6.7931, -5.4455, -4.1980, -3.6123, -2.8540, -2.2158, -1.5991])
@@ -65,6 +68,14 @@ elif reduced_cube.replace('.fits', '').endswith('337'):
     bg_custom = np.array([-8, -6, -4, -3.5, -3.5, -3, -5])
     bg_addend = np.array([2.3296, 1.8386, 1.1218, 1.0374, 1.3269, 1.2559, 3.5082]) * 0.9
     bg_custom += bg_addend
+    ob.bg_prior = torch.tensor(bg_custom, device=ob.device, dtype=ob.cube_sparse.dtype)
+
+elif reduced_cube == "DATACUBEFINALscipost_20220531T034028_d33feab3.fits":
+    bg_custom = np.array([90, 120, 130, 130, 140, 130, 110])
+    ob.bg_prior = torch.tensor(bg_custom, device=ob.device, dtype=ob.cube_sparse.dtype)
+
+elif reduced_cube == "DATACUBEFINALscipost_20191102T010934_fb6f4016.fits":
+    bg_custom = np.array([100, 90, 70, 60, 57, 47, 37])
     ob.bg_prior = torch.tensor(bg_custom, device=ob.device, dtype=ob.cube_sparse.dtype)
 
 # ob.cube_sparse -= torch.tensor(bg_custom, device=ob.device, dtype=ob.cube_sparse.dtype).view(-1, 1, 1)
@@ -108,17 +119,18 @@ print(f"{'NGS mag':<{col_w}}  {NGS_mag:.2f}")
 from tools.plotting import PlotSpetralCubeInRGB
 from matplotlib.colors import LogNorm
 
+bg_custom = np.array([-8, -6, -4, -3.5, -3.5, -3, -5]) * -1
 
-img = ob.cube_sparse.cpu().numpy() - bg_custom.reshape(-1, 1, 1)
+img = (ob.cube_sparse.cpu().numpy() - bg_custom.reshape(-1, 1, 1))[ob.ROI_plot]
 
 # display_norm = LogNorm(vmin=1, vmax=img.sum(axis=0).max().item()) # again, rather empirical values
 # plt.imshow(img.sum(axis=0), norm=display_norm, origin='lower')
-
 
 idx = 0
 
 display_norm = LogNorm(vmin=1, vmax=img[idx, ...].max().item()) # again, rather empirical values
 plt.imshow(img[idx, ...], norm=display_norm, origin='lower')
+plt.colorbar(label='Flux, [a.u.]')
 
 plt.axis('off')
 plt.show()
@@ -177,7 +189,8 @@ sources['weight'] = 1.0
 # sources = sources.nlargest(200, 'peak_value')
 
 ob.sources_table = sources
-ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
+
+# ob.ExtractSources(verbose=True, max_nan_fraction=0.7)
 
 # ob.DisplaySources(draw_box_size=5)
 
@@ -230,7 +243,7 @@ data_img = ob.cube_sparse.clone() - ob.background_sparse.view(ob.N_wvl, 1, 1)
 
 #%%
 residue_sparse = (ob.cube_sparse - field_disentangled) * ob.valid_mask
-bg_correct = ob.ExtractBackgroundFromResidue(residue_sparse, min_radius=2, max_radius=18, border_margin = 30, regime='median', show=True)
+bg_correct = ob.ExtractBackgroundFromResidue(residue_sparse, min_radius=2, max_radius=22, border_margin = 30, regime='median', show=True)
 bg_testo = ob.background_sparse + bg_correct.squeeze()
 
 #%%
@@ -246,10 +259,11 @@ from tools.multisources import VisualizeSources, PlotSourcesProfiles, extract_RO
 from matplotlib.colors import LogNorm
 
 display_norm = LogNorm(vmin=1, vmax=data_img.sum(dim=0).max().item()) # again, rather empirical values
-_ = VisualizeSources(data_img, field_disentangled, norm=display_norm, mask=ob.valid_mask, ROI=ob.ROI_plot)
+_ = VisualizeSources(data_img, field_disentangled, norm=display_norm, mask=ob.valid_mask, sources=ob.sources.table, ROI=ob.ROI_plot)
 
 PlotSourcesProfiles(data_img, field_disentangled, ob.sources.table, show=False,radius=16, title='Predicted profiles + astrometry correction (spectrally binned)', y_max=350, y_min=0.25)
 
+#%%
 if 'fitted' in model_cache.stem:
     prefix = 'fitted'
 elif 'predicted' in model_cache.stem:
@@ -481,8 +495,6 @@ simulated_full = ob.SimulateField(full_spectrum=True, N_λ_per_batch=10, disenta
 from tools.plotting import PlotSpetralCubeInRGB
 
 # Mapping MUSE spectral range to visible spectrum range for RGB conversion
-λ_vis = np.linspace(440, 750, ob.N_wvl_full)  # MUSE covers ~465-930nm, so we map it to 440-750nm for visualization
-
 color_kwargs ={
     'saturation' :  2.0,
     'contrast'   :  1.75,
@@ -490,8 +502,7 @@ color_kwargs ={
     'mg_shift'   :  0.15,
     'min_val'    :  1000,
     'max_val'    :  4*7.5e6,
-    'show'       :  False,    
-    'wavelengths':  λ_vis
+    'show'       :  False
 }
 
 model_full = simulated_full[ob.ROI_plot] + ob.background_full.view(-1, 1, 1).numpy()
@@ -499,13 +510,13 @@ data_full  = ob.cube_full[ob.ROI_plot]
 diff_full  = np.abs(model_full - data_full)
 
 _ = PlotSpetralCubeInRGB( model_full, title="Model (full spectrum)", **color_kwargs )
-plt.savefig(data_folder / f"plots/model_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
+# plt.savefig(data_folder / f"plots/model_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
 
 _ = PlotSpetralCubeInRGB( data_full, title="Data (full spectrum)", **color_kwargs )
-plt.savefig(data_folder / f"plots/data_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
+# plt.savefig(data_folder / f"plots/data_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
 
 _ = PlotSpetralCubeInRGB( diff_full, title="Difference", **color_kwargs )
-plt.savefig(data_folder / f"plots/diff_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
+# plt.savefig(data_folder / f"plots/diff_full_{ob.model_type}_{cube_path.stem}.pdf", dpi=300)
 
 # del model_full, data_full, diff_full
 # torch.cuda.empty_cache()

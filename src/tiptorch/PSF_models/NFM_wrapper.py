@@ -850,6 +850,84 @@ class PSFModelNFM:
 
 
     @torch.no_grad()
+    def RenderPSFAtDirection(
+        self,
+        dir_x = None,
+        dir_y = None,
+        *,
+        full_spectrum = False,
+        λ_batch_size  = 100,
+        force_cpu     = True,
+        verbose       = False,
+    ) -> torch.Tensor:
+        '''
+        Render a single raw PSF at an arbitrary angular field position, independent
+        of the sources currently registered in the inputs manager. Available only in
+        the single-OB regime (multiple_obs=False).
+
+        The returned PSF is the bare TipTorch output at source-0's slot with the
+        requested direction temporarily injected; NO chromatic flux normalisation
+        (F_norm_λ crop factor), per-source F_norm scaling, or source spectrum is
+        applied here — those are the caller's responsibility.
+
+        Parameters
+        ----------
+        dir_x, dir_y : float or torch.Tensor, optional
+            Source direction in radians along the two field axes. If the PSF model
+            has no field-dependent state (e.g. 'psfao' regime, which lacks
+            'src_dirs_x' / 'src_dirs_y'), both arguments are ignored.
+            If None, the currently configured direction of source 0 is reused.
+        full_spectrum : bool
+            Simulate over the full MUSE-NFM spectrum instead of the current sparse
+            wavelength grid.
+        λ_batch_size, force_cpu, verbose :
+            Forwarded to SimulateSpectralRange when full_spectrum=True.
+
+        Returns
+        -------
+        PSF : torch.Tensor  [N_λ, N_pix, N_pix]
+        '''
+        if self.multiple_obs:
+            raise NotImplementedError(
+                "RenderPSFAtDirection only supports the single-OB regime (multiple_obs=False)."
+            )
+
+        # Field-dependent state exists only for physics-based / hybrid regimes
+        param_names   = self.get_param_names()
+        has_field_dep = ('src_dirs_x' in param_names) and ('src_dirs_y' in param_names)
+
+        # Temporarily override source-0 direction; restored in finally-block
+        x_backup = y_backup = None
+        if has_field_dep and (dir_x is not None or dir_y is not None):
+            src_dirs_x = self.inputs_manager['src_dirs_x']
+            src_dirs_y = self.inputs_manager['src_dirs_y']
+            x_backup = src_dirs_x[0:1].clone()
+            y_backup = src_dirs_y[0:1].clone()
+            if dir_x is not None:
+                src_dirs_x[0:1] = float(dir_x) if not torch.is_tensor(dir_x) else dir_x.reshape(x_backup.shape).to(x_backup)
+            if dir_y is not None:
+                src_dirs_y[0:1] = float(dir_y) if not torch.is_tensor(dir_y) else dir_y.reshape(y_backup.shape).to(y_backup)
+
+        try:
+            if full_spectrum:
+                PSFs, _ = self.SimulateSpectralRange(
+                    src_ids      = 0,
+                    λ_batch_size = λ_batch_size,
+                    sequential   = True,
+                    verbose      = verbose,
+                    force_cpu    = force_cpu,
+                )
+                return PSFs[0]  # [N_λ_full, N_pix, N_pix]
+            else:
+                return self.forward(src_ids=0)[0]  # [N_λ_sim, N_pix, N_pix]
+        finally:
+            if x_backup is not None:
+                self.inputs_manager['src_dirs_x'][0:1] = x_backup
+            if y_backup is not None:
+                self.inputs_manager['src_dirs_y'][0:1] = y_backup
+
+
+    @torch.no_grad()
     def ComputeStrehl(self):
         ''' Computes Strehl ratio (SR) across the simulated wavelengths for the on-axis PSF '''
         # Back-up the original coordinates

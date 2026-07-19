@@ -157,7 +157,7 @@ def register_hooks(var):
 
 
 
-def wavelength_to_rgb(wavelength, gamma=0.8, show_invisible=False):
+def wavelength_to_RGB(wavelength, gamma=0.8, show_invisible=False):
     '''
     Approximate conversion of wavelength to RGB color percieved by human eye.   
     '''  
@@ -211,7 +211,7 @@ def render_spectral_PSF(spectral_cube, λs):
     Rs, Gs, Bs = np.zeros_like(λs), np.zeros_like(λs), np.zeros_like(λs)
 
     for i,λ in enumerate(λs):
-        Rs[i], Gs[i], Bs[i] = wavelength_to_rgb(λ, show_invisible=True)
+        Rs[i], Gs[i], Bs[i] = wavelength_to_RGB(λ, show_invisible=True)
 
     for id in range(0, len(λs)):
         img = np.log10( 50+np.abs(spectral_cube) )
@@ -229,18 +229,101 @@ def render_spectral_PSF(spectral_cube, λs):
         plt.title(f'λ = {λs[id]:.2f} nm')
 
 
+def _cube_to_RGB_array(
+    image,
+    wavelengths = None,
+    min_val = 1.0,
+    max_val = None,
+    scale = 'log',
+    saturation = 1.0,
+    contrast = 1.0,
+    wb_shift = 0.0,
+    mg_shift = 0.0,
+):
+    """
+    Convert a (N_λ, H, W) spectral cube to a normalised (H, W, 3) RGB array.
+
+    Returns
+    -------
+    norm_image : ndarray (H, W, 3) - clipped and normalised to [0, 1] for imshow
+    image_RGB  : ndarray (H, W, 3) - linear mixed RGB before normalisation
+    max_val    : float              - effective upper clip value used
+    """
+    image_t = image if torch.is_tensor(image) else torch.as_tensor(image)
+    if image_t.ndim != 3:
+        raise ValueError(f"Expected image with shape (N_waves, H, W), got {tuple(image_t.shape)}")
+
+    if wavelengths is None:
+        wavelengths = np.linspace(440, 750, image_t.shape[0])
+    wavelengths    = np.asarray(wavelengths)
+    RGB_weights_np = np.array([wavelength_to_RGB(λ, show_invisible=True) for λ in wavelengths],
+                               dtype=np.float32).T
+
+    use_cuda = False
+    if torch.cuda.is_available():
+        n_waves, h, w = image_t.shape
+        elem_size = torch.finfo(torch.float32).bits // 8
+        est_bytes  = (n_waves * h * w + 3 * h * w) * elem_size
+        free_mem, _ = torch.cuda.mem_get_info()
+        use_cuda = free_mem > est_bytes * 3
+
+    device      = torch.device("cuda") if use_cuda else image_t.device
+    image_work  = image_t.to(device=device, dtype=torch.float32, copy=False)
+    rgb_weights = torch.as_tensor(RGB_weights_np, device=device, dtype=torch.float32)
+
+    image_RGB_t = torch.einsum("cn,nhw->chw", rgb_weights, image_work).abs()
+    image_RGB   = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
+    
+    if use_cuda:
+        torch.cuda.empty_cache()
+
+    if wb_shift != 0.0 or mg_shift != 0.0:
+        wb_gains = np.array(
+            [(1.0 + wb_shift) * (1.0 + mg_shift),
+              1.0             * (1.0 - mg_shift),
+             (1.0 - wb_shift) * (1.0 + mg_shift)],
+            dtype=np.float32
+        )
+        image_RGB = image_RGB * wb_gains
+
+    if max_val is None:
+        max_val = np.percentile(image_RGB, 97.5)  # always linear; log10 is applied below when scale='log'
+
+    if scale == 'log':
+        lo, hi       = np.log10(min_val), np.log10(max_val)
+        image_scaled = np.log10(image_RGB + 1e-10)
+    else:
+        lo, hi       = min_val, max_val
+        image_scaled = image_RGB.copy()
+
+    if saturation != 1.0:
+        luma         = (0.2126 * image_scaled[..., 0]
+                      + 0.7152 * image_scaled[..., 1]
+                      + 0.0722 * image_scaled[..., 2])[..., np.newaxis]
+        image_scaled = luma + saturation * (image_scaled - luma)
+
+    if contrast != 1.0:
+        mid       = (lo + hi) * 0.5
+        half_span = (hi - lo) * 0.5 / contrast
+        lo, hi    = mid - half_span, mid + half_span
+
+    norm_image = (np.clip(image_scaled, lo, hi) - lo) / (hi - lo)
+    return norm_image, image_RGB, max_val
+
+
 def PlotSpetralCubeInRGB(
     image,
-    wavelengths,
+    wavelengths = None,
     min_val = 1e-6,
     max_val = None,
     scale = 'log',
     title = None,
-    show = True,
+    show  = True,
     saturation = 1.0,
     contrast = 1.0,
     wb_shift = 0.0,
-    mg_shift = 0.0
+    mg_shift = 0.0,
+    fig_size = (6, 6)
 ):
     """
     Map a multi-wavelength image into RGB.
@@ -284,87 +367,17 @@ def PlotSpetralCubeInRGB(
     image_RGB : ndarray, shape (H, W, 3)
         The raw (pre-normalisation) RGB array.
     """
-    if wavelengths is None:
-        raise ValueError("wavelengths must be provided")
-
-    image_t = image if torch.is_tensor(image) else torch.as_tensor(image)
-    if image_t.ndim != 3:
-        raise ValueError(f"Expected image with shape (N_waves, H, W), got {tuple(image_t.shape)}")
-
-    wavelengths    = np.asarray(wavelengths)
-    RGB_weights_np = np.array([wavelength_to_rgb(λ, show_invisible=True) for λ in wavelengths], dtype=np.float32).T
-
-    use_cuda = False
-    if torch.cuda.is_available():
-        n_waves, h, w = image_t.shape
-        elem_size = torch.finfo(torch.float32).bits // 8
-        est_bytes = (n_waves * h * w + 3 * h * w) * elem_size
-        free_mem, _ = torch.cuda.mem_get_info()
-        use_cuda = free_mem > est_bytes * 3
-
-    device = torch.device("cuda") if use_cuda else image_t.device
-    image_work  = image_t.to(device=device, dtype=torch.float32, copy=False)
-    rgb_weights = torch.as_tensor(RGB_weights_np, device=device, dtype=torch.float32)
-
-    # Memory-efficient channel mixing: (3, N_waves) x (N_waves, H, W) -> (3, H, W)
-    image_RGB_t = torch.einsum("cn,nhw->chw", rgb_weights, image_work).abs()
-    image_RGB   = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
-
-    torch.cuda.empty_cache() if use_cuda else None
-
-    # White-balance gains: applied in linear domain before log so they operate
-    # on the full unclipped dynamic range.  Both axes are independent and compose
-    # multiplicatively: R gain = (1 + wb_shift)(1 + mg_shift), etc.
-    if wb_shift != 0.0 or mg_shift != 0.0:
-        wb_gains = np.array(
-            [(1.0 + wb_shift) * (1.0 + mg_shift),   # R: warm + magenta
-              1.0             * (1.0 - mg_shift),   # G: green axis only
-             (1.0 - wb_shift) * (1.0 + mg_shift)],  # B: cool + magenta
-            dtype=np.float32
-        )
-        image_RGB = image_RGB * wb_gains
-
-    # Auto-compute max_val from histogram if not provided
-    if max_val is None:
-        if scale == 'log':
-            image_log = np.log10(image_RGB + 1e-10)
-            max_val = np.percentile(image_log, 99)
-        else:
-            max_val = np.percentile(image_RGB, 99)
-
-    if scale == 'log':
-        lo, hi = np.log10(min_val), np.log10(max_val)
-        image_scaled = np.log10(image_RGB + 1e-10)
-    else:
-        lo, hi = min_val, max_val
-        image_scaled = image_RGB.copy()
-
-    # Saturation adjustment in the pre-clip scaled domain so dark and bright
-    # regions are treated consistently (no saturation-of-clipped-values artefact).
-    if saturation != 1.0:
-        luma = (0.2126 * image_scaled[..., 0]
-              + 0.7152 * image_scaled[..., 1]
-              + 0.0722 * image_scaled[..., 2])[..., np.newaxis]
-        image_scaled = luma + saturation * (image_scaled - luma)
-
-    # Contrast: shrink/widen the display window around its midpoint before
-    # clipping, so highlights and shadows are not prematurely crushed.
-    if contrast != 1.0:
-        mid       = (lo + hi) * 0.5
-        half_span = (hi - lo) * 0.5 / contrast
-        lo, hi    = mid - half_span, mid + half_span
-
-    norm_image = (np.clip(image_scaled, lo, hi) - lo) / (hi - lo)
-
-    plt.figure()
+    norm_image, image_RGB, max_val = _cube_to_RGB_array(
+        image, wavelengths, min_val, max_val, scale,
+        saturation, contrast, wb_shift, mg_shift
+    )
+    plt.figure(figsize=fig_size, dpi=300)
     plt.imshow(norm_image, origin="lower")
     if title:
         plt.title(title)
     plt.axis('off')
-
     if show:
         plt.show()
-
     return image_RGB, max_val
 
 
@@ -810,7 +823,7 @@ def plot_chromatic_PSF_slice(
     x_start = max(0, center_x - half_window)
     x_end = min(PSF.shape[-1], center_x + half_window)
     
-    wvl_colors = [wavelength_to_rgb(l, gamma=1.0) for l in np.linspace(440, 750, N_wvl)]
+    wvl_colors = [wavelength_to_RGB(l, gamma=1.0) for l in np.linspace(440, 750, N_wvl)]
 
     for i in range(N_wvl):
         # Extract cross-sections through center and average them

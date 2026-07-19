@@ -23,7 +23,7 @@ from astropy.io import fits
 from scipy.ndimage import binary_dilation
 from pathlib import Path
 from tiptorch.tools.utils import GetROIaroundMax, GetJmag, check_framework, recompute_Cn2_Kmeans, rad2arc
-from tools.plotting import wavelength_to_rgb
+from tools.plotting import wavelength_to_RGB
 from tiptorch.managers.config_manager import ConfigManager
 from scipy.ndimage import rotate
 import logging
@@ -1097,7 +1097,7 @@ def GetSpectralCubeAndHeaderData(
         Rs, Gs, Bs = np.zeros_like(λs), np.zeros_like(λs), np.zeros_like(λs)
 
         for i, λ in enumerate(λs):
-            Rs[i], Gs[i], Bs[i] = wavelength_to_rgb(λ, show_invisible=True)
+            Rs[i], Gs[i], Bs[i] = wavelength_to_RGB(λ, show_invisible=True)
 
         # Mask out the bad wavelength ranges
         spectrum_valid = valid_λs * spectrum.copy()
