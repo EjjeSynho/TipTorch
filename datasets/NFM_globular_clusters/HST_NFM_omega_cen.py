@@ -44,13 +44,11 @@ CUBES_FOLDER = data_folder / "../reduced_cubes"
 FindDuplicatesFITS(CUBES_FOLDER)
 files_matches, _ = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=False)
 
-# reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
+reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 # reduced_cube = "ADP.2019-05-30T08-10-58.821.fits"
 # reduced_cube = "ADP.2021-05-19T05-26-01.345.fits"
 # reduced_cube = "ADP.2021-05-19T05-26-01.337.fits"
 # reduced_cube = "ADP.2021-05-19T05-26-01.303.fits"
-# reduced_cube = "DATACUBEFINALscipost_20191102T010934_fb6f4016.fits"
-reduced_cube = "DATACUBEFINALscipost_20220531T034028_d33feab3.fits"
 # reduced_cube = "ADP.2022-06-20T16-50-01.871.fits"
 
 
@@ -272,8 +270,8 @@ df_HST_sources = df_HST_sources.rename(columns={'x, [asec]': 'x', 'y, [asec]': '
 df_HST_sources['flux'] = df_flux.sum(axis=1)
 
 # Emprical correction
-dx_emp = 0.5
-dy_emp = 1.5
+dx_emp = 0
+dy_emp = 0
 
 df_HST_sources['x'] += hst_x_offset + dx_emp # Empirical WCS pre-alignment offsets
 df_HST_sources['y'] += hst_y_offset + dy_emp
@@ -494,6 +492,43 @@ plt.ylabel('ΔDEC [arcsec]')
 plt.title(f'HST sources matching with optimal transformation')
 plt.legend()
 plt.grid(alpha=0.3)
+plt.show()
+
+#%%
+# Plot HST sources within NFM FoV with points and brightness circles
+plt.figure(figsize=(10, 10))
+
+# Plot brightness as circles (larger, semi-transparent)
+plt.scatter(x_hst_sel, y_hst_sel, 
+            s=norm_size(flux_hst_norm_sel, max_flux_all) * 5, 
+            facecolors='none', 
+            edgecolors='blue', 
+            alpha=0.6, 
+            linewidths=1.5,
+            label='Brightness')
+
+# Plot source positions as small points
+plt.scatter(x_hst_sel, y_hst_sel, 
+            s=10, 
+            color='red', 
+            marker='.', 
+            label='Source position',
+            zorder=5)
+
+# Draw MUSE NFM field of view
+plt.plot([-3.75, -3.75, 3.75, 3.75, -3.75], 
+         [-3.75, 3.75, 3.75, -3.75, -3.75], 
+         color='black', 
+         linestyle='--', 
+         label='MUSE NFM FoV')
+
+plt.axis('equal')
+plt.xlabel('ΔRA [arcsec]')
+plt.ylabel('ΔDEC [arcsec]')
+plt.title(f'HST sources within NFM FoV ({len(x_hst_sel)} sources)')
+plt.legend()
+plt.grid(alpha=0.3)
+# plt.savefig(data_folder / f'../metadata/HST_sources_{cube_path.stem}.pdf', dpi=300)
 plt.show()
 
 #%%
