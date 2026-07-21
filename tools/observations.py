@@ -1742,9 +1742,10 @@ class MUSEObservation:
         plt.show()
 
 
-    def DisplaySimulation(self, plot_profiles=True, plot_full_spectrum=False, cmap=None) -> None:
+    def DisplaySimulation(self, plot_profiles=True, plot_full_spectrum=False, cmap=None, focus_on_src=None) -> None:
         """
         Renders the data, the simulation, and their difference for visual inspection. Optionally plots the radial profiles of the sources.
+        If focus_on_src is provided, zooms in on the ROI of that source; otherwise uses self.ROI_plot.
         """
         # Render the entire MUSE NFM spectrum
         if plot_full_spectrum:
@@ -1783,14 +1784,19 @@ class MUSEObservation:
             
         diff_  = (data_ - model_) * mask_
 
+        if focus_on_src is not None and self.sources is not None:
+            (y0, y1), (x0, x1) = self.sources.slices_global[focus_on_src]
+            ROI_ = (Ellipsis, slice(y0, y1), slice(x0, x1))
+        else:
+            ROI_ = self.ROI_plot
+
         fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-        
         
         for ax, arr, title in zip(axes, [data_, model_, diff_], ['Data', 'Model', 'Difference']):
             _, vmin_, vmax_ = DisplaySpectralCube(
                 arr,
                 wavelengths = λ_,
-                ROI = self.ROI_plot,
+                ROI = ROI_,
                 cmap = cmap,
                 vmin = vmin,
                 vmax = vmax,

@@ -1025,3 +1025,104 @@ def ROI_from_valid_mask(
         out["mask_clean"] = mask_clean
 
     return out
+
+
+def fix_cosmic_rays_batch(
+    ROIs: Union[list, torch.Tensor],
+    central_pixel: tuple[int, int],
+    baseline_window_start: int = 1200,
+    pct_range: tuple = (50, 100),
+    pct_step: float = 1.0
+) -> list:
+    """
+    Detect and fix cosmic rays in a batch of ROIs using the ring/peak flux ratio method.
+
+    This function processes multiple ROIs in batch, computing the cosmic ray threshold
+    for each ROI based on the "donut" (ring) to peak flux ratio.
+
+    Parameters
+    ----------
+    ROIs : list of torch.Tensor or torch.Tensor
+        List of ROIs (each [N_wvl, box_size, box_size]) or a stacked tensor [N_rois, N_wvl, box_size, box_size].
+    central_pixel : tuple[int, int]
+        (y, x) coordinates of the central pixel in each ROI.
+    baseline_window_start : int
+        Spectral slice index where the baseline window starts. Default 1200.
+    pct_range : tuple
+        (min_pct, max_pct) range for threshold search. Default (50, 100).
+    pct_step : float
+        Step size for percentile range. Default 1.0.
+
+    Returns
+    -------
+    list of torch.Tensor
+        List of fixed ROIs with cosmic ray pixels set to NaN.
+
+    Notes
+    -----
+    For each ROI:
+    1. Computes ring flux from 3x3 neighborhood (excluding center)
+    2. Computes ratio of ring flux to peak flux
+    3. Finds optimal threshold using stability analysis of quantiles
+    4. Flags and replaces cosmic ray pixels with NaN
+    """
+    # Handle input - stack if list
+    if isinstance(ROIs, list):
+        ROIs_stacked = torch.stack(ROIs, dim=0)
+    else:
+        ROIs_stacked = ROIs
+
+    n_rois = ROIs_stacked.shape[0]
+    fixed_ROIs = []
+
+    # Pre-compute donut indices (3x3 neighborhood excluding center)
+    dy = torch.tensor([-1, -1, -1, 0, 0, 1, 1, 1])
+    dx = torch.tensor([-1, 0, 1, -1, 1, -1, 0, 1])
+
+    # Process each ROI in batch
+    for i in range(n_rois):
+        roi = ROIs_stacked[i]
+
+        # Extract peak flux at central pixel
+        peak = roi[:, central_pixel[0], central_pixel[1]].clone()
+
+        # Extract donut (3x3 ring around central pixel)
+        donut = roi[
+            :,
+            central_pixel[0] - 1:central_pixel[0] + 2,
+            central_pixel[1] - 1:central_pixel[1] + 2
+        ].clone()
+        donut[..., 1, 1] = 0.0  # Exclude center
+        donut_flux = donut.sum(dim=(-2, -1)) / 8.0
+
+        # Compute ratio
+        ratio = donut_flux.clamp(min=1e-12) / peak
+        ratio = ratio.nan_to_num(nan=2.0, posinf=2.0, neginf=2.0)
+
+        # Center around baseline
+        baseline_window = ratio[baseline_window_start:]
+        baseline = baseline_window.median()
+        ratio_centered = ratio - baseline
+
+        # Compute quantiles for the percentile range
+        Ps = torch.arange(pct_range[0], pct_range[1], pct_step)
+        quantiles = Ps / 100.0
+        threshs = torch.quantile(ratio_centered[baseline_window_start:], quantiles)
+
+        # Find optimal threshold using stability analysis
+        d_threshs = threshs.diff().abs()
+        threshs_valid = threshs[1:]
+        Ps_valid = Ps[1:]
+        pct = Ps_valid[d_threshs.argmax()].item() - 0.5
+
+        # Compute final threshold and flag cosmic rays
+        thresh = torch.quantile(ratio_centered[baseline_window_start:], pct / 100.0)
+        flagged = torch.where(ratio_centered > thresh)[0]
+        flagged = flagged[flagged > baseline_window_start]
+
+        # Create fixed ROI
+        roi_fixed = roi.clone()
+        roi_fixed[flagged, central_pixel[0], central_pixel[1]] = torch.nan
+        fixed_ROIs.append(roi_fixed)
+
+    return fixed_ROIs
