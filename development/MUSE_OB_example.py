@@ -65,19 +65,20 @@ ob.DetectSources(nsigma=35, threshold='auto')
 
 # ob.DeleteSources([1, 2])  # Example: delete sources with IDs 1 and 2
 
-ob.DisplaySources()
+ob.DisplayField()
 
 #%%
-# ob.PlotSourceSpectra()
 ob.InitSimulation()
 
 #%%
-ob.FitPSFModel(repeat=2, max_iter=200)
+ob.FitPSFModel(repeat=3, max_iter=200)
 # ob.FitPSFModel(fit=['astrometry'], repeat=3, max_iter=200)
 # ob.FitPSFModel(fit=['astrometry', 'photometry'], repeat=3, max_iter=200)
 
 #%%
 model = ob.SimulateField()
+
+#%%
 ob.DisplaySimulation(plot_profiles=True)
 
 #%%
@@ -85,6 +86,57 @@ _ = ob.SimulateField(full_spectrum=True)
 
 #%%
 ob.DisplaySimulation(plot_profiles=True, plot_full_spectrum=True)
+
+#%%
+center_ = ob.field_center[0].tolist()
+
+_, PSF_sparse, _ = ob.SimulatePSFAtPosition(*center_)
+_, PSF_full, _   = ob.SimulatePSFAtPosition(*center_, full_spectrum=True)
+
+#%%
+import numpy as np
+import torch
+
+ids = []
+# Before and after Na-filter region
+region_1 = np.where(ob.λ_bins <  589)[0]
+region_2 = np.where(ob.λ_bins >= 600)[0]
+
+for l in ob.λ_bins:
+    id_λ = np.argmin(np.abs(ob.λ_full - l)).item()
+    ids.append(id_λ)
+ids = np.array(ids)
+
+ids1 = ids[region_1]
+ids2 = ids[region_2]
+
+#%%
+PSF_full_binned = []
+for i in range(len(ids1)-1):
+    PSF_full_binned.append(PSF_full[ids1[i]:ids1[i+1]].mean(dim=0))
+
+for i in range(len(ids2)-1):
+    PSF_full_binned.append(PSF_full[ids2[i]:ids2[i+1]].mean(dim=0))
+
+PSF_full_binned = torch.stack(PSF_full_binned, dim=0)[ob.ids_λ_sparse, ...].to(ob.device)
+
+#%%
+max_diffs = PSF_sparse.amax(dim=(-2, -1)) / PSF_full_binned.amax(dim=(-2, -1))
+
+print(max_diffs)
+
+#%%
+from tools.plotting import plot_radial_PSF_profiles
+
+n_l = 6
+
+plot_radial_PSF_profiles(
+    PSF_0 = PSF_sparse[n_l, ...],
+    PSF_1 = (PSF_full_binned * max_diffs.view(-1, 1, 1))[n_l, ...],
+    label_0 = 'Full',
+    label_1 = 'Sparse',
+    cutoff=30,
+)
 
 #%%
 ob.PlotSourceSpectra(title='Sources spectra (residual)', show_sparse=False, plot_residual=True, smooth_kernel=15)

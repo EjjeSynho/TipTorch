@@ -1713,6 +1713,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
 
     spectral_info = {
         "λ_binned":  λ_binned, # [nm]
+        "λ_bins":    λ_bins,   # [nm]
         "λ_full":    λ_full, # [nm]
         "Δλ_binned": Δλ_binned,
         "Δλ_full":   Δλ_full

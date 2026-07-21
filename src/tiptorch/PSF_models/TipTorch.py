@@ -416,12 +416,12 @@ class TipTorch(torch.nn.Module):
         
         # self.center_aligner = torch.exp( 1j * torch.pi * (self.U + self.V) * (1 - self.N_pix%2))
 
-        # since only half of PSD is used, the padding of AO-corrected PSD component is done only on the left
+        # Since only half of PSD is used, the padding of AO-corrected PSD component is done only on the left
         self.PSD_padder = torch.nn.ZeroPad2d( (a:=((self.nOtf-self.nOtf_AO)//2), 0, a, a) ) # pad_left, pad_right, pad_top, pad_bottom
 
         self.piston_filter = self.PistonFilter(self.k_AO)
         
-        # To avoid re-initializing it without a need
+        # To avoid initializing it without a need
         if self.PSD_include['aliasing']:
             self.PR = self.PistonFilter(torch.hypot(self.km, self.kn)) # piston filter for aliased spatial frequencies
 
@@ -452,23 +452,35 @@ class TipTorch(torch.nn.Module):
         return self.OTF_static
 
 
-    def Update(self, config: dict | None = None, grids: bool = False, pupils: bool = False, tomography: bool = False) -> None:
+    def Update(self, config: dict | None = None, grids: bool = False, pupils: bool = False, tomography: bool = False, update_static_OTF: bool = True) -> None:
         # Update the model with a new configuration. To ensure optimal performance, different
         # components can be updated independently when needed. By default, only values are updated
         
         if config is not None:
             self.config = config
         
-        self.InitValues() # Fill up the values of the internal variables from the config file
+        # Set the model parameters to the ones defined in the config file
+        self.InitValues()
 
-        if self.is_float: self._to_float()
-        
-        if grids:  self.InitGrids()
+        if self.is_float:
+            self._to_float()
+        # Update grids used for computation of PSDs and OTFs. This is necessary when the sampling has changed.
+        if grids:
+            self.InitGrids()
+        # Update pupil and apodizer masks
         if pupils:
             self.InitPupils()
         elif grids and self.pupil is not None:
-            # Grid-dependent static OTF must be refreshed even when pupil data did not change.
-            self.UpdateStaticOTF()
+            if update_static_OTF:
+                # Grid-dependent static OTF must be refreshed when pupil data did not change.
+                self.UpdateStaticOTF()
+            else:
+                # Caller will set OTF_static via ComputeStaticOTF(phase); skip the expensive
+                # pupil FFT but still refresh the pupil_padder which depends on sampling_min.
+                phase_size = self.pupil.shape[-1]
+                self.pupil_padder = torch.nn.ZeroPad2d(
+                    int(round(phase_size * self.sampling_min / 2 - phase_size / 2))
+                )
         
         # If the number of sources have changed, reinitialize the tomography projector
         if (self.tomography and tomography) or (self.tomography and grids):
@@ -1376,10 +1388,24 @@ class TipTorch(torch.nn.Module):
         return error_budget
 
 
-    def SetWavelengths(self, wavelengths: torch.Tensor):
-        ''' Set new simulated wavelengths in [nm] '''
+    def SetWavelengths(self, wavelengths: torch.Tensor, refresh_static_OTF: bool = True):
+        ''' Set new simulated wavelengths in [nm].
+
+        Args:
+            wavelengths: New simulated wavelengths in [nm].
+            refresh_static_OTF: If True (default), the diffraction-limited static OTF
+                is recomputed from the pupil for the new grid. Set to False when the
+                caller will immediately overwrite ``OTF_static`` via
+                ``ComputeStaticOTF(phase)`` — this skips a wasted pupil FFT per batch.
+        '''
         self.config['sources_science']['Wavelength'] = wavelengths.view(1,-1) # [nm]
-        self.Update(grids=True, pupils=False, tomography=True) # Avoid an expensive update of pupil masks
+        if refresh_static_OTF:
+            # Full update: grids + diffraction-limited static OTF + tomography projector.
+            self.Update(grids=True, pupils=False, tomography=True) # Avoid an expensive update of pupil masks
+        else:
+            # Skip the static-OTF FFT — the caller will set OTF_static via ComputeStaticOTF(phase).
+            self.Update(grids=True, pupils=False, tomography=True, update_static_OTF=False)
+            
         self.wavelengths = wavelengths # [nm]
 
 

@@ -321,7 +321,7 @@ class SourcesData:
 
 
 
-def DisplayField(
+def DisplaySpectralCube(
     cube,
     *,
     sources = None,
@@ -330,7 +330,7 @@ def DisplayField(
     show_markers = True,
     show_ids = False,
     show_weights = False,
-    roi = None,
+    ROI   = None,
     title = None,
     norm  = None,
     vmin  = None,
@@ -365,7 +365,7 @@ def DisplayField(
     show_markers : bool - draw a circle (or rectangle) per source. Default True.
     show_ids : bool     - annotate each marker with its source index. Default False.
     show_weights : bool - fill markers with alpha ∝ source weight. Default False.
-    roi : tuple of slices or None
+    ROI : tuple of slices or None
         Region of interest, e.g. ``np.s_[..., y0:y1, x0:x1]``.
     title : str or None
     figsize : tuple   (used only when ax=None)
@@ -440,8 +440,8 @@ def DisplayField(
     # ── Prepare array ──────────────────────────────────────────────────────────
     arr = cube.detach().cpu().numpy() if isinstance(cube, torch.Tensor) else np.asarray(cube)
     arr = np.abs(arr)
-    if roi is not None:
-        arr = arr[roi]
+    if ROI is not None:
+        arr = arr[ROI]
 
     # ── Figure / axes ──────────────────────────────────────────────────────────
     own_figure = ax is None
@@ -449,10 +449,12 @@ def DisplayField(
         _, ax = plt.subplots(figsize=figsize)
 
     # ── Render image ───────────────────────────────────────────────────────────
+    
+    # ============ If RGB rendering: wavelength -> colour mapping =============
     if cmap is None and arr.ndim == 3:
         # RGB mode: wavelength -> colour mapping
         # vmin/vmax override min_val/max_val for a unified intensity interface
-        display_img, _, _ = _cube_to_RGB_array(
+        display_img, v_lo, v_hi = _cube_to_RGB_array(
             arr,
             wavelengths,
             vmin,
@@ -464,16 +466,18 @@ def DisplayField(
             mg_shift
         )
         ax.imshow(display_img, origin='lower')
-        
+    
+    # ============ If colormap rendering: collapse λ and display =============
     else:
         # cmap mode: collapse λ and display with chosen colormap
-        img_2d = arr.sum(axis=0) if arr.ndim == 3 else arr
+        img_2d = arr.mean(axis=0) if arr.ndim == 3 else arr
         img_2d = np.nan_to_num(img_2d)
         
         if norm is None:
             pos  = img_2d[img_2d > 0]
-            v_lo = float(vmin if vmin is not None else (max(1.0, pos.min()) if len(pos) else 1.0))
-            v_hi = float(vmax if vmax is not None else max(img_2d.max(), v_lo * 2))
+            v_lo = float(vmin if vmin is not None else (max(10.0, pos.min())     if len(pos) else 10.0))
+            v_hi = float(vmax if vmax is not None else (np.percentile(pos, 97.5) if len(pos) else v_lo * 2))
+            
             if scale == 'log':
                 norm = LogNorm(vmin=v_lo, vmax=v_hi)
             else:
@@ -481,7 +485,7 @@ def DisplayField(
                 norm = Normalize(vmin=v_lo, vmax=v_hi)
         
         ax.imshow(img_2d, norm=norm, origin='lower', cmap=cmap if cmap is not None else 'gray')
-
+        
     ax.axis('off')
     if title:
         ax.set_title(title)
@@ -490,7 +494,7 @@ def DisplayField(
     if show_markers:
         src_df = _get_sources_table(sources)
         if src_df is not None and len(src_df):
-            x_off, y_off = _roi_offsets(roi)
+            x_off, y_off = _roi_offsets(ROI)
             _draw_source_markers(ax, src_df, x_offset=x_off, y_offset=y_off)
 
     if own_figure:
@@ -498,7 +502,7 @@ def DisplayField(
         if show:
             plt.show()
 
-    return ax
+    return ax, v_lo, v_hi
 
 
 def DetectSources(data_cube, threshold=None, nsigma=3.0, box_size=11, sort_by_brightness=True, weight_from_flux=False, display=False, draw_box_size=None, verbose=False):
@@ -574,9 +578,8 @@ def DetectSources(data_cube, threshold=None, nsigma=3.0, box_size=11, sort_by_br
     if display and draw_box_size is not None:
         draw_box_size = box_size if draw_box_size is None else int(draw_box_size)
         bg = float(np.nanmedian(data_src[data_src > 0]))
-        DisplayField(data_src, sources=sources_df, show_markers=True, show_ids=True,
-                     marker_shape='box', marker_size=draw_box_size/2,
-                     vmin=bg*0.9, vmax=threshold*10)
+        
+        DisplaySpectralCube(data_src, sources=sources_df, show_markers=True, show_ids=True, marker_shape='box', marker_size=draw_box_size/2, vmin=bg*0.9, vmax=threshold*10)
 
     # Sort in descending order of flux (peak value)
     if sort_by_brightness:

@@ -232,13 +232,13 @@ def render_spectral_PSF(spectral_cube, λs):
 def _cube_to_RGB_array(
     image,
     wavelengths = None,
-    min_val = 1.0,
+    min_val = None,
     max_val = None,
     scale = 'log',
     saturation = 1.0,
-    contrast = 1.0,
-    wb_shift = 0.0,
-    mg_shift = 0.0,
+    contrast   = 1.0,
+    wb_shift   = 0.0,
+    mg_shift   = 0.0,
 ):
     """
     Convert a (N_λ, H, W) spectral cube to a normalised (H, W, 3) RGB array.
@@ -246,8 +246,8 @@ def _cube_to_RGB_array(
     Returns
     -------
     norm_image : ndarray (H, W, 3) - clipped and normalised to [0, 1] for imshow
-    image_RGB  : ndarray (H, W, 3) - linear mixed RGB before normalisation
-    max_val    : float              - effective upper clip value used
+    v_lo       : float             - effective lower clip value used
+    v_hi       : float             - effective upper clip value used
     """
     image_t = image if torch.is_tensor(image) else torch.as_tensor(image)
     if image_t.ndim != 3:
@@ -255,9 +255,10 @@ def _cube_to_RGB_array(
 
     if wavelengths is None:
         wavelengths = np.linspace(440, 750, image_t.shape[0])
-    wavelengths    = np.asarray(wavelengths)
-    RGB_weights_np = np.array([wavelength_to_RGB(λ, show_invisible=True) for λ in wavelengths],
-                               dtype=np.float32).T
+        
+    wavelengths = np.asarray(wavelengths)
+    
+    RGB_weights_np = np.array([wavelength_to_RGB(λ, show_invisible=True) for λ in wavelengths], dtype=np.float32).T
 
     use_cuda = False
     if torch.cuda.is_available():
@@ -269,10 +270,8 @@ def _cube_to_RGB_array(
 
     device      = torch.device("cuda") if use_cuda else image_t.device
     image_work  = image_t.to(device=device, dtype=torch.float32, copy=False)
-    rgb_weights = torch.as_tensor(RGB_weights_np, device=device, dtype=torch.float32)
-
-    image_RGB_t = torch.einsum("cn,nhw->chw", rgb_weights, image_work).abs()
-    image_RGB   = image_RGB_t.permute(1, 2, 0).detach().cpu().numpy()
+    RGB_weights = torch.as_tensor(RGB_weights_np, device=device, dtype=torch.float32)
+    image_RGB   = torch.einsum("cn,nhw->chw", RGB_weights, image_work).abs().permute(1,2,0).detach().cpu().numpy() / len(wavelengths)
     
     if use_cuda:
         torch.cuda.empty_cache()
@@ -286,20 +285,20 @@ def _cube_to_RGB_array(
         )
         image_RGB = image_RGB * wb_gains
 
-    if max_val is None:
-        max_val = np.percentile(image_RGB, 97.5)  # always linear; log10 is applied below when scale='log'
+    if max_val is None:  max_val = image_RGB.mean(axis=-1).max() * 0.85
+    if min_val is None:  min_val = 1.0
 
     if scale == 'log':
         lo, hi       = np.log10(min_val), np.log10(max_val)
         image_scaled = np.log10(image_RGB + 1e-10)
     else:
         lo, hi       = min_val, max_val
-        image_scaled = image_RGB.copy()
+        image_scaled = image_RGB
 
     if saturation != 1.0:
-        luma         = (0.2126 * image_scaled[..., 0]
-                      + 0.7152 * image_scaled[..., 1]
-                      + 0.0722 * image_scaled[..., 2])[..., np.newaxis]
+        luma = (0.2126 * image_scaled[..., 0]
+              + 0.7152 * image_scaled[..., 1]
+              + 0.0722 * image_scaled[..., 2])[..., np.newaxis]
         image_scaled = luma + saturation * (image_scaled - luma)
 
     if contrast != 1.0:
@@ -308,77 +307,77 @@ def _cube_to_RGB_array(
         lo, hi    = mid - half_span, mid + half_span
 
     norm_image = (np.clip(image_scaled, lo, hi) - lo) / (hi - lo)
-    return norm_image, image_RGB, max_val
+    return norm_image, min_val, max_val
 
 
-def PlotSpetralCubeInRGB(
-    image,
-    wavelengths = None,
-    min_val = 1e-6,
-    max_val = None,
-    scale = 'log',
-    title = None,
-    show  = True,
-    saturation = 1.0,
-    contrast = 1.0,
-    wb_shift = 0.0,
-    mg_shift = 0.0,
-    fig_size = (6, 6)
-):
-    """
-    Map a multi-wavelength image into RGB.
+# def PlotSpetralCubeInRGB(
+#     image,
+#     wavelengths = None,
+#     min_val = 1e-6,
+#     max_val = None,
+#     scale = 'log',
+#     title = None,
+#     show  = True,
+#     saturation = 1.0,
+#     contrast = 1.0,
+#     wb_shift = 0.0,
+#     mg_shift = 0.0,
+#     fig_size = (6, 6)
+# ):
+#     """
+#     Map a multi-wavelength image into RGB.
 
-    Parameters
-    ----------
-    image : array-like, shape (N_waves, H, W) or torch.Tensor
-        Stacked wavelength slices.
-    wavelengths : sequence of length N_waves
-        Physical wavelengths corresponding to each image slice.
-    min_val : float
-        Minimum intensity for clipping. Default suits log scale (1e-6).
-        For linear scale, use 0.0.
-    max_val : float or None
-        Maximum intensity for clipping. If None, automatically computed from the
-        image histogram (99th percentile in log domain). For linear scale with
-        explicit value, use 1.0.
-    scale : {'log', 'linear'}
-        Normalisation strategy. 'log' applies log10 before clipping (default).
-    title : str, optional
-        Plot title.
-    show : bool
-        Whether to call plt.show() or not.
-    saturation : float
-        Saturation multiplier. 1.0 = original, >1 more vivid, <1 desaturated,
-        0.0 = grayscale. Default 1.0.
-    contrast : float
-        Contrast multiplier applied around the mid-point (0.5). 1.0 = original,
-        >1 higher contrast, <1 lower contrast. Default 1.0.
-    wb_shift : float
-        Red/blue white-balance shift in [-1, 1]. 0.0 = neutral. Positive values
-        boost red and suppress blue (warmer); negative values do the opposite
-        (cooler). Default 0.0.
-    mg_shift : float
-        Magenta/green white-balance shift in [-1, 1]. 0.0 = neutral. Positive
-        values boost red+blue (magenta tint) and suppress green; negative values
-        do the opposite (green tint). Default 0.0.
+#     Parameters
+#     ----------
+#     image : array-like, shape (N_waves, H, W) or torch.Tensor
+#         Stacked wavelength slices.
+#     wavelengths : sequence of length N_waves
+#         Physical wavelengths corresponding to each image slice.
+#     min_val : float
+#         Minimum intensity for clipping. Default suits log scale (1e-6).
+#         For linear scale, use 0.0.
+#     max_val : float or None
+#         Maximum intensity for clipping. If None, automatically computed from the
+#         image histogram (99th percentile in log domain). For linear scale with
+#         explicit value, use 1.0.
+#     scale : {'log', 'linear'}
+#         Normalisation strategy. 'log' applies log10 before clipping (default).
+#     title : str, optional
+#         Plot title.
+#     show : bool
+#         Whether to call plt.show() or not.
+#     saturation : float
+#         Saturation multiplier. 1.0 = original, >1 more vivid, <1 desaturated,
+#         0.0 = grayscale. Default 1.0.
+#     contrast : float
+#         Contrast multiplier applied around the mid-point (0.5). 1.0 = original,
+#         >1 higher contrast, <1 lower contrast. Default 1.0.
+#     wb_shift : float
+#         Red/blue white-balance shift in [-1, 1]. 0.0 = neutral. Positive values
+#         boost red and suppress blue (warmer); negative values do the opposite
+#         (cooler). Default 0.0.
+#     mg_shift : float
+#         Magenta/green white-balance shift in [-1, 1]. 0.0 = neutral. Positive
+#         values boost red+blue (magenta tint) and suppress green; negative values
+#         do the opposite (green tint). Default 0.0.
 
-    Returns
-    -------
-    image_RGB : ndarray, shape (H, W, 3)
-        The raw (pre-normalisation) RGB array.
-    """
-    norm_image, image_RGB, max_val = _cube_to_RGB_array(
-        image, wavelengths, min_val, max_val, scale,
-        saturation, contrast, wb_shift, mg_shift
-    )
-    plt.figure(figsize=fig_size, dpi=300)
-    plt.imshow(norm_image, origin="lower")
-    if title:
-        plt.title(title)
-    plt.axis('off')
-    if show:
-        plt.show()
-    return image_RGB, max_val
+#     Returns
+#     -------
+#     image_RGB : ndarray, shape (H, W, 3)
+#         The raw (pre-normalisation) RGB array.
+#     """
+#     norm_image, image_RGB, max_val = _cube_to_RGB_array(
+#         image, wavelengths, min_val, max_val, scale,
+#         saturation, contrast, wb_shift, mg_shift
+#     )
+#     plt.figure(figsize=fig_size, dpi=300)
+#     plt.imshow(norm_image, origin="lower")
+#     if title:
+#         plt.title(title)
+#     plt.axis('off')
+#     if show:
+#         plt.show()
+#     return image_RGB, max_val
 
 
 def save_GIF(array, duration=1e3, scale=1, path='test.gif', colormap=cm.viridis):

@@ -667,7 +667,7 @@ class PSFModelNFM:
         self.inputs_manager[key] = value
     
     
-    def SetWavelengths(self, wavelengths: torch.Tensor):
+    def SetWavelengths(self, wavelengths: torch.Tensor, refresh_static_OTF=False):
         # Cheap pointer check first (same tensor object → same values, no GPU sync needed)
         if self.λ_sim.data_ptr() == wavelengths.data_ptr():
             return
@@ -676,7 +676,7 @@ class PSFModelNFM:
             torch.allclose(wavelengths.flatten(), self.λ_sim.flatten(), atol=1e-12):
             return
 
-        self.model.SetWavelengths(wavelengths)
+        self.model.SetWavelengths(wavelengths, refresh_static_OTF)
         self.λ_sim = wavelengths
         if self.use_splines:
             self.λ_sim_normed = self.norm_wvl(self.λ_sim) # [0...1], simulated wavelengths normalized to [0...1] range for spline evaluation
@@ -802,7 +802,9 @@ class PSFModelNFM:
             if verbose:
                 pbar.update(len(λ_batch))
 
-            self.model.SetWavelengths(λ_batch)
+            # When LO NCPAs are active, ComputeStaticOTF(phase) below immediately overwrites
+            # the diffraction-limited static OTF; skip the wasted pupil FFT inside SetWavelengths.
+            self.model.SetWavelengths(λ_batch, refresh_static_OTF=not self.LO_NCPAs)
 
             for entry in polychromatic_params:
                 x_[entry] = x_dict[entry][..., global_sl]
@@ -828,14 +830,22 @@ class PSFModelNFM:
 
         # ── 6. Restore sparse model state ──────────────────────────────────────────────
         self.model.N_src = _N_src
-        self.SetWavelengths(_initial_wvl)
+        # Call self.model.SetWavelengths directly to bypass the early-return guard in
+        # NFMWrapper.SetWavelengths: the loop updated self.model's grids directly without
+        # going through the wrapper, so self.λ_sim still holds the original sparse values
+        # while self.model is configured for the last λ-batch.
+        self.model.SetWavelengths(_initial_wvl, refresh_static_OTF=not self.LO_NCPAs)
+        
         if self.LO_NCPAs:
             self.model.ComputeStaticOTF(phase_)
 
         if verbose:
             pbar.close()
 
-        torch.cuda.empty_cache()
+        # NOTE: no torch.cuda.empty_cache() here on purpose. When SimulateSpectralRange is
+        # called repeatedly (e.g. from disentangle_flux_batched), the per-call sync
+        # dominates the total run-time. Callers that need to release the cached VRAM can
+        # invoke torch.cuda.empty_cache() themselves after the whole loop is done.
 
         return PSFs_out, λ_range   # [N_src_sim, N_λ_range, N_pix, N_pix], [N_λ_range]
 
@@ -888,9 +898,7 @@ class PSFModelNFM:
         PSF : torch.Tensor  [N_λ, N_pix, N_pix]
         '''
         if self.multiple_obs:
-            raise NotImplementedError(
-                "RenderPSFAtDirection only supports the single-OB regime (multiple_obs=False)."
-            )
+            raise NotImplementedError("RenderPSFAtDirection only supports the single-OB regime (multiple_obs=False).")
 
         # Field-dependent state exists only for physics-based / hybrid regimes
         param_names   = self.get_param_names()

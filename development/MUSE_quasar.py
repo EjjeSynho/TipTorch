@@ -47,7 +47,7 @@ ob.DetectSources(nsigma=35, threshold='auto')
 
 #%%
 ob.ExtractSources()
-ob.DisplaySources(draw_box_size=20)
+ob.DisplayField(draw_box_size=20)
 
 #%%
 from tiptorch._config import WEIGHTS_FOLDER
@@ -269,7 +269,7 @@ ob.DetectSources(nsigma=35, threshold='auto')
 
 #%%
 ob.ExtractSources()
-ob.DisplaySources(draw_box_size=20)
+ob.DisplayField(draw_box_size=20)
 
 #%%
 from tiptorch._config import WEIGHTS_FOLDER

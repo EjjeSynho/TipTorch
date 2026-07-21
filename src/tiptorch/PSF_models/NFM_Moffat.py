@@ -294,6 +294,7 @@ class MoffatPSFModelNFM:
         wavelengths = torch.as_tensor(wavelengths, device=self.device, dtype=self.dtype).flatten()
         if self.λ_sim.shape == wavelengths.shape and torch.allclose(wavelengths, self.λ_sim, atol=1e-12):
             return
+        
         self.λ_sim = wavelengths
         if self.use_splines:
             self.λ_sim_normed = self.norm_wvl(self.λ_sim)
@@ -366,6 +367,7 @@ class MoffatPSFModelNFM:
             out[:, out_sl] = self._render(batch_dict).to(out_device)
 
         self.SetWavelengths(initial_wavelengths)
+        
         return out, λ_range
 
 

@@ -31,7 +31,7 @@ from tools.multisources import (
     SourcesData,
     SourcesSubset,
     DetectSources,
-    DisplayField,
+    DisplaySpectralCube,
     add_ROIs_separately,
     ExtractSourceImages,
     ROI_from_valid_mask,
@@ -132,12 +132,14 @@ class MUSEObservation:
         λ_full,   Δλ_full   = spectral_info['λ_full'],   spectral_info['Δλ_full']
         λ_binned, Δλ_binned = spectral_info['λ_binned'], spectral_info['Δλ_binned']
 
-        # Here, it's assumed to be every 5th bin, but it can be changed to any other selection strategy
-        ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
-        λ_sparse  =  λ_binned[..., ids_λ_sparse]
-        Δλ_sparse = Δλ_binned[..., ids_λ_sparse]
+        λ_bins = spectral_info['λ_bins'] # borders of the spectral bins
 
-        self.cube_sparse = cube_binned[ids_λ_sparse, ...] # Select the sparse subset ofspectral slices
+        # Here, it's assumed to be every 5th bin, but it can be changed to any other selection strategy
+        self.ids_λ_sparse = np.arange(0, λ_binned.shape[-1], 5)
+        λ_sparse  =  λ_binned[..., self.ids_λ_sparse]
+        Δλ_sparse = Δλ_binned[..., self.ids_λ_sparse]
+
+        self.cube_sparse = cube_binned[self.ids_λ_sparse, ...] # Select the sparse subset ofspectral slices
         self.N_wvl = self.cube_sparse.shape[0]
         self.N_wvl_full = self.cube_full.shape[0]
 
@@ -147,10 +149,14 @@ class MUSEObservation:
         
         self.λ_full   = λ_full
         self.λ_sparse = λ_sparse
+        self.λ_bins   = λ_bins
         
         # Constant flux background wthin the field
         self.background_sparse = torch.zeros([self.N_wvl], device=self.device)
         self.background_full   = torch.zeros([self.N_wvl_full], device='cpu')
+        
+        # torch.from_numpy shares storage with the numpy array (zero-copy on CPU)
+        self.cube_full = torch.from_numpy(self.cube_full).to(device='cpu', dtype=torch.float32)
         
         self.model_config = model_config #TODO: make config (re-)initialization more flexible
         self.valid_mask = valid_mask
@@ -222,8 +228,7 @@ class MUSEObservation:
                 λ_min           = self.λ_full.min().item() * 1e-9, # [m]
                 λ_max           = self.λ_full.max().item() * 1e-9, # [m]
                 num_λ_slices    = len(self.λ_full)
-            )
-                        
+            )       
             # Get the initial guess for the PSF model parameters via calibrator NN
             if path_to_calibrator is None:
                 path_to_calibrator = WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth'
@@ -268,14 +273,13 @@ class MUSEObservation:
             
         elif self.model_type == 'gaussian':
             raise NotImplementedError("Gaussian PSF model is not implemented yet. Please use 'TipTorch' or 'Moffat' as the model type.")
-        
         else:
             raise ValueError(f"Invalid model type: {self.model_type}. Supported types are: 'TipTorch', 'PSFAO', 'Moffat', 'Gaussian'.")
         
         self._update_flux_norm() # Update the flux normalization factor based on the initial guess for the PSF shape
 
 
-    def _invalidate_extracted_state(self, reason: str):
+    def _invalidate_sources_state(self, reason: str):
         """Reset extracted SourcesData / N_src when the raw sources_table changes,
         keeping the two collections in sync. Warns if a PSF model was already built."""
         import warnings
@@ -305,14 +309,14 @@ class MUSEObservation:
             verbose = verbose
         )
         # Detection replaces the raw table, so any previously extracted sources become stale.
-        self._invalidate_extracted_state("DetectSources() replaced the raw sources_table")
+        self._invalidate_sources_state("DetectSources() replaced the raw sources_table")
 
 
     def AddSources(self, sources_coords, weights=0.0):
         # If some sources are missing from the automatic detection, they can be added manually by providing their coordinates in the same format as the sources dataframe
         self.sources_table = AddSources(self.cube_sparse, sources_coords, self.sources_table, weights=weights, weight_from_flux=False)
         # New rows in the raw table must be re-extracted before they can be used by the model.
-        self._invalidate_extracted_state("AddSources() modified the raw sources_table")
+        self._invalidate_sources_state("AddSources() modified the raw sources_table")
 
 
     def DeleteSources(self, src_ids):
@@ -374,7 +378,9 @@ class MUSEObservation:
         srcs_image_data = ExtractSourceImages(self.cube_sparse, self.sources_table, box_size=self.PSF_size, filter_sources=True, max_nan_fraction=max_nan_fraction, debug_draw=False)
         # Extract spectra from the PSF core for each filtered source
         extracted_table = srcs_image_data["src_data"]
-        N_filtered      = len(self.sources_table) - len(extracted_table)
+        # ExtractSourceImages() can remove sources that are too close to the edge of the field, so we need to keep track of how many sources were filtered out
+        N_filtered = len(self.sources_table) - len(extracted_table)
+        
         spectra_sparse, spectra_full = self.ExtractSpectraFromCore(extracted_table, self.cube_sparse, self.cube_full)
         # These are the sources which are included in the model
         self.sources = SourcesData(
@@ -386,6 +392,7 @@ class MUSEObservation:
             spectra_sparse = spectra_sparse,
         )
         self.N_src = len(self.sources)
+        #TODO: update the sources_table!
 
         # Keep sources_table in sync with the extracted SourcesData: edge-filtered sources
         # are dropped from the raw table so both collections describe the same set of sources.
@@ -407,7 +414,7 @@ class MUSEObservation:
 
         if self.PSF_model.use_splines:
             wvl_current = self.PSF_model.λ_sim.clone()
-            self.PSF_model.SetWavelengths(self.PSF_model.λ_ctrl) # isntead of anchor λs, evaluate at spline nodes
+            self.PSF_model.SetWavelengths(self.PSF_model.λ_ctrl) # instead of anchor λs, evaluate at spline nodes
 
         has_src_dirs = all(name in self.PSF_model.get_param_names() for name in ['src_dirs_x', 'src_dirs_y'])
         if has_src_dirs:
@@ -1184,9 +1191,7 @@ class MUSEObservation:
         # but without the per-source F_norm scaling or any source spectrum.
         if apply_crop_factor and 'F_norm_λ_ctrl' in self.PSF_model.get_param_names():
             λ_normed = self.PSF_model.λ_full_normed if full_spectrum else self.PSF_model.λ_sim_normed
-            crop = self.PSF_model.evaluate_splines(
-                self.PSF_model.inputs_manager['F_norm_λ_ctrl'], λ_normed
-            ).to(PSF.device)
+            crop = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], λ_normed).to(PSF.device)
             PSF = PSF * crop.reshape(-1, 1, 1)
 
         # ── 4. Compute ROI slices for pasting the PSF into the full field ────
@@ -1229,7 +1234,7 @@ class MUSEObservation:
         return self.sources.spectra_full if source_id is None else self.sources.spectra_full[source_id]
         
 
-    def DisplaySources(self, cmap=None):
+    def DisplayField(self, cmap=None):
         if self.sources_table is None:
             raise ValueError("Sources must be initialized before displaying. Please run DetectSources() or AddSources() first.")
         
@@ -1242,10 +1247,10 @@ class MUSEObservation:
         }
         
         src_table = self.sources_table if self.sources is None else self.sources.table
-        DisplayField(
+        DisplaySpectralCube(
             self.cube_sparse,
             sources      = src_table,
-            roi          = self.ROI_plot,
+            ROI          = self.ROI_plot,
             show_markers = True,
             show_ids     = True,
             cmap         = cmap,
@@ -1523,8 +1528,7 @@ class MUSEObservation:
                 force_cpu    = False,
                 verbose      = False,
             )
-
-            data_batch = torch.tensor(self.cube_full[λ0:λ1]).to(self.device)
+            data_batch = self.cube_full[λ0:λ1].to(self.device, non_blocking=True)
 
             I_sim_batch, spec_batch, bg_batch = self.disentangle_flux(
                 srcs,
@@ -1540,10 +1544,16 @@ class MUSEObservation:
             fluxes_full[λ0:λ1] = spec_batch.cpu()
             bg_full    [λ0:λ1] = bg_batch.cpu()
 
+            # NOTE: gc.collect() / torch.cuda.empty_cache() used to be called every iteration
+            # here. They force a CUDA synchronization and walk the entire Python object graph;
+            # with ~37 outer batches this dominated the wall-time of full-spectrum simulation.
+            # The intermediate tensors go out of scope naturally at the next iteration.
             del PSFs_batch, data_batch, I_sim_batch, spec_batch, bg_batch
-            gc.collect()
+
+        gc.collect()
+        if torch.cuda.is_available():
             torch.cuda.empty_cache()
-            
+
         return I_sim_full, fluxes_full, bg_full
 
 
@@ -1732,79 +1742,75 @@ class MUSEObservation:
         plt.show()
 
 
-    def DisplaySimulation(self, plot_profiles=True, plot_full_spectrum=False) -> None:
-        to_np = lambda x: x.detach().cpu().numpy() if isinstance(x, torch.Tensor) else np.asarray(x)
-
+    def DisplaySimulation(self, plot_profiles=True, plot_full_spectrum=False, cmap=None) -> None:
+        """
+        Renders the data, the simulation, and their difference for visual inspection. Optionally plots the radial profiles of the sources.
+        """
         # Render the entire MUSE NFM spectrum
         if plot_full_spectrum:
             if self.simulated_full is None:
                 print("Full spectrum simulation not found, simulating now...")
                 self.SimulateField(full_spectrum=True)
 
-            λ_vis    = np.linspace(440, 750, self.N_wvl_full)
-            data_arr = to_np(self.cube_full     [self.ROI_plot])
-            sim_arr  = to_np(self.simulated_full[self.ROI_plot])
-            diff_arr = np.abs(data_arr - sim_arr)
+            data_   = self.cube_full
+            model_  = self.simulated_full
+            mask_   = self.valid_mask.cpu().numpy()
 
-            all_white = np.stack([data_arr.sum(axis=0), sim_arr.sum(axis=0), diff_arr.sum(axis=0)])
-            vmax = float(np.nanmax(all_white))
-            pos  = all_white[all_white > 0]
-            vmin = float(max(1.0, np.nanpercentile(pos, 1)) if pos.size > 0 else 1.0)
-
-            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+            λ_ = np.linspace(440, 750, self.N_wvl_full)
+            color_kwargs = {
+                'saturation':  1.25,
+                'contrast'  :  1.25,
+                'wb_shift'  : -0.3,
+                'mg_shift'  :  0.15
+            }
+            label_ = 'full'
+            vmin, vmax = np.maximum(0.75, self.background_sparse.median().item()), None
             
-            for ax, arr, title in zip(axes, [data_arr, sim_arr, diff_arr], ['Data', 'Model', 'Difference']):
-                DisplayField(
-                    arr,
-                    wavelengths=λ_vis,
-                    cmap=None,
-                    scale='log',
-                    vmin=vmin,
-                    vmax=vmax,
-                    title=title,
-                    show=False,
-                    ax=ax
-                )
-                
-            plt.tight_layout()
-            plt.show()
-
-            if plot_profiles:
-                PlotSourcesProfiles(self.cube_full, self.simulated_full, self.sources.table, radius=16, title='Source radial profiles (full spectrum)')
-        
-        # Plot fast sparse representation
         else:
-            data_np  = to_np(self.cube_sparse)
-            model_np = to_np(self.simulated_sparse)
-            mask_np  = to_np(self.valid_mask)
-            diff_np  = (data_np - model_np) * mask_np
+            data_  = self.cube_sparse
+            model_ = self.simulated_sparse
+            mask_ = self.valid_mask
 
-            dw   = np.abs(data_np.sum(axis=0))
-            mw   = np.abs(model_np.sum(axis=0))
-            vmax = float(max(dw.max(), mw.max()))
-            pos  = np.concatenate([dw[dw > 0], mw[mw > 0]])
-            vmin = float(max(1.0, pos.min())) if len(pos) else 1.0
-            display_norm = LogNorm(vmin=vmin, vmax=vmax)
-
-            fig, axes = plt.subplots(1, 3, figsize=(18, 6))
-            for ax, arr, title in zip(axes, [data_np, model_np, diff_np], ['Data', 'Model', 'Difference']):
-                DisplayField(
-                    arr,
-                    sources=self.sources,
-                    roi=self.ROI_plot,
-                    norm=display_norm,
-                    show_markers=self.sources is not None,
-                    show=False,
-                    ax=ax,
-                    title=title
-                )
-                
-            plt.tight_layout()
-            plt.show()
-
-            if plot_profiles:
-                PlotSourcesProfiles(self.cube_sparse, self.simulated_sparse, self.sources.table, radius=16, title='Source radial profiles (sparse spectrum)')
+            λ_ = np.linspace(440, 750, self.N_wvl)
+            color_kwargs = {
+                'saturation':  1.25,
+                'contrast'  :  1.25,
+                'wb_shift'  : -0.2,
+                'mg_shift'  :  0.075
+            }
+            label_ = 'sparse'
+            vmin, vmax = np.maximum(0.1, self.background_sparse.median().item()), None
             
+        diff_  = (data_ - model_) * mask_
+
+        fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+        
+        
+        for ax, arr, title in zip(axes, [data_, model_, diff_], ['Data', 'Model', 'Difference']):
+            _, vmin_, vmax_ = DisplaySpectralCube(
+                arr,
+                wavelengths = λ_,
+                ROI = self.ROI_plot,
+                cmap = cmap,
+                vmin = vmin,
+                vmax = vmax,
+                scale = 'log',
+                title = title,
+                show = False,
+                ax = ax,
+                **color_kwargs,
+            )
+            # Make sure that next plots will re-use the same vmin/vmax for consistent color scaling
+            if vmin is None: vmin = vmin_
+            if vmax is None: vmax = vmax_
+            
+        plt.tight_layout()
+        plt.show()
+
+        if plot_profiles:
+            PlotSourcesProfiles(data_, model_, self.sources.table, radius=16, title=f'Source radial profiles ({label_})')
+        
+
             
     def SaveModelCubeFITS(self, cube, output_path, λ_full, sources=None, compress=True, compression_type='GZIP_2'):
         raise NotImplementedError("This function is not properly implemented yet.")

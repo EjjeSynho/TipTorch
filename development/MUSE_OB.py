@@ -64,7 +64,7 @@ ob.DetectSources(nsigma=35, threshold='auto')
 
 #%%
 ob.ExtractSources()
-ob.DisplaySources(draw_box_size=20)
+ob.DisplayField(draw_box_size=20)
 
 #%%
 ob.PlotSourceSpectra()
