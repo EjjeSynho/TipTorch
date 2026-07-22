@@ -90,7 +90,7 @@ plt.show()
 
 #%%
 _ = ob.SimulateField(full_spectrum=True)
-ob.DisplaySimulation(plot_profiles=True, plot_full_spectrum=True)
+ob.DisplaySimulation(plot_profiles=True, full_spectrum=True)
 
 #%%
 ob.PlotSourceSpectra(title='Sources spectra (residual)', show_sparse=False, plot_residual=True, smooth_kernel=15)

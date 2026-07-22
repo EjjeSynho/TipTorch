@@ -35,7 +35,9 @@ from tools.multisources import (
     add_ROIs_separately,
     ExtractSourceImages,
     ROI_from_valid_mask,
-    PlotSourcesProfiles
+    PlotSourcesProfiles,
+    extract_ROIs,
+    add_ROIs
 )
 
 
@@ -160,6 +162,237 @@ class MUSEObservation:
         
         self.model_config = model_config #TODO: make config (re-)initialization more flexible
         self.valid_mask = valid_mask
+
+
+    def detect_bad_exposures(self, overexposure_threshold=1500, low_SNR_threshold=25):
+        """
+        This function detects overexposed and underexposed spectral regions per source.
+        """
+        radius = 16
+
+        box_size = np.round(radius * 2 + 4).astype(int)
+        ROIs_0, coords_loc_0, coords_global_0, _ = extract_ROIs(self.cube_full,  self.sources.table, box_size=box_size)
+
+        N_src = len(ROIs_0)
+
+        # Stack all ROIs into a batch: [N_src, N_wvl, H, W]
+        ROIs_batch = torch.stack(ROIs_0)
+
+        # Central pixel coordinates per source
+        cps = torch.tensor([[int(np.round(np.sum(c[0]))/2), int(np.round(np.sum(c[1]))/2)] for c in coords_loc_0])  # [N_src, 2]
+
+        # Extract peak values and surrounding ring for each source
+        peaks = ROIs_batch[torch.arange(N_src), :, cps[:,0], cps[:,1]]  # [N_src, N_wvl]
+
+
+        def _approx_SNR(peaks, ROIs, coords, source_table, border=3, src_mask=None):
+            """
+            Compute SNR per spectral slice for each source, masking out other sources within the ROI.
+
+            Args:
+                peaks       (Tensor): Peak flux per spectral slice, shape [N_src, N_wvl].
+                ROIs        (Tensor): ROI image cubes, shape [N_src, N_wvl, H, W].
+                coords      (list):   List of ROI local coordinates from extract_ROIs.
+                source_table (Table): Source table with x_peak and y_peak positions.
+                border      (int):    Width (in pixels) of the ROI border used to estimate
+                                    background noise. Defaults to 3.
+                src_mask    (Tensor): Optional boolean mask [N_src, N_src] where True means
+                                    the source is excluded from masking. If None, diagonal mask.
+
+            Returns:
+                snr (Tensor): SNR per spectral slice, shape [N_src, N_wvl].
+                            Slices where the background std is zero are set to NaN.
+            """
+            H, W = ROIs.shape[-2], ROIs.shape[-1]
+            N_src = ROIs.shape[0]
+
+            if src_mask is None:
+                src_mask = torch.eye(N_src, dtype=torch.bool, device=ROIs.device)
+
+            # Build a boolean border mask (True = background pixel)
+            mask = torch.ones(H, W, dtype=torch.bool, device=ROIs.device)
+            mask[border:H-border, border:W-border] = False
+
+            # Initialize background mask for each source: [N_src, H, W]
+            bg_mask = mask.unsqueeze(0).expand(N_src, -1, -1).clone()
+            yy, xx = torch.meshgrid(torch.arange(H, device=ROIs.device), torch.arange(W, device=ROIs.device), indexing='ij')
+
+            # Pre-compute ROI global boundaries
+            roi_boundaries = []
+            for i in range(N_src):
+                y_range, x_range = coords[i]
+                roi_boundaries.append((y_range[0], y_range[1], x_range[0], x_range[1]))
+
+            # Mask out other sources that appear within each ROI
+            for i in range(N_src):
+                y_min, y_max, x_min, x_max = roi_boundaries[i]
+                # Check which other sources fall within this ROI
+                for j in range(N_src):
+                    if i != j and src_mask[i, j]:
+                        src_j_x = source_table['x_peak'].iloc[j]
+                        src_j_y = source_table['y_peak'].iloc[j]
+
+                        # Check if source j is within ROI i's boundaries
+                        if (x_min <= src_j_x < x_max and y_min <= src_j_y < y_max):
+                            src_j_x_roi = int(src_j_x - x_min)
+                            src_j_y_roi = int(src_j_y - y_min)
+                            r2_j = (xx - src_j_x_roi)**2 + (yy - src_j_y_roi)**2
+                            bg_mask[i] = bg_mask[i] & (~ (r2_j <= 4.0))
+
+            # Gather background pixels and compute SNR
+            bg_mask_expanded = bg_mask.unsqueeze(1).expand(-1, ROIs.shape[1], -1, -1)
+            bg_pixels = ROIs[bg_mask_expanded].view(N_src, ROIs.shape[1], -1)
+            bg_std = bg_pixels.std(dim=-1)
+
+            snr = peaks / bg_std
+            snr = snr.masked_fill(bg_std == 0, float('nan'))
+            return snr
+
+
+        def _process_spectrum(data, pool_kernel=16, smooth_kernel=10):
+            """
+            Heal spectral gaps, bin, and smooth sequential spectral data.
+            
+            Args:
+                data (Tensor): Spectral data, shape [N_src, N_wvl] or [N_wvl].
+                gap_start (int): Start index of the Na-line gap to heal.
+                gap_end (int): End index of the Na-line gap.
+                pool_kernel (int): Kernel size for max pooling (binning).
+                smooth_kernel (int): Kernel size for average pooling (smoothing).
+            
+            Returns:
+                healed (Tensor): Healed spectrum, shape [N_src, N_wvl] or [N_wvl].
+                pooled (Tensor): Binned spectrum, shape [N_src, N_wvl//pool_kernel] or [N_wvl//pool_kernel].
+                smoothed (Tensor): Smoothed binned spectrum, same shape as pooled.
+            """
+            
+            # Fixed due to the Na-filter region in MUSE NFM data, we define the gap indices to heal
+            gap_start = 824
+            gap_end   = 1041
+            
+            if data.ndim == 1:
+                data = data.unsqueeze(0)
+            
+            # Lineraly interpolate the gap region for each source
+            healed = data.clone()
+            v0 = data[:, gap_start - 1]
+            v1 = data[:, gap_end]
+            healed[:, gap_start:gap_end] = torch.stack([torch.linspace(v0[i], v1[i], gap_end - gap_start) for i in range(v0.shape[0])], dim=0)
+            
+            # Pool the healed spectrum using max pooling to reduce noise and remove the flux jumps due to noise or over exposure
+            pooled = torch.nn.functional.max_pool1d(healed.unsqueeze(1), kernel_size=pool_kernel, stride=pool_kernel, padding=0).squeeze(1)
+            
+            # Smooth for further stability
+            smoothed = torch.nn.functional.avg_pool1d(
+                torch.nn.functional.pad(pooled.unsqueeze(1), (smooth_kernel // 2, smooth_kernel // 2), mode='replicate'),
+                kernel_size=smooth_kernel,
+                stride=1
+            ).squeeze(1)
+            
+            if data.ndim == 1:
+                return healed.squeeze(0), pooled.squeeze(0), smoothed.squeeze(0)
+            
+            return healed, pooled, smoothed
+
+
+        SNR = _approx_SNR(peaks, ROIs_batch, coords_loc_0, self.sources.table, border=3)  # [N_src, N_wvl]
+
+        _, _, peaks_smooth = _process_spectrum(peaks, pool_kernel=16, smooth_kernel=10)
+        _, _, snr_smooth   = _process_spectrum(SNR,   pool_kernel=16, smooth_kernel=10)
+
+        overexposure_mask = peaks_smooth > overexposure_threshold
+        low_SNR_mask = snr_smooth < low_SNR_threshold
+
+        # Scale masks to match the original shape
+        overexposure_mask_full = torch.nn.functional.interpolate(overexposure_mask.unsqueeze(1).float(), size=peaks.shape[1], mode='nearest').squeeze(1).bool()
+        low_SNR_mask_full      = torch.nn.functional.interpolate(low_SNR_mask.unsqueeze(1).float(), size=peaks.shape[1], mode='nearest').squeeze(1).bool()
+
+        # Mask the Na-filter region
+        Na_mask_full = torch.zeros_like(peaks, dtype=torch.bool)
+        Na_mask_full[:, 824:1041] = True
+
+        # Compute good IDs per source (not globally)
+        good_SNR_ids_per_src = []
+        for i in range(N_src):
+            good_ids = torch.where(~low_SNR_mask_full[i] & ~Na_mask_full[i])[0].sort().values
+            good_SNR_ids_per_src.append(good_ids)
+
+        # "Ring" is a region around the central pixel. If the central pixel is overexposed,dinut will dominate
+        ring = torch.stack([ROIs_batch[i, :, cps[i,0]-1:cps[i,0]+2, cps[i,1]-1:cps[i,1]+2]for i in range(N_src)])  # [N_src, N_wvl, 3, 3]
+        ring[..., 1, 1] = 0.0
+        ring_mean = ring.sum(dim=(-2, -1)) / 8.0  # [N_src, N_wvl]
+
+        # Compute ring-to-peak ratio
+        ratio = ring_mean.clamp(min=1e-12) / peaks
+        ratio = ratio.nan_to_num(nan=2.0, posinf=2.0, neginf=2.0)
+
+        # Center ratio by subtracting the baseline median (per source)
+        baseline = torch.stack([ratio[i, good_SNR_ids_per_src[i]].median() for i in range(N_src)]).unsqueeze(1)
+        ratio_centered = ratio - baseline
+
+        # Adaptive threshold per source
+        Ps = torch.arange(50, 100, 1)
+        quantiles = Ps.float() / 100.0
+
+        threshs = torch.stack([torch.quantile(ratio_centered[i, good_SNR_ids_per_src[i]], quantiles) for i in range(N_src)])  # [N_src, len(Ps)]
+        d_threshs = threshs.diff(dim=1).abs()
+        best_pct = (Ps[1:][d_threshs.argmax(dim=1)]) / 100.0  # [N_src]
+
+        thresh_vals = torch.stack([torch.quantile(ratio_centered[i, good_SNR_ids_per_src[i]], best_pct[i]) for i in range(N_src)])  # [N_src]
+
+        # Flag slices with potential overexposure. A slice is flagged as bad only if it:
+        # 1. In the overexposed region
+        # 2. It exceeds the adaptive threshold for peak to non-peak ratio
+        # 3. It's in the good SNR region, so it must be an overexposure then
+        anomalous_slices = torch.zeros_like(ratio, dtype=torch.bool)
+        for i in range(N_src):
+            # Only flag slices that are in the overexposure mask AND exceed threshold in good SNR region
+            in_overexposure = overexposure_mask_full[i]
+            in_good_region = torch.isin(torch.arange(ratio.shape[1]), good_SNR_ids_per_src[i])
+            exceeds_threshold = ratio_centered[i] > thresh_vals[i]
+            anomalous_slices[i] = in_overexposure & exceeds_threshold & in_good_region
+
+        #% Diagnostic plot for source 0
+        # plt.plot(ratio_centered[0].cpu().numpy(), linewidth=0.8, label='Ring / peak ratio (centered)')
+        # plt.axhline(thresh_vals[0].item(), color='r', linestyle='--', linewidth=0.8, label=f'{best_pct[0].item()*100:.0f}th pct threshold')
+        # plt.xlabel('Spectral slice')
+        # plt.ylabel('Ring / peak flux ratio')
+        # plt.legend()
+        # plt.tight_layout()
+        # plt.show()
+
+        return anomalous_slices, overexposure_mask_full, low_SNR_mask_full, Na_mask_full
+
+
+    def mask_bad_peaks(self, bad_slices_mask):
+        """ This function creates a mask for the full cube, marking bad pixels at the source peak positions in local ROI coordinates. """
+
+        coords_loc    = self.sources.slices_local
+        coords_global = self.sources.slices_global
+
+        # Compute central pixel coordinates per source from local ROI coordinates
+        cps = torch.tensor([
+            [int(np.round(np.sum(c[0]))/2), int(np.round(np.sum(c[1]))/2)] for c in coords_loc
+        ])  # [N_src, 2]
+        
+        # Compute cube-wide bad pixels mask using add_ROIs
+        # Create a mask cube where bad pixels are marked as 1.0 and good pixels as 0.0
+        bad_mask_ROIs = []
+        for i in range(len(self.sources)):
+            # Use PSF_size for consistent ROI shape
+            roi_shape = (self.cube_full.shape[0], self.PSF_size, self.PSF_size)
+            
+            roi_mask = torch.zeros(roi_shape, dtype=torch.float32, device=self.cube_full.device)
+            # Mark bad pixels at the source peak position in local ROI coordinates
+            roi_mask[bad_slices_mask[i], cps[i, 0], cps[i, 1]] = 1.0
+            bad_mask_ROIs.append(roi_mask)
+        
+        # Use add_ROIs to combine all ROI masks into the full cube
+        # The global coordinates (coords_global_0) map ROI local positions to image global positions
+        mask_full = add_ROIs(torch.zeros_like(self.cube_full, dtype=torch.float32), bad_mask_ROIs, coords_loc, coords_global)
+        
+        # Convert to boolean mask (True = bad pixel)
+        return mask_full > 0.5
 
 
     def AddSourcesToModelConfig(self):
@@ -381,6 +614,7 @@ class MUSEObservation:
         # ExtractSourceImages() can remove sources that are too close to the edge of the field, so we need to keep track of how many sources were filtered out
         N_filtered = len(self.sources_table) - len(extracted_table)
         
+        # Initial guess for sources spectra, which doesn't account for overlaps or artifacts
         spectra_sparse, spectra_full = self.ExtractSpectraFromCore(extracted_table, self.cube_sparse, self.cube_full)
         # These are the sources which are included in the model
         self.sources = SourcesData(
@@ -392,8 +626,7 @@ class MUSEObservation:
             spectra_sparse = spectra_sparse,
         )
         self.N_src = len(self.sources)
-        #TODO: update the sources_table!
-
+                
         # Keep sources_table in sync with the extracted SourcesData: edge-filtered sources
         # are dropped from the raw table so both collections describe the same set of sources.
         self.sources_table = self.sources.table.copy()
@@ -403,6 +636,12 @@ class MUSEObservation:
             print(f"Extracted {self.N_src} source{'s' if self.N_src != 1 else ''}.")
             print(f"Num. of filtered sources on the edge of the field: {N_filtered}")
             
+        # The mask that mask out overexposed and underexposed pixels
+        anomaly_mask, overexposure_mask, low_SNR_mask, Na_mask = self.detect_bad_exposures()
+        bad_regions = anomaly_mask | overexposure_mask | low_SNR_mask | Na_mask
+
+        self.mask_full = (~self.mask_bad_peaks(bad_regions)).float() # 0 means a bad pixel, 1 means a good pixel
+
 
     @torch.no_grad()
     def _compute_flux_crop_factor(self, quasi_inf_PSF_size: int = 511) -> None:
@@ -1742,13 +1981,14 @@ class MUSEObservation:
         plt.show()
 
 
-    def DisplaySimulation(self, plot_profiles=True, plot_full_spectrum=False, cmap=None, focus_on_src=None) -> None:
+    def DisplaySimulation(self, plot_profiles=True, full_spectrum=False, cmap=None, focus_on_src=None) -> None:
         """
         Renders the data, the simulation, and their difference for visual inspection. Optionally plots the radial profiles of the sources.
         If focus_on_src is provided, zooms in on the ROI of that source; otherwise uses self.ROI_plot.
         """
+        # TODO: what about full mask here?
         # Render the entire MUSE NFM spectrum
-        if plot_full_spectrum:
+        if full_spectrum:
             if self.simulated_full is None:
                 print("Full spectrum simulation not found, simulating now...")
                 self.SimulateField(full_spectrum=True)
@@ -1814,10 +2054,10 @@ class MUSEObservation:
         plt.show()
 
         if plot_profiles:
-            PlotSourcesProfiles(data_, model_, self.sources.table, radius=16, title=f'Source radial profiles ({label_})')
-        
+            m_ = self.mask_full if full_spectrum else 1.0
+            PlotSourcesProfiles(data_*m_, model_*m_, self.sources.table, radius=16, title=f'Source radial profiles ({label_})')
+    
 
-            
     def SaveModelCubeFITS(self, cube, output_path, λ_full, sources=None, compress=True, compression_type='GZIP_2'):
         raise NotImplementedError("This function is not properly implemented yet.")
         

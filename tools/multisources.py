@@ -858,11 +858,7 @@ def PlotSourcesProfiles(data, model, sources, radius, select_ids=None, show=True
         ROIs_1 = [roi for i, roi in enumerate(ROIs_1) if i in select_ids]
 
     # Spectrally average the PSFs
-    avg_white = (
-        lambda x: torch.stack(x).mean(dim=1)
-        if isinstance(x[0], torch.Tensor)
-        else np.mean(np.stack(x), axis=1)
-    )
+    avg_white = (lambda x: torch.nanmean(torch.stack(x), dim=1) if isinstance(x[0], torch.Tensor) else np.nanmean(np.stack(x), axis=1))
 
     PSFs_0_white = avg_white(ROIs_0)
     PSFs_1_white = avg_white(ROIs_1)
