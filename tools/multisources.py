@@ -35,9 +35,9 @@ class SourcesSubset:
     slices_local:  list
     slices_global: list
     spectra_sparse: torch.Tensor | None
-    spectra_full:   torch.Tensor | None
+    spectra_full:   torch.Tensor | None  # Spectrum which is used for rendering PSFs, used only for technical purposes
     spectra_sparse_true: Optional[torch.Tensor] = None
-    spectra_full_true :  Optional[torch.Tensor] = None
+    spectra_full_true :  Optional[torch.Tensor] = None # True astrophysical spectrum    
     spectra_res_sparse:  Optional[torch.Tensor] = None
     spectra_res_full:    Optional[torch.Tensor] = None
     proximity_table:     Optional[np.ndarray] = None

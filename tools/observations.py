@@ -1,5 +1,6 @@
 #%%
 import sys, os
+import warnings
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -76,8 +77,10 @@ class MUSEObservation:
         
         # The number of λ slices simulated per batch for the full-spectrum simulation
         self.λ_batch_size = 100
-        
+        self.is_disentangled = False # Flag to indicate whether the spectra have been disentangled via simulation or not
         self.bg_prior = None
+        
+        self.PSF_model = None
         
         # Define the half-width of the region for spectrum extraction = ~size of the PSF core
         self.flux_core_radius = 2 # [pix]
@@ -145,7 +148,7 @@ class MUSEObservation:
         self.N_wvl = self.cube_sparse.shape[0]
         self.N_wvl_full = self.cube_full.shape[0]
 
-        # Since spectral bins are the sum, they need to be re-normalized to averages to ≈ the full spectrum values range
+        # Since spectral bins are the sum, they need to be re-normalized to averages to be ≈ to the full spectrum values range
         flux_λ_norm = torch.tensor(Δλ_full / Δλ_sparse, device=self.device, dtype=torch.float32)
         self.cube_sparse *= flux_λ_norm[:, None, None]
         
@@ -164,14 +167,14 @@ class MUSEObservation:
         self.valid_mask = valid_mask
 
 
-    def detect_bad_exposures(self, overexposure_threshold=1500, low_SNR_threshold=25):
+    def _detect_bad_exposures(self, overexposure_threshold=1500, low_SNR_threshold=25):
         """
         This function detects overexposed and underexposed spectral regions per source.
         """
         radius = 16
 
         box_size = np.round(radius * 2 + 4).astype(int)
-        ROIs_0, coords_loc_0, coords_global_0, _ = extract_ROIs(self.cube_full,  self.sources.table, box_size=box_size)
+        ROIs_0, coords_loc_0, _, _ = extract_ROIs(self.cube_full,  self.sources.table, box_size=box_size)
 
         N_src = len(ROIs_0)
 
@@ -275,7 +278,7 @@ class MUSEObservation:
             
             # Lineraly interpolate the gap region for each source
             healed = data.clone()
-            v0 = data[:, gap_start - 1]
+            v0 = data[:, gap_start-1]
             v1 = data[:, gap_end]
             healed[:, gap_start:gap_end] = torch.stack([torch.linspace(v0[i], v1[i], gap_end - gap_start) for i in range(v0.shape[0])], dim=0)
             
@@ -298,10 +301,10 @@ class MUSEObservation:
         SNR = _approx_SNR(peaks, ROIs_batch, coords_loc_0, self.sources.table, border=3)  # [N_src, N_wvl]
 
         _, _, peaks_smooth = _process_spectrum(peaks, pool_kernel=16, smooth_kernel=10)
-        _, _, snr_smooth   = _process_spectrum(SNR,   pool_kernel=16, smooth_kernel=10)
+        _, _, SNR_smooth   = _process_spectrum(SNR,   pool_kernel=16, smooth_kernel=10)
 
         overexposure_mask = peaks_smooth > overexposure_threshold
-        low_SNR_mask = snr_smooth < low_SNR_threshold
+        low_SNR_mask = SNR_smooth < low_SNR_threshold
 
         # Scale masks to match the original shape
         overexposure_mask_full = torch.nn.functional.interpolate(overexposure_mask.unsqueeze(1).float(), size=peaks.shape[1], mode='nearest').squeeze(1).bool()
@@ -364,7 +367,7 @@ class MUSEObservation:
         return anomalous_slices, overexposure_mask_full, low_SNR_mask_full, Na_mask_full
 
 
-    def mask_bad_peaks(self, bad_slices_mask):
+    def _mask_bad_peaks(self, bad_slices_mask):
         """ This function creates a mask for the full cube, marking bad pixels at the source peak positions in local ROI coordinates. """
 
         coords_loc    = self.sources.slices_local
@@ -388,7 +391,7 @@ class MUSEObservation:
             bad_mask_ROIs.append(roi_mask)
         
         # Use add_ROIs to combine all ROI masks into the full cube
-        # The global coordinates (coords_global_0) map ROI local positions to image global positions
+        # The global coordinates (coords_global) map ROI local positions to image global positions
         mask_full = add_ROIs(torch.zeros_like(self.cube_full, dtype=torch.float32), bad_mask_ROIs, coords_loc, coords_global)
         
         # Convert to boolean mask (True = bad pixel)
@@ -416,11 +419,12 @@ class MUSEObservation:
 
 
     def ExtractSpectraFromCore(self, sources_table, cube_sparse, cube_full):
+        """ This function is used to extract an approximate spectrum for each source before spectral disentangling via simulation."""
         if len(sources_table) == 0:
             raise ValueError("No sources detected. Please (re-)run DetectSources() or AddSources() before initializing sources info.")
         
         # Contains the spectrum per source AVERAGED across the PSF core pixels. The core mask here must match EXACTLY the one
-        # used for the flux normalization factor estimation later        
+        # used for the flux normalization factor estimation later
         N_src = len(sources_table)
         # This one is stored in RAM to save VRAM since it's only used for visualization and evaluation
         spectra_full = [GetSpectrum(cube_full, sources_table.iloc[i], radius=self.flux_core_radius, mask_type='square') for i in range(N_src)]
@@ -450,17 +454,17 @@ class MUSEObservation:
             # Initialize the PSF model
             self.PSF_model = PSFModelNFM(
                 self.model_config,
-                multiple_obs    = False,
-                LO_NCPAs        = True,
-                chrom_defocus   = False,
-                use_Moffat      = False,
-                model_type      = 'physics-based',
-                N_spline_nodes  = 5,
-                Z_mode_max      = 9,
-                device          = self.device,
-                λ_min           = self.λ_full.min().item() * 1e-9, # [m]
-                λ_max           = self.λ_full.max().item() * 1e-9, # [m]
-                num_λ_slices    = len(self.λ_full)
+                multiple_obs   = False,
+                LO_NCPAs       = True,
+                chrom_defocus  = False,
+                use_Moffat     = False,
+                model_type     = 'physics-based',
+                N_spline_nodes = 5,
+                Z_mode_max     = 9,
+                device         = self.device,
+                λ_min          = self.λ_full.min().item() * 1e-9, # [m]
+                λ_max          = self.λ_full.max().item() * 1e-9, # [m]
+                num_λ_slices   = len(self.λ_full)
             )       
             # Get the initial guess for the PSF model parameters via calibrator NN
             if path_to_calibrator is None:
@@ -519,10 +523,9 @@ class MUSEObservation:
         if self.sources is not None:
             self.sources = None
             self.N_src = 0
-            if hasattr(self, 'PSF_model') and self.PSF_model is not None:
+            if self.PSF_model is not None:
                 warnings.warn(
-                    f"{reason}: extracted sources and PSF model are now stale. "
-                    "Re-run ExtractSources() and InitSimulation()."
+                    f"{reason}: extracted sources and PSF model are now stale. Re-run ExtractSources() and InitSimulation()."
                 )
             else:
                 warnings.warn(f"{reason}: previously extracted sources have been discarded. Re-run ExtractSources().")
@@ -601,7 +604,7 @@ class MUSEObservation:
             # sources.delete uses positional indexing; positions match the raw table row order.
             self.sources.delete(valid)
             self.N_src = len(self.sources)
-            if hasattr(self, 'PSF_model') and self.PSF_model is not None:
+            if self.PSF_model is not None:
                 warnings.warn("Sources deleted after PSF model initialization. Please re-run InitSimulation() to rebuild the model.")
 
 
@@ -622,7 +625,7 @@ class MUSEObservation:
             imgs_sparse    = srcs_image_data["src_images"],
             slices_local   = srcs_image_data["ROI_local"],
             slices_global  = srcs_image_data["ROI_global"],
-            spectra_full   = spectra_full,
+            spectra_full   = spectra_full, # these spectra are initial guesses
             spectra_sparse = spectra_sparse,
         )
         self.N_src = len(self.sources)
@@ -637,10 +640,10 @@ class MUSEObservation:
             print(f"Num. of filtered sources on the edge of the field: {N_filtered}")
             
         # The mask that mask out overexposed and underexposed pixels
-        anomaly_mask, overexposure_mask, low_SNR_mask, Na_mask = self.detect_bad_exposures()
+        anomaly_mask, overexposure_mask, low_SNR_mask, Na_mask = self._detect_bad_exposures()
         bad_regions = anomaly_mask | overexposure_mask | low_SNR_mask | Na_mask
 
-        self.mask_full = (~self.mask_bad_peaks(bad_regions)).float() # 0 means a bad pixel, 1 means a good pixel
+        self.mask_full = (~self._mask_bad_peaks(bad_regions)).float() # 0 means a bad pixel, 1 means a good pixel
 
 
     @torch.no_grad()
@@ -788,6 +791,10 @@ class MUSEObservation:
 
     @torch.no_grad()
     def simulate_full(self, src_subset: Optional[SourcesSubset]=None, return_PSFs=False, λ_batch_size=None, force_cpu=True, verbose=False) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """
+        Does the same as simulate_sparse but for the full MUSE NFM spectrum. This is more memory-intensive and slower, so it's not used
+        in the fitting hot-path. Also, when spectra disentangling is enabled for the full spectrum, this function isn't used, too.
+        """
         if src_subset is None:
             src_subset = self.sources.select(None)
 
@@ -1047,7 +1054,7 @@ class MUSEObservation:
             raise ValueError("Calibrator fine-tuning is only available for model_type='TipTorch'.")
         if self.sources is None or self.N_src == 0:
             raise ValueError("Sources must be extracted before fine-tuning. Run ExtractSources() first.")
-        if not hasattr(self, 'PSF_model'):
+        if self.PSF_model is None:
             raise ValueError("PSF model must be initialized before fine-tuning. Run InitSimulation() first.")
 
         if self.calibrator is None or calibrator_path is not None:
@@ -1260,14 +1267,17 @@ class MUSEObservation:
 
     def SimulateField(self, full_spectrum=False, N_src_per_batch=None, N_λ_per_batch=None, disentangle_spectra=True, force_cpu=True) -> torch.Tensor:
         ''' Simulate all sources within the field. If full_spectrum is True, simulates the full spectrum instead of the sparse λ-subset. '''
+        
+        # Flag to indicate that the disentangling has been performed
+        self.is_disentangled = True & (disentangle_spectra and self.sources.spectra_sparse is not None)
+
         # ------------- In this branch, all spectral slices from the full range are simulated
         if full_spectrum:
-            
             if N_λ_per_batch is None:
                 N_λ_per_batch = self.λ_batch_size
             
             if disentangle_spectra:
-                # This function simulates raw PSFs per λ-batch and disentangles in one pass
+                # This function simulates raw PSFs per λ-batch and disentangles in one go, so no need to simulate field here
                 I_sim_full, fluxes_full, bg_full = self.disentangle_flux_batched(
                     λ_batch_size = N_λ_per_batch,
                     solver = 'linear', # for saving resources, let it be linear
@@ -1279,15 +1289,16 @@ class MUSEObservation:
                 # Compute PSF normalization factors for the full spectral range. Without disentangling, it is done inside simulate_full()
                 PSF_norm_factor_full = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_norm_λ_ctrl'], self.PSF_model.λ_full_normed)
                 F_norm = self.PSF_model.inputs_manager['F_norm']
+                
                 # The F_PSF factor is used to correct for the overall flux normalization changes during fitting, but it has the same value for all sources,
                 # so it doesn't affect the relative spectra shapes. However, it's important to apply it to get the correct absolute flux values in the spectra,
                 # assuming that ∑ PSF(λ) ≡ 1 for ∀ PSF ∈ field
                 F_PSF = self.PSF_model.evaluate_splines(self.PSF_model.inputs_manager['F_ctrl'], self.PSF_model.λ_full_normed)
                 
                 flux_normalization = (F_norm.view(-1, 1) * PSF_norm_factor_full).cpu()
-                
-                self.sources.spectra_full_true = fluxes_full.T / F_PSF.cpu()        # True astrophysical decoupled sources spectrum
-                self.sources.spectra_full      = fluxes_full.T / flux_normalization # [N_src, N_wvl_full], on CPU
+                # Both are [N_src, N_wvl_full], on CPU
+                self.sources.spectra_full_true = fluxes_full.T / F_PSF.cpu() # True astrophysical disentangled spectrum
+                self.sources.spectra_full      = fluxes_full.T / flux_normalization # Spectrum which is used for rendering PSFs in the field, used only for technical purposes
                 
             else:
                 with torch.no_grad():
@@ -1397,7 +1408,7 @@ class MUSEObservation:
                 "local":  (slice_y, slice_x),  # visible portion of the PSF stamp
             }
         """
-        if getattr(self, 'PSF_model', None) is None:
+        if self.PSF_model is None:
             raise ValueError(
                 "PSF model must be initialised before calling SimulatePSFAtPosition. "
                 "Run InitSimulation() first."
@@ -1463,14 +1474,25 @@ class MUSEObservation:
         return canvas, PSF, {"global": global_slice, "local": local_slice}
 
 
-    def GetSpectrum(self, source_id=None):
+    def GetSpectra(self, source_id=None):
         if self.sources is None:
             raise ValueError("Sources must be initialized before getting spectra. Please run ExtractSources() first.")
         
-        if all(s is None for s in [self.sources.spectra_full_true]):
-            raise ValueError("Spectra are not yet computed. Please simulate the full first field with spectra disentangling enabled by running SimulateField(full_spectrum=True)")
+        if self.sources.spectra_full is None:
+            raise ValueError("Spectra are not yet computed. Please run ExtractSources() first to get an initial spectra estimate.")
         
-        return self.sources.spectra_full if source_id is None else self.sources.spectra_full[source_id]
+        if self.sources.spectra_full_true is None:
+            # Before disentangling: spectra_full_true isn't populated yet, so fall back to the crude
+            # initial guess extracted from the PSF core (set by ExtractSources / ExtractSpectraFromCore).
+            # This guess doesn't account for source overlaps or PSF flux normalization, so it's only approximate.
+            warnings.warn("Spectra are not disentangled yet so they are approximate. Please run SimulateField(full_spectrum=True, disentangle_spectra=True) to get the true astrophysical spectra.")
+            spectra = self.sources.spectra_full
+        else:
+            # After disentangling: spectra_full_true holds the true astrophysical spectrum
+            # (disentangled fluxes corrected for the PSF flux normalization), which is what we want here.
+            spectra = self.sources.spectra_full_true
+        
+        return spectra if source_id is None else spectra[source_id]
         
 
     def DisplayField(self, cmap=None):
@@ -1916,17 +1938,24 @@ class MUSEObservation:
             #     print("Residual spectra are not available. Computing them now...")
             #     self.sources.spectra_res_sparse, self.sources.spectra_res_full = \
             #         self.ExtractSpectraFromCore(self.sources.table, self.residue_sparse, self.residue_full)
-                
+
         src_subset = self.sources.select(src_ids) # select a subset of sources to plot
-        
+
         if plot_residual:
             raise NotImplementedError("Residual spectra plotting is not properly implemented yet.")
             # src_spectra_full   = src_subset.spectra_res_full
             # src_spectra_sparse = src_subset.spectra_res_sparse
         else:
-            src_spectra_full   = src_subset.spectra_full_true
-            src_spectra_sparse = src_subset.spectra_sparse_true
-                  
+            # GetSpectra() returns the true astrophysical spectrum once disentangling has run,
+            # falling back to the crude PSF-core initial guess (with a warning) before that.
+            src_spectra_full = self.GetSpectra(source_id=src_subset.ids)
+            # No sparse counterpart to GetSpectra() exists yet, so mirror the same before/after
+            # disentangling fallback here: use the true sparse spectrum once it's available.
+            src_spectra_sparse = (
+                src_subset.spectra_sparse_true if src_subset.spectra_sparse_true is not None
+                else src_subset.spectra_sparse
+            )
+
         N = len(src_subset.ids)
         colors = generate_random_colors(N)
 
@@ -2152,7 +2181,6 @@ class MUSEObservation:
             comp_label = f' ({compression_type} compressed)' if compress else ''
             print(f"Saved {ndim_label} model cube{comp_label} to {output_path}")
 
-
         # stem = os.path.splitext(os.path.basename(cube_path))[0]
         # suffix = '_modeled_cube_objects' if np.asarray(PSFs_separated).ndim == 4 else '_modeled_cube'
         # output_file = data_folder / f'{stem}{suffix}.fits'
@@ -2163,7 +2191,7 @@ class MUSEObservation:
     def cleanup(self):
         """Explicitly clean up GPU memory and delete large objects."""
         # Delete PSF model and its internal tensors
-        if hasattr(self, 'PSF_model') and self.PSF_model is not None:
+        if self.PSF_model is not None:
             del self.PSF_model
             self.PSF_model = None
         

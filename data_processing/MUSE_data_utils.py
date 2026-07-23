@@ -703,52 +703,52 @@ def GetSpectrum(data, point, radius=1, mask_type='square', debug_show_ROI=False)
     # Handle square exactly as before
     if mask_type == 'square':
         if torch.is_tensor(data):
-            roi = data[:, y_min:y_max, x_min:x_max]
+            ROI = data[:, y_min:y_max, x_min:x_max]
             if debug_show_ROI:
-                plt.imshow(torch.nansum(roi, dim=0).cpu().numpy(), origin='lower')
+                plt.imshow(torch.nansum(ROI, dim=0).cpu().numpy(), origin='lower')
                 plt.show()
-            return torch.nanmean(roi, dim=(-2, -1))
+            return torch.nanmean(ROI, dim=(-2, -1))
 
         else:  # NumPy or CuPy array
             array_module = check_framework(data)
-            roi = data[:, y_min:y_max, x_min:x_max]
+            ROI = data[:, y_min:y_max, x_min:x_max]
             if debug_show_ROI:
-                plt.imshow(array_module.nansum(roi, axis=0), origin='lower')
+                plt.imshow(array_module.nansum(ROI, axis=0), origin='lower')
                 plt.show()
-            return array_module.nanmean(roi, axis=(-2, -1))
+            return array_module.nanmean(ROI, axis=(-2, -1))
 
     # Circular mask
     yy, xx = np.meshgrid(np.arange(y_min, y_max)-y, np.arange(x_min, x_max)-x, indexing='ij')
     mask_np = (xx**2 + yy**2) < radius**2
 
     if torch.is_tensor(data):
-        roi = data[:, y_min:y_max, x_min:x_max]
+        ROI = data[:, y_min:y_max, x_min:x_max]
 
-        mask = torch.as_tensor(mask_np, dtype=torch.bool, device=roi.device)
-        masked_roi = torch.where(mask.unsqueeze(0), roi, torch.tensor(float('nan'), device=roi.device, dtype=roi.dtype))
+        mask = torch.as_tensor(mask_np, dtype=torch.bool, device=ROI.device)
+        masked_ROI = torch.where(mask.unsqueeze(0), ROI, torch.tensor(float('nan'), device=ROI.device, dtype=ROI.dtype))
 
         if debug_show_ROI:
-            plt.imshow(torch.nansum(masked_roi, dim=0).cpu().numpy(), origin='lower')
+            plt.imshow(torch.nansum(masked_ROI, dim=0).cpu().numpy(), origin='lower')
             plt.show()
 
-        return torch.nanmean(masked_roi, dim=(-2, -1))
+        return torch.nanmean(masked_ROI, dim=(-2, -1))
 
     else:  # NumPy or CuPy array
         array_module = check_framework(data)
-        roi = data[:, y_min:y_max, x_min:x_max]
+        ROI = data[:, y_min:y_max, x_min:x_max]
 
         if array_module.__name__ == 'cupy':
             mask = array_module.asarray(mask_np)
         else:
             mask = mask_np
 
-        masked_roi = array_module.where(mask[None, :, :], roi, array_module.nan)
+        masked_ROI = array_module.where(mask[None, :, :], ROI, array_module.nan)
 
         if debug_show_ROI:
-            plt.imshow(array_module.nansum(masked_roi, axis=0), origin='lower')
+            plt.imshow(array_module.nansum(masked_ROI, axis=0), origin='lower')
             plt.show()
 
-        return array_module.nanmean(masked_roi, axis=(-2, -1))
+        return array_module.nanmean(masked_ROI, axis=(-2, -1))
     
 
 def range_overlap(v_min, v_max, h_min, h_max):

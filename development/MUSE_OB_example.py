@@ -87,6 +87,9 @@ _ = ob.SimulateField(full_spectrum=True)
 # %%
 ob.DisplaySimulation(plot_profiles=True, full_spectrum=True, focus_on_src=0)  # Focus on the first source
 
+#%%
+ob.PlotSourceSpectra()
+
 # %%
 %matplotlib widget
 
@@ -94,11 +97,27 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, RadioButtons
 from matplotlib.colors import LogNorm, Normalize
+import torch
 
-try:
-    import torch
-except ImportError:
-    torch = None
+# Cut out the ROI around source 0 from the full-spectrum data/model cubes,
+# same convention as DisplaySimulation(..., focus_on_src=...) uses internally.
+src_idx = 0
+(y0, y1), (x0, x1) = ob.sources.slices_global[src_idx]
+
+pic_data  = ob.cube_full[:, y0:y1, x0:x1]
+pic_model = ob.simulated_full[:, y0:y1, x0:x1]
+
+# Crop to the very central 11x11 pixels of the ROI
+crop_size = 11
+cy, cx = pic_data.shape[-2] // 2, pic_data.shape[-1] // 2
+half = crop_size // 2
+cy0, cy1 = cy - half, cy - half + crop_size
+cx0, cx1 = cx - half, cx - half + crop_size
+
+pic_data  = pic_data [:, cy0:cy1, cx0:cx1]
+pic_model = pic_model[:, cy0:cy1, cx0:cx1]
+
+ii = ob.N_wvl_full // 2  # initial slice shown in the widget below
 
 
 def _to_numpy(x):
@@ -119,14 +138,10 @@ except:
     has_wavelengths = False
 
 if data_cube.ndim < 3 or model_cube.ndim < 3:
-    raise ValueError(
-        "pic_data and pic_model must contain a stack of 2D slices."
-    )
+    raise ValueError("pic_data and pic_model must contain a stack of 2D slices.")
 
 if data_cube.shape != model_cube.shape:
-    raise ValueError(
-        f"Shape mismatch: data={data_cube.shape}, model={model_cube.shape}"
-    )
+    raise ValueError(f"Shape mismatch: data={data_cube.shape}, model={model_cube.shape}")
 
 n_slices = data_cube.shape[0]
 if n_slices == 0:
@@ -288,29 +303,3 @@ fig.canvas.mpl_connect('key_press_event', on_key_press)
 update()
 plt.show()
 
-# %%
-# 2184 - big jump
-# 2185 - fine
-
-# 2192 - fine
-# 2193-2195 - big jump
-
-# 2202 - fine
-# 2203 - big jump
-
-# 2958 - fine
-# 2959 - starts jumping
-# 2960 - severe jump
-# 2961 - fine
-
-#3206 - missing core
-#3207 - fine again
-
-#3232 - missing core
-#3233 - fine again
-
-#3217 - missing core
-#3318 - fine again
-
-#3250 - missing core
-#3351 - fine again
