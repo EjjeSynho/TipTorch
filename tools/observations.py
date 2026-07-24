@@ -1264,7 +1264,7 @@ class MUSEObservation:
         
     
 
-    def SimulateField(self, full_spectrum=False, N_src_per_batch=None, N_λ_per_batch=None, disentangle_spectra=True, force_cpu=True) -> torch.Tensor:
+    def SimulateField(self, full_spectrum=False, disentangle_spectra=True, N_src_per_batch=None, N_λ_per_batch=None, force_cpu=True) -> torch.Tensor:
         ''' Simulate all sources within the field. If full_spectrum is True, simulates the full spectrum instead of the sparse λ-subset. '''
         
         # Flag to indicate that the disentangling has been performed

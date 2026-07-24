@@ -2,7 +2,7 @@
 
 > **⚠️ Work in Progress:** *This project is under active development. APIs, examples, and features may change without notice.*
 
-A PyTorch-based adaptive optics (AO) Point Spread Function (PSF) simulator for astronomical instruments.
+A differentiable, GPU-accelerated adaptive optics (AO) point spread function (PSF) simulator built on PyTorch for high-fidelity astronomical imaging analysis.
 
 
 ### Features
@@ -13,8 +13,9 @@ A PyTorch-based adaptive optics (AO) Point Spread Function (PSF) simulator for a
 - Fast PSF fitting to observational data
 - ML-based calibration from integrated AO telemetry
 - Currently supports SCAO, LTAO, MCAO
+- Compatible with `astro-tiptop` configurations
 
-So far, the code was tested on SPHERE/IRDIS (VLT) and MUSE Narrow-Field Mode (VLT) instruments.
+Validated on VLT/MUSE Narrow-Field Mode and VLT/SPHERE-IRDIS instrument data.
 
 
 ## Installation
@@ -26,22 +27,27 @@ So far, the code was tested on SPHERE/IRDIS (VLT) and MUSE Narrow-Field Mode (VL
 
 ### Option 1 — Install the package with pip
 
-If you already have a Python environment with PyTorch installed, you can add `tiptorch` directly:
+First, install PyTorch (choose the wheel/index that matches your platform):
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+```
+
+Then, install TipTorch with:
 
 ```bash
 pip install .
 ```
 
-> **Note:** PyTorch must be installed *before* `tiptorch`. For CUDA support, install PyTorch from the appropriate index first:
-> ```bash
-> pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-> ```
+OR with development mode:
 
-> **Note:** For development purposes, install in editable mode: `pip install -e .`
+```bash
+pip install -e .
+```
 
-### Option 2 — Install the code (recommended)
+### Option 2 — Installation script (recommended)
 
-The setup scripts automatically creates an optimal Conda environment, which provides the best performance and compatibility. To do so:
+The setup scripts automatically creates a Conda environment and installs the code, which provides the best performance and compatibility. To do so:
 
 **Linux / macOS / WSL:**
 ```bash
@@ -56,7 +62,7 @@ The setup scripts automatically creates an optimal Conda environment, which prov
 <details>
 <summary><strong>(Advanced) Customizable setup options</strong></summary>
 
-Both scripts accept options to customize the environment:
+Both scripts accept options to customize the environment (`--for-unix` / `-ForWindows`):
 
 | Flag | Description |
 |------|-------------|
