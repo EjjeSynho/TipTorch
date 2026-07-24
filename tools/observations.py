@@ -118,9 +118,12 @@ class MUSEObservation:
         # You need to run this function at least ones to generate the data cache file. Then, te function will automatically reduce it ones it's found
         spectral_cubes, spectral_info, data_cache, model_config = LoadCachedDataMUSE(self.raw_path, self.cube_path, self.cache_path, save_cache=True, device=self.device, verbose=True)   
         # Extract full and binned spectral cubes. Sparse cube selects a subset of binned wavelengths ranges
-        self.cube_full, cube_binned, valid_mask = spectral_cubes["cube_full"], spectral_cubes["cube_binned"], spectral_cubes["mask"]
+        self.cube_full = spectral_cubes["cube_full"]
+        self.cube_stat = spectral_cubes["cube_stat"]
+        cube_binned, valid_mask = spectral_cubes["cube_binned"], spectral_cubes["mask"]
 
-        #NOTE: MUSE cube flux units are [10^-20 erg s^-1 cm^-2 Å^-1], all cubes are normalized to this flux unit
+        # NOTE: MUSE DATA units are [10^-20 erg s^-1 cm^-2 Å^-1].
+        # cube_stat is a variance cube and therefore uses the squared DATA unit.
 
         # Compute the center of mass for valid mask assuming it's the center of the science field
         yy, xx = torch.where(valid_mask.squeeze() > 0)
@@ -154,6 +157,7 @@ class MUSEObservation:
         self.λ_full   = λ_full
         self.λ_sparse = λ_sparse
         self.λ_bins   = λ_bins
+        self.stat_unit = spectral_info["stat_unit"]
         
         # Constant flux background wthin the field
         self.background_sparse = torch.zeros([self.N_wvl], device=self.device)
@@ -161,9 +165,23 @@ class MUSEObservation:
         
         # torch.from_numpy shares storage with the numpy array (zero-copy on CPU)
         self.cube_full = torch.from_numpy(self.cube_full).to(device='cpu', dtype=torch.float32)
+        self.cube_stat = torch.from_numpy(self.cube_stat).to(device='cpu', dtype=torch.float32)
         
         self.model_config = model_config #TODO: make config (re-)initialization more flexible
         self.valid_mask = valid_mask
+
+
+    @property
+    def cube_std(self) -> Optional[torch.Tensor]:
+        """
+        Per-voxel standard deviation derived from the MUSE STAT variance cube.
+
+        It is computed on access to avoid permanently storing a second
+        full-resolution uncertainty cube in memory.
+        """
+        if self.cube_stat is None:
+            return None
+        return torch.sqrt(torch.clamp(self.cube_stat, min=0))
 
 
     def _detect_bad_exposures(self, overexposure_threshold=1500, low_SNR_threshold=25):
@@ -205,7 +223,7 @@ class MUSEObservation:
                 snr (Tensor): SNR per spectral slice, shape [N_src, N_wvl].
                             Slices where the background std is zero are set to NaN.
             """
-            H, W = ROIs.shape[-2], ROIs.shape[-1]
+            H, W  = ROIs.shape[-2], ROIs.shape[-1]
             N_src = ROIs.shape[0]
 
             if src_mask is None:
@@ -2438,7 +2456,7 @@ class MUSEObservation:
                     setattr(self, attr, None)
         
         # Delete CPU tensors (to free RAM)
-        cpu_attrs = ['cube_full', 'canvas_full', 'simulated_full', 'residue_full', 'λ_full', 'flux_λ_norm']
+        cpu_attrs = ['cube_full', 'cube_stat', 'canvas_full', 'simulated_full', 'residue_full', 'λ_full', 'flux_λ_norm']
         for attr in cpu_attrs:
             if hasattr(self, attr) and getattr(self, attr) is not None:
                 tensor = getattr(self, attr)

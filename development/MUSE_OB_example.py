@@ -63,7 +63,11 @@ ob.DetectSources(nsigma=35, threshold='auto')
 
 ob.DisplayField()
 
-# Note, that the source detection in TipTorch is very crude, and it is better to offload this task to a more sophisticated tool. Alternatively, one can provide sources directly by setting 'ob.sources_table = <your_table>' before calling InitSimulation(). In this case, the source detection step can be skipped. The table must contain at least the following columns: ['id', 'x_peak', 'y_peak', 'XXX', 'weight'].
+# Note, that the source detection in TipTorch is very crude, and it is better to offload this task to a more sophisticated tool. Alternatively, one can provide sources directly by setting 'ob.sources_table = <your_table>' before calling InitSimulation(). In this case, the source detection step can be skipped. The table must contain at least the following columns: ['id', 'x_peak', 'y_peak', 'XXX', 'weight'], where
+# - 'id' is the source ID used to index it (not necessarily sequential or numerical)
+# - 'x_peak' and 'y_peak' are the source coordinates in pixels (TODO: add WCS support)
+# - 'XXX' is the averaged source flux. Can be approximate, and used only for technical purposes so have an initial guess on which sources are bright and which are faint. The model will re-estimate the fluxes later during the simulation.
+# - 'weight' is the relative weight of the source in the PSF fitting (1.0 by default)
 
 # Note, if you want to fit PSF in one place but simulate sources in another region of the field, just 'AddSource(..., weight=0.0)'. Zero weight tells the model that this source should not be used in fitting and must be only simulated. This is useful when the field has a bright point source, but the scientific interest is in another region of the field. The model will handle the extrapolation of the PSF shape to the source location automatically.
 

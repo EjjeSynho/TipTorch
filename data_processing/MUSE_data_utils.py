@@ -1023,6 +1023,8 @@ def GetSpectralCubeAndHeaderData(
     # Generate binned cubes
     if verbose: print('Generating binned data cubes...')
     data_binned = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
+    # Spectral scatter within each bin. This is not the variance stored in the
+    # MUSE FITS STAT extension; LoadCachedDataMUSE reads that separately.
     std_binned  = xp.zeros([len(λ_bins_smart)-1, white[ROI].shape[0], white[ROI].shape[1]])
     # Central λs at each spectral bin
     wavelengths = xp.zeros(len(λ_bins_smart)-1)
@@ -1647,16 +1649,47 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
     """
     This function prepares the data to be understandable by the PSF model. It bins the NFM cube and
     associates the necessary reduced telemetry data.
+
+    The full-resolution DATA and STAT extensions are read directly from the
+    MUSE cube. STAT contains the per-voxel variance (not standard deviation).
     """
-    with fits.open(cube_path) as cube_fits: 
-        cube_full = cube_fits[1].data # Full spectral cube taken directly from the MUSE ITS
+    with fits.open(cube_path) as cube_fits:
+        try:
+            data_hdu = cube_fits['DATA']
+        except KeyError:
+            # Retain compatibility with cubes whose DATA extension is unnamed.
+            data_hdu = cube_fits[1]
+
+        try:
+            stat_hdu = cube_fits['STAT']
+        except KeyError as exc:
+            raise ValueError(
+                f"MUSE cube '{cube_path}' does not contain a STAT variance extension."
+            ) from exc
+
+        # Make writable, in-memory copies before closing the FITS file. Astropy
+        # may otherwise return memory-mapped arrays backed by the closed HDUList.
+        # Explicit float32 conversion also changes FITS' big-endian arrays to
+        # native byte order, which torch.from_numpy requires.
+        cube_full = np.array(data_hdu.data, dtype=np.float32, copy=True)
+        cube_stat = np.array(stat_hdu.data, dtype=np.float32, copy=True)
+        stat_unit = stat_hdu.header.get('BUNIT')
+
+    if cube_stat.shape != cube_full.shape:
+        raise ValueError(
+            f"MUSE DATA and STAT shapes differ: {cube_full.shape} != {cube_stat.shape}."
+        )
 
     # Compute the mask of valid pixels
     nan_mask = np.abs(np.nansum(cube_full, axis=0)) < 1e-12
     nan_mask = binary_dilation(nan_mask, iterations=2, )
     valid_mask = ~nan_mask
-    # Remove NaN values
-    cube_full = np.nan_to_num(cube_full, nan=0.0) * valid_mask[np.newaxis, :, :]
+    # Remove invalid values. Bad MUSE voxels are represented by NaNs in both
+    # DATA and STAT; masked variance is zero so it cannot contribute later.
+    np.nan_to_num(cube_full, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    np.nan_to_num(cube_stat, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    cube_full *= valid_mask[np.newaxis, :, :]
+    cube_stat *= valid_mask[np.newaxis, :, :]
 
     valid_mask = torch.tensor(valid_mask, dtype=default_torch_type, device=device).unsqueeze(0)
 
@@ -1716,7 +1749,8 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
         "λ_bins":    λ_bins,   # [nm]
         "λ_full":    λ_full, # [nm]
         "Δλ_binned": Δλ_binned,
-        "Δλ_full":   Δλ_full
+        "Δλ_full":   Δλ_full,
+        "stat_unit": stat_unit
     }
 
     if save_cache:
@@ -1729,6 +1763,7 @@ def LoadCachedDataMUSE(raw_path, cube_path, cache_path, save_cache=True, device=
 
     spectral_cubes = {
         "cube_full":   cube_full,   # this one contains all spectral slices
+        "cube_stat":   cube_stat,   # per-voxel variance from the FITS STAT extension
         "cube_binned": cube_binned, # this one contains 7 avg. spectral slices out of 14 pre-computed spectral bins (will be changed)
         "mask":        valid_mask   # this one contains the mask of the data cube
     }
@@ -2484,5 +2519,3 @@ def impute_df(df):
 
     # df_out['NGS mag (from ph.)'] = GetJmag(df_out['IRLOS photons, [photons/s/m^2]'])
     return imputer, df_out
-
-
