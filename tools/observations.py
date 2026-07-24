@@ -9,6 +9,7 @@ from tiptorch._config import WEIGHTS_FOLDER, default_torch_type
 import torch
 import gc
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import torch.nn.functional as F
 
@@ -80,6 +81,7 @@ class MUSEObservation:
         self.bg_prior = None
         
         self.PSF_model = None
+        self.hot_pixel_table = None
         
         # Define the half-width of the region for spectrum extraction = ~size of the PSF core
         self.flux_core_radius = 2 # [pix]
@@ -182,6 +184,373 @@ class MUSEObservation:
         if self.cube_stat is None:
             return None
         return torch.sqrt(torch.clamp(self.cube_stat, min=0))
+
+
+    def _apply_hot_pixel_mask(self, mask: torch.Tensor) -> torch.Tensor:
+        """Set automatically classified hot voxels to zero in a good-pixel mask."""
+        if self.hot_pixel_table is None or self.hot_pixel_table.empty:
+            return mask
+
+        rows = self.hot_pixel_table[self.hot_pixel_table["auto_mask"]]
+        if rows.empty:
+            return mask
+
+        indices = torch.as_tensor(
+            rows[["wavelength_index", "y", "x"]].to_numpy(dtype=np.int64, copy=True),
+            device=mask.device,
+        )
+        mask[indices[:, 0], indices[:, 1], indices[:, 2]] = 0
+        return mask
+
+
+    @torch.no_grad()
+    def FilterHotPixels(
+        self,
+        coordinates=None,
+        spectral_half_window: int = 11,
+        exclude_radius: int = 1,
+        variance_floor=0.0,
+        variance_scale: float = 1.0,
+        z_threshold: float = 6.0,
+        curvature_threshold: float = 5.0,
+        high_z_threshold: float = 12.0,
+        high_curvature_threshold: float = 8.0,
+        support_z_threshold: float = 2.0,
+        high_max_support: int = 2,
+        ordinary_max_support: int = 4,
+        spectral_compactness_threshold: float = 0.65,
+        spatial_radius: int = 2,
+        spatial_central_fraction_threshold: float = 0.2,
+        spatial_r_eff_threshold: float = 1.25,
+        protected_source_ids=None,
+        filter_sources: bool = False,
+        verbose: bool = False,
+    ) -> pd.DataFrame:
+        """
+        Detect spectrally sharp hot-pixel artifacts at selected field positions.
+
+        The detector is intended to run after :meth:`DetectSources`. By default
+        it examines the peak spaxel of every row in ``sources_table``; explicit
+        ``(x, y)`` coordinates may be supplied instead. It does not modify the
+        science or STAT cubes.
+
+        For each position, the procedure:
+
+        1. builds a leave-one-out spectral median baseline, excluding the
+           candidate channel and ``exclude_radius`` adjacent channels;
+        2. whitens the positive residual with the MUSE STAT variance;
+        3. computes the variance-normalized three-point spectral curvature;
+        4. measures spectral support and central-channel compactness;
+        5. measures central-pixel fraction and effective radius in the
+           spectral-residual image plane.
+
+        Candidates are classified as ``high_confidence``, ``ordinary``,
+        ``ambiguous``, or ``protected``. High-confidence and ordinary
+        candidates have ``auto_mask=True``; ambiguous, spatially PSF-like
+        narrow features and explicitly protected sources are retained.
+        Automatically classified voxels are also applied to ``mask_full`` when
+        it exists and will be applied when :meth:`ExtractSources` creates it
+        later.
+
+        Parameters
+        ----------
+        coordinates : array-like, optional
+            Candidate positions as ``[[x, y], ...]``. Defaults to source peaks.
+            ``filter_sources=True`` is only supported for the default source
+            positions.
+        spectral_half_window : int
+            Number of channels on each side used for the local baseline and
+            support measurements. Values around 7--15 are appropriate first
+            choices for MUSE.
+        exclude_radius : int
+            Exclude ``k-exclude_radius`` through ``k+exclude_radius`` from the
+            baseline so a compact artifact cannot bias its own prediction.
+        variance_floor : float or broadcastable array
+            Additional empirical standard-deviation floor in DATA units.
+        variance_scale : float
+            Multiplicative correction applied to pipeline standard deviations.
+        protected_source_ids : int or sequence of int, optional
+            Source IDs known to be astrophysical. Their candidates are reported
+            as ``protected`` but are never automatically masked or removed.
+        filter_sources : bool
+            Remove source-table rows containing automatically classified
+            artifacts. Prefer running this before :meth:`ExtractSources`.
+
+        Returns
+        -------
+        pandas.DataFrame
+            One row per candidate voxel, including spectral/spatial scores,
+            classification, and ``auto_mask``.
+        """
+
+        if spectral_half_window < 2:
+            warnings.warn("spectral_half_window must be at least 2.")
+            spectral_half_window = 2
+        
+        if exclude_radius < 0 or exclude_radius >= spectral_half_window:
+            raise ValueError("exclude_radius must satisfy 0 <= exclude_radius < spectral_half_window.")
+        
+        if spatial_radius < 0:
+            raise ValueError("spatial_radius must be non-negative.")
+        
+        if variance_scale <= 0:
+            raise ValueError("variance_scale must be positive.")
+        
+        if high_z_threshold < z_threshold or high_curvature_threshold < curvature_threshold:
+            raise ValueError("High-confidence thresholds cannot be lower than ordinary thresholds.")
+
+        using_source_table = coordinates is None
+        
+        if protected_source_ids is None:
+            protected_source_ids = set()
+        elif isinstance(protected_source_ids, (int, np.integer)):
+            protected_source_ids = {int(protected_source_ids)}
+        else:
+            protected_source_ids = {int(i) for i in protected_source_ids}
+
+        if using_source_table:
+            if self.sources_table is None or len(self.sources_table) == 0:
+                raise ValueError("No candidate coordinates are available. Run DetectSources() or pass coordinates explicitly.")
+            
+            coordinates_np = self.sources_table[["x_peak", "y_peak"]].to_numpy(dtype=float)
+            
+            try:
+                coordinate_ids = self.sources_table.index.to_numpy(dtype=int)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("sources_table must use integer source IDs as its index.") from exc
+            
+            invalid_protected_ids = protected_source_ids - set(coordinate_ids.tolist())
+            
+            if invalid_protected_ids:
+                raise ValueError(f"protected_source_ids are not present in sources_table: {sorted(invalid_protected_ids)}")
+            
+        else:
+            coordinates_np = np.asarray(coordinates, dtype=float)
+            
+            if coordinates_np.ndim == 1:
+                coordinates_np = coordinates_np[None, :]
+            
+            if coordinates_np.ndim != 2 or coordinates_np.shape[1] != 2:
+                raise ValueError("coordinates must have shape (N, 2) in (x, y) order.")
+            
+            if filter_sources:
+                raise ValueError("filter_sources=True requires coordinates=None so rows map to sources_table.")
+            
+            if protected_source_ids:
+                raise ValueError("protected_source_ids requires coordinates=None.")
+                
+            coordinate_ids = np.full(len(coordinates_np), -1, dtype=int)
+
+        n_wvl, height, width = self.cube_full.shape
+        if n_wvl <= 2 * spectral_half_window:
+            raise ValueError(f"The cube must contain more than {2 * spectral_half_window} wavelength channels for the requested window.")
+        
+        xy = np.rint(coordinates_np).astype(np.int64)
+        in_bounds = ( (xy[:, 0] >= 0) & (xy[:, 0] < width) & (xy[:, 1] >= 0) & (xy[:, 1] < height) )
+        
+        if not np.all(in_bounds):
+            bad = np.flatnonzero(~in_bounds).tolist()
+            raise ValueError(f"Candidate coordinate rows outside the cube: {bad}")
+
+        x_ids = torch.as_tensor(xy[:, 0], dtype=torch.long)
+        y_ids = torch.as_tensor(xy[:, 1], dtype=torch.long)
+        spectra = self.cube_full[:, y_ids, x_ids].T.contiguous()
+        variance = self.cube_stat[:, y_ids, x_ids].T.contiguous()
+
+        # [N_position, N_wavelength, 2*m+1]. Replicate padding is used only to keep array shapes simple.
+        # Candidates in the first/last m channels are explicitly rejected below.
+        m = spectral_half_window
+        spectra_padded = F.pad(spectra.unsqueeze(1), (m, m), mode="replicate").squeeze(1)
+        windows = spectra_padded.unfold(dimension=1, size=2 * m + 1, step=1)
+        offsets = torch.arange(-m, m + 1)
+        baseline_neighbors = offsets.abs() > exclude_radius
+        baseline = torch.quantile(windows[..., baseline_neighbors], 0.5, dim=-1)
+        residual = spectra - baseline
+
+        try:
+            floor = torch.as_tensor(variance_floor, dtype=variance.dtype)
+            effective_variance = variance_scale ** 2 * variance + floor.square()
+        except RuntimeError as exc:
+            raise ValueError(f"variance_floor must be scalar or broadcastable to {tuple(variance.shape)}.") from exc
+
+        sigma       = torch.sqrt(effective_variance.clamp_min(0))
+        z_residual  = torch.full_like(residual, torch.nan)
+        valid_sigma = torch.isfinite(sigma) & (sigma > 0)
+        z_residual[valid_sigma] = residual[valid_sigma] / sigma[valid_sigma]
+
+        curvature_z = torch.full_like(spectra, torch.nan)
+        curvature = 2.0 * spectra[:, 1:-1] - spectra[:, :-2] - spectra[:, 2:]
+        curvature_variance = (
+            4.0 * effective_variance[:, 1:-1]
+            + effective_variance[:, :-2]
+            + effective_variance[:, 2:]
+        )
+        curvature_sigma = torch.sqrt(curvature_variance.clamp_min(0))
+        valid_curvature = torch.isfinite(curvature_sigma) & (curvature_sigma > 0)
+        curvature_values = torch.full_like(curvature, torch.nan)
+        curvature_values[valid_curvature] = ( curvature[valid_curvature] / curvature_sigma[valid_curvature] )
+        curvature_z[:, 1:-1] = curvature_values
+
+        support_kernel = torch.ones(1, 1, 2 * m + 1, dtype=spectra.dtype, device=spectra.device)
+        spectral_support = F.conv1d(
+            (z_residual > support_z_threshold).to(spectra.dtype).unsqueeze(1),
+            support_kernel,
+            padding=m,
+        ).squeeze(1).to(torch.int64)
+
+        residual_positive = residual.clamp_min(0)
+        positive_sum = F.conv1d(residual_positive.unsqueeze(1), support_kernel, padding=m).squeeze(1)
+        
+        spectral_compactness = torch.zeros_like(residual)
+        has_positive_support = positive_sum > 0
+        spectral_compactness[has_positive_support] = residual_positive[has_positive_support] / positive_sum[has_positive_support]
+
+        valid_spectral_range = torch.zeros(n_wvl, dtype=torch.bool)
+        valid_spectral_range[m:n_wvl-m] = True
+        valid_positions = self.valid_mask.squeeze().detach().cpu().bool()[y_ids, x_ids]
+
+        candidate_mask = (
+            (z_residual > z_threshold)
+            & (curvature_z > curvature_threshold)
+            & valid_spectral_range.unsqueeze(0)
+            & valid_positions.unsqueeze(1)
+        )
+        candidate_ids = torch.nonzero(candidate_mask, as_tuple=False)
+
+        columns = [
+            "source_id", "x", "y", "wavelength_index", "wavelength_nm", "residual", "z_residual", "z_curvature", "spectral_support",
+            "spectral_compactness", "spatial_central_fraction", "spatial_r_eff", "spatial_compact", "classification", "auto_mask",
+        ]
+        rows = []
+        
+        for position_id_t, wavelength_id_t in candidate_ids:
+            position_id   = int(position_id_t)
+            wavelength_id = int(wavelength_id_t)
+            x = int(xy[position_id, 0])
+            y = int(xy[position_id, 1])
+
+            y0 = max(0, y - spatial_radius)
+            y1 = min(height, y + spatial_radius + 1)
+            x0 = max(0, x - spatial_radius)
+            x1 = min(width, x + spatial_radius + 1)
+
+            neighbor_ids = torch.cat([
+                torch.arange(wavelength_id - m, wavelength_id - exclude_radius),
+                torch.arange(wavelength_id + exclude_radius + 1, wavelength_id + m + 1),
+            ])
+            
+            patch_baseline = torch.quantile(self.cube_full[neighbor_ids, y0:y1, x0:x1], 0.5, dim=0)
+            patch_residual = self.cube_full[wavelength_id, y0:y1, x0:x1] - patch_baseline
+            patch_positive = patch_residual.clamp_min(0)
+            patch_sum      = patch_positive.sum()
+
+            if patch_sum > 0:
+                cy, cx = y - y0, x - x0
+                central_fraction = float(patch_positive[cy, cx] / patch_sum)
+                yy, xx = torch.meshgrid(
+                    torch.arange(y0, y1, dtype=patch_positive.dtype),
+                    torch.arange(x0, x1, dtype=patch_positive.dtype),
+                    indexing="ij",
+                )
+                r2 = (xx - x) ** 2 + (yy - y) ** 2
+                spatial_r_eff = float(torch.sqrt((patch_positive * r2).sum() / patch_sum))
+            else:
+                central_fraction = np.nan
+                spatial_r_eff    = np.nan
+
+            spatial_compact = (
+                np.isfinite(central_fraction)
+                and np.isfinite(spatial_r_eff)
+                and central_fraction >= spatial_central_fraction_threshold
+                and spatial_r_eff <= spatial_r_eff_threshold
+            )
+            z_value = float(z_residual[position_id, wavelength_id])
+            curvature_value = float(curvature_z[position_id, wavelength_id])
+            support = int(spectral_support[position_id, wavelength_id])
+            compactness = float(spectral_compactness[position_id, wavelength_id])
+
+            high_confidence = (
+                z_value > high_z_threshold 
+                and curvature_value > high_curvature_threshold
+                and support <= high_max_support
+            )
+            ordinary = (
+                support <= ordinary_max_support
+                and (compactness >= spectral_compactness_threshold or spatial_compact)
+            )
+
+            source_id = int(coordinate_ids[position_id])
+            
+            if source_id in protected_source_ids:
+                classification = "protected"
+                auto_mask = False
+                
+            elif high_confidence:
+                classification = "high_confidence"
+                auto_mask = True
+                
+            elif ordinary:
+                classification = "ordinary"
+                auto_mask = True
+            else:
+                # A spectrally significant candidate that is broad or spatially
+                # PSF-like may be a genuine unresolved emission-line source.
+                classification = "ambiguous"
+                auto_mask = False
+
+            wavelength_nm = (
+                float(self.λ_full[wavelength_id])
+                if self.λ_full is not None else np.nan
+            )
+            rows.append({
+                "source_id": source_id,
+                "x": x,
+                "y": y,
+                "wavelength_index": wavelength_id,
+                "wavelength_nm": wavelength_nm,
+                "residual": float(residual[position_id, wavelength_id]),
+                "z_residual": z_value,
+                "z_curvature": curvature_value,
+                "spectral_support": support,
+                "spectral_compactness": compactness,
+                "spatial_central_fraction": central_fraction,
+                "spatial_r_eff": spatial_r_eff,
+                "spatial_compact": spatial_compact,
+                "classification": classification,
+                "auto_mask": auto_mask,
+            })
+
+        self.hot_pixel_table = pd.DataFrame(rows, columns=columns)
+        if not self.hot_pixel_table.empty:
+            self.hot_pixel_table.sort_values(
+                ["auto_mask", "z_residual"], ascending=[False, False], inplace=True
+            )
+            self.hot_pixel_table.reset_index(drop=True, inplace=True)
+
+        if hasattr(self, "mask_full") and self.mask_full is not None:
+            self._apply_hot_pixel_mask(self.mask_full)
+
+        if filter_sources and not self.hot_pixel_table.empty:
+            source_ids = (
+                self.hot_pixel_table.loc[self.hot_pixel_table["auto_mask"], "source_id"]
+                .drop_duplicates()
+                .astype(int)
+                .tolist()
+            )
+            if source_ids:
+                self.DeleteSources(source_ids)
+
+        if verbose:
+            counts = self.hot_pixel_table["classification"].value_counts()
+            print(
+                f"Hot-pixel candidates: {len(self.hot_pixel_table)} "
+                f"({int(counts.get('high_confidence', 0))} high-confidence, "
+                f"{int(counts.get('ordinary', 0))} ordinary, "
+                f"{int(counts.get('ambiguous', 0))} ambiguous, "
+                f"{int(counts.get('protected', 0))} protected)."
+            )
+
+        return self.hot_pixel_table.copy()
 
 
     def _detect_bad_exposures(self, overexposure_threshold=1500, low_SNR_threshold=25):
@@ -661,6 +1030,7 @@ class MUSEObservation:
         bad_regions = anomaly_mask | overexposure_mask | low_SNR_mask | Na_mask
 
         self.mask_full = (~self._mask_bad_peaks(bad_regions)).float() # 0 means a bad pixel, 1 means a good pixel
+        self._apply_hot_pixel_mask(self.mask_full)
 
 
     @torch.no_grad()
@@ -1294,12 +1664,17 @@ class MUSEObservation:
                 N_λ_per_batch = self.λ_batch_size
             
             if disentangle_spectra:
+                # Exposure-quality failures retain the existing soft weight of
+                # 0.5, while confidently detected hot pixels are fully excluded.
+                pixel_weights_full = self.mask_full.clip(0.5) * self.valid_mask.cpu()
+                self._apply_hot_pixel_mask(pixel_weights_full)
+
                 # This function simulates raw PSFs per λ-batch and disentangles in one go, so no need to simulate field here
                 I_sim_full, fluxes_full, bg_full = self.disentangle_flux_batched(
                     λ_batch_size = N_λ_per_batch,
                     solver = 'linear', # for saving resources, let it be linear
                     verbose = False,
-                    pixel_weights = self.mask_full.clip(0.5) * self.valid_mask.cpu() # min-clipped to avoid too harsh punishment of the bad peaks/pixels
+                    pixel_weights = pixel_weights_full
                 )
                 simulated = I_sim_full - bg_full.view(-1, 1, 1)
                 self.background_full   = bg_full
@@ -2218,6 +2593,7 @@ class MUSEObservation:
           this includes the fitted 'inputs_manager' parameters and its own config snapshot
           (which is restored verbatim by LoadState(), superseding the fresh model_config).
         - The calibrator's checkpoint path (its network weights are not duplicated here).
+        - The sparse hot-pixel candidate table produced by FilterHotPixels().
 
         Parameters
         ----------
@@ -2233,13 +2609,14 @@ class MUSEObservation:
             raise ValueError("Sources must be initialized before saving OB state. Please run ExtractSources() first.")
 
         state = {
-            'format_version':     2,
+            'format_version':     3,
             'PSF_size':           self.PSF_size,
             'flux_core_radius':   self.flux_core_radius,
             'suppress_bump_flag': self.suppress_bump_flag,
             'suppress_LO_flag':   self.suppress_LO_flag,
             'is_disentangled':    self.is_disentangled,
             'bg_prior':           self._tree_to(self.bg_prior, 'cpu'),
+            'hot_pixel_table':    deepcopy(self.hot_pixel_table),
 
             # Sources & spectra - always fully preserved, re-using SourcesData's own (de)serialization
             'sources_table': deepcopy(self.sources_table),
@@ -2300,6 +2677,7 @@ class MUSEObservation:
         self.suppress_LO_flag   = state.get('suppress_LO_flag', self.suppress_LO_flag)
         self.is_disentangled    = state.get('is_disentangled', False)
         self.bg_prior = self._tree_to(state.get('bg_prior'), device)
+        self.hot_pixel_table = deepcopy(state.get('hot_pixel_table'))
 
         # Restore sources & spectra exactly as saved (never recomputed), re-using SourcesData's own (de)serialization
         self.sources = SourcesData.load(state['sources'], device=device)
@@ -2322,6 +2700,7 @@ class MUSEObservation:
             anomaly_mask, overexposure_mask, low_SNR_mask, Na_mask = self._detect_bad_exposures()
             bad_regions = anomaly_mask | overexposure_mask | low_SNR_mask | Na_mask
             self.mask_full = (~self._mask_bad_peaks(bad_regions)).float()
+            self._apply_hot_pixel_mask(self.mask_full)
         except Exception as e:
             warnings.warn(f"Could not recompute mask_full after loading OB state: {e}")
 

@@ -6,9 +6,9 @@ import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from tiptorch._config import default_device, project_settings
-import matplotlib.pyplot as plt
 from tools.observations import MUSEObservation
 
+from itertools import product
 from pathlib import Path
 
 # Define the location of your NFM data. It can be whenever. One option is to add it to the project config file 
@@ -53,13 +53,15 @@ ob = MUSEObservation(raw_path, cube_path, cache_path, device=device)
 # - Do your analysis
 
 #%%
-
 ob.DetectSources(nsigma=35, threshold='auto')
 # ob.DetectSources(nsigma=35, threshold=4e2, verbose=True)
 # ob.AddSources([[100, 200]], weights=0.0)
 # NOTE: If some sources must be filtered out, do it here by modifying the ob.sources_table before initializing the sources for simulation
 
 # ob.DeleteSources([1, 2])  # Example: delete sources with IDs 1 and 2
+
+# Sometimes, hot pixels are detected as sources. To filter them out, use the FilterHotPixels() function.
+hot_pixels = ob.FilterHotPixels(filter_sources=True, verbose=True)
 
 ob.DisplayField()
 
@@ -126,3 +128,5 @@ ob = MUSEObservation(raw_path, cube_path, cache_path, device=device)
 ob.LoadState(data_folder/'metadata'/(cache_path.stem+'.pkl'), device=device)
 _ = ob.SimulateField(full_spectrum=True)
 ob.DisplaySimulation(plot_profiles=True, full_spectrum=True, focus_on_src=0)  # Focus on the first source
+
+# %%
