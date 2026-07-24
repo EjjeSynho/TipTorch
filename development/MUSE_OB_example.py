@@ -1,13 +1,6 @@
 #%%
-try:
-    ipy = get_ipython()        # NameError if not running under IPython
-    if ipy:
-        ipy.run_line_magic('reload_ext', 'autoreload')
-        ipy.run_line_magic('autoreload', '2')
-        import linecache
-        ipy.events.register('post_execute', lambda: linecache.clearcache())
-except NameError:
-    pass
+%reload_ext autoreload
+%autoreload 2
 
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -43,17 +36,17 @@ if not isinstance(data_folder, Path):
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T04_56_21.169.fits.fz"
 # cache_path = data_folder / "cached_cubes/CUBE_0001.pickle"
 
-# cube_path  = data_folder / "reduced_cubes/CUBE_0002.fits"
-# raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_11_59.783.fits.fz"
-# cache_path = data_folder / "cached_cubes/CUBE_0002.pickle"
+cube_path  = data_folder / "reduced_cubes/CUBE_0002.fits"
+raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_11_59.783.fits.fz"
+cache_path = data_folder / "cached_cubes/CUBE_0002.pickle"
 
 # cube_path  = data_folder / "reduced_cubes/CUBE_0003.fits"
 # raw_path   = data_folder / "raw_data/MUSE.2023-04-27T05_28_41.014.fits.fz"
 # cache_path = data_folder / "cached_cubes/CUBE_0003.pickle"
 
-cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
-raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
-cache_path = data_folder / "cached_cubes/CUBE_0021.pickle"
+# cube_path  = data_folder / "reduced_cubes/CUBE_0021.fits"
+# raw_path   = data_folder / "raw_data/MUSE.2023-06-17T00_04_47.319.fits.fz"
+# cache_path = data_folder / "cached_cubes/CUBE_0021.pickle"
 
 ob = MUSEObservation(raw_path, cube_path, cache_path, device=device)
 
@@ -89,6 +82,17 @@ ob.DisplaySimulation(plot_profiles=True, full_spectrum=True, focus_on_src=0)  # 
 
 #%%
 ob.PlotSourceSpectra()
+
+#%%
+ob.SaveState(data_folder/'metadata'/(cache_path.stem+'.pkl'), save_full_cubes=False)
+
+#%%
+ob = MUSEObservation(raw_path, cube_path, cache_path, device=device)
+
+ob.LoadState(data_folder/'metadata'/(cache_path.stem+'.pkl'), device=device)
+_ = ob.SimulateField(full_spectrum=True)
+ob.DisplaySimulation(plot_profiles=True, full_spectrum=True, focus_on_src=0)  # Focus on the first source
+
 
 # %%
 %matplotlib widget

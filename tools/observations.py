@@ -57,7 +57,6 @@ class FitWeights:
     unit_flux:  float = 0.2
 
 
-# TODO: implement a OB storage function (not only FITS cubes, but also sources data, fitting results, etc.)
 class MUSEObservation:
     def __init__(self, raw_path, cube_path, cache_path, PSF_size=111, model_type='TipTorch', device=default_torch_type):
         self.raw_path   = raw_path
@@ -1046,9 +1045,9 @@ class MUSEObservation:
         calibrator outputs are clamped to the frozen reference prediction, while
         the tuned network is regularized toward its starting weights.
 
-        Increase ``regularization_looseness`` above 1 to let the NN move farther
-        from its initial predictions, or set ``prediction_anchor`` /
-        ``weight_anchor`` directly for finer control.
+        Increase ''regularization_looseness'' above 1 to let the NN move farther
+        from its initial predictions, or set ''prediction_anchor'' /
+        ''weight_anchor'' directly for finer control.
         """
         if self.model_type != 'tiptorch':
             raise ValueError("Calibrator fine-tuning is only available for model_type='TipTorch'.")
@@ -1282,6 +1281,7 @@ class MUSEObservation:
                     λ_batch_size = N_λ_per_batch,
                     solver = 'linear', # for saving resources, let it be linear
                     verbose = False,
+                    pixel_weights = self.mask_full.clip(0.5) * self.valid_mask.cpu() # min-clipped to avoid too harsh punishment of the bad peaks/pixels
                 )
                 simulated = I_sim_full - bg_full.view(-1, 1, 1)
                 self.background_full   = bg_full
@@ -1541,12 +1541,19 @@ class MUSEObservation:
         fixed_bg         = None,   # Optional fixed background [N_wvl] or [N_wvl, 1, 1]; if provided, bg is not solved
         flux_reg         = 0.0,    # L2 regularization weight on spectrum; prevents blowup from collinear/overlapping PSFs
         flux_prior       = None,   # [N_wvl, N_src] prior target for spectrum regularization; if None, regularizes towards zero
+        pixel_weights    = None,   # Optional per-pixel weights for the data term, [H, W] or chromatic [N_wvl, H, W]; e.g. to mask out (0) or down-weight broken pixels
     ):
         """
         Does spectral disentangling of the sources in the field by solving a linear system of equations. The PSFs are assumed to be known and fixed.
         In essence, reconstructs spectral cube by solving  P @ spectrum + bg ≈ I_data.
         Can do this with a single linear least-squares solve or with an iterative non-linear optimization
         enforcing non-negativity on the spectra and optionally on the background as well.
+
+        pixel_weights, if provided, weights each pixel's contribution to the solve (weighted
+        least-squares for the linear solver, weighted data loss for the nonlinear one), e.g. to
+        mask out (weight 0) or down-weight broken/untrustworthy pixels. It can be shared across
+        all wavelengths ([H, W]) or chromatic ([N_wvl, H, W], matching data_cube). It only affects
+        the fit, not the rendered I_sim.
 
         Returns
         -------
@@ -1563,7 +1570,7 @@ class MUSEObservation:
         PSFs = PSFs.to(device=device, dtype=dtype)
         data_cube = (data_cube if isinstance(data_cube, torch.Tensor) else torch.tensor(data_cube)).to(device=device, dtype=dtype)
 
-        def sanitize(x, name):
+        def _sanitize(x, name):
             if torch.isfinite(x).all(): return x
             if nan_policy == "raise": raise FloatingPointError(f"{name} contain(s) {(~torch.isfinite(x)).sum().item()} NaN/Inf values.")
             if nan_policy == "zero" : return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
@@ -1572,10 +1579,27 @@ class MUSEObservation:
         # Store original field dimensions for full-size output rendering
         H_out, W_out = data_cube.shape[-2], data_cube.shape[-1]
 
-        # Optional fixed per-wavelength background; when provided, skip bg solving.
+        # Optional per-pixel (optionally chromatic) weighting for the data term, e.g. to mask out
+        # or down-weight broken pixels. Broadcast to [N_wvl, H_out, W_out]: a 2-D map [H, W] applies
+        # the same weights at every wavelength, a 3-D map [N_wvl, H, W] allows chromatic weighting.
+        if pixel_weights is not None:
+            pixel_weights = pixel_weights if isinstance(pixel_weights, torch.Tensor) else torch.tensor(pixel_weights)
+            pixel_weights = pixel_weights.to(device=device, dtype=dtype)
+            
+            if pixel_weights.ndim == 2:
+                pixel_weights = pixel_weights.unsqueeze(0).expand(N_wvl, -1, -1)
+            elif pixel_weights.ndim != 3:
+                raise ValueError(f"pixel_weights must be 2-D [H, W] or 3-D [N_wvl, H, W], got shape {tuple(pixel_weights.shape)}")
+            if pixel_weights.shape[-2:] != (H_out, W_out):
+                raise ValueError(f"pixel_weights spatial shape {tuple(pixel_weights.shape[-2:])} must match data_cube's {(H_out, W_out)}")
+            
+            pixel_weights = _sanitize(pixel_weights, "pixel_weights").clamp_min(0).contiguous()
+
+        # Optional fixed per-wavelength background. When provided, skips bg solving
         if fixed_bg is not None:
             fixed_bg = fixed_bg if isinstance(fixed_bg, torch.Tensor) else torch.tensor(fixed_bg)
             fixed_bg = fixed_bg.to(device=device, dtype=dtype)
+            
             if fixed_bg.numel() == 1:
                 fixed_bg = fixed_bg.reshape(1).repeat(N_wvl)
             elif fixed_bg.numel() == N_wvl:
@@ -1584,12 +1608,13 @@ class MUSEObservation:
                 if fixed_bg.shape[0] != N_wvl:
                     raise ValueError(f"fixed_bg first dimension must be N_wvl={N_wvl}, got shape {tuple(fixed_bg.shape)}")
                 fixed_bg = fixed_bg.view(N_wvl, -1).mean(dim=-1)
+            
             fixed_bg = fixed_bg.contiguous()  # [N_wvl]
-            fixed_bg = sanitize(fixed_bg, "fixed_bg")
+            fixed_bg = _sanitize(fixed_bg, "fixed_bg")
 
         # Scatter PSFs onto the field canvas -> design matrix P
         with torch.no_grad():
-            PSFs_ = PSFs if solver == 'linear' else sanitize(PSFs, "PSFs")
+            PSFs_ = PSFs if solver == 'linear' else _sanitize(PSFs, "PSFs")
             canvas = torch.zeros_like(data_cube, device=device, dtype=dtype)
             srcs_stack = add_ROIs_separately(canvas, PSFs_, srcs.slices_local, srcs.slices_global)
             del canvas, PSFs_
@@ -1601,17 +1626,19 @@ class MUSEObservation:
                 P_full = srcs_stack.view(N_src, N_wvl, -1).permute(1, 2, 0).contiguous()           # [N_wvl, H*W, N_src]
                 P      = srcs_stack[:, :, slice_y, slice_x].contiguous().view(N_src, N_wvl, -1).permute(1, 2, 0).contiguous()
                 I_data = data_cube[:, slice_y, slice_x].contiguous().view(N_wvl, -1, 1)
+                W_data = pixel_weights[:, slice_y, slice_x].contiguous().view(N_wvl, -1, 1) if pixel_weights is not None else None
             else:
                 P      = srcs_stack.view(N_src, N_wvl, -1).permute(1, 2, 0).contiguous()  # [N_wvl, pixels, N_src]
                 I_data = data_cube.view(N_wvl, -1, 1)                                      # [N_wvl, pixels, 1]
                 P_full = P
+                W_data = pixel_weights.view(N_wvl, -1, 1) if pixel_weights is not None else None
             del srcs_stack
 
             if solver == 'nonlinear':
-                P      = sanitize(P, "Simulated PSFs")
-                I_data = sanitize(I_data, "Data")
+                P      = _sanitize(P, "Simulated PSFs")
+                I_data = _sanitize(I_data, "Data")
                 if field_crop is not None:
-                    P_full = sanitize(P_full, "Simulated PSFs (full)")
+                    P_full = _sanitize(P_full, "Simulated PSFs (full)")
 
         N_wvl, N_pix, N_src = P.shape
 
@@ -1621,13 +1648,18 @@ class MUSEObservation:
         def _lstsq_reg(A, b, n_reg=None, prior=None):
             n_cols = A.shape[-1]
             n_reg  = n_cols if n_reg is None else n_reg
+            
             if flux_reg <= 0:
                 return torch.linalg.lstsq(A, b, rcond=rcond).solution
+            
             sqrt_r  = torch.tensor(flux_reg, device=device, dtype=dtype).sqrt()
             eye_blk = sqrt_r * torch.eye(n_reg, device=device, dtype=dtype).unsqueeze(0).expand(N_wvl, -1, -1)
+            
             if n_reg < n_cols:  # pad zeros for unpenalized columns (e.g. bg scalar)
                 eye_blk = torch.cat([eye_blk, torch.zeros(N_wvl, n_reg, n_cols - n_reg, device=device, dtype=dtype)], dim=-1)
+                
             prior_v = prior if prior is not None else torch.zeros(N_wvl, n_reg, device=device, dtype=dtype)
+            
             return torch.linalg.lstsq(
                 torch.cat([A, eye_blk], dim=1),
                 torch.cat([b, (sqrt_r * prior_v).unsqueeze(-1)], dim=1),
@@ -1637,27 +1669,51 @@ class MUSEObservation:
         _prior = (flux_prior.to(device=device, dtype=dtype) if flux_prior is not None
                   else torch.zeros(N_wvl, N_src, device=device, dtype=dtype))
 
+        # Shared by both solvers: regularized lstsq solve for (spectrum, bg). If fixed_bg_val
+        # is given, bg is treated as fixed and only the (background-subtracted) spectrum is
+        # solved for; otherwise P is augmented with a constant column so bg is solved jointly.
+        # If weight is given (per-pixel, [N_wvl, N_pix, 1]), the system rows are scaled by its
+        # square root, turning the solve into a weighted least-squares fit (weight 0 == masked out).
+        # Returns spectrum [N_wvl, N_src] (non-negative) and bg [N_wvl].
+        def _solve_lstsq_spectrum(P_mat, I_mat, fixed_bg_val, safe=False, weight=None):
+            _san = _sanitize if safe else (lambda x, _name: x)
+            sqrt_w = weight.sqrt() if weight is not None else None
+            
+            if fixed_bg_val is None:
+                ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
+                P_aug = _san(torch.cat([P_mat, ones], dim=-1), "P_aug")
+                I_aug = I_mat
+                if sqrt_w is not None:
+                    P_aug = P_aug * sqrt_w
+                    I_aug = I_aug * sqrt_w
+                sol      = _san(_lstsq_reg(P_aug, I_aug, n_reg=N_src, prior=_prior), "lstsq solution")
+                spectrum = sol[:, :N_src, 0].clamp(min=0)
+                bg       = sol[:, N_src, 0]
+                
+            else:
+                I_centered = _san(I_mat - fixed_bg_val.view(N_wvl, 1, 1), "I_data centered")
+                P_w, I_w = P_mat, I_centered
+                if sqrt_w is not None:
+                    P_w = P_w * sqrt_w
+                    I_w = I_w * sqrt_w
+                sol        = _san(_lstsq_reg(P_w, I_w, prior=_prior), "lstsq solution")
+                spectrum   = sol[:, :, 0].clamp(min=0)
+                bg         = fixed_bg_val
+                
+            return spectrum, bg
+
+
         # ======================== Linear solver ========================
         if solver == 'linear':
-            if fixed_bg is None:
-                ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
-                P_aug = torch.cat([P, ones], dim=-1)
-                sol      = _lstsq_reg(P_aug, I_data, n_reg=N_src, prior=_prior)
-                spectrum = sol[:, :N_src, :].clamp(min=0)
-                bg       = sol[:, N_src:,  :]
-            else:
-                I_centered = I_data - fixed_bg.view(N_wvl, 1, 1)
-                sol      = _lstsq_reg(P, I_centered, prior=_prior)
-                spectrum = sol.clamp(min=0)
-                bg       = fixed_bg.view(N_wvl, 1, 1)
-            I_sim    = (torch.matmul(P_full, spectrum) + bg).squeeze(-1).view(N_wvl, H_out, W_out)
-            return I_sim, spectrum.squeeze(-1), bg.view(N_wvl)
+            spectrum, bg = _solve_lstsq_spectrum(P, I_data, fixed_bg, weight=W_data)
+            I_sim = (torch.matmul(P_full, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1)).squeeze(-1).view(N_wvl, H_out, W_out)
+            return I_sim, spectrum, bg
 
         #--------------------------------------------------------------------------
         # ======================== Non-linear solver ========================
         def softplus_inv(y):
             eps = torch.finfo(y.dtype).eps
-            y   = sanitize(y, "softplus_inv input").clamp_min(eps)
+            y   = _sanitize(y, "softplus_inv input").clamp_min(eps)
             return torch.where(y > 20.0, y, torch.log(torch.expm1(y).clamp_min(eps)))
 
         # Initialize from lstsq solution (warm-starting across λ-batches is not
@@ -1665,18 +1721,7 @@ class MUSEObservation:
         # is smooth, so lstsq gives a better starting point every time)
         if init_from_lstsq:
             with torch.no_grad():
-                if fixed_bg is None:
-                    ones  = torch.ones(N_wvl, N_pix, 1, device=device, dtype=dtype)
-                    P_aug      = sanitize(torch.cat([P, ones], dim=-1), "P_aug")
-                    sol        = sanitize(_lstsq_reg(P_aug, I_data, n_reg=N_src, prior=_prior), "lstsq init")
-                    spec_init  = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
-                    bg_init    = sanitize(sol[:,  N_src, 0], "bg_init")
-                else:
-                    I_centered = sanitize(I_data - fixed_bg.view(N_wvl, 1, 1), "I_data centered")
-                    sol        = sanitize(_lstsq_reg(P, I_centered, prior=_prior), "lstsq init")
-                    spec_init  = sanitize(sol[:, :N_src, 0], "spec_init").clamp_min(0)
-                    bg_init    = fixed_bg
-                    
+                spec_init, bg_init = _solve_lstsq_spectrum(P, I_data, fixed_bg, safe=True, weight=W_data)
                 raw_spec_init = softplus_inv(spec_init)
                 raw_bg_init   = bg_init if bg_unconstrained else softplus_inv(bg_init.clamp_min(0))
         else:
@@ -1693,10 +1738,16 @@ class MUSEObservation:
 
         for i in range(n_iter):
             optimizer.zero_grad(set_to_none=True)
-            spectrum  = F.softplus(raw_spectrum)
-            bg        = fixed_bg if raw_bg is None else (raw_bg if bg_unconstrained else F.softplus(raw_bg))
-            data_loss = torch.mean((torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1) - I_data) ** 2)
-            loss      = data_loss if _reg_prior is None else data_loss + flux_reg * (spectrum - _reg_prior).pow(2).mean()
+            spectrum = F.softplus(raw_spectrum)
+            bg       = fixed_bg if raw_bg is None else (raw_bg if bg_unconstrained else F.softplus(raw_bg))
+            residual = torch.matmul(P, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1) - I_data
+            if W_data is None:
+                data_loss = residual.pow(2).mean()
+            else:
+                # Weighted mean (normalized by total weight) so masked-out/downweighted pixels
+                # don't shrink the loss scale, keeping it comparable to the unweighted case.
+                data_loss = (W_data * residual.pow(2)).sum() / W_data.sum().clamp_min(torch.finfo(dtype).eps)
+            loss = data_loss if _reg_prior is None else data_loss + flux_reg * (spectrum - _reg_prior).pow(2).mean()
 
             if not torch.isfinite(loss):
                 if verbose: print(f"iter {i:05d} | non-finite loss, stopping")
@@ -1719,9 +1770,9 @@ class MUSEObservation:
                 print(f"iter {i:05d} | loss = {loss.item():.6e}")
 
         with torch.no_grad():
-            spectrum = sanitize(F.softplus(raw_spectrum), "final spectrum")
-            bg       = sanitize(fixed_bg if raw_bg is None else (raw_bg if bg_unconstrained else F.softplus(raw_bg)), "final bg")
-            I_sim    = sanitize(
+            spectrum = _sanitize(F.softplus(raw_spectrum), "final spectrum")
+            bg       = _sanitize(fixed_bg if raw_bg is None else (raw_bg if bg_unconstrained else F.softplus(raw_bg)), "final bg")
+            I_sim    = _sanitize(
                 (torch.matmul(P_full, spectrum.unsqueeze(-1)) + bg.view(N_wvl, 1, 1))
                 .squeeze(-1).view(N_wvl, H_out, W_out),
                 "Simulated field"
@@ -1753,7 +1804,9 @@ class MUSEObservation:
         solver        : str   - 'linear' or 'nonlinear'
         n_iter        : int   - Adam iterations per λ-batch
         verbose       : bool  - show per-batch progress information
-        **disentangle_kwargs  - forwarded verbatim to DisentangleFlux
+        **disentangle_kwargs  - forwarded verbatim to DisentangleFlux; a chromatic
+            'pixel_weights' map ([N_wvl_full, H, W]) is sliced per λ-batch automatically,
+            while a shared [H, W] map (or None) is passed through unchanged to every batch.
 
         Returns
         -------
@@ -1776,6 +1829,21 @@ class MUSEObservation:
         fluxes_full = torch.zeros([N_wvl_full, self.N_src], device='cpu', dtype=dtype)
         bg_full     = torch.zeros([N_wvl_full],             device='cpu', dtype=dtype)
 
+        # Pulled out separately (rather than left inside **disentangle_kwargs) so a chromatic
+        # map can be sliced consistently with data_batch on every iteration below.
+        pixel_weights = disentangle_kwargs.pop('pixel_weights', None)
+        if pixel_weights is not None:
+            pixel_weights = pixel_weights if isinstance(pixel_weights, torch.Tensor) else torch.tensor(pixel_weights)
+            pixel_weights = pixel_weights.to(dtype=dtype)
+            if pixel_weights.ndim == 3:
+                if pixel_weights.shape[0] != N_wvl_full:
+                    raise ValueError(
+                        f"Chromatic pixel_weights first dimension must be N_wvl_full={N_wvl_full}, "
+                        f"got shape {tuple(pixel_weights.shape)}"
+                    )
+            elif pixel_weights.ndim != 2:
+                raise ValueError(f"pixel_weights must be 2-D [H, W] or 3-D [N_wvl_full, H, W], got shape {tuple(pixel_weights.shape)}")
+
         for λ0 in tqdm(range(0, N_wvl_full, λ_batch_size), desc='Disentangling λ-batches'):
             λ1 = min(λ0 + λ_batch_size, N_wvl_full)
 
@@ -1791,13 +1859,23 @@ class MUSEObservation:
             )
             data_batch = self.cube_full[λ0:λ1].to(self.device, non_blocking=True)
 
+            # Chromatic weights are sliced to match this λ-batch; a shared [H, W] map (or None)
+            # is reused unchanged across all batches.
+            if pixel_weights is None:
+                weights_batch = None
+            elif pixel_weights.ndim == 3:
+                weights_batch = pixel_weights[λ0:λ1].to(self.device, non_blocking=True)
+            else:
+                weights_batch = pixel_weights.to(self.device, non_blocking=True)
+
             I_sim_batch, spec_batch, bg_batch = self.disentangle_flux(
                 srcs,
                 PSFs_batch,
                 data_batch,
-                solver  = solver,
-                n_iter  = n_iter,
-                verbose = verbose,
+                solver        = solver,
+                n_iter        = n_iter,
+                verbose       = verbose,
+                pixel_weights = weights_batch,
                 **disentangle_kwargs
             )
 
@@ -1809,7 +1887,7 @@ class MUSEObservation:
             # here. They force a CUDA synchronization and walk the entire Python object graph;
             # with ~37 outer batches this dominated the wall-time of full-spectrum simulation.
             # The intermediate tensors go out of scope naturally at the next iteration.
-            del PSFs_batch, data_batch, I_sim_batch, spec_batch, bg_batch
+            del PSFs_batch, data_batch, weights_batch, I_sim_batch, spec_batch, bg_batch
 
         gc.collect()
         if torch.cuda.is_available():
@@ -2087,6 +2165,160 @@ class MUSEObservation:
             PlotSourcesProfiles(data_*m_, model_*m_, self.sources.table, radius=16, title=f'Source radial profiles ({label_})')
     
 
+    @staticmethod
+    def _tree_to(obj, device: "str | torch.device" = 'cpu'):
+        """
+        Recursively detach/clone tensors in a nested dict/list/tuple structure and move them
+        to 'device'; non-tensor leaves (DataFrames, ndarrays, scalars, ...) are deep-copied.
+        'None' passes through unchanged. Used to make OB state (SaveState/LoadState) portable.
+        """
+        if obj is None:
+            return None
+        if torch.is_tensor(obj):
+            return obj.detach().to(device).clone()
+        if isinstance(obj, dict):
+            return {k: MUSEObservation._tree_to(v, device) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(MUSEObservation._tree_to(v, device) for v in obj)
+        
+        return deepcopy(obj)
+
+
+    def SaveState(self, output_path, **metadata):
+        """
+        Save the fitted/extracted state of this observation block (OB) to a single file.
+
+        This does NOT store raw_path/cube_path/cache_path, nor any data cubes - by design.
+        The intended usage is: construct a fresh MUSEObservation from the original MUSE FITS
+        files (which re-derives cube_full/cube_sparse/model_config/... cheaply via the normal
+        on-disk cache), then call LoadState() on it to restore everything below on top of that:
+
+        - Detected/extracted sources: table, per-source images, ROI slices, and every spectrum
+          variant ('spectra_sparse/full' initial guesses and, once disentangled,
+          'spectra_sparse/full_true', 'spectra_res_sparse/full') - always fully preserved.
+        - The PSF model's own state ('PSF_model.save()'), re-using its (de)serialization -
+          this includes the fitted 'inputs_manager' parameters and its own config snapshot
+          (which is restored verbatim by LoadState(), superseding the fresh model_config).
+        - The calibrator's checkpoint path (its network weights are not duplicated here).
+
+        Parameters
+        ----------
+        output_path : str or Path - destination file (.pth)
+        **metadata  : arbitrary extra key/value pairs stored under state['metadata'], e.g. for
+                      provenance tracking
+
+        Returns
+        -------
+        Path - the path the state was saved to
+        """
+        if self.sources is None:
+            raise ValueError("Sources must be initialized before saving OB state. Please run ExtractSources() first.")
+
+        state = {
+            'format_version':     2,
+            'PSF_size':           self.PSF_size,
+            'flux_core_radius':   self.flux_core_radius,
+            'suppress_bump_flag': self.suppress_bump_flag,
+            'suppress_LO_flag':   self.suppress_LO_flag,
+            'is_disentangled':    self.is_disentangled,
+            'bg_prior':           self._tree_to(self.bg_prior, 'cpu'),
+
+            # Sources & spectra - always fully preserved, re-using SourcesData's own (de)serialization
+            'sources_table': deepcopy(self.sources_table),
+            'sources': self.sources.save(),
+
+            # PSF model state (fitted parameters + its own config snapshot), re-using its own (de)serialization
+            'PSF_model': self.PSF_model.save(cpu=True) if self.PSF_model is not None else None,
+
+            # Calibrator restored from its own checkpoint bundle rather than duplicating its weights here
+            'calibrator_path': str(self.calibrator.checkpoint_path) if self.calibrator is not None else None,
+
+            'metadata': metadata,
+        }
+
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(state, output_path)
+        print(f"OB state saved -> {output_path}")
+        return output_path
+
+
+    def LoadState(self, path, device=None) -> "MUSEObservation":
+        """
+        Restore a state saved by SaveState() onto this already-initialized MUSEObservation.
+
+        Usage: first construct the OB normally from the original MUSE FITS files (this loads
+        cube_full/cube_sparse/model_config/... via the normal on-disk cache), then call
+        'ob.LoadState(path)' to restore the fitted/extracted state on top of it:
+
+            ob = MUSEObservation(raw_path, cube_path, cache_path, device=device)
+            ob.LoadState(path, device=device)
+
+        Detected/extracted sources and every spectrum variant are always restored exactly as
+        saved, never recomputed. The PSF model (including all fitted parameters) is restored
+        via 'PSFModelNFM.load()' - its own saved config snapshot supersedes 'self.model_config'
+        so that any mutations made by InitSimulation() (sources coordinates, NumberSources,
+        sparse Wavelength, ...) are brought back exactly as they were at save time. The
+        calibrator is reconstructed from its own checkpoint file (its path is stored, not its
+        network weights). 'mask_full' is not stored - it's cheaply recomputed from the (already
+        loaded) cube_full and the restored sources, the same way ExtractSources() computes it.
+
+        Parameters
+        ----------
+        path   : str or Path - file produced by SaveState()
+        device : torch.device | str | None - device override; defaults to this OB's device
+
+        Returns
+        -------
+        MUSEObservation - self, for chaining
+        """
+        state = torch.load(path, map_location='cpu', weights_only=False)
+        device = torch.device(device) if device is not None else torch.device(self.device)
+
+        self.PSF_size = state.get('PSF_size', self.PSF_size)
+        self.flux_core_radius = state.get('flux_core_radius', self.flux_core_radius)
+        self.N_core_pixels = (self.flux_core_radius * 2 + 1) ** 2
+        self.suppress_bump_flag = state.get('suppress_bump_flag', self.suppress_bump_flag)
+        self.suppress_LO_flag   = state.get('suppress_LO_flag', self.suppress_LO_flag)
+        self.is_disentangled    = state.get('is_disentangled', False)
+        self.bg_prior = self._tree_to(state.get('bg_prior'), device)
+
+        # Restore sources & spectra exactly as saved (never recomputed), re-using SourcesData's own (de)serialization
+        self.sources = SourcesData.load(state['sources'], device=device)
+        self.sources_table = deepcopy(state['sources_table'])
+        self.N_src = len(self.sources)
+
+        # Restore the PSF model; its own embedded config snapshot supersedes self.model_config
+        # so that InitSimulation()'s mutations (sources coords, NumberSources, ...) come back too
+        if state.get('PSF_model') is not None:
+            self.PSF_model = PSFModelNFM.load(state['PSF_model'], device=device, config=self.model_config)
+            if state['PSF_model'].get('config') is not None:
+                self.model_config = self._tree_to(state['PSF_model']['config'], device)
+        else:
+            self.PSF_model = None
+        self.model_config['sensor_science']['FieldOfView'] = self.PSF_size
+
+        # mask_full is a full-cube-sized QC mask; it's not stored, just recomputed the same way
+        # ExtractSources() does, now that cube_full and the restored sources are both available.
+        try:
+            anomaly_mask, overexposure_mask, low_SNR_mask, Na_mask = self._detect_bad_exposures()
+            bad_regions = anomaly_mask | overexposure_mask | low_SNR_mask | Na_mask
+            self.mask_full = (~self._mask_bad_peaks(bad_regions)).float()
+        except Exception as e:
+            warnings.warn(f"Could not recompute mask_full after loading OB state: {e}")
+
+        # Restore the calibrator from its own checkpoint bundle (weights not duplicated in the OB state)
+        if state.get('calibrator_path') is not None:
+            try:
+                self.calibrator = NFMCalibrator(state['calibrator_path'], device=device)
+            except Exception as e:
+                warnings.warn(f"Could not reload calibrator from '{state['calibrator_path']}': {e}")
+        else:
+            self.calibrator = None
+
+        return self
+
+
     def SaveModelCubeFITS(self, cube, output_path, λ_full, sources=None, compress=True, compression_type='GZIP_2'):
         raise NotImplementedError("This function is not properly implemented yet.")
         
@@ -2362,3 +2594,5 @@ def visualize_field_tiles(
     plt.title(title)
     plt.tight_layout()
     plt.show()
+
+# %%

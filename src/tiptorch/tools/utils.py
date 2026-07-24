@@ -965,3 +965,55 @@ class RadialProfileLossSimple(nn.Module):
             loss = fvu.mean()
 
         return loss
+
+
+def scan_cuda_tensors(obj):
+    from collections.abc import Mapping, Sequence
+    found = {}
+    visited = set()
+
+    def scan(value, path):
+        object_id = id(value)
+        if object_id in visited:
+            return
+        visited.add(object_id)
+
+        if isinstance(value, torch.Tensor):
+            if value.is_cuda:
+                found[path] = value
+            return
+
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                scan(item, f"{path}[{key!r}]")
+            return
+
+        if isinstance(value, Sequence) and not isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            for index, item in enumerate(value):
+                scan(item, f"{path}[{index}]")
+            return
+
+        if hasattr(value, "__dict__"):
+            for name, item in vars(value).items():
+                scan(item, f"{path}.{name}" if path else name)
+
+    scan(obj, obj.__class__.__name__)
+
+    for gpu_id in sorted({
+        tensor.device.index for tensor in found.values()
+    }):
+        print(f"\n=== GPU:{gpu_id} ===")
+
+        for path, tensor in found.items():
+            if tensor.device.index == gpu_id:
+                memory_mb = tensor.numel() * tensor.element_size() / 1024**2
+                print(
+                    f"{path:60s} "
+                    f"{str(tuple(tensor.shape)):20s} "
+                    f"{str(tensor.dtype):15s} "
+                    f"{memory_mb:9.2f} MB"
+                )
+
+    return found

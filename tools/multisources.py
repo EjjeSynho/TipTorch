@@ -12,6 +12,7 @@ from matplotlib.colors import LogNorm
 from scipy import ndimage
 from typing import Optional, Union, Sequence
 from dataclasses import dataclass
+from copy import deepcopy
 
 import matplotlib.patches as mpatches
 import matplotlib.colors as mcolors
@@ -172,6 +173,63 @@ class SourcesData:
 
     def __len__(self) -> int:
         return len(self.table)
+
+    @staticmethod
+    def _tree_to(obj, device: "str | torch.device" = 'cpu'):
+        """
+        Recursively detach/clone tensors in a nested dict/list/tuple structure and move them
+        to 'device'; non-tensor leaves (DataFrames, ndarrays, scalars, ...) are deep-copied.
+        'None' passes through unchanged. Used by save()/load() for portable serialization.
+        """
+        if obj is None:
+            return None
+        if torch.is_tensor(obj):
+            return obj.detach().to(device).clone()
+        if isinstance(obj, dict):
+            return {k: SourcesData._tree_to(v, device) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return type(obj)(SourcesData._tree_to(v, device) for v in obj)
+        return deepcopy(obj)
+
+    def save(self) -> dict:
+        """
+        Serialize to a plain dict suitable for torch.save(). All tensors are moved to CPU.
+        'proximity_table' is not stored since it's cheaply recomputed from 'table' in
+        __post_init__ whenever a SourcesData is (re-)constructed, e.g. via load().
+        """
+        return {
+            'table':               deepcopy(self.table),
+            'imgs_sparse':         self._tree_to(self.imgs_sparse, 'cpu'),
+            'slices_local':        deepcopy(self.slices_local),
+            'slices_global':       deepcopy(self.slices_global),
+            'spectra_full':        self._tree_to(self.spectra_full, 'cpu'),
+            'spectra_sparse':      self._tree_to(self.spectra_sparse, 'cpu'),
+            'spectra_sparse_true': self._tree_to(self.spectra_sparse_true, 'cpu'),
+            'spectra_full_true':   self._tree_to(self.spectra_full_true, 'cpu'),
+            'spectra_res_full':    self._tree_to(self.spectra_res_full, 'cpu'),
+            'spectra_res_sparse':  self._tree_to(self.spectra_res_sparse, 'cpu'),
+        }
+
+    @classmethod
+    def load(cls, state: dict, device: "str | torch.device" = 'cpu') -> "SourcesData":
+        """
+        Reconstruct a SourcesData from save() output. 'spectra_full'/'spectra_full_true' stay
+        on CPU (matching how the rest of the pipeline stores them, to save VRAM); everything
+        else ('imgs_sparse', 'spectra_sparse', 'spectra_sparse_true', 'spectra_res_sparse') is
+        moved to 'device'. 'proximity_table' is recomputed automatically in __post_init__.
+        """
+        return cls(
+            table               = state['table'],
+            imgs_sparse         = cls._tree_to(state['imgs_sparse'], device),
+            slices_local        = deepcopy(state['slices_local']),
+            slices_global       = deepcopy(state['slices_global']),
+            spectra_full        = cls._tree_to(state['spectra_full'], 'cpu'),
+            spectra_sparse      = cls._tree_to(state['spectra_sparse'], device),
+            spectra_sparse_true = cls._tree_to(state['spectra_sparse_true'], device),
+            spectra_full_true   = cls._tree_to(state['spectra_full_true'], 'cpu'),
+            spectra_res_full    = cls._tree_to(state['spectra_res_full'], 'cpu'),
+            spectra_res_sparse  = cls._tree_to(state['spectra_res_sparse'], device),
+        )
 
     def index(self, src_ids: Optional[Union[int, np.integer, Sequence[int]]] = None) -> list[int]:
         """Normalize src_ids to an explicit validated list. None returns all source IDs."""
