@@ -928,7 +928,7 @@ def PlotSourcesProfiles(data, model, sources, radius, select_ids=None, show=True
         PSF_0 = PSFs_0_white,
         PSF_1 = PSFs_1_white,
         label_0 = 'Data',
-        label_1 = 'Prediction',
+        label_1 = 'Model',
         cutoff=radius,
         ax=ax,
         **kwargs,

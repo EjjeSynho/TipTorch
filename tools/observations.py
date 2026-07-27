@@ -4,7 +4,7 @@ import warnings
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from tiptorch._config import WEIGHTS_FOLDER, default_torch_type
+from tiptorch._config import WEIGHTS_FOLDER, default_torch_type, default_device
 
 import torch
 import gc
@@ -59,7 +59,18 @@ class FitWeights:
 
 
 class MUSEObservation:
-    def __init__(self, raw_path, cube_path, cache_path, PSF_size=111, model_type='TipTorch', device=default_torch_type):
+    """ Class for simulating and fitting a MUSE NFM observation block (OB). """
+    
+    def __init__(
+        self,
+        raw_path:   None | str | Path = None,
+        cube_path:  None | str | Path = None,
+        cache_path: None | str | Path = None,
+        PSF_size:   int = 64, 
+        model_type: str = 'TipTorch',
+        device: None | torch.device = default_device
+    ):
+        
         self.raw_path   = raw_path
         self.cube_path  = cube_path
         self.cache_path = cache_path
@@ -186,6 +197,7 @@ class MUSEObservation:
         return torch.sqrt(torch.clamp(self.cube_stat, min=0))
 
 
+    # TODO: separete mask for the bad PSF peaks
     def _apply_hot_pixel_mask(self, mask: torch.Tensor) -> torch.Tensor:
         """Set automatically classified hot voxels to zero in a good-pixel mask."""
         if self.hot_pixel_table is None or self.hot_pixel_table.empty:
@@ -917,7 +929,7 @@ class MUSEObservation:
                 warnings.warn(f"{reason}: previously extracted sources have been discarded. Re-run ExtractSources().")
 
 
-    def DetectSources(self, nsigma=35, threshold='auto', verbose=False):
+    def DetectSources(self, nsigma=35, threshold='auto', filter_hot_pixels=True, verbose=False):
         # Simple sources detector function. For now, make sure that only point sources are included. This function also defines the
         # order in which sources are indexed ad processed later, so it's important to use it before extracting the source images
         # and spectra. The order can be defined by the brightness of the sources in the descending order
@@ -930,14 +942,36 @@ class MUSEObservation:
             weight_from_flux = False,
             verbose = verbose
         )
+        
+        # Hot pixels are sometimes detected as sources. Filter them out
+        if filter_hot_pixels:
+            _ = self.FilterHotPixels(filter_sources=True, verbose=verbose)
         # Detection replaces the raw table, so any previously extracted sources become stale.
         self._invalidate_sources_state("DetectSources() replaced the raw sources_table")
 
 
-    def AddSources(self, sources_coords, weights=0.0):
-        # If some sources are missing from the automatic detection, they can be added manually by providing their coordinates in the same format as the sources dataframe
-        self.sources_table = AddSources(self.cube_sparse, sources_coords, self.sources_table, weights=weights, weight_from_flux=False)
-        # New rows in the raw table must be re-extracted before they can be used by the model.
+    def AddSources(self, sources_coords: list | np.ndarray | tuple, weights: float | int | list | np.ndarray = 0.0):
+        """
+        Add source(s) manually to the sources table.
+
+        If some sources are missing from automatic detection, they can be added manually
+        by providing their coordinates in the same format as the sources dataframe.
+        New rows in the raw table must be re-extracted before they can be used by the model.
+
+        Parameters
+        ----------
+        sources_coords : list, np.ndarray, or tuple
+            Coordinates of sources to add.
+        weights : float, int, list, or np.ndarray, optional
+            Weights for the sources. Default is 0.0.
+        """
+        self.sources_table = AddSources(
+            self.cube_sparse,
+            sources_coords,
+            self.sources_table,
+            weights=weights,
+            weight_from_flux=False
+        )
         self._invalidate_sources_state("AddSources() modified the raw sources_table")
 
 
