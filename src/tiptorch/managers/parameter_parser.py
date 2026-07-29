@@ -65,7 +65,7 @@ class ParameterParser():
 
         # Checks if path is present in the file. If no, path is set to None by default
         def check_path(section, entry):
-            if entry not in params[section]:
+            if entry not in params[section] or params[section][entry] == '':
                 params[section][entry] = None
             else:
                 params[section][entry] = self.find_file(params[section][entry])

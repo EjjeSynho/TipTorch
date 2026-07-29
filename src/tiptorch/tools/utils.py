@@ -7,6 +7,7 @@ from photutils.centroids import centroid_quadratic, centroid_com, centroid_com, 
 from astropy.modeling import models, fitting
 import matplotlib.pyplot as plt
 import seaborn as sns
+from typing import Optional
 
 from tiptorch._config import xp
 
@@ -1017,3 +1018,38 @@ def scan_cuda_tensors(obj):
                 )
 
     return found
+
+
+def BinCn2(Cn2_weights, layer_altitudes, N_binned: int, dtype: Optional[torch.dtype] = torch.float32, eps: Optional[float] = None):
+    """
+    Vectorized equivalent-layer reduction (based on Saxenhuber:17). The final dimension represents atmospheric layers.
+    For example, Cn2 may have shape (..., nLayers).
+
+    Returns:
+        Cn2_binned: (..., nEqLayers)
+        h_binned: (..., nEqLayers)
+    """
+    Cn2_weights = torch.as_tensor(Cn2_weights, dtype=dtype)
+    layer_altitudes = torch.as_tensor(layer_altitudes, dtype=Cn2_weights.dtype, device=Cn2_weights.device)
+    Cn2_weights, layer_altitudes = torch.broadcast_tensors(Cn2_weights, layer_altitudes)
+
+    N_L = Cn2_weights.shape[-1]
+    N_binned = int(N_binned)
+
+    if not 1 <= N_binned <= N_L:
+        raise ValueError("The number of new layers must be between 1 and the number of input layers")
+
+    # Matches the original partitioning: equal-sized initial slabs, with the final slab absorbing any remainder
+    slab_size = N_L // N_binned
+    groups = (torch.arange(N_L, device=Cn2_weights.device) // slab_size).clamp_max(N_binned-1)
+    groups = groups.expand_as(Cn2_weights)
+
+    output_shape = (*Cn2_weights.shape[:-1], N_binned)
+
+    power  = 5/3
+    Cn2_binned  = Cn2_weights.new_zeros(output_shape).scatter_add(dim=-1, index=groups, src=Cn2_weights)
+    moment      = Cn2_weights.new_zeros(output_shape).scatter_add(dim=-1, index=groups, src=Cn2_weights * layer_altitudes.pow(power))
+    denominator = Cn2_binned if eps is None else Cn2_binned.clamp_min(eps)
+    h_binned    = (moment / denominator).pow(1/power)
+
+    return Cn2_binned, h_binned

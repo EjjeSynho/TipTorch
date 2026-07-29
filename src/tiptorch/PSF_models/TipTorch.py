@@ -105,19 +105,19 @@ class TipTorch(torch.nn.Module):
         assert self.N_obs == 1 or self.N_obs == self.N_src
 
         # Deformable mirror(s) parameters
-        self.pitch = self.config['DM']['DmPitchs'] #[m]
-        self.kc    = 1.0 / (2.0 * self.pitch) # TODO: support multiple DMs, just select the biggest pitch among all of them
+        self.pitch = self.config['DM']['DmPitchs'].min() #[m], select the DM with the finest resolution 
+        self.kc    = 1.0 / (2.0 * self.pitch)
         
         self.h_DM  = self.config['DM']['DmHeights'] # [m]
         self.N_DM  = self.h_DM.shape[0]
+        self.DM_opt_weight = self.config['DM']['OptimizationWeight'].view(self.N_obs, -1)  # [N_obs, N_optdir]
+        self.N_optdir = self.DM_opt_weight.shape[-1]
         
-        self.DM_opt_angle   = self.config['DM']['OptimizationZenith' ].view(self.N_obs, self.N_DM) / self.rad2arc # [N_obs, N_optdir]
-        self.DM_opt_azimuth = torch.deg2rad(self.config['DM']['OptimizationAzimuth'].view(self.N_obs, self.N_DM)) # [N_obs, N_optdir]
+        self.DM_opt_angle   = self.config['DM']['OptimizationZenith' ].view(self.N_obs, self.N_optdir) / self.rad2arc # [N_obs, N_optdir]
+        self.DM_opt_azimuth = torch.deg2rad(self.config['DM']['OptimizationAzimuth'].view(self.N_obs, self.N_optdir)) # [N_obs, N_optdir]
 
         self.DM_opt_dir_x  = torch.tan(self.DM_opt_angle) * torch.cos(self.DM_opt_azimuth) # [N_obs, N_optdir]
         self.DM_opt_dir_y  = torch.tan(self.DM_opt_angle) * torch.sin(self.DM_opt_azimuth) # [N_obs, N_optdir]
-        self.DM_opt_weight = self.config['DM']['OptimizationWeight'].view(self.N_obs, -1)  # [N_obs, N_optdir]
-        self.N_optdir = self.DM_opt_weight.shape[-1]
         self.DM_rec_layers = self.config['DM']['NumberReconstructedLayers'].item() # [N_rec_layers]
 
         # HO WFS(s) parameters
@@ -412,7 +412,7 @@ class TipTorch(torch.nn.Module):
         self.U, self.V = torch.meshgrid(UV_range, UV_range, indexing = 'ij')
         self.U, self.V = pdims(self.U, -2), pdims(self.V, -2)
         
-        self.u_max = (self.sampling * self.D / self.wvl / self.rad2mas)**2 # TODO: check 1/2 factor
+        self.u_max = (0.5 * self.sampling * self.D / self.wvl / self.rad2mas)**2 # TODO: check 1/2 factor
         
         # self.center_aligner = torch.exp( 1j * torch.pi * (self.U + self.V) * (1 - self.N_pix%2))
 
@@ -631,22 +631,19 @@ class TipTorch(torch.nn.Module):
         
         mask = self.mask_corrected_AO.view(1, self.nOtf_AO_y, self.nOtf_AO_x, 1)
         P_DM   = torch.exp( 2j*torch.pi*h_dm * pdims(f*mask,1) ).unsqueeze(-2) # [N_obs, nOtf_AO, nOtf_AO, N_optdir, 1, N_DM]
-        P_DM_t = torch.conj( P_DM.permute(0, 1, 2, 3, 4, 5) )    # [N_obs, nOtf_AO, nOtf_AO, N_optdir, N_DM, 1]
+        P_DM_t = torch.conj( P_DM.permute(0, 1, 2, 3, 5, 4) )    # [N_obs, nOtf_AO, nOtf_AO, N_optdir, N_DM, 1]
 
         mat1   = ((P_DM_t @ P_L)  * opt_w).sum(dim=3)  # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
         to_inv = ((P_DM_t @ P_DM) * opt_w).sum(dim=3)  # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_DM]
         
         if inv_method == 'lstsq':
-            # Solve using least squares: mat2 * to_inv = mat1
-            # Rearrange to: to_inv^T * mat2^T = mat1^T
-            A = to_inv.transpose(-2, -1)
-            B = mat1.transpose(-2, -1)
-            mat2 = torch.linalg.lstsq(A, B, rcond=1e-2).solution.transpose(-2, -1)
-            
+            # Solve to_inv @ P_opt = mat1 directly for P_opt (equivalent to P_opt = pinv(to_inv) @ mat1),
+            # since to_inv is square [N_DM, N_DM] and mat1 is [N_DM, N_L], their sizes at dim -2 already match
+            self.P_opt = torch.linalg.lstsq(to_inv, mat1, rcond=1e-2).solution # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
+
         elif inv_method == 'pinv':
             mat2 = torch.linalg.pinv(to_inv, rcond=1e-2) # Last 2 dimensions are inverted
-            
-        self.P_opt = mat2 @ mat1 # [N_obs, nOtf_AO, nOtf_AO, 1, N_L]
+            self.P_opt = mat2 @ mat1 # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
 
 
     def TransferFunctions(self, freq: torch.Tensor, Ts: torch.Tensor, delay: torch.Tensor, loop_gain: torch.Tensor):
@@ -843,7 +840,7 @@ class TipTorch(torch.nn.Module):
         cos_ang   = torch.cos(torch.arctan2(self.ky_AO, self.kx_AO) - src_azimuth).unsqueeze(1) # [N_src, 1, nOtf_AO_y, nOtf_AO_x]
         tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle)) # [N_obs, N_wvl]
         
-        return self.W_atm.unsqueeze(1) * ( 2*w*(1.0 - torch.cos(2*torch.pi*h*k * pdims(tan_theta, 3) * pdims(cos_ang, 1))) ).sum(dim=-1) * self.mask_corrected_AO
+        return self.W_atm.unsqueeze(1) * ( 2*w*(1.0-torch.cos(2*torch.pi*h*k * pdims(tan_theta, 3) * pdims(cos_ang, 1))) ).sum(dim=-1) * self.mask_corrected_AO
     
 
     def JitterKernel(self, Jx: torch.Tensor, Jy: torch.Tensor, Jxy: torch.Tensor):
@@ -855,7 +852,7 @@ class TipTorch(torch.nn.Module):
         V_prime = self.U * sin_theta + self.V * cos_theta
 
         Djitter = pdims(self.u_max * self.jitter_norm_fact, 2) * ( (Jx*U_prime)**2 + (Jy*V_prime)**2 )
-        return torch.exp(-0.5 * Djitter) #TODO: cover the Nyquist sampled case? But shouldn't it be automatic, already?
+        return torch.exp(-0.5 * Djitter) #TODO: cover the Nyquist sampled case? But check maybe it is automatic, already?
     
 
     def NoiseVariance(self):
