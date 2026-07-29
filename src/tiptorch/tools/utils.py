@@ -1020,36 +1020,74 @@ def scan_cuda_tensors(obj):
     return found
 
 
-def BinCn2(Cn2_weights, layer_altitudes, N_binned: int, dtype: Optional[torch.dtype] = torch.float32, eps: Optional[float] = None):
+def BinCn2(
+    Cn2_weights,
+    layer_altitudes,
+    N_binned: int,
+    wind_direction = None,
+    wind_speed = None,
+    dtype: Optional[torch.dtype] = torch.float32,
+    eps: Optional[float] = None,
+):
     """
-    Vectorized equivalent-layer reduction (based on Saxenhuber:17). The final dimension represents atmospheric layers.
-    For example, Cn2 may have shape (..., nLayers).
+    Bin Cn2, altitude, and optionally wind direction/speed.
+
+    Wind direction is in degrees, clockwise from north, and describes
+    where the wind comes from.
 
     Returns:
-        Cn2_binned: (..., nEqLayers)
-        h_binned: (..., nEqLayers)
-    """
-    Cn2_weights = torch.as_tensor(Cn2_weights, dtype=dtype)
-    layer_altitudes = torch.as_tensor(layer_altitudes, dtype=Cn2_weights.dtype, device=Cn2_weights.device)
-    Cn2_weights, layer_altitudes = torch.broadcast_tensors(Cn2_weights, layer_altitudes)
+        Without wind:
+            Cn2_binned, h_binned
 
-    N_L = Cn2_weights.shape[-1]
+        With wind:
+            Cn2_binned, h_binned, wind_direction_binned, wind_speed_binned
+    """
+    Cn2 = torch.as_tensor(Cn2_weights, dtype=dtype)
+    h = torch.as_tensor(layer_altitudes, dtype=Cn2.dtype, device=Cn2.device)
+
+    has_wind = wind_direction is not None or wind_speed is not None
+    if has_wind:
+        if wind_direction is None or wind_speed is None:
+            raise ValueError("Provide both wind_direction and wind_speed")
+
+        direction = torch.as_tensor(wind_direction, dtype=Cn2.dtype, device=Cn2.device)
+        speed = torch.as_tensor(wind_speed, dtype=Cn2.dtype, device=Cn2.device)
+        Cn2, h, direction, speed = torch.broadcast_tensors(Cn2, h, direction, speed)
+    else:
+        Cn2, h = torch.broadcast_tensors(Cn2, h)
+
+    n_layers = Cn2.shape[-1]
     N_binned = int(N_binned)
 
-    if not 1 <= N_binned <= N_L:
-        raise ValueError("The number of new layers must be between 1 and the number of input layers")
+    if not 1 <= N_binned <= n_layers:
+        raise ValueError("N_binned must be between 1 and the number of layers")
 
-    # Matches the original partitioning: equal-sized initial slabs, with the final slab absorbing any remainder
-    slab_size = N_L // N_binned
-    groups = (torch.arange(N_L, device=Cn2_weights.device) // slab_size).clamp_max(N_binned-1)
-    groups = groups.expand_as(Cn2_weights)
+    slab_size = n_layers // N_binned
+    groups = (torch.arange(n_layers, device=Cn2.device) // slab_size).clamp_max(N_binned - 1).expand_as(Cn2)
 
-    output_shape = (*Cn2_weights.shape[:-1], N_binned)
+    output_shape = (*Cn2.shape[:-1], N_binned)
 
-    power  = 5/3
-    Cn2_binned  = Cn2_weights.new_zeros(output_shape).scatter_add(dim=-1, index=groups, src=Cn2_weights)
-    moment      = Cn2_weights.new_zeros(output_shape).scatter_add(dim=-1, index=groups, src=Cn2_weights * layer_altitudes.pow(power))
+    def bin_sum(x):
+        return Cn2.new_zeros(output_shape).scatter_add_(-1, groups, x)
+
+    power = 5/3
+    Cn2_binned = bin_sum(Cn2)
     denominator = Cn2_binned if eps is None else Cn2_binned.clamp_min(eps)
-    h_binned    = (moment / denominator).pow(1/power)
 
-    return Cn2_binned, h_binned
+    h_binned = (bin_sum(Cn2 * h.pow(power)) / denominator).pow(1 / power)
+
+    if not has_wind:
+        return Cn2_binned, h_binned
+
+    # Convert meteorological direction/speed to east/north components.
+    theta = torch.deg2rad(direction)
+    wind_x = -speed * torch.sin(theta)
+    wind_y = -speed * torch.cos(theta)
+
+    wind_x = bin_sum(Cn2 * wind_x) / denominator
+    wind_y = bin_sum(Cn2 * wind_y) / denominator
+
+    speed_binned = torch.hypot(wind_x, wind_y)
+    direction_binned = torch.rad2deg(torch.atan2(-wind_x, -wind_y)).remainder(360)
+
+    return Cn2_binned, h_binned, direction_binned, speed_binned

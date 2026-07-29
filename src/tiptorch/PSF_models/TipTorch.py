@@ -1104,7 +1104,7 @@ class TipTorch(torch.nn.Module):
         if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
 
             WFS_noise_var = (self.dn.view(self.N_obs,-1) + self.NoiseVariance()).abs() # [rad^2] at atmo wvl
-                        
+            # TODO: check the wind direction sign conventions! sin and cos might be swapped and - should b in front of wind speed
             self.vx = self.wind_speed * torch.cos( torch.deg2rad(self.wind_dir) )
             self.vy = self.wind_speed * torch.sin( torch.deg2rad(self.wind_dir) )
 

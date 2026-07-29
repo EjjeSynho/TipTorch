@@ -197,23 +197,14 @@ class PSFModelNFM:
                 
             return config
         
-        # Backward compatibility with the old save() key.
-        if 'λ_min, λmax, N_λ' in store_data:
-            λ_min, λ_max, num_λ_slices = store_data['λ_min, λmax, N_λ']
-        else:
-            λ_min        = store_data.get('λ_min', 475.e-9)
-            λ_max        = store_data.get('λ_max', 935.e-9)
-            num_λ_slices = store_data.get('num_λ_slices', 3681)
+        λ_min, λ_max, num_λ_slices = store_data['λ_min'], store_data['λ_max'], store_data['num_λ_slices']
 
         device = torch.device(device if device is not None else store_data.get('device', default_device))
         dtype  = _dtype_from_name(store_data.get('dtype', torch.float32))
 
         _raw_config = store_data.get('config', config)
         if _raw_config is None:
-            raise ValueError(
-                "The saved file does not contain a 'config' entry (old format). "
-                "Pass the config explicitly via PSFModelNFM.load(..., config=ob.model_config)."
-            )
+            raise ValueError("The saved file does not contain a 'config' entry (old format). Pass the config explicitly via PSFModelNFM.load(..., config=ob.model_config).")
 
         new_instance = cls(
             config         = _restore_config(_raw_config, device),
