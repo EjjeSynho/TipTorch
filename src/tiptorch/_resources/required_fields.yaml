@@ -1,6 +1,7 @@
 telescope:
 - PathPupil
 - PathApodizer
+- PathStaticOn
 - PupilAngle
 - TelescopeDiameter
 - ZenithAngle

@@ -83,7 +83,8 @@ SCALAR_VALUES = [
     ['sensor_science', 'PixelScale'],
     ['sensor_science', 'FieldOfView'],
     ['telescope', 'PupilAngle'],
-    ['telescope', 'TelescopeDiameter']
+    ['telescope', 'TelescopeDiameter'],
+    ['DM', 'NumberReconstructedLayers']
 ]
 
 class ConfigManager():

@@ -4,6 +4,7 @@ import torch
 import numpy as np
 import scipy.special as spc
 import torchvision.transforms as transforms
+import torchvision.transforms.functional as TF
 from torch import fft, nn
 from torch.nn.functional import interpolate
 from astropy.io import fits
@@ -23,6 +24,15 @@ class TipTorch(torch.nn.Module):
         if self.apodizer is None and self.config['telescope']['PathApodizer'] is not None:
             apodizer_path = Path(self.config['telescope']['PathApodizer'])
             self.apodizer = self.make_tensor(to_little_endian(fits.getdata(apodizer_path)))
+
+        if self.pupil_angle != 0.0:
+            # Physically rotate the loaded masks; downstream code expects an already-oriented pupil
+            angle = self.pupil_angle.item() if torch.is_tensor(self.pupil_angle) else self.pupil_angle
+            # Pupil is a binary mask, so use nearest-neighbor to avoid introducing fractional edge values
+            self.pupil = TF.rotate(self.pupil.unsqueeze(0), -angle, interpolation=TF.InterpolationMode.NEAREST).squeeze(0)
+
+            if self.apodizer is not None:
+                self.apodizer = TF.rotate(self.apodizer.unsqueeze(0), -angle, interpolation=TF.InterpolationMode.BILINEAR).squeeze(0)
 
         if self.apodizer is not None:
             assert self.pupil.shape[-1] == self.apodizer.shape[-1], "Pupil and apodizer must have the same size"
@@ -118,7 +128,7 @@ class TipTorch(torch.nn.Module):
 
         self.DM_opt_dir_x  = torch.tan(self.DM_opt_angle) * torch.cos(self.DM_opt_azimuth) # [N_obs, N_optdir]
         self.DM_opt_dir_y  = torch.tan(self.DM_opt_angle) * torch.sin(self.DM_opt_azimuth) # [N_obs, N_optdir]
-        self.DM_rec_layers = self.config['DM']['NumberReconstructedLayers'].item() # [N_rec_layers]
+        self.DM_rec_layers = self.config['DM']['NumberReconstructedLayers'] # [N_rec_layers]
 
         # HO WFS(s) parameters
         self.WFS_d_sub = self.config['sensor_HO']['SizeLenslets']
@@ -412,7 +422,7 @@ class TipTorch(torch.nn.Module):
         self.U, self.V = torch.meshgrid(UV_range, UV_range, indexing = 'ij')
         self.U, self.V = pdims(self.U, -2), pdims(self.V, -2)
         
-        self.u_max = (0.5 * self.sampling * self.D / self.wvl / self.rad2mas)**2 # TODO: check 1/2 factor
+        self.u_max = (self.sampling * self.D / self.wvl / self.rad2mas)**2 # TODO: check if 1/2 factor is required
         
         # self.center_aligner = torch.exp( 1j * torch.pi * (self.U + self.V) * (1 - self.N_pix%2))
 
