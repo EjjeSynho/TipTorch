@@ -39,6 +39,7 @@ class PSFModelNFM:
         # Resolve model_type: explicit argument wins; fall back to use_Moffat for backward compat
         if model_type is None:
             model_type = 'hybrid' if use_Moffat else 'physics-based'
+            
         if model_type not in self._VALID_REGIMES:
             raise ValueError(f"model_type must be one of {self._VALID_REGIMES}, got '{model_type}'")
 

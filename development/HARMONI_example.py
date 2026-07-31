@@ -1,9 +1,17 @@
 #%%
+%reload_ext autoreload
+%autoreload 2
+
+# *****************************************************************************************************
+# ********************* FIX BACK PUPIL TRANSPOSE IN TIPTORCH  **********************************
+# *****************************************************************************************************
+# *****************************************************************************************************
+
 import sys
 import torch
 import numpy as np
-from pathlib import Path
 import matplotlib.pyplot as plt
+from pathlib import Path
 from matplotlib.colors import LogNorm, SymLogNorm
 from photutils.centroids import centroid_2dg
 from torchmin import minimize
@@ -14,6 +22,7 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from tiptorch.PSF_models.HARMONI_wrapper import PSFModelHARMONI
 from tiptorch.managers.config_manager import ConfigManager
 from tiptorch._config import default_device, default_torch_type
+# from tiptorch.tools import PSFMismatchLoss
 from tiptorch.tools.utils import BinCn2, mask_circle
 from tools.plotting import plot_radial_PSF_profiles
 from astropy.io import fits
@@ -21,7 +30,7 @@ from astropy.io import fits
 #%%
 N_pix    = 151  # Desired number of pixels in the final PSF cube (N_pix x N_pix)
 # N_layers = 10  # Number of binned atmospheric layers
-N_layers = 5
+N_layers = None
 N_λ_bins = 40  # Number of spectral bins; set to None to use Δλ_bin
 
 #%%
@@ -171,10 +180,10 @@ def embed_PSF_in_new_cube(PSF_cube, target_n_y, target_n_x, center_y=None, cente
     dst_y_start = max(0, offset_y)
     dst_x_start = max(0, offset_x)
     
-    src_y_end   = min(n_y, target_n_y - offset_y)
-    src_x_end   = min(n_x, target_n_x - offset_x)
-    dst_y_end   = min(target_n_y, n_y + offset_y)
-    dst_x_end   = min(target_n_x, n_x + offset_x)
+    src_y_end = min(n_y, target_n_y - offset_y)
+    src_x_end = min(n_x, target_n_x - offset_x)
+    dst_y_end = min(target_n_y, n_y + offset_y)
+    dst_x_end = min(target_n_x, n_x + offset_x)
     
     # Copy the overlapping region
     new_cube[:, dst_y_start:dst_y_end, dst_x_start:dst_x_end] = PSF_cube[:, src_y_start:src_y_end, src_x_start:src_x_end]
@@ -234,77 +243,82 @@ plt.scatter(target_n_x // 2, target_n_y // 2, color='red', marker='x', label='Or
 plt.show()
 
 #%%
-config_manager = ConfigManager()
-config_torch = config_manager.Load('/home/aosimul/akuznets/Data/HARMONI/HARMONI_MCAO_Med.ini')
-config_torch = config_manager.Convert(config_torch, framework='pytorch', device=default_device, dtype=default_torch_type)
+def ConfigInit(N_layers=None, verbose=False):
+    config_manager = ConfigManager()
+    config_torch = config_manager.Load('/home/aosimul/akuznets/Data/HARMONI/HARMONI_MCAO_Med.ini')
+    config_torch = config_manager.Convert(config_torch, framework='pytorch', device=default_device, dtype=default_torch_type)
 
-config_torch['sources_science']['Wavelength']   = torch.tensor(λ_sparse, device=default_device).view(1,-1) * 1e-9 # [m]
-config_torch['sensor_science']['PixelScale']    = 6.0
-config_torch['sensor_science']['FieldOfView']   = N_pix
-config_torch['telescope']['PupilAngle']         = torch.tensor(20.0, device=default_device)  # [deg]
-config_torch['telescope']['PathPupil']          = '/home/aosimul/akuznets/Data/HARMONI/pupils/EELT480pp0.0803m_obs0.283_spider2023.fits'
-config_torch['telescope']['PathStaticOn']       = '/home/aosimul/akuznets/Data/HARMONI/pupils/ELT_M1_MORFEO_DMs_static_wfe_480px.fits'
-config_torch['DM']['NumberReconstructedLayers'] = N_layers
+    config_torch['sources_science']['Wavelength']   = torch.tensor(λ_sparse, device=default_device).view(1,-1) * 1e-9 # [m]
+    config_torch['sensor_science']['PixelScale']    = 6.0
+    config_torch['sensor_science']['FieldOfView']   = N_pix
+    config_torch['telescope']['PupilAngle']         = torch.tensor(22.0, device=default_device)  # [deg]
+    config_torch['telescope']['PathPupil']          = '/home/aosimul/akuznets/Data/HARMONI/pupils/EELT480pp0.0803m_obs0.283_spider2023.fits'
+    config_torch['telescope']['PathStaticOn']       = '/home/aosimul/akuznets/Data/HARMONI/pupils/ELT_M1_MORFEO_DMs_static_wfe_480px.fits'
+    config_torch['DM']['NumberReconstructedLayers'] = N_layers
 
-if N_layers is not None:
-    # >>>>>>> Perform Cn2 layers binning
-    Cn2_weights     = config_torch['atmosphere']['Cn2Weights'].flatten()
-    layer_altitudes = config_torch['atmosphere']['Cn2Heights'].flatten()
-    wind_speed      = config_torch['atmosphere']['WindSpeed'].flatten()
-    wind_direction  = config_torch['atmosphere']['WindDirection'].flatten()
+    if N_layers is not None:
+        # >>>>>>> Perform Cn2 layers binning
+        Cn2_weights     = config_torch['atmosphere']['Cn2Weights'].flatten()
+        layer_altitudes = config_torch['atmosphere']['Cn2Heights'].flatten()
+        wind_speed      = config_torch['atmosphere']['WindSpeed'].flatten()
+        wind_direction  = config_torch['atmosphere']['WindDirection'].flatten()
 
-    Cn2_binned, h_binned, wind_direction_binned, wind_speed_binned = BinCn2(
-        Cn2_weights,
-        layer_altitudes,
-        wind_direction = wind_direction,
-        wind_speed = wind_speed,
-        N_binned = N_layers,
-    )
+        Cn2_binned, h_binned, wind_direction_binned, wind_speed_binned = BinCn2(
+            Cn2_weights,
+            layer_altitudes,
+            wind_direction = wind_direction,
+            wind_speed = wind_speed,
+            N_binned = N_layers,
+        )
 
-    # Update config with binned Cn2 and wind profiles
-    config_torch['atmosphere']['Cn2Weights']    = Cn2_binned.unsqueeze(0)  # Add batch dimension
-    config_torch['atmosphere']['Cn2Heights']    = h_binned.unsqueeze(0)    # Add batch dimension
-    config_torch['atmosphere']['WindSpeed']     = wind_speed_binned.unsqueeze(0)
-    config_torch['atmosphere']['WindDirection'] = wind_direction_binned.unsqueeze(0)
-else:
-    N_layers = config_torch['atmosphere']['Cn2Weights'].shape[-1]
-    layer_altitudes = config_torch['atmosphere']['Cn2Heights'].flatten()
+        # Update config with binned Cn2 and wind profiles
+        config_torch['atmosphere']['Cn2Weights']    = Cn2_binned.unsqueeze(0)  # Add batch dimension
+        config_torch['atmosphere']['Cn2Heights']    = h_binned.unsqueeze(0)    # Add batch dimension
+        config_torch['atmosphere']['WindSpeed']     = wind_speed_binned.unsqueeze(0)
+        config_torch['atmosphere']['WindDirection'] = wind_direction_binned.unsqueeze(0)
 
-print(f"Simulated wavelengths: {λ_sparse.tolist()} nm ({len(λ_sparse)} slices)")
-print(f"Cn2 profile binned from {len(layer_altitudes)} layers to {N_layers} equivalent layers")
-print(f"Binned heights:         {[int(round(x)) for x in h_binned.cpu().numpy().tolist()]}")
-print(f"Binned weights:         {[round(x, 2) for x in Cn2_binned.cpu().numpy().tolist()]}")
-print(f"Binned wind speeds:     {[round(x, 2) for x in wind_speed_binned.cpu().numpy().tolist()]}")
-print(f"Binned wind directions: {[round(x, 2) for x in wind_direction_binned.cpu().numpy().tolist()]}")
+    else:
+        N_layers = config_torch['atmosphere']['Cn2Weights'].shape[-1]
 
-# Display pupil and static WFE in a 1x2 subplot
-fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+    if verbose:
+        print(f"Simulated wavelengths:  {λ_sparse.tolist()} nm ({len(λ_sparse)} slices)")
+        print(f"Cn2 heights:     {[int(round(x)) for x in config_torch['atmosphere']['Cn2Heights'].flatten().cpu().numpy().tolist()]}")
+        print(f"Cn2 weights:     {[round(x, 2)   for x in config_torch['atmosphere']['Cn2Weights'].flatten().cpu().numpy().tolist()]}")
+        print(f"Wind speeds:     {[round(x, 2)   for x in config_torch['atmosphere']['WindSpeed'].flatten().cpu().numpy().tolist()]}")
+        print(f"Wind directions: {[round(x, 2)   for x in config_torch['atmosphere']['WindDirection'].flatten().cpu().numpy().tolist()]}")
 
-with fits.open(config_torch['telescope']['PathPupil']) as hdul:
-    im1 = axes[0].imshow(hdul[1].data, cmap='gray', origin='lower')
-    axes[0].set_title('ELT Pupil')
-    axes[0].set_xlabel('Pixel')
-    axes[0].set_ylabel('Pixel')
-    plt.colorbar(im1, ax=axes[0], label='Pupil Transmission')
+        # Display pupil and static WFE in a 1x2 subplot
+        _, axes = plt.subplots(1, 2, figsize=(12, 5))
 
-with fits.open(config_torch['telescope']['PathStaticOn']) as hdul_static:
-    im2 = axes[1].imshow(hdul_static[0].data, cmap='jet', origin='lower')
-    axes[1].set_title('ELT Static WFE (MORFEO DMs)')
-    axes[1].set_xlabel('Pixel')
-    axes[1].set_ylabel('Pixel')
-    plt.colorbar(im2, ax=axes[1], label='WFE [nm]')
+        with fits.open(config_torch['telescope']['PathPupil']) as hdul:
+            im1 = axes[0].imshow(hdul[1].data, cmap='gray', origin='lower')
+            axes[0].set_title('ELT Pupil')
+            axes[0].set_xlabel('Pixel')
+            axes[0].set_ylabel('Pixel')
+            plt.colorbar(im1, ax=axes[0], label='Pupil Transmission')
 
-plt.tight_layout()
-plt.show()
+        with fits.open(config_torch['telescope']['PathStaticOn']) as hdul_static:
+            im2 = axes[1].imshow(hdul_static[0].data, cmap='jet', origin='lower')
+            axes[1].set_title('ELT Static WFE (MORFEO DMs)')
+            axes[1].set_xlabel('Pixel')
+            axes[1].set_ylabel('Pixel')
+            plt.colorbar(im2, ax=axes[1], label='WFE [nm]')
 
-#%%
+        plt.tight_layout()
+        plt.show()
+        
+    return config_torch
+
+
+#%
 print("Initializing the TipTorch HARMONI wrapper...")
 model = PSFModelHARMONI(
-    config = config_torch,
+    config = ConfigInit(N_layers=N_layers, verbose=True),
     LO_NCPAs = True,
-    use_Zernike = False,
+    use_Zernike = True,
     use_static_WFE = True,
-    Z_mode_max = 9,
+    Z_mode_max = 3,
+    use_Moffat = True,
     N_spline_nodes = 5,
     device = default_device,
     retain_PSDs = False,
@@ -313,20 +327,33 @@ model = PSFModelHARMONI(
     λ_max = float(λ_binned[-1] * 1e-9),
     num_λ_slices=len(λ_binned),
 )
+tiptorch_model = model.model
+
+# tiptorch_model.pupil = tiptorch_model.pupil.T
 
 model.inputs_manager.delete('wind_speed_single')
 model.inputs_manager.delete('wind_dir_single')
 
-model.inputs_manager.set_optimizable(['LO_coefs', 'F_norm', 'wind_speed_single', 'Cn2_weights', 'L0', 'r0'], False)
+# model.inputs_manager.set_optimizable(['LO_coefs', 'F_norm', 'bg_ctrl', 'Cn2_weights', 'L0', 'r0'], False)
+model.inputs_manager.set_optimizable(['LO_coefs', 'F_norm', 'bg_ctrl', 'Cn2_weights'], False)
 x_dict = model.inputs_manager.to_dict()
 
-x_dict['J_ctrl'] = x_dict['J_ctrl'] * 0.0 + 2.0
+x_dict['J_ctrl'] = x_dict['J_ctrl'] * 0.0 + 6.0
 
-_ = model(x_dict) # update the model with the initial parameters to ensure all internal states are consistent
+
+PSF_1 = model(x_dict) # update the model with the initial parameters to ensure all internal states are consistent
+
+
+cmap_viridis = plt.cm.get_cmap('viridis').copy()
+cmap_viridis.set_bad(color='#440154')  # viridis darkpurple
+
+vmax = max(PSF_1.max(), PSF_1.max())
+vmin = vmax * 1e-4
+
+plt.imshow(PSF_1.cpu().squeeze().sum(dim=0), cmap=cmap_viridis, origin='lower', norm=LogNorm(vmin=vmin, vmax=vmax))
+
 
 print(model.inputs_manager)
-
-tiptorch_model = model.model
 
 print("\n" + "="*60)
 print("Model Initialization Summary".center(60))
@@ -350,10 +377,10 @@ print(f"Static WFE loaded with RMS = {static_WFE_rms:.2f} nm")
 
 print(model.inputs_manager)
 
-print("\nSimulating sparse PSFs with static WFE...")
-PSF_initial = model()
+_ = model()
 
-#%%
+
+#%
 # Fit the sparse HARMONI cube using the same managed-parameter workflow as the
 # MUSE on-sky example. The zero-padded border is excluded from the objective.
 PSF_data = torch.as_tensor(PSF_0, device=default_device, dtype=default_torch_type,).unsqueeze(0)
@@ -367,31 +394,79 @@ if λ_weighting:
 else:
     wavelength_weights = 1.0
 
+# Compare the EE curves at several scientifically interpretable aperture radii,
+# rather than making the fit depend on one arbitrary aperture.
+# EE_radii_pix = (2.0, 4.0, 8.0, 16.0, 32.0)
+# metric_mismatch_loss = PSFMismatchLoss(
+#     ee_radius=EE_radii_pix,
+#     peak_weight=1.0,
+#     fwhm_weight=100.0,
+#     ee_weight=5.0,
+# )
+
 def run_model(x):
     """Unpack an optimizer vector, update the wrapper, and render sparse PSFs."""
     inputs = model.inputs_manager.unstack(x, include_all=True, update=True)
     return model(inputs)
 
 
-def loss_PSF(PSF_data, PSF_model, w_MSE, w_MAE):
+def loss_PSF(PSF_data, model, w_MSE, w_MAE, w_log):
     """MUSE-style image loss evaluated only on measured HARMONI pixels."""
-    diff = (PSF_model - PSF_data)[..., fit_mask] * wavelength_weights
+    diff = (model - PSF_data)[..., fit_mask] * wavelength_weights
     MSE_loss = diff.pow(2).mean() * w_MSE
     MAE_loss = diff.abs().mean() * w_MAE
-    return 2e4 * (MSE_loss + MAE_loss)
 
-# def force_positive(x):
-#     return torch.clamp(-x, min=0).pow(2).mean()
+    # Robust (Huber) log-loss: fits the PSF wings, where linear MSE/MAE have little effect,
+    # while being insensitive to residual outliers; eps is adaptive to the data peak to keep
+    # both logarithm arguments strictly positive at all flux levels.
+    eps = PSF_data.detach().amax().clamp(min=1e-10) * 1e-5
+    log_diff = (torch.log(model.clamp(min=eps)) - torch.log(PSF_data.clamp(min=eps)))[..., fit_mask] * wavelength_weights
+    log_loss = torch.nn.functional.huber_loss(log_diff, torch.zeros_like(log_diff), delta=1.0) * w_log
 
-def force_small_jitter():
+    return 2e4 * (MSE_loss + MAE_loss)  + log_loss * 1e-3
+
+if model.use_Moffat:
+    def Moffat_penalty():
+        amp = model.inputs_manager['amp']
+        # alpha = model.inputs_manager['alpha']
+        # beta = model.inputs_manager['beta']
+        # b = model.inputs_manager['b']
+        
+        # Enforce positive amplitude
+        amp_penalty = amp.pow(2).mean() * 0.5
+        
+        # Enforce beta > 1.5
+        # beta_penalty = torch.clamp(1.5 - beta, min=0).pow(2).mean() * 1e-3
+        
+        # # Enforce alpha > 0
+        # alpha_penalty = torch.clamp(-alpha, min=0).pow(2).mean() * 1e-3
+        
+        # # Enforce b > 0
+        # b_penalty = torch.clamp(-b, min=0).pow(2).mean() * 1e-3
+        
+        return amp_penalty #+ b_penalty + beta_penalty + alpha_penalty
+else:
+    def Moffat_penalty():
+        return 0.0
+
+
+def jitter_penalty():
     """Encourage small jitter values (in mas) to avoid unphysical PSF broadening."""
     jitter = model.inputs_manager['J_ctrl'].abs().sum()
-    return jitter / N_λ_sparse * 2.0
+    return jitter / N_λ_sparse * 0.5
+
+
+def dn_penalty():
+    """Encourage small differential piston values (in nm) to avoid unphysical PSF broadening."""
+    dn = model.inputs_manager['dn'].abs()
+    return dn * 0.02
+
 
 def loss_fn(x):
     PSF_fitted = run_model(x)
-    PSF_loss = loss_PSF(PSF_data, PSF_fitted, w_MSE=900.0, w_MAE=3.6)
-    return PSF_loss #+ force_small_jitter()
+    PSF_loss = loss_PSF(PSF_data, PSF_fitted, w_MSE=2000.0, w_MAE=2.6, w_log=500.0)
+    # metrics_loss = metric_mismatch_loss(PSF_fitted, PSF_data)
+    return PSF_loss + dn_penalty() + Moffat_penalty()  #+ jitter_penalty() 
 
 
 def minimize_params(loss_function, max_iter, verbose=True, force_BFGS=False):
@@ -416,10 +491,8 @@ def minimize_params(loss_function, max_iter, verbose=True, force_BFGS=False):
 
     if not force_BFGS and stopped_early and high_loss:
         if verbose:
-            print(
-                "Warning: L-BFGS stopped early with a high loss. "
-                "Retrying from the initial parameters with BFGS..."
-            )
+            print("Warning: L-BFGS stopped early with a high loss. Retrying from the initial parameters with BFGS...")
+            
         model.inputs_manager.unstack(x_backup, include_all=True, update=True)
         result = run_minimizer('bfgs', 1e-5)
 
@@ -439,11 +512,20 @@ def minimize_params(loss_function, max_iter, verbose=True, force_BFGS=False):
 
 
 print("\nFitting sparse HARMONI PSFs...")
-x_fit, PSF_1, success, final_loss = minimize_params(loss_fn, 200)
+x_fit, PSF_1, success, final_loss = minimize_params(loss_fn, 250)
 
 print(f"Fit success: {success}; final loss: {final_loss:.6f}")
 print("Fitted parameters:")
 print(model.inputs_manager)
+
+# Keep the mismatch computation graph-connected until presentation.
+# The component values can therefore also be used directly in another optimizer.
+# metric_mismatch = metric_mismatch_loss(PSF_1, PSF_data, return_components=True)
+
+# print("\nMean relative image-quality mismatch:")
+# print(f"  Peak: {metric_mismatch['peak'].detach().item() * 100:.2f}%")
+# print(f"  FWHM: {metric_mismatch['fwhm'].detach().item() * 100:.2f}%")
+# print(f"  EE ({', '.join(f'{radius:g}' for radius in EE_radii_pix)} pix): {metric_mismatch['ee'].detach().item() * 100:.2f}%")
 
 
 # Find wavelength closest to 1600 nm in sparse array
@@ -470,15 +552,22 @@ PSF_difference = PSF_data_cropped - PSF_simulated_cropped
 # Create figure with 3 panels
 fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
+# Set bad pixels to dark purple (viridis-like)
+cmap_viridis = plt.cm.get_cmap('viridis').copy()
+cmap_viridis.set_bad(color='#440154')  # viridis darkpurple
+
+cmap_rdbu = plt.cm.get_cmap('RdBu_r').copy()
+cmap_rdbu.set_bad(color='darkblue')
+
 # Data PSF (log scale)
-im1 = axes[0].imshow(PSF_data_cropped, cmap='viridis', origin='lower', norm=LogNorm(vmin=vmin, vmax=vmax))
+im1 = axes[0].imshow(PSF_data_cropped, cmap=cmap_viridis, origin='lower', norm=LogNorm(vmin=vmin, vmax=vmax))
 axes[0].set_title(f'Data PSF at {λ_sparse[wvl_idx]:.1f} nm\n(Log Scale, {crop_size}x{crop_size})')
 axes[0].set_xlabel('Pixel')
 axes[0].set_ylabel('Pixel')
 plt.colorbar(im1, ax=axes[0], label='Intensity (log)')
 
 # Fitted PSF (log scale)
-im2 = axes[1].imshow(PSF_simulated_cropped, cmap='viridis', origin='lower', norm=LogNorm(vmin=vmin, vmax=vmax))
+im2 = axes[1].imshow(PSF_simulated_cropped, cmap=cmap_viridis, origin='lower', norm=LogNorm(vmin=vmin, vmax=vmax))
 axes[1].set_title(f'Fitted PSF at {λ_sparse[wvl_idx]:.1f} nm\n(Log Scale, {crop_size}x{crop_size})')
 axes[1].set_xlabel('Pixel')
 axes[1].set_ylabel('Pixel')
@@ -487,7 +576,7 @@ plt.colorbar(im2, ax=axes[1], label='Intensity (log)')
 # Difference (data - fitted model)
 diff_vmax = np.abs(PSF_difference).max()
 linthresh = diff_vmax * 1e-3  # Linear threshold: values below this are shown linearly
-im3 = axes[2].imshow(PSF_difference, cmap='RdBu_r', origin='lower', norm=SymLogNorm(linthresh=linthresh, vmin=-diff_vmax, vmax=diff_vmax, base=10))
+im3 = axes[2].imshow(PSF_difference, cmap=cmap_rdbu, origin='lower', norm=SymLogNorm(linthresh=linthresh, vmin=-diff_vmax, vmax=diff_vmax, base=10))
 axes[2].set_title(f'Difference (Data - Fit)\n(SymLog Scale, {crop_size}x{crop_size})')
 axes[2].set_xlabel('Pixel')
 axes[2].set_ylabel('Pixel')
@@ -514,17 +603,13 @@ for i, lmbd_idx in enumerate(wvl_select):
         ax = ax[i]
     )
     ax[i].set_title(f'λ = {λ_sparse[lmbd_idx]:.1f} nm')
+
 plt.tight_layout()
 plt.show()
 
 #%%
 print("\nSimulating the fitted model on the binned HARMONI H-band spectrum...")
-PSF_full = model.SimulateFullSpectrum(
-    src_ids=0,
-    λ_batch_size=50,
-    verbose=True,
-    force_cpu=True,
-)[0]
+PSF_full = model.SimulateFullSpectrum(src_ids=0, λ_batch_size=50, verbose=True, force_cpu=True)[0]
 
 full_flux = PSF_full.sum(dim=(-2, -1))
 print(f"Full-spectrum PSF shape: {tuple(PSF_full.shape)}")

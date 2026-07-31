@@ -18,33 +18,31 @@ class PSFModelHARMONI(PSFModelNFM):
     def __init__(
         self,
         config,
-        multiple_obs    = False,
-        LO_NCPAs        = True,
-        use_Zernike     = True,
-        use_static_WFE  = True,
-        static_WFE_path = None,
+        multiple_obs     = False,
+        LO_NCPAs         = True,
+        use_Zernike      = True,
+        use_static_WFE   = True,
+        static_WFE_path  = None,
         static_WFE_scale = 1.0,
-        use_Moffat      = False,
-        retain_PSDs     = False,
-        Z_mode_max      = 9,
-        N_spline_nodes  = 5,
-        device          = default_device,
-        dtype           = torch.float32,
-        model_type      = None,
-        *,
-        λ_min           = 470.e-9,
-        λ_max           = 2450.e-9,
-        num_λ_slices    = 3961,
+        use_Moffat       = False,
+        retain_PSDs      = False,
+        Z_mode_max       = 9,
+        N_spline_nodes   = 5,
+        device           = default_device,
+        dtype            = torch.float32,
+        model_type       = None,
+        *, 
+        λ_min            = 470.e-9,
+        λ_max            = 2450.e-9,
+        num_λ_slices     = 3961,
     ):
-        self._config_raw = config
-        self.use_splines = False
-        self.use_Zernike = bool(LO_NCPAs and use_Zernike)
-        self.static_WFE_path = self._resolve_static_WFE_path(config, static_WFE_path)
-        self.use_static_WFE = bool(
-            LO_NCPAs and use_static_WFE and self.static_WFE_path is not None
-        )
+        self._config_raw      = config
+        self.use_splines      = False
+        self.use_Zernike      = bool(LO_NCPAs and use_Zernike)
+        self.static_WFE_path  = self._resolve_static_WFE_path(config, static_WFE_path)
+        self.use_static_WFE   = bool(LO_NCPAs and use_static_WFE and self.static_WFE_path is not None)
         self.static_WFE_scale = float(static_WFE_scale)
-        self.static_WFE_mode = None
+        self.static_WFE_mode  = None
 
         phase_aberrations = self.use_Zernike or self.use_static_WFE
 
@@ -80,9 +78,7 @@ class PSFModelHARMONI(PSFModelNFM):
         paths.discard(None)
 
         if len(paths) > 1:
-            raise ValueError(
-                "Different static WFE maps for different observations are not supported."
-            )
+            raise ValueError("Different static WFE maps for different observations are not supported.")
 
         return str(Path(paths.pop())) if paths else None
 
@@ -92,7 +88,7 @@ class PSFModelHARMONI(PSFModelNFM):
             'fitting':         True,
             'WFS noise':       physics_on,
             'spatio-temporal': physics_on,
-            'aliasing':        False,
+            'aliasing':        physics_on,
             'chromatism':      physics_on,
             'diff. refract':   physics_on,
             'Moffat':          self.model_type in ('hybrid', 'psfao'),
@@ -116,26 +112,20 @@ class PSFModelHARMONI(PSFModelNFM):
         static_WFE = fits.getdata(path)
 
         if static_WFE.ndim != 2:
-            raise ValueError(
-                f"Static WFE map must be two-dimensional, got shape {static_WFE.shape}."
-            )
+            raise ValueError(f"Static WFE map must be two-dimensional, got shape {static_WFE.shape}.")
 
-        static_WFE = torch.as_tensor(
-            to_little_endian(static_WFE),
-            device=self.device,
-            dtype=self.dtype,
-        )
+        static_WFE = torch.as_tensor(to_little_endian(static_WFE), device=self.device, dtype=self.dtype)
 
         pupil = self.model.pupil.squeeze()
+        
         if static_WFE.shape != pupil.shape:
-            raise ValueError(
-                f"Static WFE map shape {tuple(static_WFE.shape)} does not match "
-                f"the pupil shape {tuple(pupil.shape)}."
-            )
+            raise ValueError(f"Static WFE map shape {tuple(static_WFE.shape)} does not match the pupil shape {tuple(pupil.shape)}.")
+        
         if not torch.isfinite(static_WFE).all():
             raise ValueError("Static WFE map contains non-finite values.")
 
         return static_WFE * pupil
+
 
     def _init_NCPAs(self):
         basis = []
@@ -148,11 +138,8 @@ class PSFModelHARMONI(PSFModelNFM):
         if self.use_Zernike:
             if self.Z_mode_max < 3:
                 raise ValueError("Z_mode_max must be at least 3 when Zernikes are enabled.")
-            zernike_basis = ZernikeBasis(
-                self.model,
-                N_modes=self.Z_mode_max,
-                ignore_pupil=False,
-            )
+            
+            zernike_basis = ZernikeBasis(self.model, N_modes=self.Z_mode_max, ignore_pupil=False)
             basis.append(zernike_basis.basis[2:self.Z_mode_max])
 
         self.LO_basis = ArbitraryBasis(
@@ -162,6 +149,7 @@ class PSFModelHARMONI(PSFModelNFM):
         )
         self.LO_N_params = self.LO_basis.N_modes
 
+
     def _init_model_inputs(self):
         self.λ_sim = self.λ_sim.flatten()
         if self.use_splines:
@@ -170,11 +158,10 @@ class PSFModelHARMONI(PSFModelNFM):
         super()._init_model_inputs()
 
         if self.static_WFE_mode is not None:
-            self.inputs_manager['LO_coefs'][:, self.static_WFE_mode] = (
-                self.static_WFE_scale
-            )
+            self.inputs_manager['LO_coefs'][:, self.static_WFE_mode] = self.static_WFE_scale
             self.inputs_manager.stack()
             self.backup_manager = self.inputs_manager.copy()
+
 
     def save(self, *, cpu=True):
         store_data = super().save(cpu=False)
@@ -187,6 +174,7 @@ class PSFModelHARMONI(PSFModelNFM):
             'static_WFE_scale':  self.static_WFE_scale,
         })
         return self._tree_to_cpu(store_data) if cpu else store_data
+
 
     @classmethod
     def load(cls, store_data, *, device=None, config=None):
@@ -203,10 +191,7 @@ class PSFModelHARMONI(PSFModelNFM):
         raw_config = deepcopy(store_data.get('config', config))
 
         if raw_config is None:
-            raise ValueError(
-                "The saved wrapper does not contain a config. Pass one via "
-                "PSFModelHARMONI.load(..., config=...)."
-            )
+            raise ValueError("The saved wrapper does not contain a config. Pass one via PSFModelHARMONI.load(..., config=...).")
 
         if (
             isinstance(raw_config, dict)
@@ -222,9 +207,7 @@ class PSFModelHARMONI(PSFModelNFM):
 
         instance = cls(
             config=raw_config,
-            multiple_obs=store_data.get(
-                'multiple_obs', store_data.get('multiple_OBs', False)
-            ),
+            multiple_obs=store_data.get('multiple_obs', store_data.get('multiple_OBs', False)),
             LO_NCPAs=store_data.get('LO_NCPAs', True),
             use_Zernike=store_data.get('use_Zernike', True),
             use_static_WFE=store_data.get('use_static_WFE', True),
@@ -254,9 +237,6 @@ class PSFModelHARMONI(PSFModelNFM):
         instance.backup_manager = instance.inputs_manager.copy()
         return instance
 
+
     def copy(self):
-        return type(self).load(
-            self.save(cpu=False),
-            device=self.device,
-            config=deepcopy(self._config_raw),
-        )
+        return type(self).load(self.save(cpu=False), device=self.device, config=deepcopy(self._config_raw))

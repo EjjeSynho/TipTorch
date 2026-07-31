@@ -19,7 +19,7 @@ class TipTorch(torch.nn.Module):
         # If not provided externally, TipTorch tries to load pupil and apodizer from the config file.
         if self.pupil is None:
             pupil_path = Path(self.config['telescope']['PathPupil'])
-            self.pupil = self.make_tensor(to_little_endian(fits.getdata(pupil_path)))
+            self.pupil = self.make_tensor(to_little_endian(fits.getdata(pupil_path))).T
 
         if self.apodizer is None and self.config['telescope']['PathApodizer'] is not None:
             apodizer_path = Path(self.config['telescope']['PathApodizer'])
@@ -663,12 +663,14 @@ class TipTorch(torch.nn.Module):
         # atfInt = self._stabilize(hInt * z**(-delay) * rtfInt)    # Aliasing transfer function
         # ntfInt = self._stabilize(atfInt / z, 1e-12)              # Noise transfer function
         # ntfInt = self._stabilize(hInt * z**(-delay-1)) # according to Sanchit, but it maybe wrong
-        
+
         z = torch.exp(2j*torch.pi*freq*Ts) # no minus according to Sanchit
-        hInt = loop_gain / (1.0 - 1.0/z)
-        rtfInt = 1. / (1 + hInt*z.pow(-delay))  # Rejection transfer function
-        atfInt = hInt * z.pow(-delay) * rtfInt  # Aliasing transfer function
-        ntfInt = atfInt / z                     # Noise transfer function
+        # z == 1 at freq == 0, which would make this denominator vanish; stabilize to avoid a div-by-zero / NaN gradient
+        hInt = loop_gain / self._stabilize(1.0 - 1.0/z, 1e-12)
+        z_pow_delay = z.pow(-delay) # cached: reused below instead of being recomputed
+        rtfInt = 1. / self._stabilize(1 + hInt*z_pow_delay, 1e-12)  # Rejection transfer function
+        atfInt = hInt * z_pow_delay * rtfInt                        # Aliasing transfer function
+        ntfInt = atfInt / z                                         # Noise transfer function
         # ntfInt = hInt * z**(-delay-1) # according to Sanchit, but it maybe wrong
                     
         return hInt, rtfInt, atfInt, ntfInt
