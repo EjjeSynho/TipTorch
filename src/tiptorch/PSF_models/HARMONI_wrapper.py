@@ -62,25 +62,7 @@ class PSFModelHARMONI(PSFModelNFM):
             λ_max=λ_max,
             num_λ_slices=num_λ_slices,
         )
-
-    @staticmethod
-    def _resolve_static_WFE_path(config, static_WFE_path):
-        if static_WFE_path is not None:
-            return str(Path(static_WFE_path))
-
-        configs = [config] if isinstance(config, dict) else list(config)
-        paths = {
-            entry.get('telescope', {}).get('PathStaticOn')
-            or entry.get('PathStaticOn')
-            for entry in configs
-            if isinstance(entry, dict)
-        }
-        paths.discard(None)
-
-        if len(paths) > 1:
-            raise ValueError("Different static WFE maps for different observations are not supported.")
-
-        return str(Path(paths.pop())) if paths else None
+        
 
     def _init_model(self, config):
         physics_on = self.model_type != 'psfao'
@@ -105,6 +87,27 @@ class PSFModelHARMONI(PSFModelNFM):
             retain_PSDs=self.retain_PSDs,
             dtype=self.dtype,
         )
+
+
+    @staticmethod
+    def _resolve_static_WFE_path(config, static_WFE_path):
+        if static_WFE_path is not None:
+            return str(Path(static_WFE_path))
+
+        configs = [config] if isinstance(config, dict) else list(config)
+        paths = {
+            entry.get('telescope', {}).get('PathStaticOn')
+            or entry.get('PathStaticOn')
+            for entry in configs
+            if isinstance(entry, dict)
+        }
+        paths.discard(None)
+
+        if len(paths) > 1:
+            raise ValueError("Different static WFE maps for different observations are not supported.")
+
+        return str(Path(paths.pop())) if paths else None
+    
 
     def _load_static_WFE(self):
         """Load a pupil-sampled static WFE map whose values are in nanometres."""

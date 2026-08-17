@@ -2,11 +2,6 @@
 %reload_ext autoreload
 %autoreload 2
 
-# *****************************************************************************************************
-# ********************* FIX BACK PUPIL TRANSPOSE IN TIPTORCH  **********************************
-# *****************************************************************************************************
-# *****************************************************************************************************
-
 import sys
 import torch
 import numpy as np
@@ -34,38 +29,44 @@ N_λ_bins = 40  # Number of spectral bins; set to None to use Δλ_bin
 
 #%%
 pupil_path = '/home/aosimul/akuznets/Data/HARMONI/pupils/EELT480pp0.0803m_obs0.283_spider2023.fits'
+pupil_path_T = pupil_path.replace('2023.fits', '2023_T.fits')
 
-with fits.open(pupil_path) as hdul:
+with fits.open(pupil_path_T) as hdul:
     pupil_data = hdul[1].data
 
 plt.imshow(pupil_data, cmap='gray', origin='lower')
 plt.axis('off')
 plt.show()
 
-#%%
-def fft_propagate_pupil_to_focal(pupil):
-    pupil = np.asarray(pupil, dtype=np.complex64)
-    focal_field = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(pupil)))
-    focal_intensity = np.abs(focal_field) ** 2
-    return focal_intensity / focal_intensity.sum()
+# hdul = fits.HDUList([fits.PrimaryHDU(), fits.ImageHDU(data=pupil_data.T)])
+# hdul.writeto(pupil_path_T, overwrite=True)
 
 
-PSF_fft = fft_propagate_pupil_to_focal(pupil_data)
+# def fft_propagate_pupil_to_focal(pupil):
+#     pupil = np.asarray(pupil, dtype=np.complex64)
+#     focal_field = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(pupil)))
+#     focal_intensity = np.abs(focal_field) ** 2
+#     return focal_intensity / focal_intensity.sum()
 
-plt.figure(figsize=(5, 5))
-plt.imshow(np.log10(np.clip(PSF_fft, 1e-12, None)), origin='lower', cmap='inferno')
-plt.title('Minimal FFT PSF from pupil_data')
-plt.colorbar(label='log10 intensity')
-plt.tight_layout()
-plt.show()
+
+# PSF_fft = fft_propagate_pupil_to_focal(pupil_data)
+
+# plt.figure(figsize=(5, 5))
+# plt.imshow(np.log10(np.clip(PSF_fft, 1e-12, None)), origin='lower', cmap='inferno')
+# plt.title('Minimal FFT PSF from pupil_data')
+# plt.colorbar(label='log10 intensity')
+# plt.tight_layout()
+# plt.show()
 
 #%%
 # >>>>>>> Load simulated PSF cube for comparison
+# cube_path = '/home/aosimul/akuznets/Data/HARMONI/simulated_cubes_6mas/01_Feige110_MCAO_6MAS_H_CLEAR_ERM_DATACUBE.fits'
+# cube_path = '/home/aosimul/akuznets/Data/HARMONI/simulated_cubes_6mas/01_Feige110_MCAO_6MAS_J_CLEAR_ERM_DATACUBE.fits'
 # cube_path = '/home/aosimul/akuznets/Data/HARMONI/simulated_cubes_6mas/01_Feige110_MCAO_6MAS_Iz_CLEAR_ERM_DATACUBE.fits'
-cube_path = '/home/aosimul/akuznets/Data/HARMONI/simulated_cubes_6mas/01_Feige110_MCAO_6MAS_H_CLEAR_ERM_DATACUBE.fits'
+cube_path = '/home/aosimul/akuznets/Data/HARMONI/simulated_cubes_6mas/01_Feige110_MCAO_6MAS_K_CLEAR_ERM_DATACUBE.fits'
 
 with fits.open(cube_path) as hdul:
-    PSF_0 = hdul[1].data  # Shape: (N_wvl, N_pix, N_pix) or (N_wvl, N_y, N_x)
+    PSF_0 = hdul[1].data  # Shape: [N_wvl, N_pix, N_pix] or [N_wvl, N_y, N_x]
     PSF_header = hdul[1].header
     
 print(f"\nLoaded PSF cube from {cube_path}")
@@ -286,7 +287,7 @@ def ConfigInit(N_layers=None, verbose=False):
     config_torch['sensor_science']['PixelScale']    = 6.0
     config_torch['sensor_science']['FieldOfView']   = N_pix
     config_torch['telescope']['PupilAngle']         = torch.tensor(22.0, device=default_device)  # [deg]
-    config_torch['telescope']['PathPupil']          = '/home/aosimul/akuznets/Data/HARMONI/pupils/EELT480pp0.0803m_obs0.283_spider2023.fits'
+    config_torch['telescope']['PathPupil']          = pupil_path_T
     config_torch['telescope']['PathStaticOn']       = '/home/aosimul/akuznets/Data/HARMONI/pupils/ELT_M1_MORFEO_DMs_static_wfe_480px.fits'
     config_torch['DM']['NumberReconstructedLayers'] = N_layers
 
@@ -363,8 +364,6 @@ model = PSFModelHARMONI(
 )
 tiptorch_model = model.model
 
-# tiptorch_model.pupil = tiptorch_model.pupil.T
-
 model.inputs_manager.delete('wind_speed_single')
 model.inputs_manager.delete('wind_dir_single')
 
@@ -374,9 +373,7 @@ x_dict = model.inputs_manager.to_dict()
 
 x_dict['J_ctrl'] = x_dict['J_ctrl'] * 0.0 + 6.0
 
-
 PSF_1 = model(x_dict) # update the model with the initial parameters to ensure all internal states are consistent
-
 
 cmap_viridis = plt.cm.get_cmap('viridis').copy()
 cmap_viridis.set_bad(color='#440154')  # viridis darkpurple
@@ -389,9 +386,8 @@ plt.axis('off')
 plt.show()
 
 
-#%%
+#%
 print(model.inputs_manager)
-
 print("\n" + "="*60)
 print("Model Initialization Summary".center(60))
 print("="*60)
@@ -416,8 +412,6 @@ print(model.inputs_manager)
 
 _ = model()
 
-
-#%
 # Fit the sparse HARMONI cube using the same managed-parameter workflow as the
 # MUSE on-sky example. The zero-padded border is excluded from the objective.
 PSF_data = torch.as_tensor(PSF_0, device=default_device, dtype=default_torch_type,).unsqueeze(0)
@@ -487,12 +481,14 @@ def jitter_penalty():
 def dn_penalty():
     """Encourage small differential piston values (in nm) to avoid unphysical PSF broadening."""
     dn = model.inputs_manager['dn'].abs()
-    return dn * 0.02
+    # return dn * 0.02 # for J
+    return dn * 0.015 # for K
 
 
 def loss_fn(x):
     PSF_fitted = run_model(x)
-    PSF_loss = loss_PSF(PSF_data, PSF_fitted, w_MSE=2000.0, w_MAE=2.6, w_log=500.0)
+    # PSF_loss = loss_PSF(PSF_data, PSF_fitted, w_MSE=2000.0, w_MAE=2.6, w_log=500.0) # For J
+    PSF_loss = loss_PSF(PSF_data, PSF_fitted, w_MSE=10000.0, w_MAE=2.6, w_log=10.0) # For K
     # metrics_loss = metric_mismatch_loss(PSF_fitted, PSF_data)
     return PSF_loss + dn_penalty() + Moffat_penalty()  #+ jitter_penalty() 
 
@@ -637,7 +633,7 @@ sample_ids = [0, len(λ_binned) // 2, len(λ_binned) - 1]
 fig, axes = plt.subplots(2, len(sample_ids), figsize=(15, 9))
 
 for column, spectral_id in enumerate(sample_ids):
-    data_slice = PSF_binned[spectral_id]
+    data_slice  = PSF_binned[spectral_id]
     model_slice = PSF_1_full[spectral_id].numpy()
     vmax = max(data_slice.max(), model_slice.max())
     norm = LogNorm(vmin=max(vmax * 1e-4, 1e-16), vmax=vmax)
