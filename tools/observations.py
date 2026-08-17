@@ -798,7 +798,6 @@ class MUSEObservation:
 
     def AddSourcesToModelConfig(self):
         # TODO: properly manage per-source variables in NFM_wrapper if sources are added/deleted
-        # TODO: implement sources deletion
         pixel_scale = self.model_config['sensor_science']['PixelScale'] # [mas/pix]
         
         # Sources coordinates that can be understood by TipTorch model
@@ -817,7 +816,7 @@ class MUSEObservation:
 
 
     def ExtractSpectraFromCore(self, sources_table, cube_sparse, cube_full):
-        """ This function is used to extract an approximate spectrum for each source before spectral disentangling via simulation."""
+        """ This function is used to extract an approximate spectrum for each source before spectral disentangling via SimulateField()."""
         if len(sources_table) == 0:
             raise ValueError("No sources detected. Please (re-)run DetectSources() or AddSources() before initializing sources info.")
         

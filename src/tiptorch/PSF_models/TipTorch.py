@@ -16,26 +16,29 @@ from pathlib import Path
 class TipTorch(torch.nn.Module):
 
     def _load_pupil_and_apodizer(self):
-        # If not provided externally, TipTorch tries to load pupil and apodizer from the config file.
-        if self.pupil is None:
+        # If not provided externally, TipTorch tries to load pupil and apodizer from the config file
+        pupil_loaded = self.pupil is None
+        if pupil_loaded:
             pupil_path = Path(self.config['telescope']['PathPupil'])
-            self.pupil = self.make_tensor(to_little_endian(fits.getdata(pupil_path))).T
+            self.pupil = self.make_tensor(to_little_endian(fits.getdata(pupil_path)))
 
-        if self.apodizer is None and self.config['telescope']['PathApodizer'] is not None:
+        apodizer_loaded = self.apodizer is None and self.config['telescope']['PathApodizer'] is not None
+        if apodizer_loaded:
             apodizer_path = Path(self.config['telescope']['PathApodizer'])
             self.apodizer = self.make_tensor(to_little_endian(fits.getdata(apodizer_path)))
 
-        if self.pupil_angle != 0.0:
-            # Physically rotate the loaded masks; downstream code expects an already-oriented pupil
+        if self.apodizer is not None:
+            assert self.pupil.shape[-1] == self.apodizer.shape[-1], "Pupil and apodizer must have the same size"
+
+        # Externally provided pupil/apodizer are assumed to already be correctly oriented, so rotate only what was just loaded
+        if self.pupil_angle != 0.0 and pupil_loaded:
             angle = self.pupil_angle.item() if torch.is_tensor(self.pupil_angle) else self.pupil_angle
             # Pupil is a binary mask, so use nearest-neighbor to avoid introducing fractional edge values
             self.pupil = TF.rotate(self.pupil.unsqueeze(0), -angle, interpolation=TF.InterpolationMode.NEAREST).squeeze(0)
 
-            if self.apodizer is not None:
+            if apodizer_loaded:
                 self.apodizer = TF.rotate(self.apodizer.unsqueeze(0), -angle, interpolation=TF.InterpolationMode.BILINEAR).squeeze(0)
 
-        if self.apodizer is not None:
-            assert self.pupil.shape[-1] == self.apodizer.shape[-1], "Pupil and apodizer must have the same size"
 
 
     def UpdateStaticOTF(self):
@@ -49,10 +52,11 @@ class TipTorch(torch.nn.Module):
         phase_size = self.pupil.shape[-1]
         self.pupil_padder = torch.nn.ZeroPad2d(int(round(phase_size * self.sampling_min / 2 - phase_size / 2)))
 
-        # Compute the diffraction-limited OTF from the pupil (and apodizer if present).
+        # Compute the diffraction-limited OTF from the pupil (and apodizer if present)
         pupil_phase = self.pupil * self.apodizer if self.apodizer is not None else self.pupil
         self.OTF_static_default = self.Phase2OTF(pupil_phase)
-        # Live OTF is reset to the diffraction-limited reference whenever sampling changes.
+        
+        # Live OTF is reset to the diffraction-limited reference whenever sampling changes
         self.OTF_static = self.OTF_static_default.clone()
         return self.OTF_static
     

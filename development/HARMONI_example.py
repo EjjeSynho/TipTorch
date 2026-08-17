@@ -22,7 +22,6 @@ sys.path.append(str(Path(__file__).resolve().parent.parent))
 from tiptorch.PSF_models.HARMONI_wrapper import PSFModelHARMONI
 from tiptorch.managers.config_manager import ConfigManager
 from tiptorch._config import default_device, default_torch_type
-# from tiptorch.tools import PSFMismatchLoss
 from tiptorch.tools.utils import BinCn2, mask_circle
 from tools.plotting import plot_radial_PSF_profiles
 from astropy.io import fits
@@ -32,6 +31,33 @@ N_pix    = 151  # Desired number of pixels in the final PSF cube (N_pix x N_pix)
 # N_layers = 10  # Number of binned atmospheric layers
 N_layers = None
 N_λ_bins = 40  # Number of spectral bins; set to None to use Δλ_bin
+
+#%%
+pupil_path = '/home/aosimul/akuznets/Data/HARMONI/pupils/EELT480pp0.0803m_obs0.283_spider2023.fits'
+
+with fits.open(pupil_path) as hdul:
+    pupil_data = hdul[1].data
+
+plt.imshow(pupil_data, cmap='gray', origin='lower')
+plt.axis('off')
+plt.show()
+
+#%%
+def fft_propagate_pupil_to_focal(pupil):
+    pupil = np.asarray(pupil, dtype=np.complex64)
+    focal_field = np.fft.fftshift(np.fft.fft2(np.fft.ifftshift(pupil)))
+    focal_intensity = np.abs(focal_field) ** 2
+    return focal_intensity / focal_intensity.sum()
+
+
+PSF_fft = fft_propagate_pupil_to_focal(pupil_data)
+
+plt.figure(figsize=(5, 5))
+plt.imshow(np.log10(np.clip(PSF_fft, 1e-12, None)), origin='lower', cmap='inferno')
+plt.title('Minimal FFT PSF from pupil_data')
+plt.colorbar(label='log10 intensity')
+plt.tight_layout()
+plt.show()
 
 #%%
 # >>>>>>> Load simulated PSF cube for comparison
@@ -51,11 +77,14 @@ print(f"Number of wavelengths: {PSF_0.shape[0]}")
 λ_ref_val = PSF_header['CRVAL3'] / 10.0
 
 pix_idx = np.arange(PSF_0.shape[0]) + 1  # FITS pixel indices are 1-based
-λ_fits = λ_ref_val + (pix_idx - λ_ref_pix) * Δλ
+λ_full = λ_ref_val + (pix_idx - λ_ref_pix) * Δλ
+
+
+valid_slices = slice(212, -212)
 
 # Crop border slices:
-PSF_0  = PSF_0 [212:-212, ...]
-λ_fits = λ_fits[212:-212]
+PSF_0  = PSF_0[valid_slices, ...]
+λ_fits = λ_full[valid_slices]
 
 print(f"Wavelength range: {λ_fits[0]:.1f} to {λ_fits[-1]:.1f} nm")
 
@@ -126,6 +155,11 @@ def bin_spectral_cube(cube, wavelengths, n_bins=None, Δλ_bin=None):
 n_wvl, n_y, n_x = PSF_0.shape
 centroid = centroid_2dg( PSF_0.mean(axis=0) )
 center_x, center_y = int(round(centroid[0])), int(round(centroid[1]))
+
+# Preserved under different names since center_y/center_x get reassigned later on:
+# needed to embed the fitted cutout back into the original (raw) pixel grid.
+orig_frame_shape  = (n_y, n_x)
+orig_frame_center = (center_y, center_x)
 
 print(f"\nPSF cube center (from maximum): ({center_y}, {center_x})")
 print(f"PSF cube original shape: {PSF_0.shape}")
@@ -318,14 +352,14 @@ model = PSFModelHARMONI(
     use_Zernike = True,
     use_static_WFE = True,
     Z_mode_max = 3,
-    use_Moffat = True,
+    use_Moffat = False,
     N_spline_nodes = 5,
     device = default_device,
     retain_PSDs = False,
     dtype = default_torch_type,
-    λ_min = float(λ_binned[0]  * 1e-9),
-    λ_max = float(λ_binned[-1] * 1e-9),
-    num_λ_slices=len(λ_binned),
+    λ_min = float(λ_full[0]  * 1e-9),
+    λ_max = float(λ_full[-1] * 1e-9),
+    num_λ_slices=len(λ_full),
 )
 tiptorch_model = model.model
 
@@ -335,7 +369,7 @@ model.inputs_manager.delete('wind_speed_single')
 model.inputs_manager.delete('wind_dir_single')
 
 # model.inputs_manager.set_optimizable(['LO_coefs', 'F_norm', 'bg_ctrl', 'Cn2_weights', 'L0', 'r0'], False)
-model.inputs_manager.set_optimizable(['LO_coefs', 'F_norm', 'bg_ctrl', 'Cn2_weights'], False)
+model.inputs_manager.set_optimizable(['LO_coefs', 'F_norm', 'bg_ctrl', 'Cn2_weights', 'L0'], False)
 x_dict = model.inputs_manager.to_dict()
 
 x_dict['J_ctrl'] = x_dict['J_ctrl'] * 0.0 + 6.0
@@ -351,8 +385,11 @@ vmax = max(PSF_1.max(), PSF_1.max())
 vmin = vmax * 1e-4
 
 plt.imshow(PSF_1.cpu().squeeze().sum(dim=0), cmap=cmap_viridis, origin='lower', norm=LogNorm(vmin=vmin, vmax=vmax))
+plt.axis('off')
+plt.show()
 
 
+#%%
 print(model.inputs_manager)
 
 print("\n" + "="*60)
@@ -394,15 +431,6 @@ if λ_weighting:
 else:
     wavelength_weights = 1.0
 
-# Compare the EE curves at several scientifically interpretable aperture radii,
-# rather than making the fit depend on one arbitrary aperture.
-# EE_radii_pix = (2.0, 4.0, 8.0, 16.0, 32.0)
-# metric_mismatch_loss = PSFMismatchLoss(
-#     ee_radius=EE_radii_pix,
-#     peak_weight=1.0,
-#     fwhm_weight=100.0,
-#     ee_weight=5.0,
-# )
 
 def run_model(x):
     """Unpack an optimizer vector, update the wrapper, and render sparse PSFs."""
@@ -518,16 +546,6 @@ print(f"Fit success: {success}; final loss: {final_loss:.6f}")
 print("Fitted parameters:")
 print(model.inputs_manager)
 
-# Keep the mismatch computation graph-connected until presentation.
-# The component values can therefore also be used directly in another optimizer.
-# metric_mismatch = metric_mismatch_loss(PSF_1, PSF_data, return_components=True)
-
-# print("\nMean relative image-quality mismatch:")
-# print(f"  Peak: {metric_mismatch['peak'].detach().item() * 100:.2f}%")
-# print(f"  FWHM: {metric_mismatch['fwhm'].detach().item() * 100:.2f}%")
-# print(f"  EE ({', '.join(f'{radius:g}' for radius in EE_radii_pix)} pix): {metric_mismatch['ee'].detach().item() * 100:.2f}%")
-
-
 # Find wavelength closest to 1600 nm in sparse array
 target_wavelength = 1600.0  # nm
 wvl_idx = np.argmin(np.abs(λ_sparse - target_wavelength))
@@ -599,7 +617,7 @@ for i, lmbd_idx in enumerate(wvl_select):
         cutoff = 40,
         y_min = 3e-2,
         linthresh = 1e-2,
-        return_profiles = True,
+        return_profiles = False,
         ax = ax[i]
     )
     ax[i].set_title(f'λ = {λ_sparse[lmbd_idx]:.1f} nm')
@@ -609,10 +627,10 @@ plt.show()
 
 #%%
 print("\nSimulating the fitted model on the binned HARMONI H-band spectrum...")
-PSF_full = model.SimulateFullSpectrum(src_ids=0, λ_batch_size=50, verbose=True, force_cpu=True)[0]
+PSF_1_full = model.SimulateFullSpectrum(src_ids=0, λ_batch_size=50, verbose=True, force_cpu=True)[0]
 
-full_flux = PSF_full.sum(dim=(-2, -1))
-print(f"Full-spectrum PSF shape: {tuple(PSF_full.shape)}")
+full_flux = PSF_1_full.sum(dim=(-2, -1))
+print(f"Full-spectrum PSF shape: {tuple(PSF_1_full.shape)}")
 print(f"Per-slice flux range: {full_flux.min().item():.6f} to {full_flux.max().item():.6f}")
 
 sample_ids = [0, len(λ_binned) // 2, len(λ_binned) - 1]
@@ -620,7 +638,7 @@ fig, axes = plt.subplots(2, len(sample_ids), figsize=(15, 9))
 
 for column, spectral_id in enumerate(sample_ids):
     data_slice = PSF_binned[spectral_id]
-    model_slice = PSF_full[spectral_id].numpy()
+    model_slice = PSF_1_full[spectral_id].numpy()
     vmax = max(data_slice.max(), model_slice.max())
     norm = LogNorm(vmin=max(vmax * 1e-4, 1e-16), vmax=vmax)
     wavelength = λ_binned[spectral_id]
@@ -633,6 +651,181 @@ for column, spectral_id in enumerate(sample_ids):
 for axis in axes.flat:
     axis.set_xlabel('Pixel')
     axis.set_ylabel('Pixel')
+
+plt.tight_layout()
+plt.show()
+
+# Averaged full-spectrum radial profiles comparison
+wvl_select = [0, len(λ_sparse)//2, -1]
+
+avg_white = ( lambda x: x.mean(dim=0) if isinstance(x, torch.Tensor) else np.mean(x, axis=0) )
+
+plot_radial_PSF_profiles(
+    avg_white(PSF_0_full),
+    avg_white(PSF_1_full[valid_slices,...]),
+    'Data',
+    'Fitted',
+    cutoff = 40,
+    y_min = 3e-2,
+    linthresh = 1e-2,
+    return_profiles = False,
+)
+plt.tight_layout()
+plt.show()
+
+#%%
+# Save the fitted full-spectrum PSF cube as a FITS file, mirroring the original HARMONI
+# data cube's single-extension layout and WCS conventions (spatial + AWAV spectral axis).
+def save_fitted_cube_fits(
+    output_path, psf_cube, λ_full_nm, reference_header,
+    orig_frame_shape=None, orig_frame_center=None,
+    compress=True, compression_type='GZIP_2'
+):
+    """
+    Save a TipTorch-fitted full-spectrum PSF cube (N_λ, N_y, N_x) as a FITS file whose
+    header follows the same spatial/spectral WCS layout as the original simulated HARMONI
+    cube (reference_header), so the two files can be compared/overlaid directly.
+
+    Tile compression follows the same pattern as MUSEObservation.SaveModelCubeFITS.
+
+    Parameters
+    ----------
+    output_path       : str or Path
+    psf_cube          : array-like or torch.Tensor, shape (N_λ, N_y, N_x)
+    λ_full_nm         : 1-D array, wavelengths in nm, matching psf_cube's first axis
+    reference_header  : fits.Header of the original data cube (HDU[1]), used as a WCS template
+    orig_frame_shape  : (N_y, N_x) of the original (raw) cube this cutout was cropped/embedded
+                        from, if the cutout is meant to be placed back into it. Optional.
+    orig_frame_center : (y, x), 0-based pixel location in the original frame that this cutout's
+                        centre (N_pix // 2, N_pix // 2) corresponds to. Optional.
+    compress          : bool, apply tile compression (default True)
+    compression_type  : str, FITS tile compression algorithm (default 'GZIP_2')
+    """
+    data = psf_cube.detach().cpu().numpy() if torch.is_tensor(psf_cube) else np.asarray(psf_cube)
+    data = data.astype(np.float32)
+    n_λ, n_y, n_x = data.shape
+
+    λ_full_A = np.asarray(λ_full_nm, dtype=float) * 10.0  # nm -> angstrom, matching the reference header's units
+
+    hdr = fits.Header()
+    hdr['OBJECT'] = reference_header.get('OBJECT', 'UNKNOWN')
+
+    # Spatial WCS: same sky position and plate scale as the reference cube; only the
+    # reference pixel changes since the fitted cube uses a different (N_pix x N_pix) footprint.
+    hdr['CTYPE1'] = reference_header.get('CTYPE1', 'RA---TAN'); hdr['CUNIT1'] = reference_header.get('CUNIT1', 'deg')
+    hdr['CTYPE2'] = reference_header.get('CTYPE2', 'DEC--TAN'); hdr['CUNIT2'] = reference_header.get('CUNIT2', 'deg')
+    hdr['CD1_1']  = reference_header.get('CD1_1', 1.0);  hdr['CD1_2'] = reference_header.get('CD1_2', 0.0)
+    hdr['CD2_1']  = reference_header.get('CD2_1', 0.0);  hdr['CD2_2'] = reference_header.get('CD2_2', 1.0)
+    hdr['CRVAL1'] = reference_header.get('CRVAL1', 0.0); hdr['CRVAL2'] = reference_header.get('CRVAL2', 0.0)
+    hdr['CRPIX1'] = n_x / 2 + 0.5
+    hdr['CRPIX2'] = n_y / 2 + 0.5
+
+    # Spectral WCS: AWAV axis in angstrom, re-derived from the actually simulated wavelengths.
+    hdr['CTYPE3'] = reference_header.get('CTYPE3', 'AWAV'); hdr['CUNIT3'] = reference_header.get('CUNIT3', 'angstrom')
+    hdr['CRPIX3'] = 1.0
+    hdr['CRVAL3'] = float(λ_full_A[0])
+    hdr['CD3_3']  = float(np.median(np.diff(λ_full_A)))
+
+    hdr['BUNIT']   = 'normalized flux'
+    hdr['EXTNAME'] = 'DATA'
+    hdr['COMMENT'] = 'TipTorch-fitted PSF cube; WCS follows the original HARMONI simulated cube.'
+
+    # Raw-frame placement: lets this cutout be re-embedded at the correct pixel location
+    # in the original (uncropped) cube, e.g. via embed_PSF_in_new_cube(cube, ONAXIS2, ONAXIS1, OCENTY, OCENTX).
+    if orig_frame_shape is not None and orig_frame_center is not None:
+        hdr['ONAXIS1'] = (int(orig_frame_shape[1]), 'Original (raw) frame width, in pixels')
+        hdr['ONAXIS2'] = (int(orig_frame_shape[0]), 'Original (raw) frame height, in pixels')
+        hdr['OCENTX']  = (int(orig_frame_center[1]), '0-based x pixel in the raw frame at this cutout centre')
+        hdr['OCENTY']  = (int(orig_frame_center[0]), '0-based y pixel in the raw frame at this cutout centre')
+
+
+
+    if compress:
+        hdu = fits.CompImageHDU(data, header=hdr, compression_type=compression_type)
+    else:
+        hdu = fits.ImageHDU(data, header=hdr)
+
+    hdul = fits.HDUList([fits.PrimaryHDU(), hdu])
+    hdul.writeto(str(output_path), overwrite=True)
+    comp_label = f' ({compression_type} compressed)' if compress else ''
+    print(f"Saved fitted full-spectrum PSF cube{comp_label} to {output_path}")
+
+
+output_cube_path = Path(cube_path).with_name(Path(cube_path).stem + '_TipTorch_fit.fits')
+save_fitted_cube_fits(
+    output_cube_path,
+    PSF_1_full,
+    model.λ_full.detach().cpu().numpy() * 1e9,  # model.λ_full is in metres
+    reference_header=PSF_header,
+    orig_frame_shape=orig_frame_shape,
+    orig_frame_center=orig_frame_center,
+)
+
+#%%
+# Load the saved cube back and display it, as a sanity check that the FITS round-trips correctly.
+with fits.open(output_cube_path) as hdul_check:
+    hdul_check.info()
+    PSF_1_full_reloaded = hdul_check['DATA'].data
+    reloaded_header = hdul_check['DATA'].header
+
+n_λ_reloaded = reloaded_header['NAXIS3']
+λ_reloaded_A = reloaded_header['CRVAL3'] + np.arange(n_λ_reloaded) * reloaded_header['CD3_3']
+λ_reloaded_nm = λ_reloaded_A / 10.0
+
+print(f"Reloaded cube shape: {PSF_1_full_reloaded.shape}")
+print(f"Reloaded wavelength range: {λ_reloaded_nm[0]:.1f} to {λ_reloaded_nm[-1]:.1f} nm")
+print(f"Original raw-frame shape: ({reloaded_header['ONAXIS2']}, {reloaded_header['ONAXIS1']})")
+print(f"Cutout centre in raw frame: ({reloaded_header['OCENTY']}, {reloaded_header['OCENTX']})")
+
+# Embed the cutout back into the original (raw) pixel grid, using the ONAXIS1/2 and
+# OCENTX/OCENTY entries stored in the FITS header (see save_fitted_cube_fits above).
+def embed_cutout_at_position(cutout, raw_shape, center_yx):
+    """
+    Place a centred PSF cutout (N_λ, cut_ny, cut_nx) into a zero-padded cube of shape
+    (N_λ, *raw_shape), such that the cutout's own centre pixel lands at center_yx = (y, x)
+    in the raw frame. Clips at the raw-frame boundary, mirroring embed_PSF_in_new_cube.
+    """
+    n_λ, cut_ny, cut_nx = cutout.shape
+    raw_ny, raw_nx = raw_shape
+    center_y, center_x = center_yx
+
+    offset_y = center_y - cut_ny // 2
+    offset_x = center_x - cut_nx // 2
+
+    raw_cube = np.zeros((n_λ, raw_ny, raw_nx), dtype=cutout.dtype)
+
+    src_y_start, src_x_start = max(0, -offset_y), max(0, -offset_x)
+    dst_y_start, dst_x_start = max(0, offset_y),  max(0, offset_x)
+    src_y_end = min(cut_ny, raw_ny - offset_y)
+    src_x_end = min(cut_nx, raw_nx - offset_x)
+    dst_y_end = min(raw_ny, cut_ny + offset_y)
+    dst_x_end = min(raw_nx, cut_nx + offset_x)
+
+    raw_cube[:, dst_y_start:dst_y_end, dst_x_start:dst_x_end] = \
+        cutout[:, src_y_start:src_y_end, src_x_start:src_x_end]
+
+    return raw_cube
+
+
+raw_shape_reloaded = (reloaded_header['ONAXIS2'], reloaded_header['ONAXIS1'])
+center_yx_reloaded = (reloaded_header['OCENTY'], reloaded_header['OCENTX'])
+
+PSF_1_full_embedded = embed_cutout_at_position(PSF_1_full_reloaded, raw_shape_reloaded, center_yx_reloaded)
+print(f"Embedded cube shape: {PSF_1_full_embedded.shape}")
+
+sample_ids = [0, n_λ_reloaded // 2, n_λ_reloaded - 1]
+fig, axes = plt.subplots(1, len(sample_ids), figsize=(15, 5))
+
+for ax, spectral_id in zip(axes, sample_ids):
+    im = ax.imshow(
+        PSF_1_full_reloaded[spectral_id],
+        cmap='viridis', origin='lower',
+        norm=LogNorm(vmin=max(PSF_1_full_reloaded[spectral_id].max() * 1e-4, 1e-16), vmax=PSF_1_full_reloaded[spectral_id].max())
+    )
+    ax.set_title(f'Reloaded fit at {λ_reloaded_nm[spectral_id]:.1f} nm')
+    ax.set_xlabel('Pixel')
+    ax.set_ylabel('Pixel')
+    plt.colorbar(im, ax=ax, label='Intensity (log)')
 
 plt.tight_layout()
 plt.show()
