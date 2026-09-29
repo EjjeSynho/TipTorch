@@ -710,9 +710,9 @@ def save_fitted_cube_fits(
     # reference pixel changes since the fitted cube uses a different (N_pix x N_pix) footprint.
     hdr['CTYPE1'] = reference_header.get('CTYPE1', 'RA---TAN'); hdr['CUNIT1'] = reference_header.get('CUNIT1', 'deg')
     hdr['CTYPE2'] = reference_header.get('CTYPE2', 'DEC--TAN'); hdr['CUNIT2'] = reference_header.get('CUNIT2', 'deg')
-    hdr['CD1_1']  = reference_header.get('CD1_1', 1.0);  hdr['CD1_2'] = reference_header.get('CD1_2', 0.0)
-    hdr['CD2_1']  = reference_header.get('CD2_1', 0.0);  hdr['CD2_2'] = reference_header.get('CD2_2', 1.0)
-    hdr['CRVAL1'] = reference_header.get('CRVAL1', 0.0); hdr['CRVAL2'] = reference_header.get('CRVAL2', 0.0)
+    hdr['CD1_1']  = reference_header.get('CD1_1', 1.0);         hdr['CD1_2']  = reference_header.get('CD1_2', 0.0)
+    hdr['CD2_1']  = reference_header.get('CD2_1', 0.0);         hdr['CD2_2']  = reference_header.get('CD2_2', 1.0)
+    hdr['CRVAL1'] = reference_header.get('CRVAL1', 0.0);        hdr['CRVAL2'] = reference_header.get('CRVAL2', 0.0)
     hdr['CRPIX1'] = n_x / 2 + 0.5
     hdr['CRPIX2'] = n_y / 2 + 0.5
 
@@ -729,12 +729,10 @@ def save_fitted_cube_fits(
     # Raw-frame placement: lets this cutout be re-embedded at the correct pixel location
     # in the original (uncropped) cube, e.g. via embed_PSF_in_new_cube(cube, ONAXIS2, ONAXIS1, OCENTY, OCENTX).
     if orig_frame_shape is not None and orig_frame_center is not None:
-        hdr['ONAXIS1'] = (int(orig_frame_shape[1]), 'Original (raw) frame width, in pixels')
-        hdr['ONAXIS2'] = (int(orig_frame_shape[0]), 'Original (raw) frame height, in pixels')
+        hdr['ONAXIS1'] = (int(orig_frame_shape[1]),  'Original (raw) frame width, in pixels')
+        hdr['ONAXIS2'] = (int(orig_frame_shape[0]),  'Original (raw) frame height, in pixels')
         hdr['OCENTX']  = (int(orig_frame_center[1]), '0-based x pixel in the raw frame at this cutout centre')
         hdr['OCENTY']  = (int(orig_frame_center[0]), '0-based y pixel in the raw frame at this cutout centre')
-
-
 
     if compress:
         hdu = fits.CompImageHDU(data, header=hdr, compression_type=compression_type)

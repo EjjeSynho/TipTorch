@@ -67,7 +67,7 @@ def extract_reduced_muse_cube_metadata(cube_path: str | Path) -> dict:
     """
     headers = _headers_from_fits(cube_path)
 
-    ra = _get_first(headers, ["RA", "CRVAL1"])
+    ra  = _get_first(headers, ["RA", "CRVAL1"])
     dec = _get_first(headers, ["DEC", "CRVAL2"])
 
     coord = None
