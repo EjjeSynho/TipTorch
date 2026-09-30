@@ -462,13 +462,11 @@ class NFMCalibratorTrainer:
         collate_fn = self.collate_fn
         if collate_fn is not None:
             collator = lambda b: collate_fn(b, device=self.device)
+            
         elif hasattr(self.dataset, 'collate_batch'):
             collator = lambda b: self.dataset.collate_batch(b, device=self.device)
         else:
-            raise ValueError(
-                "NFMCalibratorTrainer requires a collate function. "
-                "Pass collate_fn=... or define dataset.collate_batch(batch, device)."
-            )
+            raise ValueError("NFMCalibratorTrainer requires a collate function. Pass collate_fn=... or define dataset.collate_batch(batch, device).")
 
         return DataLoader(
             dataset=Subset(self.dataset, [int(i) for i in indices]),
@@ -483,6 +481,7 @@ class NFMCalibratorTrainer:
     def _init_astrometry(self):
         n      = len(self.dataset)
         n_ctrl = len(np.atleast_1d(self.dataset.fitted_vals[0].get('dx_ctrl', [0])))
+        
         if self.pre_init_astrometry and 'dx_ctrl' in self.dataset.fitted_vals[0]:
             dx_data = np.array([d['dx_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
             dy_data = np.array([d['dy_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
@@ -1168,10 +1167,7 @@ class SmallFactorNet(nn.Module):
         direct  : Tensor [B, n_direct_outputs]  — raw logits for dn / J_ctrl
         """
         raw = self.network(x)
-        return (
-            torch.nn.functional.softplus(raw[:, :self.n_factor_outputs]),
-            raw[:, self.n_factor_outputs:],
-        )
+        return (torch.nn.functional.softplus(raw[:, :self.n_factor_outputs]), raw[:, self.n_factor_outputs:])
 
 
 class NFMFactorCalibrator:
@@ -1359,8 +1355,7 @@ class NFMFactorCalibratorTrainer:
             )
         if calibrator.n_direct_outputs != self.N_direct:
             raise ValueError(
-                f"calibrator.n_direct_outputs={calibrator.n_direct_outputs} but "
-                f"direct_transformer expects {self.N_direct} outputs."
+                f"calibrator.n_direct_outputs={calibrator.n_direct_outputs} but direct_transformer expects {self.N_direct} outputs."
             )
 
         # Store base params as full-dataset float32 tensors [N, dim]
@@ -1369,9 +1364,11 @@ class NFMFactorCalibratorTrainer:
             bp = base_params[key]
             if isinstance(bp, np.ndarray):
                 bp = torch.from_numpy(bp)
+        
             bp = bp.to(dtype=torch.float32, device=device)
             if bp.dim() == 1:
                 bp = bp.unsqueeze(-1)
+            
             self.base_params[key] = bp
 
         # Train / val split and loaders
@@ -1412,8 +1409,8 @@ class NFMFactorCalibratorTrainer:
             f"n_factor_out={calibrator.n_factor_outputs} | n_direct_out={self.N_direct}"
         )
 
-    # ── Helpers ────────────────────────────────────────────────────────────────
 
+    # ── Helpers ────────────────────────────────────────────────────────────────
     def _build_factor_slices(self, base_params):
         """Build contiguous slice objects for each active factor key."""
         self.factor_slices = {}
@@ -1424,6 +1421,7 @@ class NFMFactorCalibratorTrainer:
             dim  = int(bp.shape[-1]) if ndim > 1 else 1
             self.factor_slices[key] = slice(offset, offset + dim)
             offset += dim
+
 
     def _init_const_params(self, dataset):
         """Initialise F_ctrl and LO_coefs constants from dataset fitted-value medians."""
@@ -1440,6 +1438,7 @@ class NFMFactorCalibratorTrainer:
         LO_coefs_const = nn.Parameter(torch.tensor(LO_init[None],      dtype=torch.float32, device=self.device))
         return F_ctrl_const, LO_coefs_const
 
+
     def _make_loader(self, indices, shuffle):
         if self.collate_fn is not None:
             collator = lambda b: self.collate_fn(b, device=self.device)
@@ -1447,30 +1446,33 @@ class NFMFactorCalibratorTrainer:
             collator = lambda b: self.dataset.collate_batch(b, device=self.device)
         else:
             raise ValueError(
-                "NFMFactorCalibratorTrainer requires a collate function. "
-                "Pass collate_fn=... or define dataset.collate_batch(batch, device)."
+                "NFMFactorCalibratorTrainer requires a collate function. Pass collate_fn=... or define dataset.collate_batch(batch, device)."
             )
         return DataLoader(
-            dataset=Subset(self.dataset, [int(i) for i in indices]),
-            batch_size=self.batch_size,
-            shuffle=shuffle,
-            num_workers=0,
-            collate_fn=collator,
-            drop_last=False,
+            dataset = Subset(self.dataset, [int(i) for i in indices]),
+            batch_size = self.batch_size,
+            shuffle = shuffle,
+            num_workers = 0,
+            collate_fn = collator,
+            drop_last = False,
         )
 
+
     def _init_astrometry(self):
-        n      = len(self.dataset)
-        n_ctrl = len(np.atleast_1d(self.dataset.fitted_vals[0].get('dx_ctrl', [0])))
+        N      = len(self.dataset)
+        N_ctrl = len(np.atleast_1d(self.dataset.fitted_vals[0].get('dx_ctrl', [0])))
+        
         if self.pre_init_astrometry and 'dx_ctrl' in self.dataset.fitted_vals[0]:
             dx_data = np.array([d['dx_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
             dy_data = np.array([d['dy_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
         else:
             self.optimize_astrometry = True
-            dx_data = np.zeros((n, n_ctrl), dtype=np.float32)
-            dy_data = np.zeros((n, n_ctrl), dtype=np.float32)
+            dx_data = np.zeros((N, N_ctrl), dtype=np.float32)
+            dy_data = np.zeros((N, N_ctrl), dtype=np.float32)
+        
         self.dx = torch.tensor(dx_data, device=self.device, dtype=torch.float32, requires_grad=self.optimize_astrometry)
         self.dy = torch.tensor(dy_data, device=self.device, dtype=torch.float32, requires_grad=self.optimize_astrometry)
+
 
     def _make_optimizer(self, lr=None):
         lr     = lr or self.lr
@@ -1484,8 +1486,8 @@ class NFMFactorCalibratorTrainer:
         sch = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=7, min_lr=1e-6)
         return opt, sch
 
-    # ── Parameter assembly ────────────────────────────────────────────────────
 
+    # ── Parameter assembly ────────────────────────────────────────────────────
     def _assemble_x_dict(self, tel_b: torch.Tensor, idxs_b: torch.Tensor) -> dict:
         """
         Build the PSF-model parameter dict for one batch.
@@ -1513,8 +1515,8 @@ class NFMFactorCalibratorTrainer:
 
         return x_dict
 
-    # ── PSF forward ───────────────────────────────────────────────────────────
 
+    # ── PSF forward ───────────────────────────────────────────────────────────
     def run_model(self, x_dict_NN: dict, config, idx, lambda_ids):
         """Run the PSF model for a batch at the given wavelength indices."""
         self.PSF_model.model.N_obs = len(idx)
@@ -1538,8 +1540,8 @@ class NFMFactorCalibratorTrainer:
 
         return self.PSF_model(x_dict, update_params=False)
 
-    # ── Loss ──────────────────────────────────────────────────────────────────
 
+    # ── Loss ──────────────────────────────────────────────────────────────────
     def _loss_per_sample(self, PSF_data, PSF_pred, x_dict_NN):
         diff = PSF_pred - PSF_data
         w    = 2e4
@@ -1549,17 +1551,21 @@ class NFMFactorCalibratorTrainer:
         LO = c.pow(2).mean(dim=-1) * 1e-7
         return PSF + LO
 
+
     def loss_fn(self, PSF_data, PSF_pred, x_dict_NN, sample_weights=None, return_per_sample=False):
         per = self._loss_per_sample(PSF_data, PSF_pred, x_dict_NN)
+        
         if return_per_sample:
             return per
         if sample_weights is None:
             return per.mean()
+        
         w = sample_weights.to(dtype=per.dtype, device=per.device).view(-1)
+        
         return (w * per).sum() / (w.sum() + 1e-12)
 
-    # ── Checkpoint ────────────────────────────────────────────────────────────
 
+    # ── Checkpoint ────────────────────────────────────────────────────────────
     def save_checkpoint(self, path, epoch, train_loss, val_loss):
         data = {
             'epoch': epoch, 'train_loss': train_loss, 'val_loss': val_loss,
@@ -1571,30 +1577,39 @@ class NFMFactorCalibratorTrainer:
         if self.optimize_astrometry:
             data['dx'] = self.dx.detach().clone()
             data['dy'] = self.dy.detach().clone()
+            
         torch.save(data, path)
         logger.debug(f"[FactorTrainer] Checkpoint saved -> {path}")
 
+
     def load_checkpoint(self, path, load_optimizer=True):
         path = Path(path)
+        
         if not path.exists():
             logger.error(f"[FactorTrainer] Checkpoint not found: {path}")
             return None, None, None
+        
         ckpt = torch.load(path, map_location=self.device)
         self.calibrator.load_state_dict(ckpt['calibrator_state_dict'])
+        
         if load_optimizer and 'optimizer_state_dict' in ckpt:
             self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+     
         if 'F_ctrl_const' in ckpt:
             self.F_ctrl_const.data   = ckpt['F_ctrl_const'].to(self.device)
+            
         if 'LO_coefs_const' in ckpt:
             self.LO_coefs_const.data = ckpt['LO_coefs_const'].to(self.device)
+            
         if self.optimize_astrometry and 'dx' in ckpt:
             self.dx.data = ckpt['dx'].to(self.device)
             self.dy.data = ckpt['dy'].to(self.device)
+        
         logger.info(f"[FactorTrainer] Checkpoint loaded <- {path} (epoch {ckpt.get('epoch', '?')})")
         return ckpt.get('epoch'), ckpt.get('train_loss'), ckpt.get('val_loss')
 
-    # ── Pretrain against fitted values ────────────────────────────────────────
 
+    # ── Pretrain against fitted values ────────────────────────────────────────
     def _factor_pretrain_targets(self, fitted_vals: dict, idxs: torch.Tensor) -> torch.Tensor:
         """
         Compute supervised factor targets = fitted_val / base_val for each active
@@ -1612,10 +1627,13 @@ class NFMFactorCalibratorTrainer:
                 cn2 = fv.clamp(min=1e-6)
                 GL  = (1.0 - cn2.sum(-1, keepdim=True)).clamp(min=1e-6)
                 fv  = torch.hstack((GL, cn2))
+            
             base  = self.base_params[key][idxs]
             ratio = (fv / (base.abs() + 1e-12)).clamp(min=1e-3, max=1e3)
             targets.append(ratio)
+        
         return torch.cat(targets, dim=-1)  # [B, n_factor_outputs]
+
 
     def _direct_pretrain_targets(self, fitted_vals: dict, device) -> torch.Tensor:
         """
@@ -1623,20 +1641,25 @@ class NFMFactorCalibratorTrainer:
         (normalised space, mirrors NFMCalibratorTrainer._pretrain_target_vector).
         """
         direct_keys = [k for k in _DIRECT_PARAM_KEYS if k in fitted_vals]
+        
         if not direct_keys:
             B = next(iter(fitted_vals.values())).shape[0]
             return torch.zeros(B, self.N_direct, device=device, dtype=torch.float32)
 
         B = fitted_vals[direct_keys[0]].shape[0]
         y = torch.zeros(B, self.N_direct, device=device, dtype=torch.float32)
+        
         for key, sl in self.direct_transformer.slices.items():
             if key not in fitted_vals:
                 continue
             val = fitted_vals[key]
             if val.dim() == 1:
                 val = val.unsqueeze(-1)
+                
             y[:, sl] = self.direct_transformer.transforms[key](val)
+        
         return y
+
 
     def pretrain(self, num_epochs=100, patience=15, lr=None, save_path=None):
         """
@@ -1695,6 +1718,7 @@ class NFMFactorCalibratorTrainer:
         print()
         if best_state:
             self.calibrator.load_state_dict(best_state)
+        
         torch.save(best_state, save_path)
         logger.info(f"[Factor] Pretrain done. Best val={best_loss:.6f}, saved -> {save_path}")
 
@@ -1741,6 +1765,7 @@ class NFMFactorCalibratorTrainer:
                 PSF_pred_b   = self.run_model(x_dict_NN, config_b, idxs_b, lambda_ids)
                 total_loss  += self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict_NN).item()
                 total_batches += 1
+            
                 if return_cubes:
                     for wi, li in enumerate(lambda_ids):
                         PSFs_pred[lpos, li] = PSF_pred_b[:, wi].cpu()
@@ -1752,10 +1777,11 @@ class NFMFactorCalibratorTrainer:
         avg_loss = total_loss / max(total_batches, 1)
         if return_cubes:
             return PSFs_pred, PSFs_data, local_to_global, NN_factors, NN_direct, tel_vecs, avg_loss
+    
         return avg_loss
 
-    # ── Train ─────────────────────────────────────────────────────────────────
 
+    # ── Train ─────────────────────────────────────────────────────────────────
     def train(
         self,
         num_epochs         = 500,
@@ -1850,9 +1876,7 @@ class NFMFactorCalibratorTrainer:
             logger.info(msg)
 
             if epoch % 5 == 0:
-                self.save_checkpoint(
-                    self.weights_dir / f'checkpoint_epoch_{epoch}.pth', epoch, avg_train, val_loss
-                )
+                self.save_checkpoint( self.weights_dir / f'checkpoint_epoch_{epoch}.pth', epoch, avg_train, val_loss )
 
             if patience_counter >= patience:
                 logger.info(f"[Factor] Early stopping at epoch {epoch}")
@@ -1862,26 +1886,26 @@ class NFMFactorCalibratorTrainer:
         logger.info(f"[Factor] Training complete. Best val={best_val:.6f}")
         return train_losses, val_losses
 
-    # ── K-fold difficulty weighting ───────────────────────────────────────────
 
+    # ── K-fold difficulty weighting ───────────────────────────────────────────
     @torch.no_grad()
     def _evaluate_per_sample_losses(self, loader):
         self.calibrator.eval()
-        global_ids = np.asarray(
-            loader.dataset.indices if isinstance(loader.dataset, Subset) else range(len(loader.dataset)),
-            dtype=int,
-        )
+        global_ids = np.asarray( loader.dataset.indices if isinstance(loader.dataset, Subset) else range(len(loader.dataset)), dtype=int)
         loss_acc = {int(i): [] for i in global_ids}
+        
         for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
             x_dict_NN = self._assemble_x_dict(tel_b, idxs_b)
+            
             for lambda_ids in self.lambda_id_sets:
                 PSF_pred_b = self.run_model(x_dict_NN, config_b, idxs_b, lambda_ids)
-                per = self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict_NN,
-                                   return_per_sample=True).cpu().numpy()
+                per = self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict_NN, return_per_sample=True).cpu().numpy()
                 for gid, lv in zip(idxs_b.cpu().numpy().astype(int), per):
                     loss_acc[int(gid)].append(float(lv))
+                    
                 del PSF_pred_b, per
             del x_dict_NN
+            
         return global_ids, np.array([np.mean(loss_acc[int(i)]) for i in global_ids], dtype=np.float32)
 
     def run_kfold_difficulty_weighting(
@@ -1965,8 +1989,8 @@ class NFMFactorCalibratorTrainer:
         )
         return torch.as_tensor(weights_all, dtype=torch.float32, device=self.device)
 
-    # ── Save calibrator bundle ─────────────────────────────────────────────────
 
+    # ── Save calibrator bundle ─────────────────────────────────────────────────
     def save_calibrator(self, path):
         """Export a self-contained bundle loadable by NFMFactorCalibrator."""
         # factor_slices stored as plain [start, stop] pairs (slice objects are not pickleable)

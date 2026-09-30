@@ -334,7 +334,7 @@ G_product_numeric_norm  = G_product_numeric / G_product_numeric.max()
 G_product_from_cov_norm = G_product_from_cov / G_product_from_cov.max()
 
 abs_diff = np.abs(G_product_numeric_norm - G_product_from_cov_norm)
-print(f"max abs difference after peak normalization = {abs_diff.max():.3e}")
+print(f"max abs difference after peak normalization  = {abs_diff.max():.3e}")
 print(f"mean abs difference after peak normalization = {abs_diff.mean():.3e}")
 
 extent = [x.min(), x.max(), y.min(), y.max()]

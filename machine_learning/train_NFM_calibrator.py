@@ -72,13 +72,9 @@ DEFAULT_CONFIG = {
         "pretrain_epochs":     100,
         "pretrain_patience":   15
     },
-    "fixed_params": [
-        "Jxy", "bg_ctrl", "dx_ctrl", "dy_ctrl",
-        "F_norm", "F_norm_lambda_ctrl", "src_dirs_x", "src_dirs_y",
-        "wind_dir_single", "F_norm_λ_ctrl"
-    ],
+    "fixed_params": ["Jxy", "bg_ctrl", "dx_ctrl", "dy_ctrl", "F_norm", "F_norm_lambda_ctrl", "src_dirs_x", "src_dirs_y", "wind_dir_single", "F_norm_λ_ctrl"],
     "weights_subdir":     "NFM_calibrator",
-    "max_train_samples":  null
+    "max_train_samples":  None
 }
 
 _parser = argparse.ArgumentParser(description="Train NFM Calibrator")
@@ -352,7 +348,7 @@ if not (hasattr(sys, 'ps1') or sys.flags.interactive):
 
 fig, ax = plt.subplots(figsize=(9, 4))
 ax.plot(train_losses, label='Train')
-ax.plot(val_losses,   label='Val')
+ax.plot(val_losses, label='Val')
 ax.set(xlabel='Epoch', ylabel='Loss', title='Training Losses')
 ax.legend(); ax.grid(True)
 plt.tight_layout(); plt.show()
@@ -367,7 +363,6 @@ if cfg["tune"]["enabled"]:
     )
     _meta["tuned_params"] = cfg["tune"]["params"]
 
-#%%
 with open(_meta_path, 'w') as _f:
     json.dump(_meta, _f, indent=2)
 logger.info(f"Post-tune metadata updated -> {_meta_path}")

@@ -1,6 +1,4 @@
-
 #%%
-# ── Imports ───────────────────────────────────────────────────────────────────
 import json
 import logging
 import argparse
@@ -31,8 +29,7 @@ DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 #%%
 # ── Load training config ──────────────────────────────────────────────────────
 _vparser = argparse.ArgumentParser(description="Validate NFM Calibrator")
-_vparser.add_argument('--config', type=str, default=None,
-                      help='Path to the JSON config used for training')
+_vparser.add_argument('--config', type=str, default=None, help='Path to the JSON config used for training')
 try:
     _vargs       = _vparser.parse_args()
     _config_path = Path(_vargs.config) if _vargs.config else None
@@ -42,6 +39,7 @@ except SystemExit:
 if _config_path and _config_path.exists():
     with open(_config_path) as _f:
         cfg = json.load(_f)
+
 elif 'cfg' not in dir():
     # Fall back to NFM_calibrator_config.json in the same directory as this script.
     # Works for both CLI (uses __file__) and plain IPython (uses cwd).
@@ -80,7 +78,6 @@ logger.info(f"Metadata loaded: name={train_meta['name']} | best_val={train_meta[
 # ── Ensure consistent dataset split ──────────────────────────────────────────
 _split_path = Path(train_meta['split_path'])
 
-#%%
 # ── Initialize trainer (when running standalone, outside a training session) ──
 if 'trainer' not in dir():
     dataset = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
@@ -108,6 +105,7 @@ if 'trainer' not in dir():
             PSF_model.inputs_manager.delete(_key)
         except Exception:
             pass
+    
     if PSF_model.use_Moffat:
         PSF_model.inputs_manager.delete('theta')
         PSF_model.inputs_manager.delete('ratio')
@@ -118,6 +116,7 @@ if 'trainer' not in dir():
 
     outputs_transformer = deepcopy(PSF_model.inputs_manager.get_transformer())
     _buf = outputs_transformer.unstack(PSF_model.inputs_manager.stack())
+    
     if 'LO_coefs' in _buf:
         _buf['LO_coefs'] = _buf['LO_coefs'][:, 1:]
     _ = outputs_transformer.stack(_buf)
@@ -151,8 +150,7 @@ if 'trainer' not in dir():
 
 if _split_path.exists():
     _split = np.load(_split_path)
-    if not (np.array_equal(_split['train_idx'], trainer.train_idx) and
-            np.array_equal(_split['val_idx'],   trainer.val_idx)):
+    if not (np.array_equal(_split['train_idx'], trainer.train_idx) and np.array_equal(_split['val_idx'],   trainer.val_idx)):
         logger.warning("Trainer split does not match saved split — restoring.")
         trainer.train_idx    = _split['train_idx']
         trainer.val_idx      = _split['val_idx']
@@ -197,7 +195,6 @@ feature_keywords = {'J_ctrl', 'F_ctrl', 'LO_coefs', 'wind_speed_single', 'L0'}
 for i, name in enumerate(output_names):
     if any(keyword in name for keyword in feature_keywords):
         selected_mean_features.append((name, means[i].item(), stds[i].item()))
-
 
 #%%
 from tiptorch.tools.utils import r0
@@ -263,7 +260,7 @@ plt.tight_layout()
 plt.show()
 
 #%%
-trainer.save_calibrator(Path(train_meta['bundle_path']))
+# trainer.save_calibrator(Path(train_meta['bundle_path']))
 
 #%% ======================================================================================================================================================================
 #%  ======================================================================================================================================================================
@@ -533,9 +530,150 @@ for PSF_data_avg, PSF_pred_avg, group_name, color in groups:
     )
     plt.tight_layout()
     plt.show()
+    
+    
+#%% ======================================= ETC Performance Analysis =======================================
+# ETC-like validation: for every validation-set sample, the atmospheric/HO-WFS entries of its config
+# are replaced by ESO Paranal ambient-condition bins (turbulence categories, TC), keyed by percentile.
+# The TC of a sample is picked as the one whose reference seeing is closest to the sample's own seeing.
+from collections import Counter
+from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 
+WIND_SPEED = { 10: 10.4,  20: 10.5,  30: 9.9,   50: 10.1,  70: 12.8,   85: 14.5,   100: 15    }
+WIND_DIR   = { 10: 12.5,  20: 28.8,  30: 40.2,  50: 37.2,  70: 40.0,   85: 37.0,   100: 37.0  }
+L0_TC      = { 10: 12.48, 20: 17.1,  30: 22.1,  50: 23.5,  70: 24,     85: 24.8,   100: 25.5  }
+GLF_TC     = { 10: 0.971, 20: 0.973, 30: 0.980, 50: 0.972, 70: 0.976,  85: 0.977,  100: 0.977 }
+SEEING_TC  = { 10: 0.6,   20: 0.7,   30: 0.8,   50: 1.0,   70: 1.15,   85: 1.4,    100: 1.6   }
+
+ETC_HO_PHOTONS  = 1740.2396627862904
+ETC_TC_BINS     = sorted(SEEING_TC.keys())
+ETC_SEEING_VALS = np.array([SEEING_TC[tc] for tc in ETC_TC_BINS])
+
+
+def seeing_to_TC(seeing_value):
+    """Map a (header) seeing value [arcsec] onto the nearest ETC turbulence category (TC) bin."""
+    return ETC_TC_BINS[int(np.argmin(np.abs(ETC_SEEING_VALS - seeing_value)))]
+
+
+def build_ETC_config(base_config, TC):
+    """Return a copy of a per-sample config with atmosphere/HO-WFS entries replaced by ETC 'white profile' values for TC."""
+    etc_cfg = deepcopy(base_config)
+    glf = GLF_TC[TC]
+
+    etc_cfg['atmosphere']['Seeing']        = [SEEING_TC[TC]]
+    etc_cfg['atmosphere']['L0']            = [L0_TC[TC]]
+    etc_cfg['atmosphere']['Cn2Weights']    = [[glf, 1.0 - glf]]
+    etc_cfg['atmosphere']['Cn2Heights']    = [[0, 2000]]
+    etc_cfg['atmosphere']['WindSpeed']     = [[WIND_SPEED[TC]] * 2]
+    etc_cfg['atmosphere']['WindDirection'] = [[WIND_DIR[TC]] * 2]
+    etc_cfg['sensor_HO']['NumberPhotons']  = [[ETC_HO_PHOTONS] * 4]
+
+    return etc_cfg
+
+
+# ── Build the ETC ('white profile') config for every validation-set sample ──
+true_val_ids = validation_ids.cpu().numpy().tolist()
+
+ETC_configs, ETC_TCs = [], []
+for true_id in true_val_ids:
+    seeing_value = dataset.configs[true_id]['atmosphere']['Seeing'][0]
+    TC = seeing_to_TC(seeing_value)
+    ETC_TCs.append(TC)
+    ETC_configs.append(build_ETC_config(dataset.configs[true_id], TC))
+
+print(f"TC distribution across the validation set: {dict(sorted(Counter(ETC_TCs).items()))}")
 
 #%%
+# ── Forward-run the physics-based model with the ETC atmosphere (no calibrator involved) ──
+# Batched over samples (like the DataLoader batches) and over wavelength subsets (like
+# NFMCalibratorTrainer.run_model/validate) to keep peak VRAM usage bounded and avoid OOM.
+N_val         = len(ETC_configs)
+ETC_batch_size = cfg['batch_size']
+PSFs_ETC_cube  = torch.zeros((N_val, N_wvl_total, dataset.H, dataset.W))
+
+for start in range(0, N_val, ETC_batch_size):
+    end           = min(start + ETC_batch_size, N_val)
+    chunk_configs = ETC_configs[start:end]
+    chunk_config  = MultipleTargetsInDifferentObservations(chunk_configs, device=default_device)
+
+    with torch.no_grad():
+        ETC_PSF_model = PSFModelNFM(
+            chunk_config,
+            multiple_obs   = True,
+            LO_NCPAs       = cfg['model']['LO_NCPAs'],
+            chrom_defocus  = cfg['model']['chrom_defocus'],
+            use_Moffat     = cfg['model']['use_Moffat'],
+            retain_PSDs    = cfg['model']['retain_PSDs'],
+            N_spline_nodes = cfg['model']['N_spline_nodes'],
+            Z_mode_max     = cfg['model']['Z_mode_max'],
+            device         = default_device,
+        )
+
+        for lambda_ids in trainer.lambda_id_sets:
+            wvl = trainer.lambda_full[lambda_ids].to(device=default_device)
+            chunk_config['sources_science']['Wavelength'] = wvl.view(1, -1)
+            ETC_PSF_model.model.config = chunk_config
+
+            if len(trainer.lambda_id_sets) == 1:
+                ETC_PSF_model.model.Update(grids=False, pupils=False, tomography=True)
+            else:
+                ETC_PSF_model.SetWavelengths(wvl)
+
+            PSF_chunk = ETC_PSF_model().detach().cpu()
+            for wi, li in enumerate(lambda_ids):
+                PSFs_ETC_cube[start:end, li] = PSF_chunk[:, wi]
+
+        ETC_PSF_model.cleanup()
+    release_gpu_memory()
+
+print(f"ETC ('white profile') PSF cube: {PSFs_ETC_cube.shape}")
+
+#%%
+# Radial profile validation of the ETC 'white profile' prediction against the true validation-set data,
+# following the same approach as the profile validation performed above for the calibrated predictions.
+wvl_select = [0, N_wvl_total // 2, -1]
+
+fig, axes = plt.subplots(1, len(wvl_select), figsize=(15, 4.5))
+p_errs_ETC = []
+
+for i, lmbd in enumerate(wvl_select):
+    err = plot_radial_PSF_profiles(
+        PSFs_data_cube[:, lmbd, ...].cpu().numpy(),
+        PSFs_ETC_cube [:, lmbd, ...].cpu().numpy(),
+        'Data',
+        'ETC (white profile)',
+        cutoff=40,
+        y_min=3e-2,
+        linthresh=1e-2,
+        return_profiles=True,
+        ax=axes[i],
+    )[2].squeeze().max().item()
+
+    axes[i].set_title(f"λ = {int((lambda_full[lmbd] * 1e9).round().item())} nm")
+    p_errs_ETC.append(err)
+
+fig.suptitle('ETC white-profile validation', fontsize=13, y=1.02)
+plt.tight_layout()
+plt.show()
+print(f"ΔSR per wavelength (ETC white profile): {np.array(p_errs_ETC)}")
+
+#%%
+# Spectrally-averaged radial profile for the ETC white profile, across the whole validation set
+fig = plt.figure(figsize=(10, 6))
+plot_radial_PSF_profiles(
+    PSF_avg(PSFs_data_cube),
+    PSF_avg(PSFs_ETC_cube),
+    'Data',
+    'ETC (white profile)',
+    title='Spectrally averaged PSF — ETC white profile validation',
+    cutoff=40,
+    ax=fig.add_subplot(111),
+)
+plt.tight_layout()
+plt.show()
+
+
+#%% ======================================= Features correlations =======================================
 # Correlation of each feature with loss
 input_features = dataset.features if 'dataset' in dir() else input_features
 loss_vals = loss_SR.cpu().numpy()
@@ -793,6 +931,7 @@ plt.tight_layout(); plt.show()
 # Print ranked table
 print(f"\n{'Feature':<35} {'Global |SHAP|':>14}")
 print("-" * 51)
+
 for i in feat_order:
     print(f"{shap_input_features[i]:<35} {global_importance[i]:>14.4f}")
 
@@ -814,6 +953,7 @@ print(f"Useful features ({len(useful_features)}): {useful_features}")
 # collapse the neuron dimension by averaging within each parameter group.
 param_names  = list(outputs_transformer.slices.keys())
 mean_abs_per_param = np.zeros((len(shap_input_features), len(param_names)))
+
 for j, (pname, slc) in enumerate(outputs_transformer.slices.items()):
     mean_abs_per_param[:, j] = mean_abs_shap[:, slc].mean(axis=1)
 
@@ -824,9 +964,8 @@ norm_heatmap = mean_abs_per_param / (mean_abs_per_param.max(axis=0, keepdims=Tru
 
 # Order features by global importance (most important at top)
 feat_order_hm = np.argsort(global_importance)[::-1]
+fig, ax = plt.subplots(figsize=(max(10, len(param_names) * 0.65), max(6,  len(shap_input_features) * 0.35)))
 
-fig, ax = plt.subplots(figsize=(max(10, len(param_names) * 0.65),
-                                max(6,  len(shap_input_features) * 0.35)))
 sns.heatmap(
     norm_heatmap[feat_order_hm, :],
     xticklabels=param_names,
@@ -880,9 +1019,7 @@ n_params  = len(param_names)
 ncols     = min(4, n_params)
 nrows     = int(np.ceil(n_params / ncols))
 
-fig, axes = plt.subplots(nrows, ncols,
-                         figsize=(ncols * 4.5, nrows * 3.5),
-                         constrained_layout=True)
+fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4.5, nrows * 3.5), constrained_layout=True)
 axes_flat = np.array(axes).ravel()
 
 for j, pname in enumerate(param_names):
@@ -921,10 +1058,8 @@ for j, pname in enumerate(param_names):
 # Limit to the first 6 parameter groups for visual clarity.
 # Re-derive shap_tel_np locally for the same session-isolation reason as Step 7.
 _n_feat = shap_values.shape[1]
-shap_tel_np = np.array(
-    [list(dataset.telemetry[i].values()) for i in range(len(dataset))],
-    dtype=np.float32,
-)
+shap_tel_np = np.array([list(dataset.telemetry[i].values()) for i in range(len(dataset))], dtype=np.float32)
+
 assert shap_tel_np.shape[1] == _n_feat, (
     f"Dataset has {shap_tel_np.shape[1]} features but shap_values has {_n_feat}. "
     "Re-run Steps 1-2 to recompute shap_values with the current dataset."
@@ -937,9 +1072,7 @@ shap_per_param = {
 }
 
 N_PARAM_PLOTS = min(6, n_params)
-fig, axes = plt.subplots(2, (N_PARAM_PLOTS + 1) // 2,
-                         figsize=((N_PARAM_PLOTS + 1) // 2 * 5, 8),
-                         constrained_layout=True)
+fig, axes = plt.subplots(2, (N_PARAM_PLOTS + 1) // 2, figsize=((N_PARAM_PLOTS + 1) // 2 * 5, 8), constrained_layout=True)
 axes_flat = np.array(axes).ravel()
 
 for j, pname in enumerate(list(shap_per_param.keys())[:N_PARAM_PLOTS]):
