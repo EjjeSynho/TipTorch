@@ -202,21 +202,39 @@ class NFMCalibrator():
         return path
 
 
-    def prepare_telemetry(self, reduced_telemetry: pd.DataFrame) -> torch.Tensor:
-        telemetry_pruned = reduce_dataframe(filter_dataframe(reduced_telemetry))
-        # Standartize/normalize features
-        telemetry_ = self.telemetry_scaler.transform(telemetry_pruned[self.features])
+    def prepare_features(self, telemetry_features: pd.DataFrame) -> torch.Tensor:
+        """Scale and impute telemetry already reduced to the calibrator features."""
+        # Standardize/normalize features
+        telemetry_ = self.telemetry_scaler.transform(telemetry_features[self.features])
         # Restore feature names back to avoid warnings
-        telemetry_ = pd.DataFrame(telemetry_, columns=self.features, index=telemetry_pruned.index)
+        telemetry_ = pd.DataFrame(telemetry_, columns=self.features, index=telemetry_features.index)
         # Impute missing values
         telemetry_ = self.telemetry_imputer.transform(telemetry_)
         return torch.tensor(telemetry_, dtype=torch.float32, device=self.device)
 
 
-    def forward(self, reduced_telemetry: pd.DataFrame):
-        # Prepare the telemetry data: filter, reduce, scale, and impute
-        telemetry_vector = self.prepare_telemetry(reduced_telemetry)
-    
+    def prepare_telemetry(self, reduced_telemetry: pd.DataFrame) -> torch.Tensor:
+        telemetry_pruned = reduce_dataframe(filter_dataframe(reduced_telemetry))
+        return self.prepare_features(telemetry_pruned)
+
+
+    def forward_prepared(self, telemetry_vector: torch.Tensor):
+        """Predict PSF parameters from telemetry that is already scaled and imputed."""
+        telemetry_vector = torch.as_tensor(
+            telemetry_vector,
+            dtype=torch.float32,
+            device=self.device,
+        )
+        if telemetry_vector.ndim == 1:
+            telemetry_vector = telemetry_vector.unsqueeze(0)
+
+        n_features = self.net.network[0].in_features
+        if telemetry_vector.ndim != 2 or telemetry_vector.shape[-1] != n_features:
+            raise ValueError(
+                "Prepared telemetry must have shape [N, "
+                f"{n_features}], got {tuple(telemetry_vector.shape)}."
+            )
+
         # Pass through the network to get predictions for the PSF model inputs
         x_pred = self.net(telemetry_vector)
         x_dict_pred = self.outputs_transformer.unstack(x_pred)
@@ -230,8 +248,22 @@ class NFMCalibrator():
         return x_dict_pred
 
 
+    def forward(self, reduced_telemetry: pd.DataFrame):
+        # Prepare the telemetry data: filter, reduce, scale, and impute
+        telemetry_vector = self.prepare_telemetry(reduced_telemetry)
+        return self.forward_prepared(telemetry_vector)
+
+
     def __call__(self, reduced_telemetry: pd.DataFrame):
         return self.forward(reduced_telemetry)
+
+
+    @torch.no_grad()
+    def _apply_calibration(self, x_dict_pred: dict, PSF_model) -> None:
+        """Adapt a calibrator prediction and apply it to a PSF model."""
+        x_dict_adapted = self._adapt_to_PSF_model(x_dict_pred, PSF_model)
+        PSF_model.update_manager_params(x_dict_adapted)
+        _ = PSF_model()
 
 
     @torch.no_grad()
@@ -242,12 +274,19 @@ class NFMCalibrator():
         """
         # Do parameters dict prediction
         x_dict_pred = self.forward(reduced_telemetry)
-        # If PSF modle has slightly different settings, adapt the predicted parameters accordingly (e.g. by cropping or padding with zeros)
-        x_dict_adapted = self._adapt_to_PSF_model(x_dict_pred, PSF_model)
-        # Update PSF model's internal PSF model inputs with the predicted parameters
-        PSF_model.update_manager_params(x_dict_adapted)
-        # Trigger PSF update with new parameters
-        _ = PSF_model()
+        self._apply_calibration(x_dict_pred, PSF_model)
+
+
+    @torch.no_grad()
+    def calibrate_prepared(self, telemetry_vector: torch.Tensor, PSF_model) -> None:
+        """
+        Calibrate a PSF model from telemetry that is already scaled and imputed.
+
+        This is the dataset/batched equivalent of :meth:`calibrate`; it avoids
+        applying the telemetry preprocessing pipeline to prepared NN inputs.
+        """
+        x_dict_pred = self.forward_prepared(telemetry_vector)
+        self._apply_calibration(x_dict_pred, PSF_model)
 
 
     def check_compatibility(self, PSF_model) -> dict:

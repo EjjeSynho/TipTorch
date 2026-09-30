@@ -4,6 +4,7 @@ import logging
 import argparse
 import pickle
 import numpy as np
+import pandas as pd
 import torch
 import matplotlib.pyplot as plt
 from copy import deepcopy
@@ -15,6 +16,7 @@ from tiptorch.tools.utils import r0
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from calibrators.NFM_calibrator import (
     SmallCalibratorNet,
+    NFMCalibrator,
     NFMCalibratorTrainer,
     NFMDataset,
     release_gpu_memory
@@ -546,6 +548,8 @@ GLF_TC     = { 10: 0.971, 20: 0.973, 30: 0.980, 50: 0.972, 70: 0.976,  85: 0.977
 SEEING_TC  = { 10: 0.6,   20: 0.7,   30: 0.8,   50: 1.0,   70: 1.15,   85: 1.4,    100: 1.6   }
 
 ETC_HO_PHOTONS  = 1740.2396627862904
+ETC_LGS_PHOTON_RATE_SCALE = 1240e3  # subapertures * HO frames per second
+ETC_REFERENCE_WAVELENGTH  = 500e-9  # seeing/r0 reference wavelength [m]
 ETC_TC_BINS     = sorted(SEEING_TC.keys())
 ETC_SEEING_VALS = np.array([SEEING_TC[tc] for tc in ETC_TC_BINS])
 
@@ -562,13 +566,82 @@ def build_ETC_config(base_config, TC):
 
     etc_cfg['atmosphere']['Seeing']        = [SEEING_TC[TC]]
     etc_cfg['atmosphere']['L0']            = [L0_TC[TC]]
-    etc_cfg['atmosphere']['Cn2Weights']    = [[glf, 1.0 - glf]]
-    etc_cfg['atmosphere']['Cn2Heights']    = [[0, 2000]]
-    etc_cfg['atmosphere']['WindSpeed']     = [[WIND_SPEED[TC]] * 2]
-    etc_cfg['atmosphere']['WindDirection'] = [[WIND_DIR[TC]] * 2]
+    # The calibrator predicts three Cn2 weights. Keep the ETC profile's two
+    # active layers and add a zero-weight placeholder for shape compatibility.
+    etc_cfg['atmosphere']['Cn2Weights']    = [[glf, 1.0 - glf, 0.0]]
+    etc_cfg['atmosphere']['Cn2Heights']    = [[0, 2000, 20000]]
+    etc_cfg['atmosphere']['WindSpeed']     = [[WIND_SPEED[TC]] * 3]
+    etc_cfg['atmosphere']['WindDirection'] = [[WIND_DIR[TC]] * 3]
     etc_cfg['sensor_HO']['NumberPhotons']  = [[ETC_HO_PHOTONS] * 4]
+    etc_cfg['DM']['NumberReconstructedLayers'] = 3
 
     return etc_cfg
+
+
+def build_ETC_telemetry(telemetry_vectors, TCs, calibrator):
+    """
+    Build physical-unit ETC telemetry from normalized validation telemetry.
+
+    Observation-specific quantities for which ETC has no replacement (target,
+    pointing, IRLOS setup, etc.) are retained. Atmospheric and HO-WFS features
+    are replaced by ETC values or quantities derived from them. AO diagnostics
+    unavailable to ETC are set to NaN so the fitted telemetry imputer estimates
+    them from the ETC conditions instead of leaking the observed values.
+    """
+    if len(telemetry_vectors) != len(TCs):
+        raise ValueError(
+            f"Expected one ETC category per telemetry row, got "
+            f"{len(TCs)} categories for {len(telemetry_vectors)} rows."
+        )
+
+    telemetry_physical = pd.DataFrame(
+        calibrator.telemetry_scaler.inverse_transform(telemetry_vectors.cpu().numpy()),
+        columns=calibrator.features,
+    )
+
+    seeing   = np.asarray([SEEING_TC[tc]  for tc in TCs], dtype=np.float64)
+    glf      = np.asarray([GLF_TC[tc]     for tc in TCs], dtype=np.float64)
+    wind     = np.asarray([WIND_SPEED[tc] for tc in TCs], dtype=np.float64)
+    wind_dir = np.asarray([WIND_DIR[tc]   for tc in TCs], dtype=np.float64)
+
+    seeing_rad = np.deg2rad(seeing / 3600.0)
+    r0 = 0.98 * ETC_REFERENCE_WAVELENGTH / seeing_rad
+    k = 2.0 * np.pi / ETC_REFERENCE_WAVELENGTH
+    cn2_integral = r0 ** (-5.0 / 3.0) / (0.423 * k**2)
+    tau0 = 0.314 * r0 / wind
+    free_atmosphere_seeing = seeing * (1.0 - glf) ** (3.0 / 5.0)
+
+    replacements = {
+        'Seeing (header)':               seeing,
+        'Tau0 (header)':                 tau0,
+        'Wind dir (header)':             wind_dir,
+        'Wind speed (header)':           wind,
+        'Free Atmosphere Seeing ["]':    free_atmosphere_seeing,
+        'MASS Tau0 [s]':                 tau0,
+        'MASS-DIMM Turb Velocity [m/s]': wind,
+        'MASS_FRACGL':                   glf,
+        'IA_FWHMLINOBS':                 seeing,
+        'LGS_TUR_ALT':                   1.0 - glf,
+        'LGS photons, [photons/m^2/s]':  ETC_HO_PHOTONS * ETC_LGS_PHOTON_RATE_SCALE,
+        'MASS_TURB total':               cn2_integral,
+        'Cn2 fraction below 2000m':      glf,
+        'Cn2_alt_binned_2':              np.full_like(seeing, 2.0),
+        'Cn2_frac_binned_2':             1.0 - glf,
+        'Cn2_alt_binned_3':              np.full_like(seeing, 20.0),
+        'Cn2_frac_binned_3':             np.zeros_like(seeing),
+    }
+    for feature, values in replacements.items():
+        if feature in telemetry_physical:
+            telemetry_physical[feature] = values
+
+    # These are measured closed-loop performance diagnostics, not ETC inputs.
+    # Impute them from the ETC conditions rather than retaining information from
+    # the actual observation in an otherwise synthetic ETC prediction.
+    for feature in ('LGS_STREHL', 'LGS_TURVAR_RES', 'LGS_FWHM_GAIN', 'LGS_SLOPERMS', 'theta0'):
+        if feature in telemetry_physical:
+            telemetry_physical[feature] = np.nan
+
+    return telemetry_physical
 
 
 # ── Build the ETC ('white profile') config for every validation-set sample ──
@@ -584,17 +657,33 @@ for true_id in true_val_ids:
 print(f"TC distribution across the validation set: {dict(sorted(Counter(ETC_TCs).items()))}")
 
 #%%
-# ── Forward-run the physics-based model with the ETC atmosphere (no calibrator involved) ──
+# ── Forward-run the calibrated physics-based model with the ETC atmosphere ──
 # Batched over samples (like the DataLoader batches) and over wavelength subsets (like
 # NFMCalibratorTrainer.run_model/validate) to keep peak VRAM usage bounded and avoid OOM.
-N_val         = len(ETC_configs)
+ETC_CALIB_PATH = Path(train_meta.get('bundle_path', WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth'))
+ETC_calibrator = NFMCalibrator(ETC_CALIB_PATH, device=default_device)
+
+# NFMDataset stores telemetry after the same scaling/imputation pipeline used by
+# NFMCalibrator. Guard the feature ordering before passing those prepared vectors
+# directly to the calibrator network.
+if list(dataset.features) != list(ETC_calibrator.features):
+    raise ValueError("ETC telemetry features do not match the calibrator bundle. Rebuild the dataset and calibrator with the same telemetry pipeline.")
+
+N_val          = len(ETC_configs)
 ETC_batch_size = cfg['batch_size']
 PSFs_ETC_cube  = torch.zeros((N_val, N_wvl_total, dataset.H, dataset.W))
+
+# Build a separate ETC telemetry set in physical units, then apply exactly the
+# scaler and imputer used to train the calibrator. telemetry_vecs is ordered in
+# the same validation-local order as validation_ids / ETC_TCs.
+ETC_telemetry_features = build_ETC_telemetry(telemetry_vecs, ETC_TCs, ETC_calibrator)
+ETC_telemetry_vecs = ETC_calibrator.prepare_features(ETC_telemetry_features)
 
 for start in range(0, N_val, ETC_batch_size):
     end           = min(start + ETC_batch_size, N_val)
     chunk_configs = ETC_configs[start:end]
     chunk_config  = MultipleTargetsInDifferentObservations(chunk_configs, device=default_device)
+    chunk_telemetry = ETC_telemetry_vecs[start:end]
 
     with torch.no_grad():
         ETC_PSF_model = PSFModelNFM(
@@ -608,6 +697,8 @@ for start in range(0, N_val, ETC_batch_size):
             Z_mode_max     = cfg['model']['Z_mode_max'],
             device         = default_device,
         )
+        _ = ETC_calibrator.check_compatibility(ETC_PSF_model)
+        ETC_calibrator.calibrate_prepared(chunk_telemetry, ETC_PSF_model)
 
         for lambda_ids in trainer.lambda_id_sets:
             wvl = trainer.lambda_full[lambda_ids].to(device=default_device)
@@ -624,12 +715,13 @@ for start in range(0, N_val, ETC_batch_size):
                 PSFs_ETC_cube[start:end, li] = PSF_chunk[:, wi]
 
         ETC_PSF_model.cleanup()
+        del chunk_telemetry
     release_gpu_memory()
 
-print(f"ETC ('white profile') PSF cube: {PSFs_ETC_cube.shape}")
+print(f"Calibrated ETC ('white profile') PSF cube: {PSFs_ETC_cube.shape}")
 
 #%%
-# Radial profile validation of the ETC 'white profile' prediction against the true validation-set data,
+# Radial profile validation of the calibrated ETC 'white profile' prediction against the true validation-set data,
 # following the same approach as the profile validation performed above for the calibrated predictions.
 wvl_select = [0, N_wvl_total // 2, -1]
 
@@ -641,7 +733,7 @@ for i, lmbd in enumerate(wvl_select):
         PSFs_data_cube[:, lmbd, ...].cpu().numpy(),
         PSFs_ETC_cube [:, lmbd, ...].cpu().numpy(),
         'Data',
-        'ETC (white profile)',
+        'Calibrated ETC (white profile)',
         cutoff=40,
         y_min=3e-2,
         linthresh=1e-2,
@@ -652,20 +744,20 @@ for i, lmbd in enumerate(wvl_select):
     axes[i].set_title(f"λ = {int((lambda_full[lmbd] * 1e9).round().item())} nm")
     p_errs_ETC.append(err)
 
-fig.suptitle('ETC white-profile validation', fontsize=13, y=1.02)
+fig.suptitle('Calibrated ETC white-profile validation', fontsize=13, y=1.02)
 plt.tight_layout()
 plt.show()
-print(f"ΔSR per wavelength (ETC white profile): {np.array(p_errs_ETC)}")
+print(f"ΔSR per wavelength (calibrated ETC white profile): {np.array(p_errs_ETC)}")
 
 #%%
-# Spectrally-averaged radial profile for the ETC white profile, across the whole validation set
+# Spectrally-averaged radial profile for the calibrated ETC white profile, across the whole validation set
 fig = plt.figure(figsize=(10, 6))
 plot_radial_PSF_profiles(
     PSF_avg(PSFs_data_cube),
     PSF_avg(PSFs_ETC_cube),
     'Data',
-    'ETC (white profile)',
-    title='Spectrally averaged PSF — ETC white profile validation',
+    'Calibrated ETC (white profile)',
+    title='Spectrally averaged PSF — calibrated ETC white profile validation',
     cutoff=40,
     ax=fig.add_subplot(111),
 )
