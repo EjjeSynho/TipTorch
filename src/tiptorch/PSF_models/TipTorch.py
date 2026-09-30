@@ -576,7 +576,9 @@ class TipTorch(torch.nn.Module):
         self.rad2mas  = self.make_tensor(3600 * 180 * 1000 / torch.pi)
         self.rad2arc  = self.make_tensor(self.rad2mas / 1000)
         self.cte = self.make_tensor( (24*spc.gamma(6/5)/5)**(5/6)*(spc.gamma(11/6)**2/(2*np.pi**(11/3))) )
-        self.jitter_norm_fact = self.make_tensor( 2*np.sqrt(2*np.log(2)) )**2
+        # The characteristic function of Gaussian image motion is
+        # exp[-(2*pi)^2 * sigma^2 * pupil_separation^2 / 2].
+        self.jitter_norm_fact = self.make_tensor(2 * torch.pi)**2
 
         self.n_air = AirRefractiveIndexCalculator(device=self.device, dtype=self.dtype)
 
@@ -864,8 +866,8 @@ class TipTorch(torch.nn.Module):
         cos_theta = torch.cos( torch.deg2rad(Jxy) )
         sin_theta = torch.sin( torch.deg2rad(Jxy) )
 
-        U_prime = self.U * cos_theta - self.V * sin_theta
-        V_prime = self.U * sin_theta + self.V * cos_theta
+        U_prime = self.U * cos_theta + self.V * sin_theta
+        V_prime = -self.U * sin_theta + self.V * cos_theta
 
         Djitter = pdims(self.u_max * self.jitter_norm_fact, 2) * ( (Jx*U_prime)**2 + (Jy*V_prime)**2 )
         return torch.exp(-0.5 * Djitter) #TODO: cover the Nyquist sampled case? But check maybe it is automatic, already?
@@ -1216,8 +1218,9 @@ class TipTorch(torch.nn.Module):
                 ) * (PSF_big.shape[-1] / self.N_pix)**2 # preserve energy
                 PSF.append(PSF_interp)
             
-            else: #TODO: check flux attenuation when cropping
-                PSF_cropped = transform(PSF_big[:,n,...]).unsqueeze(1)
+            else: # Keep the requested detector size even when the OTF grid is odd.
+                PSF_cropped = transforms.CenterCrop((self.N_pix, self.N_pix))(
+                    PSF_big[:, n, ...]).unsqueeze(1)
                 PSF.append( PSF_cropped )
 
         return torch.hstack(PSF)
@@ -1353,7 +1356,7 @@ class TipTorch(torch.nn.Module):
         OTF_turb  = torch.exp( -0.5 * SF * pdims(2*torch.pi*1e-9/self.wvl,2)**2 )
         
         # Compute the residual tip/tilt kernel
-        OTF_jitter = self.JitterKernel(Jx.abs(), Jy.abs(), Jxy.abs())
+        OTF_jitter = self.JitterKernel(Jx.abs(), Jy.abs(), Jxy)
         
         # Resulting combined OTF
         self.OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
