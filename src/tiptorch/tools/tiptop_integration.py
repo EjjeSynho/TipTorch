@@ -1,206 +1,170 @@
-"""Numerical helpers for the TIPTOP to TipTorch bridge.
+"""
+Helpers for the TIPTOP to TipTorch bridge (`TIPTOP/tiptop/TipTop_integration.py`).
 
-Jitter widths are Gaussian standard deviations in milliarcseconds.  A
-convolution of independent, centred Gaussian jitters adds their covariance
-matrices; multiplying the Gaussian images would give a different result.
+Jitter widths are Gaussian standard deviations in [mas] with the ellipse angle in [deg], i.e. TipTorch's (Jx, Jy, Jxy)
+convention. A convolution of independent, zero-centered Gaussian jitters adds their covariance matrices.
+PSF metrics are batched PyTorch versions of P3's getFWHM(method='contour'), getEncircledEnergy, getEnsquaredEnergy and
+radial_profile: they take PSF stacks [..., H, W] and evaluate all PSFs in one pass.
 """
 
 import math
-
 import numpy as np
-from scipy.ndimage import map_coordinates
 import torch
+from torch.nn.functional import grid_sample, pad
 
-from tiptorch.tools.utils import cov_to_jitter_params
+from tiptorch.tools.utils import cov_to_jitter_params, mask_circle
+
+SIGMA_TO_FWHM = 2.0 * math.sqrt(2.0 * math.log(2.0))
+FWHM_TO_SIGMA = 1.0 / SIGMA_TO_FWHM
+RAD_TO_MAS    = 180.0 * 3600.0 * 1000.0 / math.pi
 
 
-FWHM_TO_SIGMA = 1.0 / (2.0 * math.sqrt(2.0 * math.log(2.0)))
-RAD_TO_MAS = 180.0 * 3600.0 * 1000.0 / math.pi
-
-
-def jitter_params_to_cov(jx, jy, angle_deg):
-    """Convert broadcastable major/minor sigmas and angle to covariance.
-
-    The angle is measured counterclockwise from the x axis in degrees.
-    """
-    jx, jy, angle_deg = torch.broadcast_tensors(jx, jy, angle_deg)
-    angle = torch.deg2rad(angle_deg)
+# ------------------------------------------ Jitter algebra ------------------------------------------
+def jitter_params_to_cov(Jx, Jy, Jxy_deg):
+    """ Covariance [..., 2, 2] of a Gaussian with major/minor sigmas Jx, Jy and major axis angle Jxy_deg (counterclockwise from x) """
+    Jx, Jy, angle = torch.broadcast_tensors(Jx, Jy, torch.deg2rad(Jxy_deg))
     c, s = torch.cos(angle), torch.sin(angle)
-    xx = jx.square() * c.square() + jy.square() * s.square()
-    yy = jx.square() * s.square() + jy.square() * c.square()
-    xy = (jx.square() - jy.square()) * s * c
-    return torch.stack((torch.stack((xx, xy), -1),
-                        torch.stack((xy, yy), -1)), -2)
+    xx = (Jx*c).square() + (Jy*s).square()
+    yy = (Jx*s).square() + (Jy*c).square()
+    xy = (Jx.square() - Jy.square()) * s * c
+    return torch.stack((torch.stack((xx, xy), -1), torch.stack((xy, yy), -1)), -2)
 
 
-def combine_zero_centered_jitters(jx1, jy1, angle1_deg,
-                                   jx2, jy2, angle2_deg):
-    """Return the single Gaussian equivalent of two jitter convolutions."""
-    covariance = (jitter_params_to_cov(jx1, jy1, angle1_deg)
-                  + jitter_params_to_cov(jx2, jy2, angle2_deg))
-    return cov_to_jitter_params(covariance)
+def combine_zero_centered_jitters(Jx1, Jy1, Jxy1_deg, Jx2, Jy2, Jxy2_deg):
+    """ Single Gaussian equivalent to the convolution of two zero-centered Gaussian jitters """
+    return cov_to_jitter_params(jitter_params_to_cov(Jx1, Jy1, Jxy1_deg) + jitter_params_to_cov(Jx2, Jy2, Jxy2_deg))
 
 
-def tiptilt_covariance_to_jitter(covariance_nm2, telescope_diameter_m):
-    """Convert MASTSEL tip/tilt covariance in nm² to image jitter in mas.
-
-    MASTSEL's residual matrix describes Zernike tip/tilt OPD coefficients.
-    Their image displacement is ``4 * coefficient / diameter`` radians.
-    """
-    if telescope_diameter_m <= 0:
-        raise ValueError("Telescope diameter must be positive")
-    scale = 4.0e-9 * RAD_TO_MAS / telescope_diameter_m
+def tiptilt_covariance_to_jitter(covariance_nm2, D):
+    """ MASTSEL tip/tilt residual covariance [N, 2, 2] (Zernike OPD coefficients, nm²) to image jitter sigmas [mas] and angle [deg] """
+    scale = 4.0e-9 * RAD_TO_MAS / D # a 1 nm tilt coefficient displaces the image by 4e-9/D rad
     return cov_to_jitter_params(covariance_nm2 * scale**2)
 
 
 def fwhm_to_jitter(fwhm_mas, *, device, dtype, count):
-    """Expand TIPTOP telescope jitter to source-wise sigma/angle tensors.
-
-    A scalar is circular FWHM in mas.  A triple is x/y FWHM in mas plus
-    ellipse angle in radians, matching ``residualToSpectrum`` in TIPTOP.
-    """
+    """ TIPTOP's telescope jitter_FWHM (a scalar [mas] or [FWHM_x, FWHM_y, angle_rad]) as per-source sigmas [mas] and angle [deg] """
     values = torch.as_tensor(fwhm_mas, device=device, dtype=dtype).flatten()
     if values.numel() == 1:
-        jx = jy = values[0] * FWHM_TO_SIGMA
-        angle = values.new_zeros(())
+        Jx, Jy, angle = values[0]*FWHM_TO_SIGMA, values[0]*FWHM_TO_SIGMA, values.new_zeros(())
     elif values.numel() == 3:
-        jx, jy = values[:2] * FWHM_TO_SIGMA
-        angle = torch.rad2deg(values[2])
+        Jx, Jy, angle = values[0]*FWHM_TO_SIGMA, values[1]*FWHM_TO_SIGMA, torch.rad2deg(values[2])
     else:
-        raise ValueError("jitter_FWHM must be a scalar or [x, y, angle_rad]")
-    if torch.any(values[:2] < 0):
-        raise ValueError("jitter_FWHM must be nonnegative")
-    return tuple(value.expand(count) for value in (jx, jy, angle))
+        raise ValueError('jitter_FWHM must be a scalar or [FWHM_x, FWHM_y, angle_rad]')
+    return tuple(v.expand(count) for v in (Jx, Jy, angle))
 
 
-def psf_fwhm(image, pixel_scale_mas):
-    """Estimate major/minor FWHM from the half-height contour in mas."""
-    image = np.asarray(image, dtype=float)
-    if image.ndim != 2 or not np.isfinite(image).all():
-        raise ValueError("PSF must be a finite two-dimensional image")
-    peak = np.unravel_index(np.argmax(image), image.shape)
-    height = image[peak] / 2
-    max_radius = min(image.shape) / 2
-    radii = np.linspace(0, max_radius, max(128, int(max_radius * 16)))
-    angles = np.linspace(0, 2 * np.pi, 64, endpoint=False)
-    points = []
-    for angle in angles:
-        ys = peak[0] + radii * np.sin(angle)
-        xs = peak[1] + radii * np.cos(angle)
-        values = map_coordinates(image, [ys, xs], order=1, mode='constant')
-        below = np.flatnonzero(values <= height)
-        if not len(below) or below[0] == 0:
-            continue
-        k = below[0]
-        radius = np.interp(height, values[k-1:k+1][::-1], radii[k-1:k+1][::-1])
-        points.append((radius * np.cos(angle), radius * np.sin(angle)))
-    if len(points) < 8:
-        return (2 * max_radius * pixel_scale_mas,) * 2
-    points = np.asarray(points)
-    design = np.column_stack((points[:, 0]**2,
-                              points[:, 0] * points[:, 1],
-                              points[:, 1]**2))
-    a, b, c = np.linalg.lstsq(design, np.ones(len(points)), rcond=None)[0]
-    eigenvalues = np.linalg.eigvalsh([[a, b / 2], [b / 2, c]])
-    if np.any(eigenvalues <= 0):
-        return (2 * max_radius * pixel_scale_mas,) * 2
-    widths = 2 * pixel_scale_mas / np.sqrt(eigenvalues)
-    return float(widths[0]), float(widths[1])
-
-
-def psf_encircled_energy(image, pixel_scale_mas):
-    """Return radial cumulative flux and bin radii in mas."""
-    image = np.asarray(image, dtype=float)
-    y, x = np.indices(image.shape)
-    cy, cx = (np.asarray(image.shape) - 1) / 2
-    distance = np.hypot(y - cy, x - cx)
-    bins = np.floor(distance).astype(int)
-    annular = np.bincount(bins.ravel(), weights=image.ravel())
-    total = annular.sum()
-    if total <= 0:
-        raise ValueError("PSF total flux must be positive")
-    return np.cumsum(annular) / total, (np.arange(len(annular)) + 0.5) * pixel_scale_mas
-
-
-def psf_ensquared_energy(image):
-    """Return cumulative flux in squares centred on the PSF peak."""
-    image = np.asarray(image, dtype=float)
-    cy, cx = np.unravel_index(np.argmax(image), image.shape)
-    max_radius = min(cy, cx, image.shape[0] - cy - 1, image.shape[1] - cx - 1)
-    total = image.sum()
-    return np.array([
-        image[cy-r:cy+r+1, cx-r:cx+r+1].sum() / total
-        for r in range(max_radius + 1)])
-
-
+# ----------------------------------------- Pupil and PSD grids -----------------------------------------
 def circular_pupil(resolution, obscuration_ratio, *, device, dtype):
-    """Build the pupil used when a TIPTOP config has no pupil FITS path."""
-    if resolution < 4 or not 0 <= obscuration_ratio < 1:
-        raise ValueError("Invalid pupil resolution or obscuration ratio")
-    coordinates = (torch.arange(resolution, device=device, dtype=dtype)
-                   - (resolution - 1) / 2) / (resolution / 2)
-    yy, xx = torch.meshgrid(coordinates, coordinates, indexing='ij')
-    radius_squared = xx.square() + yy.square()
-    return ((radius_squared <= 1)
-            & (radius_squared >= obscuration_ratio**2)).to(dtype)
+    """ Annular pupil mask [N, N] used when a TIPTOP config has no PathPupil """
+    N = int(resolution)
+    pupil = mask_circle(N, N/2) - mask_circle(N, N/2 * obscuration_ratio)
+    return torch.as_tensor(pupil, device=device, dtype=dtype)
 
 
-def tiptilt_rejection_filter(model):
-    """P3-equivalent tilt rejection filter on TipTorch's full PSD grid."""
-    x = torch.pi * model.D * model.k
-    safe_x = torch.where(x.abs() < 1e-5, torch.ones_like(x), x)
-    j0 = torch.special.bessel_j0(safe_x)
-    j1 = torch.special.bessel_j1(safe_x)
-    j2 = 2 * j1 / safe_x - j0
-    j1_term = torch.where(x.abs() < 1e-5, torch.ones_like(x), 2 * j1 / safe_x)
-    j2_term = torch.where(x.abs() < 1e-5, torch.zeros_like(x), 4 * j2 / safe_x)
-    half = (1 - j1_term.square() - j2_term.square()).clamp(0, 1)
-    return model.half_PSD_to_full(half)
+def pad_PSD_to_even(PSD):
+    """ Prepend a zero Nyquist row and column to an odd, DC-centered PSD [..., n, n] so that the DC stays at n//2 on MASTSEL's even grids """
+    return pad(PSD, (1, 0, 1, 0)) if PSD.shape[-1] % 2 else PSD
 
 
-def extra_error_psd(model, rms_nm, exponent=-2.0, min_frequency=0.0,
-                    max_frequency=0.0):
-    """Piston-filtered TIPTOP extra-error spectrum normalized to RMS nm²."""
-    frequency = model.half_PSD_to_full(model.k).real
-    x = torch.pi * model.D * frequency
-    safe_x = torch.where(x.abs() < 1e-5, torch.ones_like(x), x)
-    aperture = torch.where(x.abs() < 1e-5, torch.ones_like(x),
-                           2 * torch.special.bessel_j1(safe_x) / safe_x)
-    piston = (1 - aperture.square()).clamp_min(0)
-    spectrum = frequency.clamp_min(1e-9).pow(exponent) * piston
-    spectrum = torch.where(frequency >= min_frequency, spectrum, 0)
-    if max_frequency > 0:
-        spectrum = torch.where(frequency <= max_frequency, spectrum, 0)
-    spectrum = torch.where(x.abs() < 1e-5, 0, spectrum)
-    power = spectrum.sum(dim=(-2, -1), keepdim=True)
-    if torch.any(power <= 0):
-        raise ValueError("Extra-error frequency range contains no PSD samples")
-    return spectrum * (rms_nm**2 / power)
+# ----------------------------------------- Batched PSF metrics -----------------------------------------
+def _peak_position(PSFs):
+    """ Integer (y, x) peak coordinates [...] of a PSF stack [..., H, W] """
+    ids = PSFs.flatten(-2).argmax(-1)
+    return ids // PSFs.shape[-1], ids % PSFs.shape[-1]
 
 
-def wind_shake_psd(model, vibration_data, frame_rate, loop_gain, delay_steps):
-    """Residual wind-shake PSD in nm², following TIPTOP's RTC integration."""
-    data = np.asarray(vibration_data, dtype=float)
-    if data.ndim != 2 or data.shape[0] < 3 or frame_rate <= 0:
-        raise ValueError("Wind-shake data must contain frequency, tip and tilt PSDs")
-    frequencies = np.linspace(0.1, frame_rate / 2, int(5 * frame_rate))
-    tip = np.interp(frequencies, data[0], data[1], left=0, right=0)
-    tilt = np.interp(frequencies, data[0], data[2], left=0, right=0)
-    z = np.exp(-2j * np.pi * frequencies / frame_rate)
-    integrator = loop_gain / (1 - z**-1)
-    rejection = 1 / (1 + integrator * z**-delay_steps)
-    power_nm2 = abs(np.sum(rejection**2 * (tip + tilt))
-                    * (frequencies[1] - frequencies[0]))
+def _radial_bins(PSFs, center):
+    """ Integer radial bin [..., H, W] of every pixel about center = (y, x) [...], i.e. P3's radial_profile binning round(r) """
+    H, W = PSFs.shape[-2:]
+    y = torch.arange(H, device=PSFs.device, dtype=PSFs.dtype)[:, None] - center[0].to(PSFs.dtype)[..., None, None]
+    x = torch.arange(W, device=PSFs.device, dtype=PSFs.dtype)[None, :] - center[1].to(PSFs.dtype)[..., None, None]
+    return torch.round(torch.hypot(y, x)).long().expand(PSFs.shape)
 
-    tilt_shape = (1 - tiptilt_rejection_filter(model)).clamp_min(0)
-    frequency = model.half_PSD_to_full(model.k).real
-    x = torch.pi * model.D * frequency
-    safe_x = torch.where(x.abs() < 1e-5, torch.ones_like(x), x)
-    aperture = torch.where(x.abs() < 1e-5, torch.ones_like(x),
-                           2 * torch.special.bessel_j1(safe_x) / safe_x)
-    piston = (1 - aperture.square()).clamp_min(0)
-    shape = tilt_shape * piston * model.mask_corrected
-    total = shape.sum(dim=(-2, -1), keepdim=True)
-    if torch.any(total <= 0):
-        raise ValueError("Wind-shake PSD has no corrected spatial-frequency samples")
-    return shape * (power_nm2 / total)
+
+def _bin_sums(PSFs, bins):
+    """ Per-bin pixel sums and pixel counts [..., n_bins] computed with scatter_add over the flattened images """
+    sums   = torch.zeros(*PSFs.shape[:-2], int(bins.max())+1, device=PSFs.device, dtype=PSFs.dtype)
+    counts = torch.zeros_like(sums)
+    sums.scatter_add_  (-1, bins.flatten(-2), PSFs.flatten(-2))
+    counts.scatter_add_(-1, bins.flatten(-2), torch.ones_like(PSFs).flatten(-2))
+    return sums, counts
+
+
+def PSF_radial_profile(PSFs, pixel_scale_mas, center=None):
+    """
+    Bin radii [n_bins] in [mas] and azimuthally averaged profiles [..., n_bins] of unit-flux PSFs [..., H, W] about the peak
+    (default) or about the (y, x) pixel given in `center`, as P3's radial_profile(normalize='total')
+    """
+    PSFs = PSFs / PSFs.sum(dim=(-2,-1), keepdim=True)
+    sums, counts = _bin_sums(PSFs, _radial_bins(PSFs, _peak_position(PSFs) if center is None else center))
+    radii = torch.arange(sums.shape[-1], device=PSFs.device, dtype=PSFs.dtype) * pixel_scale_mas
+    return radii, sums / counts.clamp_min(1)
+
+
+def PSF_encircled_energy(PSFs, pixel_scale_mas, center=None):
+    """
+    Bin radii [n_bins] in [mas] and encircled energy curves [..., n_bins] normalized to their maximum (as P3's getEncircledEnergy),
+    about the central pixel (H//2, W//2) by default
+    """
+    H, W = PSFs.shape[-2:]
+    center = tuple(torch.tensor(c, device=PSFs.device) for c in (H//2, W//2)) if center is None else center
+    EE = _bin_sums(PSFs, _radial_bins(PSFs, center))[0].cumsum(-1)
+    radii = torch.arange(EE.shape[-1], device=PSFs.device, dtype=PSFs.dtype) * pixel_scale_mas
+    return radii, EE / EE.amax(-1, keepdim=True)
+
+
+def PSF_ensquared_energy(PSFs):
+    """ Ensquared energy [..., n+1] in squares of half-side n = 0..min(H, W)//2 pixels centered on the peak (as P3's getEnsquaredEnergy) """
+    H, W = PSFs.shape[-2:]
+    S = pad(PSFs.cumsum(-1).cumsum(-2), (1, 0, 1, 0)).flatten(-2) # integral image, S[y, x] = sum of PSF[:y, :x]
+    n = torch.arange(min(H, W)//2 + 1, device=PSFs.device)
+    py, px = (c[..., None] for c in _peak_position(PSFs))
+    y0, y1 = (py-n).clamp(0, H), (py+n+1).clamp(0, H)
+    x0, x1 = (px-n).clamp(0, W), (px+n+1).clamp(0, W)
+    at = lambda y, x: S.gather(-1, y*(W+1) + x)
+    return (at(y1, x1) - at(y0, x1) - at(y1, x0) + at(y0, x0)) / PSFs.sum(dim=(-2,-1))[..., None]
+
+
+def PSF_FWHM(PSFs, pixel_scale_mas, n_angles=64, radial_step=0.25):
+    """
+    Major and minor FWHM [mas] ([...], [...]) of PSFs [..., H, W] from their half-maximum contour, as P3's getFWHM(method='contour'):
+    the contour is sampled along n_angles rays from the peak (bicubic interpolation every radial_step pixels), re-centered on its
+    bounding box, and the FWHMs are twice its largest and smallest radii. Rays without a crossing extend to min(H, W)/2.
+    Bicubic sampling matters: bilinear interpolation biases the diagonal rays of PSFs only a few pixels wide.
+    """
+    H, W = PSFs.shape[-2:]
+    x = PSFs.reshape(-1, 1, H, W)
+    B = x.shape[0]
+    half   = x.flatten(-2).amax(-1).view(B, 1, 1) / 2
+    py, px = _peak_position(x[:, 0])
+    r_max  = min(H, W) / 2
+    radii  = torch.arange(0, r_max, radial_step, device=x.device, dtype=x.dtype)                # [R]
+    angles = torch.arange(n_angles, device=x.device, dtype=x.dtype) * (2*torch.pi / n_angles)  # [A]
+    cos, sin = torch.cos(angles)[:, None], torch.sin(angles)[:, None]
+
+    xs, ys = px.view(B,1,1) + radii*cos, py.view(B,1,1) + radii*sin # [B, A, R] ray coordinates in pixels
+    grid   = torch.stack((2*xs/(W-1) - 1, 2*ys/(H-1) - 1), -1)
+    values = grid_sample(x, grid, mode='bicubic', padding_mode='zeros', align_corners=True)[:, 0]
+
+    below   = values <= half
+    crossed = below.any(-1)
+    k  = torch.where(crossed, below.int().argmax(-1), radii.numel()-1).clamp_min(1) # first sample under the half maximum
+    v0 = values.gather(-1, (k-1)[..., None])[..., 0]
+    v1 = values.gather(-1, k[..., None])[..., 0]
+    frac = ((v0 - half[..., 0]) / (v0 - v1).clamp_min(1e-30)).clamp(0, 1)
+    r  = torch.where(crossed, radii[k-1] + frac*radial_step, torch.full_like(frac, r_max)) # [B, A] contour radii about the peak
+
+    cx, cy = r*cos[:, 0], r*sin[:, 0]
+    cx = cx - (cx.amax(-1, keepdim=True) + cx.amin(-1, keepdim=True)) / 2 # re-center the contour on its bounding box
+    cy = cy - (cy.amax(-1, keepdim=True) + cy.amin(-1, keepdim=True)) / 2
+    rc = torch.hypot(cx, cy)
+    return (2*rc.amax(-1)*pixel_scale_mas).view(PSFs.shape[:-2]), (2*rc.amin(-1)*pixel_scale_mas).view(PSFs.shape[:-2])
+
+
+def interpolate_curves(radii, curves, r_query):
+    """ Linear interpolation of batched curves [..., n] sampled at radii [n] at r_query (a scalar or [...]), clamped to the sampled range """
+    r = torch.as_tensor(r_query, device=radii.device, dtype=radii.dtype).clamp(radii[0], radii[-1]).expand(curves.shape[:-1])
+    k = torch.searchsorted(radii, r.contiguous()).clamp(1, radii.numel()-1)
+    c0 = curves.gather(-1, (k-1)[..., None])[..., 0]
+    c1 = curves.gather(-1, k[..., None])[..., 0]
+    return c0 + (c1-c0) * (r - radii[k-1]) / (radii[k] - radii[k-1])

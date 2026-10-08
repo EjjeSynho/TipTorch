@@ -1,398 +1,353 @@
 #%%
-%reload_ext autoreload
-%autoreload 2
+"""
+PSD-level comparison of TipTorch against P3's `fourierModel` on the MUSE NFM LTAO configuration
+(`DATA_FOLDER/parameter_files/muse_ltao.ini`).
 
-import sys
+Compared term by term, on P3's spatial-frequency grid:
+  - the six PSD contributors: fitting, aliasing, WFS noise, spatio-temporal, chromatism, differential refraction;
+  - the tomographic reconstructor and the layer / DM projectors (W_tomo, W_alpha, P_beta_DM, P_beta_L, freq_t);
+  - the P3-style PSD add-ons that are `TipTorch` members: `TiltFilter`, `FocusErrorPSD`, `ExtraErrorPSD`, `WindShakePSD`
+    against P3's `TiltFilter`, `FocusFilter`, `extraErrorPSD` and `windShakePSD`.
+
+TipTorch's oversampling is tuned so that its odd PSD grid has the same frequency step as P3's even grid with the DC on
+the same pixel (nOtf = 1153 vs 1152 here); TipTorch maps are compared after dropping their last row and column.
+
+Requirements: the `TipTop` conda env (P3 installed with CuPy), the MUSE LTAO parameter file and the VLT pupil calibration
+in the TipTorch data folder, and the TIPTOP repository (`TIPTOP_folder` in project_config.json) for the wind-shake
+temporal PSD FITS. Runtime about 20 s on a GPU.
+
+Run `python tests/PSD_comparison_with_P3.py` for the checks and the figures (saved to tests/runs/PSD_comparison/, shown
+unless `--no-plots` is given), or execute the `#%%` cells interactively. The `test_*` functions also work under pytest.
+"""
+
 import os
+import sys
 import tempfile
-import numpy as np
-import cupy as cp
-import matplotlib.pyplot as plt
-from matplotlib.colors import LogNorm
+from functools import lru_cache
 from pathlib import Path
 
-from tiptorch._config import DATA_FOLDER, DATA_FOLDER, project_settings
+import matplotlib.pyplot as plt
+from matplotlib.colors import LogNorm
+import numpy as np
+import torch
+from astropy.io import fits
 
-TIPTOP_PATH =  Path(project_settings["TIPTOP_folder"])
-
-# Import TIPTOP and dependencies
-for module in ['MASTSEL', 'P3', 'SEEING', 'SYMAO', 'TIPTOP']:
-    sys.path.append(str(TIPTOP_PATH / f'{module}'))
-    sys.path.append(str(TIPTOP_PATH / f'{module}/{module.lower()}'))
-
-sys.path.append(str(TIPTOP_PATH))
-from aoSystem.fourierModel import fourierModel
-
-#%%
-path_ini = str(DATA_FOLDER / "parameter_files/muse_ltao.ini")
-
-# Create a temporary modified version of the ini file
-with open(path_ini, 'r') as f:
-    ini_content = f.read()
-
-# Replace the calibration path to the one understandable by P3
-modified_content = ini_content.replace('$CALIBRATIONS_PATH$', '/aoSystem/data/')
-temp_dir = os.path.dirname(path_ini)
-temp_fd, temp_path_ini = tempfile.mkstemp(suffix='.ini', dir=temp_dir)
-
-with os.fdopen(temp_fd, 'w') as temp_file:
-    temp_file.write(modified_content)
-
-# Run P3 Fourier model
-P3_model = fourierModel(
-    temp_path_ini,
-    path_root = None,
-    calcPSF = False,
-    verbose = False,
-    display = False,
-    getErrorBreakDown = False,
-    getFWHM = False,
-    getEncircledEnergy = False,
-    getEnsquaredEnergy = False,
-    displayContour = False
-)
-
-W_tomo_P3    = P3_model.tomographicReconstructor().get() # extract tomographic reconstructor
-W_alpha_P3   = P3_model.Walpha.get()               # extract layer-to-alpha-direction projector
-P_beta_DM_P3 = P3_model.PbetaDM[0].get()         # extract projection from DMs to directions of interest
-# Remove temp config
-os.remove(temp_path_ini)
-
-
-#%%
-# Compute different P3 PSD contributors and pack into dictionary
-P3_PSDs = {
-    'fitting':         P3_model.fittingPSD().squeeze().copy(),
-    'aliasing':        P3_model.aliasingPSD().squeeze().copy(),
-    'diff. refract':   P3_model.differentialRefractionPSD().squeeze().copy(),
-    'chromatism':      P3_model.chromatismPSD().squeeze().copy(),
-    'spatio-temporal': P3_model.spatioTemporalPSD().squeeze().copy(),
-    'WFS noise':       P3_model.noisePSD().squeeze().copy()
-}
-
-# Manually compute spatio-temporal terms for verification
-nK = P3_model.freq.resAO
-nH = P3_model.ao.atm.nL
-Hs = P3_model.ao.atm.heights * P3_model.strechFactor
-deltaT = P3_model.ao.rtc.holoop['delay'] / P3_model.ao.rtc.holoop['rate']
-wDir_x = np.cos(P3_model.ao.atm.wDir*np.pi/180)
-wDir_y = np.sin(P3_model.ao.atm.wDir*np.pi/180)
-
-freq_t = [0,] * nH
-
-s = 0 # single source
-
-Beta = [P3_model.ao.src.direction[0,s], P3_model.ao.src.direction[1,s]]
-
-PbetaL = cp.zeros([nK, nK, 1, nH], dtype=complex)
-fx = Beta[0] * P3_model.freq.kxAO_
-fy = Beta[1] * P3_model.freq.kyAO_
-
-for j in range(nH):
-    freq_t[j] = wDir_x[j]*P3_model.freq.kxAO_+ wDir_y[j]*P3_model.freq.kyAO_
-    delta_h = Hs[j]*(fx+fy) - deltaT * P3_model.ao.atm.wSpeed[j]*freq_t[j]
-    PbetaL[: , :, 0, j] = cp.exp(1j*2*cp.pi*delta_h)
-
-proj = PbetaL - np.matmul(P3_model.PbetaDM[s], P3_model.Walpha)
-proj_t = np.conj(proj.transpose(0, 1, 3, 2))
-tmp = np.matmul(proj,np.matmul(P3_model.Cphi, proj_t))
-
-P_beta_L_P3 = PbetaL.get()
-freq_t_P3 = cp.stack(freq_t, axis=2).get()
-
-#%%
+from tiptorch._config import DATA_FOLDER, default_device, default_torch_type, project_settings
 from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.managers.config_manager import ConfigManager
-from tiptorch._config import default_device, DATA_FOLDER, default_torch_type
-import torch
 
-#%%
-config_manager = ConfigManager()
-config_dict = config_manager.Load(path_ini)
-config_dict = config_manager.Convert(config_dict, framework='pytorch', device=default_device, dtype=default_torch_type)
+PATH_INI      = DATA_FOLDER / 'parameter_files' / 'muse_ltao.ini'
+WIND_PSD_FILE = Path(project_settings['TIPTOP_folder']) / 'TIPTOP' / 'tiptop' / 'data' / 'morfeo_windshake8ms_psd_2022_1k.fits'
+OUTPUT        = (Path(__file__).resolve().parent if '__file__' in globals() else Path.cwd()) / 'runs' / 'PSD_comparison'
+SHOW_PLOTS    = '--no-plots' not in sys.argv
 
-# Initialize TipTorch model
-tiptorch_model = TipTorch(
-    AO_config=config_dict,
-    AO_type='LTAO',
-    norm_regime=None,
-    device=default_device,
-    oversampling=1,
-    retain_PSDs=True
-)
-
-# Update oversampling to match P3 model exactly
-match_sampling = (P3_model.freq.k_.min().get() / tiptorch_model.sampling_factor.cpu().numpy().max()) * 1.001
-tiptorch_model.oversampling = match_sampling
-tiptorch_model.Update(grids=True, pupils=True, tomography=True)
-
-wvl_src = tiptorch_model.wvl.item()
-wvl_atm = tiptorch_model.wvl_atm.item()
-wvl_GS  = tiptorch_model.GS_wvl.item()
-
-norm_factor = (wvl_src / wvl_atm)**2 # Scaling factor for PSDs due to the wavelength difference
-
-PSF_1 = tiptorch_model()
+PSD_TERMS      = ['fitting', 'aliasing', 'WFS noise', 'spatio-temporal', 'chromatism', 'diff. refract']
+EXTRA_ERROR    = dict(rms_nm=60.0, exponent=-2.0, k_min=0.0, k_max=0.0) # [telescope] extraErrorNm / Exp / Min / Max
+FOCUS_ERROR_NM = 30.0
 
 
-#%%
-# Restore from half to full size
-def half_to_full_reconstructor(W_half):
-    """Convert half reconstructor matrix to full size by mirroring."""
-    W_half = W_half[0,...].detach().clone() # Remove batch dim and clone to avoid in-place ops
-    return torch.cat([W_half, torch.flip(W_half[:,:-1,...], dims=(0,1))], dim=1).cpu().numpy()[:-1,:-1,...]
-
-AO_mask = tiptorch_model.mask_corrected_AO.unsqueeze(-1).unsqueeze(-1)
-
-W_tomo_torch    = half_to_full_reconstructor(tiptorch_model.W_tomo)
-W_alpha_torch   = half_to_full_reconstructor(tiptorch_model.W_alpha * AO_mask)
-P_beta_DM_torch = half_to_full_reconstructor(tiptorch_model.P_beta_DM * AO_mask)
-P_beta_L_torch  = half_to_full_reconstructor(tiptorch_model.P_beta_L * AO_mask)
-freq_t_torch    = half_to_full_reconstructor(tiptorch_model.freq_t / tiptorch_model.wind_speed.view(1,1,1,-1))
+# ------------------------------------------------ Models ------------------------------------------------
+def host(x):
+    ''' CuPy / NumPy / torch input as a real NumPy array '''
+    if torch.is_tensor(x):
+        return x.detach().cpu().numpy().real
+    return np.asarray(x.get() if hasattr(x, 'get') else x).real
 
 
-#%%
-C = 1 / norm_factor
+@lru_cache(maxsize=1)
+def build_models():
+    ''' P3 fourierModel and a TipTorch model of the same configuration, with TipTorch's frequency step matched to P3's '''
+    from p3.aoSystem.fourierModel import fourierModel
 
-# Make PSDs displayable and comparable for both models
-def PSD_preprocess(psd_data):
-    """ Convert both PSDs to numpy arrays and get real part. Handles half PSD for TipTorch, too. """
-    if hasattr(psd_data, 'cpu'):
-        PSD_buf = tiptorch_model.half_PSD_to_full(psd_data).squeeze().cpu().numpy().real
-        PSD_buf[PSD_buf.shape[0]//2, PSD_buf.shape[1]//2] = 0.0
-        return PSD_buf[:-1,:-1] * C
-    
-    elif hasattr(psd_data, 'get'): # Convert from Cupy to Numpy
-        return psd_data.squeeze().get().real
-    else:
-        return np.array(psd_data).squeeze().real # Numpy array already
+    content = PATH_INI.read_text().replace('$CALIBRATIONS_PATH$', '/aoSystem/data/') # P3 resolves calibrations inside its own package
+    fd, temp_ini = tempfile.mkstemp(suffix='.ini', dir=PATH_INI.parent)
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(content)
+    try:
+        P3 = fourierModel(temp_ini, path_root=None, calcPSF=False, verbose=False, display=False, getErrorBreakDown=False,
+                          getFWHM=False, getEncircledEnergy=False, getEnsquaredEnergy=False, displayContour=False)
+    finally:
+        os.remove(temp_ini)
+    P3.ao.tel.extraErrorNm, P3.ao.tel.extraErrorExp = EXTRA_ERROR['rms_nm'], EXTRA_ERROR['exponent']
+    P3.ao.tel.extraErrorMin, P3.ao.tel.extraErrorMax = EXTRA_ERROR['k_min'], EXTRA_ERROR['k_max']
+    P3.ao.windPsdFile = str(WIND_PSD_FILE)
 
-TipTorch_PSDs = {}
-for key in P3_PSDs.keys():
-    TipTorch_PSDs[key] = PSD_preprocess(tiptorch_model.PSDs[key].clone())
-    
-    P3_PSDs[key] = PSD_preprocess(P3_PSDs[key])
-
-#%%
-noise_variance_P3 = P3_model.ao.wfs.computeNoiseVarianceAtWavelength(
-    wvl_science=wvl_src,
-    wvl_wfs=wvl_GS,
-    r0_at_500nm=tiptorch_model.r0_().item(), 
-)[0] * (wvl_src / wvl_atm)**2 # scaled to atmosphere wavelength
-
-noise_variance_tiptorch = tiptorch_model.NoiseVariance()[0,0].item() # at atmosphere wavelength by default
-
-print(f"Noise var. - P3: {noise_variance_P3:.4f}, TipTorch: {noise_variance_tiptorch:.4f}, Diff.: {noise_variance_P3 - noise_variance_tiptorch:.4f}")
-
-#%%
-PSD_noise_P3 = cp.zeros((P3_model.freq.resAO, P3_model.freq.resAO, P3_model.ao.src.nSrc), dtype=complex)
-# noise level is considered in the covariance matrix Cb
-# and the noise gain is considered as follows (0.6 - 1.0)
-noise_gain = min(0.8, 0.4 + 0.1333 * P3_model.ao.rtc.holoop['delay'])**2
-
-for j in range(P3_model.ao.src.nSrc):
-    PW = cp.matmul(P3_model.PbetaDM[j], P3_model.W)
-    PW_t = cp.conj(PW.transpose(0,1,3,2))
-    tmp  = cp.matmul( PW, cp.matmul(P3_model.Cb, PW_t) )
-    PSD_noise_P3[:,:,j] = P3_model.freq.mskInAO_ * tmp[:, :, 0, 0] * P3_model.freq.pistonFilterAO_ * noise_gain
-
-PSD_noise_P3 = PSD_noise_P3.squeeze().real.get()
-
-#%%
-from tiptorch.tools.utils import pdims
-
-noise_gain_torch = min(0.8, 0.4 + 0.1333 * tiptorch_model.HOloop_delay.item())**2
-PW_torch   = torch.matmul(tiptorch_model.P_beta_DM, tiptorch_model.W)
-PW_t_torch = torch.conj(PW_torch.transpose(-2, -1))
-tmp_torch  = torch.matmul(PW_torch, torch.matmul(tiptorch_model.C_b, PW_t_torch))
-
-PSD_noise_tiptorch = pdims(tiptorch_model.mask_corrected_AO * tiptorch_model.piston_filter, 2) * tmp_torch * noise_gain_torch
-PSD_noise_tiptorch = half_to_full_reconstructor(PSD_noise_tiptorch).squeeze().real
-
-#%%
-def display_map(im, title='', cmap='viridis', show_axis=True, fontsize=12, ax=None, vmin=None, vmax=None, scale='log', colorbar=True):
-    """ Display a PSD with log or linear normalization. Returns axis object and image for colorbar creation. """
-    if ax is None:
-        _, ax = plt.subplots(figsize=(5,5))
-    
-    # Use provided vmin/vmax or calculate percentiles for normalization
-    if vmin is None or vmax is None:
-        if scale == 'log':
-            vmin = np.percentile(im[im > 0], 1e1)    if np.any(im > 0) else 1
-            vmax = np.percentile(im[im > 0], 99.975) if np.any(im > 0) else im.max()
-        else:  # linear
-            vmin = np.percentile(im, 1)
-            vmax = np.percentile(im, 99)
-    
-    if scale == 'log':
-        im_plot = ax.imshow(im, cmap=cmap, norm=LogNorm(vmin=vmin, vmax=vmax))
-    elif scale == 'linear':
-        im_plot = ax.imshow(im, cmap=cmap, vmin=vmin, vmax=vmax)
-    else:
-        raise ValueError("Scale must be either 'log' or 'linear'.")
-    
-    ax.tick_params(axis='both', which='major', labelsize=fontsize) if not show_axis else ax.axis('off')
-    
-    if title:
-        ax.set_title(title, fontsize=fontsize)
-    
-    if colorbar:
-        plt.colorbar(im_plot, ax=ax, fraction=0.046, pad=0.04)
-    
-    return ax, im_plot
+    manager = ConfigManager()
+    config = manager.Convert(manager.Load(str(PATH_INI)), framework='pytorch', device=default_device, dtype=default_torch_type)
+    model = TipTorch(AO_config=config, AO_type='LTAO', norm_regime=None, device=default_device, oversampling=1, retain_PSDs=True)
+    # P3 samples the PSD at kRef times Nyquist: give TipTorch the same step, which makes its odd grid one pixel larger than P3's
+    model.oversampling = float(host(P3.freq.k_).min() / model.sampling_factor.max().item()) * 1.001
+    model.Update(grids=True, pupils=True, tomography=True)
+    model.ComputePSD() # fills model.PSDs (half grids, rad² at the atmosphere wavelength) and the tomographic operators
+    assert model.nOtf == P3.freq.nOtf + 1, (model.nOtf, P3.freq.nOtf)
+    return P3, model
 
 
-def plot_side_by_side(torch_data, P3_data, title, scale='log'):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-        
-    # Calculate common vmin/vmax from both images
-    combined_positive = np.concatenate([P3_data[P3_data > 0].flatten(), torch_data[torch_data > 0].flatten()])
-    vmin = np.percentile(combined_positive, 10)
-    vmax = np.percentile(combined_positive, 99.975)    
-
-    ax1, im1 = display_map(torch_data, title=f'TipTorch {title}', ax=ax1, vmin=vmin, vmax=vmax, scale=scale, colorbar=False)
-    ax2, im2 = display_map(P3_data, title=f'P3 {title}', ax=ax2, vmin=vmin, vmax=vmax, scale=scale, colorbar=False)
-        
-    # Add shared colorbar - thicker and on the right
-    cbar = fig.colorbar(im2, ax=[ax1, ax2], label='Value', fraction=0.03, pad=0.02, aspect=15, shrink=1.8)
-    cbar.ax.tick_params(labelsize=12)
-        
-    plt.tight_layout()
-    plt.subplots_adjust(right=0.8)
-    plt.show()
+# ------------------------------------------------ Grids and units ------------------------------------------------
+def on_P3_grid(x, model):
+    ''' TipTorch half- or full-grid tensor as a NumPy map on P3's grid; TipTorch's grid is one pixel larger with the DC on the same pixel '''
+    x = x.detach()
+    if x.shape[-1] != x.shape[-2]:
+        x = model.half_PSD_to_full(x)
+    return host(x.squeeze())[..., :-1, :-1]
 
 
-def plot_difference_map(torch_data, P3_data, title):
-    fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-    
-    # Calculate percentage difference: (TipTorch - P3) / P3 * 100
-    # Avoid division by zero by adding small epsilon
-    diff_normalized = ((torch_data - P3_data) / (P3_data + 1e-15)) * 100
-    
-    # Set reasonable limits for the difference plot
-    vmin = np.percentile(diff_normalized, 2.5)
-    vmax = np.percentile(diff_normalized, 97.5)
-    
-    # Plot the normalized difference
-    im = ax.imshow(diff_normalized, cmap='RdBu_r', vmin=vmin, vmax=vmax)
-    ax.set_title(f'Normalized Difference: {title}\n(TipTorch - P3) / P3 x 100%', fontsize=12)
-    
-    # Add colorbar
-    cbar = fig.colorbar(im, ax=ax, label='Percentage Difference (%)', fraction=0.046, pad=0.04)
-    cbar.ax.tick_params(labelsize=10)
-    
-    plt.tight_layout()
-    plt.show()
-    
+def operator_on_P3_grid(W, model):
+    ''' TipTorch operator [1, nOtf_AO_y, nOtf_AO_x, a, b] on the half grid as a complex NumPy array [resAO, resAO, a, b] '''
+    W = W[0].detach()
+    full = torch.cat([W, torch.flip(W[:, :-1], dims=(0, 1))], dim=1)
+    return full.cpu().numpy()[:-1, :-1]
 
-def compute_difference_stats(torch_data, P3_data, title='', verbose=True):
-    diff_normalized = ((torch_data - P3_data) / (P3_data + 1e-15)) * 100  # [%]
-    diff_stats = {
-        'diff_array': diff_normalized,
-        'median': np.median(diff_normalized),
-        'mean': np.mean(diff_normalized),
-        'std':  np.std(diff_normalized),
-        'max':  np.max(np.abs(diff_normalized))
+
+def P3_PSD_to_nm2(P3):
+    ''' P3 PSDs are rad² at wvlRef per grid pixel: nm² = PSD * (dk * rad2nm)² '''
+    return ((2*host(P3.freq.kcMax_) / P3.freq.resAO) * P3.freq.wvlRef*1e9 / (2*np.pi))**2
+
+
+def embed_AO(P3, x):
+    ''' Place an AO-area map [resAO, resAO] on P3's full grid '''
+    i1 = int(np.ceil(P3.freq.nOtf/2 - P3.freq.resAO/2))
+    full = np.zeros((P3.freq.nOtf, P3.freq.nOtf), dtype=x.dtype)
+    full[i1 : i1 + P3.freq.resAO, i1 : i1 + P3.freq.resAO] = x
+    return full
+
+
+def zero_DC(x):
+    x = x.copy()
+    x[..., x.shape[-2]//2, x.shape[-1]//2] = 0.0
+    return x
+
+
+# ------------------------------------------------ Terms ------------------------------------------------
+def PSD_terms(P3, model):
+    ''' The six PSD contributors of both models in rad² at the science wavelength (AO-area terms on the AO grid, fitting on the full grid) '''
+    P3_terms = {
+        'fitting':         P3.fittingPSD(),
+        'aliasing':        P3.aliasingPSD(),
+        'WFS noise':       P3.noisePSD(),
+        'spatio-temporal': P3.spatioTemporalPSD(),
+        'chromatism':      P3.chromatismPSD(),
+        'diff. refract':   P3.differentialRefractionPSD(),
     }
-    if verbose:
-        # print(f"{title}: Mean: {diff_stats['mean']:.1f}%, Median: {diff_stats['median']:.1f}%, STD: {diff_stats['std']:.1f}%, Max: {diff_stats['max']:.1f}%")
-        print(f"{title}: Median: {diff_stats['median']:.1f}%, Max: {diff_stats['max']:.1f}%")
-        
-    return diff_stats 
+    scale = (model.wvl_atm / model.wvl).item()**2 # TipTorch PSDs are rad² at the atmosphere wavelength
+    P3_terms = {key: host(value).squeeze() for key, value in P3_terms.items()}
+    TT_terms = {key: zero_DC(on_P3_grid(model.PSDs[key], model)) * scale for key in P3_terms}
+    return P3_terms, TT_terms
 
 
-#%%
-# Iterate over all PSD contributors and create 1 x 2 subplots for each
-for key in P3_PSDs.keys():
-    if key in TipTorch_PSDs:     
-        plot_side_by_side(TipTorch_PSDs[key], P3_PSDs[key], title=key+' PSD')
-
-# Calculate and plot normalized difference maps (as percentages)
-for key in P3_PSDs.keys():
-    if key in TipTorch_PSDs:
-        plot_difference_map(TipTorch_PSDs[key], P3_PSDs[key], title=key+' PSD')
-
-# Print error statistics
-for key in TipTorch_PSDs.keys():
-    diff_stats = compute_difference_stats(TipTorch_PSDs[key], P3_PSDs[key], title=key+' PSD')
-
-# %%
-from photutils.profiles import RadialProfile
-
-choice = ['fitting', 'WFS noise', 'spatio-temporal', 'aliasing', 'diff. refract', 'chromatism']
-# choice = ['fitting', 'WFS noise', 'chromatism']
-
-def plot_PSD_radial_profile(img, title, linestyle='-', color=None):
-    xycen = (img.shape[-1]//2, img.shape[-2]//2)
-    edge_radii = np.arange(img.shape[-1]//2)
-    rp = RadialProfile(img, xycen, edge_radii)
-
-    spatial_freq = rp.radius * tiptorch_model.dk.cpu().numpy()
-    plt.plot(spatial_freq, rp.profile, linestyle=linestyle, color=color, label=title, linewidth=1)
-
-    
-plt.figure(figsize=(12,8))
-
-for i, key in (enumerate(choice)):
-    plot_PSD_radial_profile(P3_PSDs[key], f'P3 {key}', linestyle='--', color=f'C{i}')
-    plot_PSD_radial_profile(TipTorch_PSDs[key], f'TipTorch {key}', linestyle='-', color=f'C{i}')
+def addon_terms(P3, model):
+    ''' TipTorch's P3-style PSD members against their P3 originals, on P3's full grid (nm², the tilt filter is dimensionless) '''
+    nm2 = P3_PSD_to_nm2(P3)
+    focus = host(P3.FocusFilter())
+    P3_terms = {
+        'tilt filter': host(P3.TiltFilter()),
+        'focus error': focus / focus.sum() * FOCUS_ERROR_NM**2,
+        'extra error': host(P3.extraErrorPSD()) * nm2,
+        'wind shake':  embed_AO(P3, host(P3.windShakePSD())) * nm2,
+    }
+    TT_terms = {
+        'tilt filter': on_P3_grid(model.TiltFilter(), model),
+        'focus error': on_P3_grid(model.FocusErrorPSD(FOCUS_ERROR_NM), model),
+        'extra error': on_P3_grid(model.ExtraErrorPSD(**EXTRA_ERROR), model),
+        'wind shake':  on_P3_grid(model.WindShakePSD(fits.getdata(WIND_PSD_FILE)), model),
+    }
+    return P3_terms, TT_terms
 
 
-plt.xscale('symlog', linthresh=5e-2)
-plt.yscale('symlog', linthresh=1e-3)
+def P3_layer_projector(P3, source=0):
+    ''' P3's layer-to-direction projector P_beta_L and the temporal frequencies, as P3 builds them inside spatioTemporalPSD '''
+    import cupy as cp
+    nK, nL = P3.freq.resAO, P3.ao.atm.nL
+    heights = P3.ao.atm.heights * P3.strechFactor
+    delta_T = P3.ao.rtc.holoop['delay'] / P3.ao.rtc.holoop['rate']
+    wind_x, wind_y = np.cos(np.deg2rad(P3.ao.atm.wDir)), np.sin(np.deg2rad(P3.ao.atm.wDir))
+    beta_x, beta_y = P3.ao.src.direction[:, source]
 
-plt.xlim(1e-1, 1e1)
-
-plt.grid(True, which='both', alpha=0.3)
-plt.xlabel('Spatial frequency (1/m)')
-
-plt.title('PSD radial profile comparison')
-plt.ylabel(rf'PSD [rad$^2$/(1/m)$^2$]')
-
-plt.legend(ncol=2)
-plt.tight_layout()
-plt.show()
-
-# %%
-# Compare TipTorch and P3 tomographic reconstructors
-
-i_layer = 0
-j_GS = 0
-
-W_tomo_torch_data = np.abs(W_tomo_torch)[..., i_layer, j_GS]
-W_tomo_P3_data    = np.abs(W_tomo_P3)   [..., i_layer, j_GS]
-
-W_alpha_torch_data = np.abs(W_alpha_torch)[..., 0, i_layer]
-W_alpha_P3_data    = np.abs(W_alpha_P3)   [..., 0, i_layer]
-
-P_beta_DM_torch_data = np.abs(P_beta_DM_torch)[..., 0, 0]
-P_beta_DM_P3_data    = np.abs(P_beta_DM_P3)   [..., 0, 0]
-
-P_beta_L_torch_data = np.abs(P_beta_L_torch)[..., 0, i_layer]
-P_beta_L_P3_data    = np.abs(P_beta_L_P3)   [..., 0, i_layer]
-
-freq_t_torch_data = np.abs(freq_t_torch)[..., i_layer]
-freq_t_P3_data    = np.abs(freq_t_P3)   [..., i_layer]
-
-plot_difference_map(W_tomo_torch_data, W_tomo_P3_data, title='W_tomo')
-
-# plot_side_by_side(W_alpha_torch_data, W_alpha_P3_data, title='W_alpha')
-# plot_difference_map(W_alpha_torch_data, W_alpha_P3_data, title='W_alpha')
-
-plot_difference_map(P_beta_DM_torch_data, P_beta_DM_P3_data, title='P_beta_DM')
+    P_beta_L = cp.zeros([nK, nK, 1, nL], dtype=complex)
+    freq_t = []
+    for j in range(nL):
+        freq_t.append(wind_x[j]*P3.freq.kxAO_ + wind_y[j]*P3.freq.kyAO_)
+        phase = heights[j] * (beta_x*P3.freq.kxAO_ + beta_y*P3.freq.kyAO_) - delta_T * P3.ao.atm.wSpeed[j] * freq_t[j]
+        P_beta_L[:, :, 0, j] = cp.exp(2j*cp.pi*phase)
+    return host(P_beta_L), host(cp.stack(freq_t, axis=2))
 
 
-#%%
-_ = compute_difference_stats(W_tomo_torch_data, W_tomo_P3_data, title='W_tomo')
-_ = compute_difference_stats(W_alpha_torch_data, W_alpha_P3_data, title='W_alpha')
-_ = compute_difference_stats(P_beta_DM_torch_data, P_beta_DM_P3_data, title='P_beta_DM')
-_ = compute_difference_stats(freq_t_torch_data, freq_t_P3_data, title='freq_t')
-_ = compute_difference_stats(P_beta_L_torch_data, P_beta_L_P3_data, title='P_beta_L')
+def reconstructor_terms(P3, model):
+    ''' Tomographic operators of both models on the AO grid for layer 0 / guide star 0: magnitudes of the reconstructors, real parts of the phasors '''
+    AO_mask = model.mask_corrected_AO.unsqueeze(-1).unsqueeze(-1)
+    mask_P3 = host(P3.freq.mskInAO_)
+    P_beta_L_P3, freq_t_P3 = P3_layer_projector(P3)
+    P3_terms = {
+        'W_tomo':    np.abs(host(P3.tomographicReconstructor()))[..., 0, 0],
+        'W_alpha':   np.abs(host(P3.Walpha))[..., 0, 0],
+        'P_beta_DM': np.real(host(P3.PbetaDM[0]).astype(complex))[..., 0, 0] * mask_P3,
+        'P_beta_L':  np.real(P_beta_L_P3)[..., 0, 0] * mask_P3,
+        'freq_t':    np.abs(freq_t_P3)[..., 0],
+    }
+    TT_terms = {
+        'W_tomo':    np.abs(operator_on_P3_grid(model.W_tomo, model))[..., 0, 0],
+        'W_alpha':   np.abs(operator_on_P3_grid(model.W_alpha * AO_mask, model))[..., 0, 0],
+        'P_beta_DM': np.real(operator_on_P3_grid(model.P_beta_DM * AO_mask, model))[..., 0, 0],
+        'P_beta_L':  np.real(operator_on_P3_grid(model.P_beta_L * AO_mask, model))[..., 0, 0],
+        'freq_t':    np.abs(operator_on_P3_grid((model.freq_t / model.wind_speed.view(1, 1, 1, -1)).unsqueeze(-1), model))[..., 0, 0],
+    }
+    return P3_terms, TT_terms
 
 
-#%%
-# display_map(freq_t_torch_data, scale='linear', colorbar=True)
-plot_side_by_side(freq_t_torch_data, freq_t_P3_data, title='freq_t')
+# ------------------------------------------------ Statistics and plots ------------------------------------------------
+def difference_stats(TT, P3, title=None):
+    ''' Relative difference (TipTorch - P3) / P3 in percent where P3 is significant, and the maximum absolute difference relative to P3's peak '''
+    significant = np.abs(P3) > 1e-3 * np.abs(P3).max()
+    relative = 100 * (TT[significant] - P3[significant]) / P3[significant]
+    stats = dict(median_rel=np.median(relative), p90_rel=np.percentile(np.abs(relative), 90), max_abs_rel_peak=100*np.abs(TT - P3).max()/np.abs(P3).max())
+    if title:
+        print(f'{title:16s}: median {stats["median_rel"]:+6.2f} %,  |rel| 90th pct {stats["p90_rel"]:6.2f} %,  max |diff| {stats["max_abs_rel_peak"]:6.2f} % of peak')
+    return stats
 
 
-# %%
+def radial_profile(image, dk):
+    ''' Azimuthal mean about the central pixel; radii in [1/m] '''
+    y, x = np.indices(image.shape)
+    r = np.round(np.hypot(x - image.shape[1]//2, y - image.shape[0]//2)).astype(int).ravel()
+    profile = np.bincount(r, image.ravel()) / np.bincount(r)
+    return np.arange(profile.size) * dk, profile
+
+
+def _finish(fig, name):
+    OUTPUT.mkdir(parents=True, exist_ok=True)
+    fig.savefig(OUTPUT / f'{name}.png', dpi=110)
+    if SHOW_PLOTS:
+        plt.show()
+    plt.close(fig)
+
+
+def plot_maps(TT, P3, title, name, log=True, crop=None):
+    ''' TipTorch and P3 maps on a shared color scale plus their relative difference, optionally cropped to the central crop x crop pixels '''
+    if crop is not None and crop < TT.shape[0]:
+        c = TT.shape[0] // 2
+        TT, P3 = TT[c - crop//2 : c + crop//2, c - crop//2 : c + crop//2], P3[c - crop//2 : c + crop//2, c - crop//2 : c + crop//2]
+    positive = np.concatenate([P3[P3 > 0].ravel(), TT[TT > 0].ravel()])
+    norm = LogNorm(np.percentile(positive, 10), np.percentile(positive, 99.975)) if log and positive.size else None
+    difference = 100 * (TT - P3) / np.where(np.abs(P3) > 1e-3*np.abs(P3).max(), P3, np.nan)
+    limit = np.nanpercentile(np.abs(difference), 97.5)
+
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5))
+    for ax, image, label in ((axes[0], TT, 'TipTorch'), (axes[1], P3, 'P3')):
+        im = ax.imshow(image, norm=norm, cmap='viridis')
+        ax.set_title(f'{label} {title}')
+        ax.axis('off')
+    fig.colorbar(im, ax=axes[:2], fraction=0.025)
+    im = axes[2].imshow(difference, cmap='RdBu_r', vmin=-limit, vmax=limit)
+    axes[2].set_title('(TipTorch - P3) / P3 [%]')
+    axes[2].axis('off')
+    fig.colorbar(im, ax=axes[2], fraction=0.046)
+    _finish(fig, name)
+
+
+def plot_radial_profiles(P3_terms, TT_terms, dk, title, name, ylabel):
+    fig, ax = plt.subplots(figsize=(11, 7))
+    for i, key in enumerate(P3_terms):
+        for terms, label, style in ((P3_terms, 'P3', '--'), (TT_terms, 'TipTorch', '-')):
+            radii, profile = radial_profile(terms[key], dk)
+            ax.plot(radii, profile, style, color=f'C{i}', label=f'{label} {key}', linewidth=1)
+    ax.set_xscale('log')
+    ax.set_yscale('log')
+    ax.set_xlim(dk, None)
+    ax.grid(True, which='both', alpha=0.3)
+    ax.set_xlabel('spatial frequency [1/m]')
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(ncol=2, fontsize=9)
+    fig.tight_layout()
+    _finish(fig, name)
+
+
+# ------------------------------------------------ Checks ------------------------------------------------
+def test_PSD_contributors_match_P3():
+    P3, model = build_models()
+    P3_terms, TT_terms = PSD_terms(P3, model)
+    print('PSD contributors (rad^2 at the science wavelength):')
+    stats = {key: difference_stats(TT_terms[key], P3_terms[key], key) for key in PSD_TERMS}
+    assert abs(stats['fitting']['median_rel']) < 1.0
+    assert abs(stats['chromatism']['median_rel']) < 5.0 # air refractive index models differ slightly
+    assert abs(stats['spatio-temporal']['median_rel']) < 5.0
+    assert all(np.isfinite(TT_terms[key]).all() for key in PSD_TERMS)
+
+
+def test_tomographic_operators_match_P3():
+    P3, model = build_models()
+    P3_terms, TT_terms = reconstructor_terms(P3, model)
+    print('Tomographic operators (layer 0 / guide star 0):')
+    stats = {key: difference_stats(TT_terms[key], P3_terms[key], key) for key in P3_terms}
+    for key in ('W_alpha', 'P_beta_DM', 'P_beta_L', 'freq_t'):
+        assert stats[key]['max_abs_rel_peak'] < 1.0, key
+    assert stats['W_tomo']['max_abs_rel_peak'] < 10.0 # relative errors are dominated by near-zero entries, compare to the peak
+
+
+def test_tilt_filter_matches_P3():
+    P3, model = build_models()
+    tilt_P3, tilt_TT = host(P3.TiltFilter()), on_P3_grid(model.TiltFilter(), model)
+    assert tilt_TT.shape == tilt_P3.shape
+    assert tilt_TT[tilt_TT.shape[0]//2, tilt_TT.shape[1]//2] < 1e-9 # tip/tilt is fully rejected at the origin
+    assert np.all((tilt_TT >= 0) & (tilt_TT <= 1))
+    assert np.abs(tilt_TT - tilt_P3).max() < 1e-2 # the two grids differ by 0.2 % in frequency step
+
+
+def test_focus_error_PSD_matches_P3():
+    P3, model = build_models()
+    P3_terms, TT_terms = addon_terms(P3, model)
+    focus_P3, focus_TT = P3_terms['focus error'], TT_terms['focus error']
+    np.testing.assert_allclose(model.FocusErrorPSD(FOCUS_ERROR_NM).sum().item(), FOCUS_ERROR_NM**2, rtol=1e-5) # on TipTorch's own grid
+    assert np.abs(focus_TT - focus_P3).max() < 1e-2 * focus_P3.max()
+
+
+def test_extra_error_PSD_matches_P3():
+    P3, model = build_models()
+    P3_terms, TT_terms = addon_terms(P3, model)
+    extra_P3, extra_TT = P3_terms['extra error'], TT_terms['extra error']
+    np.testing.assert_allclose(model.ExtraErrorPSD(**EXTRA_ERROR).sum().item(), EXTRA_ERROR['rms_nm']**2, rtol=1e-5) # on TipTorch's own grid
+    np.testing.assert_allclose(extra_P3.sum(), EXTRA_ERROR['rms_nm']**2, rtol=1e-6)
+    assert extra_TT[extra_TT.shape[0]//2, extra_TT.shape[1]//2] == 0 # TipTorch removes the DC that P3 keeps
+    assert difference_stats(zero_DC(extra_TT), zero_DC(extra_P3))['p90_rel'] < 1.0
+
+
+def test_wind_shake_PSD_matches_P3():
+    P3, model = build_models()
+    P3_terms, TT_terms = addon_terms(P3, model)
+    wind_P3, wind_TT = P3_terms['wind shake'], TT_terms['wind shake']
+    assert np.isfinite(wind_TT).all() and wind_TT.min() >= 0
+    np.testing.assert_allclose(wind_TT.sum(), wind_P3.sum(), rtol=1e-2) # same temporal integration of the rejection transfer function
+    assert np.abs(wind_TT - wind_P3).max() < 2e-2 * wind_P3.max()
+
+
+def run_all():
+    for test in (test_PSD_contributors_match_P3, test_tomographic_operators_match_P3, test_tilt_filter_matches_P3,
+                 test_focus_error_PSD_matches_P3, test_extra_error_PSD_matches_P3, test_wind_shake_PSD_matches_P3):
+        test()
+    print('PSD comparison with P3 passed')
+
+
+#%% Checks and figures
+if __name__ == '__main__':
+    run_all()
+    P3, model = build_models()
+    dk = float(model.dk)
+
+    #%% PSD contributors
+    P3_PSDs, TT_PSDs = PSD_terms(P3, model)
+    for key in PSD_TERMS:
+        plot_maps(TT_PSDs[key], P3_PSDs[key], f'{key} PSD', f'PSD_{key.replace(" ", "_").replace(".", "")}')
+    plot_radial_profiles(P3_PSDs, TT_PSDs, dk, 'PSD contributors', 'PSD_radial_profiles', 'PSD [rad² / (1/m)²]')
+
+    #%% P3-style add-ons implemented as TipTorch members
+    P3_addons, TT_addons = addon_terms(P3, model)
+    for key in P3_addons:
+        plot_maps(TT_addons[key], P3_addons[key], key, f'addon_{key.replace(" ", "_")}', log=key != 'tilt filter', crop=None if key == 'tilt filter' else 3*P3.freq.resAO)
+    plot_radial_profiles({k: v for k, v in P3_addons.items() if k != 'tilt filter'}, {k: v for k, v in TT_addons.items() if k != 'tilt filter'},
+                         dk, 'PSD add-ons', 'addon_radial_profiles', 'PSD [nm² / pixel]')
+
+    #%% Tomographic operators
+    P3_ops, TT_ops = reconstructor_terms(P3, model)
+    for key in P3_ops:
+        plot_maps(TT_ops[key], P3_ops[key], key, f'operator_{key}', log=False)
+    print('figures written to', OUTPUT)

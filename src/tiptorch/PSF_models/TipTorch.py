@@ -294,8 +294,83 @@ class TipTorch(torch.nn.Module):
         # Apply analytical limit: 2*J₃(x)/x → 0 as x → 0
         result = torch.where(x < 1e-6, torch.zeros_like(result), result)
         return result
-    
-    
+
+
+    def _spatial_filters(self, k: torch.Tensor, D: torch.Tensor | float | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+        ''' Piston and tilt rejection filters [Sasiela 93] on an arbitrary spatial frequency grid k [1/m] for an aperture of diameter D [m] '''
+        x  = torch.pi * (self.D if D is None else D) * k
+        x_ = torch.where(x < 1e-6, torch.ones_like(x), x) # protect the origin, analytical limits are restored below
+        J1 = torch.special.bessel_j1(x_)
+        J2 = 2.0 * J1 / x_ - torch.special.bessel_j0(x_)
+
+        j1_term = torch.where(x < 1e-6, torch.ones_like(x),  2.0 * J1 / x_)
+        j2_term = torch.where(x < 1e-6, torch.zeros_like(x), 4.0 * J2 / x_)
+
+        piston_filter = (1.0 - j1_term.pow(2)).clamp_min(0.0)
+        tilt_filter   = (piston_filter - j2_term.pow(2)).clamp_min(0.0)
+        return piston_filter, tilt_filter
+
+
+    def _normalized_PSD(self, PSD_half: torch.Tensor, rms_nm: torch.Tensor | float) -> torch.Tensor:
+        ''' Expand a half-grid PSD shape to the full grid and scale it to integrate to the requested RMS² [nm²], given per source or observation '''
+        PSD = self.half_PSD_to_full(PSD_half)
+        return self.make_tensor(rms_nm).view(-1, 1, 1, 1).pow(2) * PSD / PSD.sum(dim=(-2,-1), keepdim=True)
+
+
+    def TiltFilter(self) -> torch.Tensor:
+        ''' Tilt rejection filter on the full PSD grid, [1, nOtf, nOtf]. The PSD is multiplied by it when tip/tilt is corrected by a separate LO loop '''
+        return self.half_PSD_to_full(self._spatial_filters(self.k)[1])
+
+
+    def ExtraErrorPSD(self, rms_nm: torch.Tensor | float, exponent: float = -2.0, k_min: float = 0.0, k_max: float = 0.0) -> torch.Tensor:
+        '''
+        Piston-filtered power-law PSD [nm²] with the requested RMS WFE (as P3's extraErrorPSD).
+        rms_nm is a scalar or [N_src] tensor, k_min/k_max [1/m] restrict the spectrum (k_max <= 0 disables the upper cut).
+        Returns [N_src or 1, 1, nOtf, nOtf]
+        '''
+        k = self.k
+        in_band = k >= k_min if k_max <= 0 else (k >= k_min) & (k <= k_max)
+        PSD = k.pow(exponent) * self._spatial_filters(k)[0] * in_band
+        PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0 # remove the DC component
+        return self._normalized_PSD(PSD, rms_nm)
+
+
+    def FocusErrorPSD(self, rms_nm: torch.Tensor | float) -> torch.Tensor:
+        ''' Full-grid PSD [nm²] of a residual global focus error with the requested RMS (as P3's FocusFilter), [N_src or 1, 1, nOtf, nOtf] '''
+        PSD = 1.0 - 3.0 * self._bessel_j3(torch.pi * self.D * self.k).pow(2)
+        return self._normalized_PSD(PSD, rms_nm)
+
+
+    def WindShakePSD(self, vibration_PSD: torch.Tensor) -> torch.Tensor:
+        '''
+        Residual wind shake / vibration PSD [nm²] (as P3's windShakePSD).
+        vibration_PSD: [3, N_f] with temporal frequencies [Hz], tip and tilt temporal PSDs [nm²/Hz].
+        The temporal PSDs are filtered by the HO loop rejection transfer function and integrated. The resulting
+        power is spread over the tilt-shaped, piston-filtered part of the AO-corrected area. Returns [N_obs, 1, nOtf, nOtf]
+        '''
+        data = self.make_tensor(to_little_endian(np.asarray(vibration_PSD)) if not torch.is_tensor(vibration_PSD) else vibration_PSD)
+        rate, gain, delay = self.HOloop_rate.view(-1,1), self.HOloop_gain.view(-1,1), self.HOloop_delay.view(-1,1) # [N_obs, 1]
+
+        f = 0.1 + (0.5*rate - 0.1) * torch.linspace(0, 1, int(5*rate.max().item()), device=self.device, dtype=rate.dtype) # [N_obs, N_f]
+        PSD_t = self._interp1d(f, data[0], data[1]) + self._interp1d(f, data[0], data[2]) # tip + tilt
+        _, rtfInt, _, _ = self.TransferFunctions(f, 1.0/rate, delay, gain)
+        power = ( (rtfInt.pow(2) * PSD_t).sum(dim=-1) * (f[:,1]-f[:,0]) ).abs() # [N_obs]
+
+        piston_filter, tilt_filter = self._spatial_filters(self.k_AO)
+        PSD  = self.PSD_padder((1.0 - tilt_filter) * piston_filter)
+        mask = self.half_PSD_to_full(self.PSD_padder(self.mask_corrected_AO))
+        return self._normalized_PSD(PSD, power.sqrt()) * mask
+
+
+    @staticmethod
+    def _interp1d(x_new: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        ''' Batched linear interpolation of the (x, y) samples at x_new, zero outside of the sampled range (as np.interp with left=right=0) '''
+        ids = torch.searchsorted(x, x_new.contiguous()).clamp(1, x.numel()-1)
+        x0, x1, y0, y1 = x[ids-1], x[ids], y[ids-1], y[ids]
+        y_new = y0 + (y1-y0) * (x_new-x0) / (x1-x0)
+        return torch.where((x_new < x[0]) | (x_new > x[-1]), torch.zeros_like(y_new), y_new)
+
+
     def _to_odd(self, x: float) -> int:
         odd = int(np.round(x))
         if odd % 2 == 0:
@@ -426,7 +501,8 @@ class TipTorch(torch.nn.Module):
         self.U, self.V = torch.meshgrid(UV_range, UV_range, indexing = 'ij')
         self.U, self.V = pdims(self.U, -2), pdims(self.V, -2)
         
-        self.u_max = (self.sampling * self.D / self.wvl / self.rad2mas)**2 # TODO: check if 1/2 factor is required
+        # U, V span [-1, 1] over the OTF grid, i.e. up to the Nyquist frequency sampling*D/(2*wvl) [cycles/rad]; converted to [cycles/mas]²
+        self.u_max = (self.sampling * self.D / self.wvl / self.rad2mas / 2)**2
         
         # self.center_aligner = torch.exp( 1j * torch.pi * (self.U + self.V) * (1 - self.N_pix%2))
 
