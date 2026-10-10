@@ -92,7 +92,7 @@ and the validation setup; both are summarized here where needed.
       `_normalized_PSD*` helpers, the per-term shape helpers); one `_unit_spectrum(name)` gives the cached unit-power shapes; one
       `ConeEffectPSD(PSD_AO)` covers the single-LGS and the tomographic LGS cases on the AO grid and is a core term; the HO extra error
       is a core error absorber with the optimizable `extra_error_nm` (like the Moffat term) while 'LO extra error', 'wind shake',
-      'tilt filter', 'focus error' are the LO terms applied by `_apply_LO_terms` (`ComputePSD(update_LO_terms_only=True)`);
+      'tilt filter', 'focus error' are the LO terms applied by `_apply_LO` (`ComputePSD(update_LO_only=True)`);
       `ComputePSD` builds the AO terms from a name-to-callable table. Tests adapted; all checks re-run.
 
 ## Surprises & Discoveries

@@ -639,7 +639,7 @@ class TipTorch(torch.nn.Module):
             'diff. refract',
             'cone effect',    # cone effect of the LGS(s): focal anisoplanatism (single LGS) or the volume not sensed by the LGS WFSs (tomography)
             'extra error',    # [telescope] extraErrorNm power-law PSD, a generic error absorber with the RMS extra_error_nm (like the Moffat term)
-            # LO terms, applied after the core PSD and updatable on their own (ComputePSD(update_LO_terms_only=True)):
+            # LO terms, applied after the core PSD and updatable on their own (ComputePSD(update_LO_only=True)):
             'LO extra error', # [telescope] extraErrorLoNm power-law PSD of the NGS directions
             'wind shake',     # [telescope] windPsdFile temporal PSD filtered by the HO loop (no separate LO loop)
             'tilt filter',    # tip/tilt rejection filter applied to the PSD when a separate LO loop corrects tip/tilt
@@ -1317,11 +1317,11 @@ class TipTorch(torch.nn.Module):
         return self.PSF_open_loop # [N_obs, N_wvl, N_pix, N_pix]
 
 
-    def ComputePSD(self, update_LO_terms_only: bool = False) -> torch.Tensor:
+    def ComputePSD(self, update_LO_only: bool = False) -> torch.Tensor:
         '''
         Residual PSD [N_src, N_wvl, nOtf, nOtf] in [nm²] per pixel. All terms are computed on the half grids in [rad²/m²] at the atmosphere
         wavelength and expanded to the full grid only at the end. The core PSD (AO-corrected terms with the cone effect, fitting, extra error)
-        is kept in PSD_core; with update_LO_terms_only it is reused and only the LO terms (wind shake, tilt filter, LO extra error, focus
+        is kept in PSD_core; with update_LO_only it is reused and only the LO terms (wind shake, tilt filter, LO extra error, focus
         error) are re-applied, e.g. after setting focus_error_nm.
         '''
         include = self.PSD_include
@@ -1329,8 +1329,8 @@ class TipTorch(torch.nn.Module):
             self.PSD = torch.zeros([self.N_src, self.N_wvl, self.nOtf, self.nOtf], device=self.device)
             return self.PSD
 
-        if update_LO_terms_only:
-            return self._apply_LO_terms(self.PSD_core, self.PSDs if self.retain_PSDs and hasattr(self, 'PSDs') else {})
+        if update_LO_only:
+            return self._apply_LO(self.PSD_core, self.PSDs if self.retain_PSDs and hasattr(self, 'PSDs') else {})
 
         if include['WFS noise'] or include['spatio-temporal'] or include['aliasing']:
             WFS_noise_var = (self.dn.view(self.N_obs,-1) + self.NoiseVariance()).abs() # [rad^2] at atmo wvl
@@ -1371,10 +1371,10 @@ class TipTorch(torch.nn.Module):
             PSD = PSD + PSDs['extra error']
 
         self.PSD_core = PSD
-        return self._apply_LO_terms(PSD, PSDs)
+        return self._apply_LO(PSD, PSDs)
 
 
-    def _apply_LO_terms(self, PSD: torch.Tensor, PSDs: dict) -> torch.Tensor:
+    def _apply_LO(self, PSD: torch.Tensor, PSDs: dict) -> torch.Tensor:
         ''' Apply the LO terms to the half-grid core PSD (P3's order: wind shake, tilt filter, extra error, then the focus error) and expand to the full grid '''
         include = self.PSD_include
         rms2 = lambda rms: self.make_tensor(rms).view(-1, 1, 1, 1).pow(2) / self._PSD_norm()
