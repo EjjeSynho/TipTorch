@@ -47,6 +47,7 @@ elif 'cfg' not in dir():
     # Works for both CLI (uses __file__) and plain IPython (uses cwd).
     _script_dir = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd()
     _default_cfg_path = _script_dir / 'NFM_calibrator_config.json'
+    
     if _default_cfg_path.exists():
         with open(_default_cfg_path) as _f:
             cfg = json.load(_f)
@@ -261,7 +262,7 @@ fig.suptitle('Input vs. Predicted distributions', fontsize=13)
 plt.tight_layout()
 plt.show()
 
-#%%
+
 # trainer.save_calibrator(Path(train_meta['bundle_path']))
 
 #%% ======================================================================================================================================================================
@@ -417,7 +418,7 @@ print("-" * 70)
 
 for wvl in range(len(wvl_select)):
     wvl_nm = int((lambda_full[wvl_select[wvl]] * 1e9).round().item())
-    errs = profile_errs[wvl]/100
+    errs = profile_errs[wvl] / 100.0
     
     pearson_r,  pearson_p  = pearsonr (loss_np, errs)
     spearman_r, spearman_p = spearmanr(loss_np, errs)
@@ -434,7 +435,7 @@ for wvl in range(len(wvl_select)):
 # Overall correlation across all wavelengths
 all_loss = np.tile(loss_np, len(wvl_select))
 all_errs = profile_errs.flatten() / 100
-pearson_all,  pearson_p_all  = pearsonr(all_loss, all_errs)
+pearson_all,  pearson_p_all  = pearsonr (all_loss, all_errs)
 spearman_all, spearman_p_all = spearmanr(all_loss, all_errs)
 print(f"{'All wavelengths':<20} {pearson_all:>12.4f} {pearson_p_all:>12.2e} {spearman_all:>12.4f} {spearman_p_all:>12.2e}")
 
@@ -582,17 +583,12 @@ def build_ETC_telemetry(telemetry_vectors, TCs, calibrator):
     """
     Build physical-unit ETC telemetry from normalized validation telemetry.
 
-    Observation-specific quantities for which ETC has no replacement (target,
-    pointing, IRLOS setup, etc.) are retained. Atmospheric and HO-WFS features
-    are replaced by ETC values or quantities derived from them. AO diagnostics
-    unavailable to ETC are set to NaN so the fitted telemetry imputer estimates
+    Observation-specific quantities for which ETC has no replacement (target, pointing, IRLOS setup, etc.) are retained. Atmospheric and HO-WFS features
+    are replaced by ETC values or quantities derived from them. AO diagnostics unavailable to ETC are set to NaN so the fitted telemetry imputer estimates
     them from the ETC conditions instead of leaking the observed values.
     """
     if len(telemetry_vectors) != len(TCs):
-        raise ValueError(
-            f"Expected one ETC category per telemetry row, got "
-            f"{len(TCs)} categories for {len(telemetry_vectors)} rows."
-        )
+        raise ValueError(f"Expected one ETC category per telemetry row, got {len(TCs)} categories for {len(telemetry_vectors)} rows.")
 
     telemetry_physical = pd.DataFrame(
         calibrator.telemetry_scaler.inverse_transform(telemetry_vectors.cpu().numpy()),
@@ -600,16 +596,16 @@ def build_ETC_telemetry(telemetry_vectors, TCs, calibrator):
     )
 
     seeing   = np.asarray([SEEING_TC[tc]  for tc in TCs], dtype=np.float64)
-    glf      = np.asarray([GLF_TC[tc]     for tc in TCs], dtype=np.float64)
+    GLF      = np.asarray([GLF_TC[tc]     for tc in TCs], dtype=np.float64)
     wind     = np.asarray([WIND_SPEED[tc] for tc in TCs], dtype=np.float64)
     wind_dir = np.asarray([WIND_DIR[tc]   for tc in TCs], dtype=np.float64)
 
     seeing_rad = np.deg2rad(seeing / 3600.0)
     r0 = 0.98 * ETC_REFERENCE_WAVELENGTH / seeing_rad
     k = 2.0 * np.pi / ETC_REFERENCE_WAVELENGTH
-    cn2_integral = r0 ** (-5.0 / 3.0) / (0.423 * k**2)
+    Cn2_integral = r0 ** (-5.0 / 3.0) / (0.423 * k**2)
     tau0 = 0.314 * r0 / wind
-    free_atmosphere_seeing = seeing * (1.0 - glf) ** (3.0 / 5.0)
+    free_atmosphere_seeing = seeing * (1.0 - GLF) ** (3.0 / 5.0)
 
     replacements = {
         'Seeing (header)':               seeing,
@@ -619,17 +615,18 @@ def build_ETC_telemetry(telemetry_vectors, TCs, calibrator):
         'Free Atmosphere Seeing ["]':    free_atmosphere_seeing,
         'MASS Tau0 [s]':                 tau0,
         'MASS-DIMM Turb Velocity [m/s]': wind,
-        'MASS_FRACGL':                   glf,
+        'MASS_FRACGL':                   GLF,
         'IA_FWHMLINOBS':                 seeing,
-        'LGS_TUR_ALT':                   1.0 - glf,
+        'LGS_TUR_ALT':                   1.0 - GLF,
         'LGS photons, [photons/m^2/s]':  ETC_HO_PHOTONS * ETC_LGS_PHOTON_RATE_SCALE,
-        'MASS_TURB total':               cn2_integral,
-        'Cn2 fraction below 2000m':      glf,
+        'MASS_TURB total':               Cn2_integral,
+        'Cn2 fraction below 2000m':      GLF,
         'Cn2_alt_binned_2':              np.full_like(seeing, 2.0),
-        'Cn2_frac_binned_2':             1.0 - glf,
+        'Cn2_frac_binned_2':             1.0 - GLF,
         'Cn2_alt_binned_3':              np.full_like(seeing, 20.0),
         'Cn2_frac_binned_3':             np.zeros_like(seeing),
     }
+    
     for feature, values in replacements.items():
         if feature in telemetry_physical:
             telemetry_physical[feature] = values
@@ -748,6 +745,8 @@ fig.suptitle('Calibrated ETC white-profile validation', fontsize=13, y=1.02)
 plt.tight_layout()
 plt.show()
 print(f"ΔSR per wavelength (calibrated ETC white profile): {np.array(p_errs_ETC)}")
+
+# TODO: best_calibrator_bundle vs NFM_calibrator_bundle
 
 #%%
 # Spectrally-averaged radial profile for the calibrated ETC white profile, across the whole validation set

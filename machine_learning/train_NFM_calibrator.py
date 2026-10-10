@@ -30,7 +30,7 @@ DEFAULT_CONFIG = {
     "name":                 "best_calibrator",
     "debug":                False,
     "batch_size":           16,
-    "continue_training":    False,
+    "continue_training":    True,
     "run_kfold_difficulty": False,
     "kfolds":               5,
     "kfold_epochs":         120,
@@ -64,31 +64,41 @@ DEFAULT_CONFIG = {
         "predict_wind_speed":  True,
         "pre_init_astrometry": True,
         "optimize_astrometry": False,
+        "nan_recovery":        True,
         "random_state":        43,
         "num_epochs":          250,
         "patience":            20,
-        "nan_recovery":        True,
         "max_nan_recoveries":  10,
         "pretrain_epochs":     100,
         "pretrain_patience":   15
     },
-    "fixed_params": ["Jxy", "bg_ctrl", "dx_ctrl", "dy_ctrl", "F_norm", "F_norm_lambda_ctrl", "src_dirs_x", "src_dirs_y", "wind_dir_single", "F_norm_λ_ctrl"],
+    "fixed_params": [
+        "Jxy", "bg_ctrl",
+        "dx_ctrl", "dy_ctrl",
+        "F_norm", "F_norm_lambda_ctrl", "F_norm_λ_ctrl",
+        "src_dirs_x", "src_dirs_y",
+        "wind_dir_single"
+    ],
     "weights_subdir":     "NFM_calibrator",
     "max_train_samples":  None
 }
 
 _parser = argparse.ArgumentParser(description="Train NFM Calibrator")
 _parser.add_argument('--config', type=str, default=None, help='Path to JSON training config file')
+
 try:
     _cli        = _parser.parse_args()
     _cfg_path   = Path(_cli.config) if _cli.config else None
 except SystemExit:
     _cfg_path   = None
 
+
 if _cfg_path and _cfg_path.exists():
     with open(_cfg_path) as _f:
         _loaded = json.load(_f)
+        
     cfg = deepcopy(DEFAULT_CONFIG)
+    
     for _k, _v in _loaded.items():
         if isinstance(_v, dict) and _k in cfg and isinstance(cfg[_k], dict):
             cfg[_k] = {**cfg[_k], **_v}   # shallow-merge nested dicts
@@ -98,6 +108,7 @@ else:
     cfg = deepcopy(DEFAULT_CONFIG)
     if _cfg_path:
         print(f"Warning: config file not found: {_cfg_path}. Using defaults.")
+
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
 MUSE_DATA_FOLDER  = Path(project_settings["MUSE_data_folder"])
@@ -110,6 +121,7 @@ BEST_CALIB_PATH   = WEIGHTS_DIR_CALIB / f'{cfg["name"]}_checkpoint.pth'
 log_dir = Path('../data/logs')
 log_dir.mkdir(parents=True, exist_ok=True)
 log_filename = log_dir / f'training_NFM_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
+
 logging.basicConfig(
     level=logging.DEBUG if cfg["debug"] else logging.INFO,
     format='%(asctime)s | %(levelname)s | %(message)s',
@@ -118,8 +130,10 @@ logging.basicConfig(
 )
 logging.getLogger('matplotlib').setLevel(logging.WARNING)
 logging.getLogger('PIL').setLevel(logging.WARNING)
+
 logger = logging.getLogger(__name__)
 logger.info(f"Log file: {log_filename}")
+
 if _cfg_path:
     logger.info(f"Config loaded from: {_cfg_path}")
 
@@ -136,7 +150,6 @@ from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 _tmp_batch  = tuple([dataset[i] for i in np.random.randint(0, len(dataset), size=cfg["batch_size"])])
 _, _, _, _tmp_config, _ = dataset.collate_batch(_tmp_batch, device=default_device)
 
-
 if 'PSF_model' in locals():
     del PSF_model
 
@@ -152,7 +165,7 @@ with torch.no_grad():
         Z_mode_max     = cfg["model"]["Z_mode_max"],
         device         = default_device,
     )
-
+    
 del _tmp_batch, _tmp_config
 release_gpu_memory(sync=True)
 
@@ -365,8 +378,8 @@ if cfg["tune"]["enabled"]:
 
 with open(_meta_path, 'w') as _f:
     json.dump(_meta, _f, indent=2)
+    
 logger.info(f"Post-tune metadata updated -> {_meta_path}")
-
 
 # %%
 trainer.save_calibrator(Path(_meta['bundle_path']))
