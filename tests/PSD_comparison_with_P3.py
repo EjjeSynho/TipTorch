@@ -6,13 +6,13 @@ PSD-level comparison of TipTorch against P3's `fourierModel` on the MUSE NFM LTA
 Compared term by term, on P3's spatial-frequency grid:
   - the six PSD contributors: fitting, aliasing, WFS noise, spatio-temporal, chromatism, differential refraction;
   - the tomographic reconstructor and the layer / DM projectors (W_tomo, W_alpha, P_beta_DM, P_beta_L, freq_t);
-  - the P3-style PSD add-ons that are `TipTorch` members: `TiltFilter`, `FocusErrorPSD`, `ExtraErrorPSD`, `WindShakePSD`
+  - the P3-style error terms of `TipTorch` (`PSD_include` entries 'tilt filter', 'focus error', 'extra error', 'wind shake')
     against P3's `TiltFilter`, `FocusFilter`, `extraErrorPSD` and `windShakePSD`.
   - SLAO (TIPTOP's perfTest/ERIS_LGS.ini, one LGS at 90 km, plus two off-axis science sources): the cone-effect PSD against P3's
-    `focalAnisoplanatismPSD`, the anisoplanatism of the non-tomographic spatio-temporal PSD against P3's `spatioTemporalPSD` and
-    `anisoplanatismPSD`;
-  - MCAO (TIPTOP's perfTest/MAVIStest.ini, 8 LGS, 9 pointings): the PSD of the volume not sensed by the LGS WFSs against P3's
-    `mcaoWFsensConePSD`.
+    `focalAnisoplanatismPSD` inside the AO-corrected area, the anisoplanatism of the non-tomographic spatio-temporal PSD against
+    P3's `spatioTemporalPSD` and `anisoplanatismPSD`;
+  - MCAO (TIPTOP's perfTest/MAVIStest.ini, 8 LGS, 9 pointings): the cone-effect PSD (volume not sensed by the LGS WFSs) against
+    P3's `mcaoWFsensConePSD`.
 
 TipTorch's oversampling is tuned so that its odd PSD grid has the same frequency step as P3's even grid with the DC on
 the same pixel (nOtf = 1153 vs 1152 here); TipTorch maps are compared after dropping their last row and column.
@@ -191,7 +191,7 @@ def PSD_terms(P3, model):
 
 
 def addon_terms(P3, model):
-    ''' TipTorch's P3-style PSD members against their P3 originals, on P3's full grid (nm², the tilt filter is dimensionless) '''
+    ''' TipTorch's P3-style error terms against their P3 originals, on P3's full grid (nm², the tilt filter is dimensionless) '''
     nm2 = P3_PSD_to_nm2(P3)
     focus = host(P3.FocusFilter())
     P3_terms = {
@@ -200,11 +200,20 @@ def addon_terms(P3, model):
         'extra error': host(P3.extraErrorPSD()) * nm2,
         'wind shake':  embed_AO(P3, host(P3.windShakePSD())) * nm2,
     }
+    # The terms are enabled on the model and read back from its PSDs dictionary (half grids in rad²/m²)
+    model.extra_error_shape = (EXTRA_ERROR['exponent'], EXTRA_ERROR['k_min'], EXTRA_ERROR['k_max'])
+    model.extra_error_nm = torch.full((model.N_src,), EXTRA_ERROR['rms_nm'], device=model.device, dtype=model.dtype)
+    model.focus_error_nm = FOCUS_ERROR_NM
+    model.vibration_PSD = model.make_tensor(np.asarray(fits.getdata(WIND_PSD_FILE), dtype=np.float64))
+    for key in P3_terms:
+        model.PSD_include[key] = True
+    model.ComputePSD()
+    norm = model._PSD_norm().item()
     TT_terms = {
-        'tilt filter': on_P3_grid(model.TiltFilter(), model),
-        'focus error': on_P3_grid(model.FocusErrorPSD(FOCUS_ERROR_NM), model),
-        'extra error': on_P3_grid(model.ExtraErrorPSD(**EXTRA_ERROR), model),
-        'wind shake':  on_P3_grid(model.WindShakePSD(fits.getdata(WIND_PSD_FILE)), model),
+        'tilt filter': on_P3_grid(model.PSDs['tilt filter'], model),
+        'focus error': on_P3_grid(model.PSDs['focus error'], model) * norm,
+        'extra error': on_P3_grid(model.PSDs['extra error'], model) * norm,
+        'wind shake':  on_P3_grid(model.PSD_padder(model.PSDs['wind shake']), model) * norm,
     }
     return P3_terms, TT_terms
 
@@ -213,15 +222,18 @@ def SLAO_terms(P3, model):
     ''' Cone effect (full grid), spatio-temporal and anisoplanatism PSDs (AO grid) per source of the SLAO models, rad² at the science wavelength '''
     scale = (model.wvl_atm / model.wvl).item()**2
     n_full, n_AO = P3.freq.nOtf, P3.freq.resAO
-    P3_terms = {
-        'cone effect':     host(P3.focalAnisoplanatismPSD()),
+    i1 = int(np.ceil(n_full/2 - n_AO/2))
+    A = model._anisoplanatism_phasor() # TipTorch folds the anisoplanatism into the spatio-temporal PSD; P3's standalone term is 2 (1 - Re A) W_atm
+    aniso_TT = 2*(model.Cn2_weights.sum(dim=-1).view(-1, 1, 1) - A.real) * model.W_atm * model.mask_corrected_AO
+    P3_terms = { # TipTorch's cone effect is restricted to the AO-corrected area, P3's full-grid term is cropped and masked accordingly
+        'cone effect':     host(P3.focalAnisoplanatismPSD())[i1:i1+n_AO, i1:i1+n_AO] * host(P3.freq.mskInAO_),
         'spatio-temporal': np.moveaxis(host(P3.spatioTemporalPSD()), -1, 0),
         'anisoplanatism':  np.moveaxis(host(P3.anisoplanatismPSD()), -1, 0),
     }
     TT_terms = {
-        'cone effect':     on_P3_grid(model.ConeEffectPSD(), model, n_full) * scale,
+        'cone effect':     on_P3_grid(model.PSDs['cone effect'], model, n_AO) * scale,
         'spatio-temporal': np.stack([on_P3_grid(model.PSDs['spatio-temporal'][s], model, n_AO) for s in range(model.N_src)]) * scale,
-        'anisoplanatism':  np.stack([on_P3_grid(model.AnisoplanatismPSD()[s], model, n_AO) for s in range(model.N_src)]) * scale,
+        'anisoplanatism':  np.stack([on_P3_grid(aniso_TT[s], model, n_AO) for s in range(model.N_src)]) * scale,
     }
     return P3_terms, TT_terms
 
@@ -236,7 +248,7 @@ def MCAO_cone_terms(P3, model):
     cone_P3 = np.moveaxis(host(P3.mcaoWFsensConePSD(residual))[i1:i1+n, i1:i1+n], -1, 0)
 
     PSD_AO = sum(model.PSDs[key] for key in ('WFS noise', 'aliasing', 'diff. refract', 'chromatism', 'spatio-temporal'))
-    cone_TT = model.MCAOConePSD(PSD_AO)
+    cone_TT = model.ConeEffectPSD(PSD_AO)
     scale = (model.wvl_atm / model.wvl).item()**2
     return cone_P3, np.stack([on_P3_grid(cone_TT[s], model, n) for s in range(model.N_src)]) * scale
 
@@ -373,7 +385,7 @@ def test_tomographic_operators_match_P3():
 
 def test_tilt_filter_matches_P3():
     P3, model = build_models()
-    tilt_P3, tilt_TT = host(P3.TiltFilter()), on_P3_grid(model.TiltFilter(), model)
+    tilt_P3, tilt_TT = host(P3.TiltFilter()), addon_terms(P3, model)[1]['tilt filter']
     assert tilt_TT.shape == tilt_P3.shape
     assert tilt_TT[tilt_TT.shape[0]//2, tilt_TT.shape[1]//2] < 1e-9 # tip/tilt is fully rejected at the origin
     assert np.all((tilt_TT >= 0) & (tilt_TT <= 1))
@@ -384,7 +396,7 @@ def test_focus_error_PSD_matches_P3():
     P3, model = build_models()
     P3_terms, TT_terms = addon_terms(P3, model)
     focus_P3, focus_TT = P3_terms['focus error'], TT_terms['focus error']
-    np.testing.assert_allclose(model.FocusErrorPSD(FOCUS_ERROR_NM).sum().item(), FOCUS_ERROR_NM**2, rtol=1e-5) # on TipTorch's own grid
+    np.testing.assert_allclose((model.half_PSD_to_full(model.PSDs['focus error']) * model._PSD_norm()).sum().item(), FOCUS_ERROR_NM**2, rtol=1e-5) # on TipTorch's own grid
     assert np.abs(focus_TT - focus_P3).max() < 1e-2 * focus_P3.max()
 
 
@@ -392,7 +404,7 @@ def test_extra_error_PSD_matches_P3():
     P3, model = build_models()
     P3_terms, TT_terms = addon_terms(P3, model)
     extra_P3, extra_TT = P3_terms['extra error'], TT_terms['extra error']
-    np.testing.assert_allclose(model.ExtraErrorPSD(**EXTRA_ERROR).sum().item(), EXTRA_ERROR['rms_nm']**2, rtol=1e-5) # on TipTorch's own grid
+    np.testing.assert_allclose((model.half_PSD_to_full(model.PSDs['extra error']) * model._PSD_norm()).sum().item(), EXTRA_ERROR['rms_nm']**2, rtol=1e-5) # on TipTorch's own grid
     np.testing.assert_allclose(extra_P3.sum(), EXTRA_ERROR['rms_nm']**2, rtol=1e-6)
     assert extra_TT[extra_TT.shape[0]//2, extra_TT.shape[1]//2] == 0 # TipTorch removes the DC that P3 keeps
     assert difference_stats(zero_DC(extra_TT), zero_DC(extra_P3))['p90_rel'] < 1.0
@@ -410,10 +422,10 @@ def test_wind_shake_PSD_matches_P3():
 def test_SLAO_cone_effect_matches_P3():
     P3, model = build_SLAO_models()
     P3_terms, TT_terms = SLAO_terms(P3, model)
-    stats = difference_stats(TT_terms['cone effect'], P3_terms['cone effect'], 'cone effect')
+    stats = difference_stats(TT_terms['cone effect'], P3_terms['cone effect'], 'cone effect (AO area)')
     assert stats['p90_rel'] < 1.0 and stats['max_abs_rel_peak'] < 1.0
     np.testing.assert_allclose(TT_terms['cone effect'].sum(), P3_terms['cone effect'].sum(), rtol=5e-3) # analytical pupil means vs P3's 1001-point sampling
-    assert 'cone effect' in model.PSDs and model.PSDs['cone effect'].shape[-2:] == (model.nOtf_y, model.nOtf_x)
+    assert model.PSDs['cone effect'].shape[-2:] == (model.nOtf_AO_y, model.nOtf_AO_x) # AO grid only (P3 also fills the ring kc < k < kc/g)
 
 
 def test_SLAO_anisoplanatism_matches_P3():
@@ -426,10 +438,10 @@ def test_SLAO_anisoplanatism_matches_P3():
     assert difference_stats(TT_terms['anisoplanatism'][1], P3_terms['anisoplanatism'][1], 'anisoplanatism 1')['max_abs_rel_peak'] < 0.1
     assert difference_stats(TT_terms['anisoplanatism'][2].T, P3_terms['anisoplanatism'][2], 'anisoplanatism 2 (T)')['max_abs_rel_peak'] < 0.1
     assert difference_stats(TT_terms['anisoplanatism'][2], P3_terms['anisoplanatism'][2])['max_abs_rel_peak'] > 10.0
-    # total HO wavefront error per source (nm RMS) including the cone effect
+    # total HO wavefront error per source (nm RMS); P3 also counts the cone effect outside the AO area (about 18 nm here)
     HO_TT, HO_P3 = host(model.PSD.sum(dim=(-2,-1)).sqrt()).flatten(), np.sqrt(host(P3.PSD).sum(axis=(0, 1)))
     print(f'  HO residual [nm]: TipTorch {np.round(HO_TT, 1)}, P3 {np.round(HO_P3, 1)}')
-    np.testing.assert_allclose(HO_TT[:2], HO_P3[:2], rtol=1e-2)
+    np.testing.assert_allclose(HO_TT[:2], HO_P3[:2], rtol=1.5e-2)
 
 
 def test_MCAO_cone_effect_matches_P3():
@@ -441,7 +453,7 @@ def test_MCAO_cone_effect_matches_P3():
     for s in (0, 1, 3):
         stats = difference_stats(cone_TT[s], cone_P3[s], f'MCAO cone, pointing {s}')
         assert stats['max_abs_rel_peak'] < 5.0 # the residual PSDs that feed the term differ by a few percent (aliasing / noise physics)
-    assert 'MCAO cone effect' in model.PSDs and model.PSDs['MCAO cone effect'].shape[0] == model.N_src
+    assert 'cone effect' in model.PSDs and model.PSDs['cone effect'].shape[0] == model.N_src
 
 
 def run_all():
@@ -464,7 +476,7 @@ if __name__ == '__main__':
         plot_maps(TT_PSDs[key], P3_PSDs[key], f'{key} PSD', f'PSD_{key.replace(" ", "_").replace(".", "")}')
     plot_radial_profiles(P3_PSDs, TT_PSDs, dk, 'PSD contributors', 'PSD_radial_profiles', 'PSD [rad² / (1/m)²]')
 
-    #%% P3-style add-ons implemented as TipTorch members
+    #%% P3-style error terms of TipTorch
     P3_addons, TT_addons = addon_terms(P3, model)
     for key in P3_addons:
         plot_maps(TT_addons[key], P3_addons[key], key, f'addon_{key.replace(" ", "_")}', log=key != 'tilt filter', crop=None if key == 'tilt filter' else 3*P3.freq.resAO)

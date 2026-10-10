@@ -87,8 +87,19 @@ and the validation setup; both are summarized here where needed.
       (`_addon_cache`); `ComputePSD(update_addons_only=True)` re-applies the add-ons to the cached half-grid core (`PSD_core`) so the
       bridge no longer recomputes the PSD for the focus error; the wind-shake FITS is loaded once with the pupils (`_load_vibration_PSD`);
       the MCAO cone low-pass is real arithmetic; the cone-effect coefficients have finite gradients. All checks re-run.
+- [x] (2026-10-10, third round, user requirements) Streamlined `TipTorch.py`: 15 functions removed (the full-grid wrappers
+      `TiltFilter` / `ExtraErrorPSD` / `FocusErrorPSD` / `WindShakePSD`, `FocusFilter`, `AnisoplanatismPSD`, `MCAOConePSD`, the
+      `_normalized_PSD*` helpers, the per-term shape helpers); one `_unit_spectrum(name)` gives the cached unit-power shapes; one
+      `ConeEffectPSD(PSD_AO)` covers the single-LGS and the tomographic LGS cases on the AO grid and is a core term; the HO extra error
+      is a core error absorber with the optimizable `extra_error_nm` (like the Moffat term) while 'LO extra error', 'wind shake',
+      'tilt filter', 'focus error' are the LO terms applied by `_apply_LO_terms` (`ComputePSD(update_LO_terms_only=True)`);
+      `ComputePSD` builds the AO terms from a name-to-callable table. Tests adapted; all checks re-run.
 
 ## Surprises & Discoveries
+- Observation (third round): P3's `focalAnisoplanatismPSD` is added on the full grid, i.e. also in the ring kc < k < kc/g where the
+  DM cannot act and the fitting error already holds the full atmospheric power. On ERIS_LGS that ring carries 17.6 nm of the
+  171.6 nm cone-effect total (29 % more power than the fitting term there): a double count. TipTorch restricts the term to the
+  AO-corrected area; the ERIS_LGS HO residual becomes 183.7 nm (P3 184.8 nm), and the PSD comparison crops and masks P3's map.
 - Observation (second round): MUSE NFM LTAO now initializes no add-on values (`extra_error_nm`, `vibration_PSD`, `focus_error_nm`
   are `None`, `PSD_include` has only the six core terms); `ComputePSD` takes 7 ms warm on the GPU, the add-on-only update 0.7 ms
   (after a 0.4 s first call that builds the cached focus shape); ERIS_LGS `ComputePSD` takes 6 ms including the cone effect.
@@ -187,6 +198,13 @@ and the validation setup; both are summarized here where needed.
 - Decision (user requirement, second round): the wind-shake temporal PSD is loaded in `InitPupils` through `_load_vibration_PSD`,
   only if `vibration_PSD` is still `None` (it can be provided externally like the pupil), never on `ComputePSD`.
 
+- Decision (user requirement, third round): the cone effect is a core term on the AO grid (not an add-on); the HO extra error is a
+  core "error absorber" like the Moffat term (enabled by the config RMS or `PSD_include['extra error']`, then `extra_error_nm` [N_src]
+  exists and can be optimized); the LO-related terms (LO extra error of the NGS directions, wind shake, tilt filter, focus error)
+  form the "LO terms" group. The anisoplanatism of SCAO / SLAO is always on for off-axis sources (inside the spatio-temporal term).
+- Decision (third round): the two cone effects are one `PSD_include` entry, `'cone effect'`, computed by `ConeEffectPSD(PSD_AO)`
+  according to the AO regime (single LGS: focal anisoplanatism; tomographic LGS system with `addMcaoWFsensConeError`: unsensed volume).
+
 ## Concrete Steps
 
 Run from `astro-tiptop/TipTorch` in the `TipTop` conda env (`KMP_DUPLICATE_LIB_OK=TRUE` when torch is imported first):
@@ -244,7 +262,9 @@ everywhere) and left as is; `Super_Sampling` and `oversampling` are unrelated.
 
 Validated: unit, PSD-level and visual checks pass; the SLAO HO residual went from 80 nm to 184.5 nm (P3 184.8 nm); ERIS, MAVIStest
 and METIS results are unchanged or closer to P3. After the second round all numbers are identical (ERIS_LGS 184.5 nm, ERIS 80.9 nm,
-MAVIStest and METIS unchanged, dummy focus variant 124.5 / 63.4 nm) and configs without the entries carry no add-on state.
+MAVIStest and METIS unchanged, dummy focus variant 124.5 / 63.4 nm) and configs without the entries carry no add-on state. After the
+third round ERIS_LGS gives 183.7 nm (cone effect inside the AO area only) and the dummy focus variant 124.2 nm (the HO extra error is now a
+core term and is therefore tilt-filtered when an LO loop exists, whereas P3 adds it after the tilt filter: 0.3 nm here); everything else is unchanged.
 
 Open: (1) nothing is committed in either repository, and the editable-installed checkout `C:\Users\akuznets\Projects\TipTorch` does
 not carry these changes (the bridge needs `PYTHONPATH` or a mirror of `TipTorch.py`, `tools/tiptop_integration.py`,
