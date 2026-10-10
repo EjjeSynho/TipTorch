@@ -1,3 +1,4 @@
+#%%
 """
 Visual comparison of TIPTOP PSFs computed with the P3 backend (`tiptop.baseSimulation`) and with the TipTorch backend
 (`tiptop.TipTop_integration`): both are run on the same `perfTest` configuration and rendered side by side, with the
@@ -6,6 +7,7 @@ normalized difference and the radial profiles. One figure per test:
     SCAO  - ERIS.ini      VLT 8 m, 1.65 um, 14 mas pixels, no LO loop
     MCAO  - MAVIStest.ini VLT 8 m, 8 LGS, 3 NGS, 9 science pointings at 550 nm, 7 mas pixels
     ELT   - METIS.ini     ELT 38.5 m SCAO, 3.7 um, 4 mas pixels, ELT pupil FITS, M1 static map, wind shake, extra error, 6 mas jitter
+    SLAO  - ERIS_LGS.ini  VLT 8 m, one LGS at 90 km (cone effect), one NGS for the LO loop, 1.65 um, 14 mas pixels
 
 Requirements: the `TipTop` conda env (P3, MASTSEL, TIPTOP, TipTorch), the TIPTOP repository next to the TipTorch one or
 `TIPTOP_PATH` pointing to it (its `tiptop/data` FITS files are needed for METIS), and optionally a CUDA device.
@@ -32,7 +34,14 @@ OUTPUT = Path(__file__).resolve().parent / 'runs' / 'visual_comparison'
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 SR_TOLERANCE = 0.15 # relative, on the rendered pointings
 
+# NOTE: off-axis TipTorch PSFs are the transpose of P3's (visible as a quadrupole in the difference panels of the MAVIStest pointings on the
+# x / y axes). TipTorch builds its frequency grids with meshgrid(indexing='ij'), so kx runs along the image rows and a source offset in x
+# (as the wind and the Jx jitter) acts along the first image axis. P3's tomographic PSD has the same raw convention, but TIPTOP's
+# baseSimulation transposes the PSD cube before MASTSEL (`self.PSD = self.PSD.transpose()`), which swaps the axes, so P3 + TIPTOP puts x
+# along the columns (P3's own SCAO branch pairs the x offset with ky, i.e. the opposite of its tomographic branch and of its wind).
+# Both codes are self-consistent; the convention is left as is here (see agents/execplans/TipTop_integration_finalizing.md).
 
+#%%
 def _host(x):
     return np.asarray(x.get() if hasattr(x, 'get') else x, dtype=float)
 
@@ -45,7 +54,7 @@ def _per_pointing(values, nWvl):
 def _run_both(config):
     ''' Run the P3 and the TipTorch baseSimulation on perfTest/<config>.ini; PSF cubes are [nPointings, N, N] at the first wavelength '''
     from tiptop.baseSimulation import baseSimulation as P3Simulation
-    from tiptop.TipTop_integration import baseSimulation as TipTorchSimulation
+    from tiptop.TipTorchSimulation import baseSimulation as TipTorchSimulation
 
     OUTPUT.mkdir(parents=True, exist_ok=True)
     results = {}
@@ -60,6 +69,7 @@ def _run_both(config):
             sim.computeMetrics()
             cube = _host(sim.cubeResultsArray)
             cube = cube[0] if sim.nWvl > 1 else cube
+            
             results[name] = dict(
                 cube = cube / cube.sum(axis=(-2, -1), keepdims=True), # P3 cubes are not unit-flux in every configuration
                 psInMas = float(_host(sim.psInMas)), wvl = float(sim.wvl[0]), time = elapsed,
@@ -69,6 +79,7 @@ def _run_both(config):
             )
     finally:
         os.chdir(cwd)
+    
     return results
 
 
@@ -124,9 +135,11 @@ def _visual_case(config, title, pointings, crop):
     assert P3['cube'].shape == TT['cube'].shape, (P3['cube'].shape, TT['cube'].shape)
     assert np.isfinite(TT['cube']).all() and np.isfinite(P3['cube']).all()
     path = _render(config, title, results, pointings, crop)
+    
     assert path.exists()
     for i in pointings:
         assert abs(TT['sr'][i] - P3['sr'][i]) <= SR_TOLERANCE * P3['sr'][i], (i, TT['sr'][i], P3['sr'][i])
+        
     print(f'{config}: figure saved to {path}')
     return results
 
@@ -144,7 +157,12 @@ def test_visual_ELT_METIS():
     _visual_case('METIS', 'SCAO on the ELT with pupil FITS, M1 static map, wind shake, extra error and telescope jitter', pointings=[0], crop=160)
 
 
+def test_visual_SLAO_ERIS_LGS():
+    # single LGS at 90 km with the cone effect, one NGS for the LO loop (tilt-filtered HO PSD)
+    _visual_case('ERIS_LGS', 'SLAO on the VLT (one LGS, cone effect, LO loop on one NGS)', pointings=[0], crop=64)
+
+#%%
 if __name__ == '__main__':
-    for test in (test_visual_SCAO_ERIS, test_visual_MCAO_MAVIS, test_visual_ELT_METIS):
+    for test in (test_visual_SCAO_ERIS, test_visual_MCAO_MAVIS, test_visual_ELT_METIS, test_visual_SLAO_ERIS_LGS):
         test()
     print('visual comparison figures written to', OUTPUT)

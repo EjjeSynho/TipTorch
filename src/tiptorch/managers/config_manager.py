@@ -72,7 +72,18 @@ SINGLETON_VALUES = [
     ['telescope', 'PathStaticOn'],
     ['telescope', 'PathStaticPos'],
     ['telescope', 'Resolution'],
-    ['telescope', 'TelescopeDiameter']
+    ['telescope', 'TelescopeDiameter'],
+    ['telescope', 'TechnicalFoV'],
+    ['telescope', 'extraErrorNm'],
+    ['telescope', 'extraErrorExp'],
+    ['telescope', 'extraErrorMin'],
+    ['telescope', 'extraErrorMax'],
+    ['telescope', 'extraErrorLoNm'],
+    ['telescope', 'extraErrorLoExp'],
+    ['telescope', 'extraErrorLoMin'],
+    ['telescope', 'extraErrorLoMax'],
+    ['telescope', 'windPsdFile'],
+    ['sensor_HO', 'addMcaoWFsensConeError']
 ]
 
 # Thee values remain scalars and must not be converted to arrays/lists when modifying configs

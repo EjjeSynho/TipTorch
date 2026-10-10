@@ -13,7 +13,8 @@ import torch
 from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.tools.tiptop_integration import (
     SIGMA_TO_FWHM, circular_pupil, combine_zero_centered_jitters, fwhm_to_jitter, interpolate_curves, jitter_params_to_cov,
-    pad_PSD_to_even, PSF_encircled_energy, PSF_ensquared_energy, PSF_FWHM, PSF_radial_profile, tiptilt_covariance_to_jitter,
+    pad_PSD_to_even, PSF_encircled_energy, PSF_ensquared_energy, PSF_FWHM, PSF_radial_profile, PSF_radial_profile_polar,
+    resample_profile_cubic, tiptilt_covariance_to_jitter,
 )
 
 torch.set_default_dtype(torch.float64)
@@ -78,6 +79,27 @@ def test_batched_energy_metrics():
     radii, profile = PSF_radial_profile(PSFs, 1.0)
     expected = torch.exp(-0.5 * (radii/4.)**2)
     np.testing.assert_allclose(profile[0, 0, :20].numpy() / profile[0, 0, 0].item(), expected[:20].numpy(), rtol=0.1) # annulus averages of a curved profile
+
+
+def test_supersampled_radial_profiles():
+    ''' TIPTOP's Super_Sampling options on a Gaussian: polar sampling (option 2) and cubic-spline resampling of the discrete profile (option 1) '''
+    sigma, ps, step = 4.0, 2.0, 0.5 # pixels, mas/pixel, mas
+    PSFs = _gaussian_stack((torch.full((2, 3), sigma), torch.full((2, 3), sigma)), size=129)
+    PSFs = PSFs / PSFs.sum(dim=(-2,-1), keepdim=True)
+    scaling = (step/ps)**2 # P3 scales supersampled profiles by (step / pixel scale)²
+
+    radii, polar = PSF_radial_profile_polar(PSFs, ps, step, max_radius_mas=60.0)
+    assert polar.shape == (2, 3, radii.numel()) and radii[1] - radii[0] == step and radii[-1] < 60.0
+    expected = PSFs[0, 0, 64, 64].item() * torch.exp(-0.5 * (radii/ps/sigma)**2) * scaling
+    np.testing.assert_allclose(polar[1, 2].numpy(), expected.numpy(), rtol=0.02, atol=1e-3*expected[0].item())
+
+    r_pix, profile = PSF_radial_profile(PSFs, ps)
+    r_fine, fine = resample_profile_cubic(r_pix, profile, ps, step)
+    assert fine.shape == (2, 3, r_fine.numel()) and torch.all(fine >= 0)
+    on_knots = fine[..., ::int(ps/step)]
+    np.testing.assert_allclose(on_knots.numpy(), profile[..., :on_knots.shape[-1]].numpy() * scaling, rtol=1e-6) # the spline interpolates the samples
+    expected = PSFs[0, 0, 64, 64].item() * torch.exp(-0.5 * (r_fine/ps/sigma)**2) * scaling
+    np.testing.assert_allclose(fine[0, 1, :60].numpy(), expected[:60].numpy(), rtol=0.1) # annulus averages of a curved profile
 
 
 def test_pupil_and_psd_padding():

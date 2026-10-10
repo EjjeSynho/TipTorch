@@ -5,6 +5,16 @@ telescope:
 - PupilAngle
 - TelescopeDiameter
 - ZenithAngle
+- TechnicalFoV
+- extraErrorNm
+- extraErrorExp
+- extraErrorMin
+- extraErrorMax
+- extraErrorLoNm
+- extraErrorLoExp
+- extraErrorLoMin
+- extraErrorLoMax
+- windPsdFile
 
 sources_science:
 - Wavelength
@@ -56,6 +66,7 @@ sensor_HO:
 - SpotFWHM
 - ExcessNoiseFactor
 - NumberPhotons
+- addMcaoWFsensConeError
 
 DM:
 - DmPitchs

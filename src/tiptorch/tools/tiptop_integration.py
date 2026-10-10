@@ -101,6 +101,53 @@ def PSF_radial_profile(PSFs, pixel_scale_mas, center=None):
     return radii, sums / counts.clamp_min(1)
 
 
+def PSF_radial_profile_polar(PSFs, pixel_scale_mas, step_mas, max_radius_mas, n_theta_max=180):
+    """
+    Radii [n_r] every step_mas up to max_radius_mas and the azimuthal means [..., n_r] of unit-flux PSFs [..., H, W] about their peaks,
+    sampled by bicubic interpolation on polar rings of max(3, ceil(2 pi r / step)) points capped at n_theta_max, as P3's
+    precompute_polar_grid / interpolate_2d (TIPTOP's Super_Sampling option 2): values are clipped at zero and scaled by (step / pixel_scale)²
+    """
+    PSFs = PSFs / PSFs.sum(dim=(-2,-1), keepdim=True)
+    H, W = PSFs.shape[-2:]
+    x = PSFs.reshape(-1, 1, H, W)
+    B = x.shape[0]
+    radii   = torch.arange(0, max_radius_mas, step_mas, device=x.device, dtype=x.dtype)          # [R]
+    n_theta = torch.ceil(2*torch.pi * radii / step_mas).clamp(3, n_theta_max)                     # [R] points per ring (all coincide at r = 0)
+    j       = torch.arange(n_theta_max, device=x.device, dtype=x.dtype)                           # [T]
+    theta   = 2*torch.pi * j[None, :] / n_theta[:, None]                                          # [R, T]
+    valid   = j[None, :] < n_theta[:, None]
+    py, px  = _peak_position(x[:, 0])
+    r_pix   = (radii / pixel_scale_mas)[:, None]
+
+    xs, ys = px.view(B,1,1) + r_pix*torch.cos(theta), py.view(B,1,1) + r_pix*torch.sin(theta)    # [B, R, T] ring coordinates in pixels
+    grid   = torch.stack((2*xs/(W-1) - 1, 2*ys/(H-1) - 1), -1)
+    values = grid_sample(x, grid, mode='bicubic', padding_mode='zeros', align_corners=True)[:, 0]
+    profile = (values * valid).sum(-1) / valid.sum(-1)
+    return radii, profile.clamp_min(0).view(*PSFs.shape[:-2], -1) * (step_mas / pixel_scale_mas)**2
+
+
+def resample_profile_cubic(radii, profiles, pixel_scale_mas, step_mas):
+    """
+    Resample profiles [..., n] sampled at the uniform radii [n] every step_mas from radii[0] to radii[-1] with a not-a-knot cubic spline,
+    as P3's interpolate_1d (TIPTOP's Super_Sampling option 1): values are clipped at zero and scaled by (step / pixel_scale)²
+    """
+    n, h = radii.numel(), radii[1] - radii[0]
+    y = profiles.reshape(-1, n).T # [n, B]
+    A, rhs = torch.zeros(n, n, device=y.device, dtype=y.dtype), torch.zeros_like(y)
+    i = torch.arange(1, n-1, device=y.device)
+    A[i, i-1], A[i, i], A[i, i+1] = 1.0, 4.0, 1.0
+    rhs[i] = 6/h**2 * (y[i+1] - 2*y[i] + y[i-1])
+    A[0, :3], A[-1, -3:] = torch.tensor([1., -2., 1.], device=y.device, dtype=y.dtype), torch.tensor([1., -2., 1.], device=y.device, dtype=y.dtype) # not-a-knot ends
+    M = torch.linalg.solve(A, rhs) # second derivatives at the knots [n, B]
+
+    r = torch.arange(radii[0].item(), radii[-1].item(), step_mas, device=y.device, dtype=y.dtype)
+    k = ((r - radii[0]) / h).floor().long().clamp(0, n-2)
+    t = (r - radii[k])[:, None]
+    b = (y[k+1] - y[k])/h - h*(2*M[k] + M[k+1])/6
+    y_new = y[k] + b*t + M[k]/2*t**2 + (M[k+1] - M[k])/(6*h)*t**3
+    return r, y_new.T.clamp_min(0).view(*profiles.shape[:-1], -1) * (step_mas / pixel_scale_mas)**2
+
+
 def PSF_encircled_energy(PSFs, pixel_scale_mas, center=None):
     """
     Bin radii [n_bins] in [mas] and encircled energy curves [..., n_bins] normalized to their maximum (as P3's getEncircledEnergy),

@@ -90,6 +90,18 @@ class ParameterParser():
         check_path('telescope',  'PathApodizer')
         check_path('telescope',  'PathStatModes') # Telescope aberrations
 
+        # TIPTOP / P3-style add-on errors: power-law extra error (HO and LO), wind shake temporal PSD, technical field of the LO sensors
+        check_value('telescope', 'extraErrorNm',    0.0)  # [nm RMS]
+        check_value('telescope', 'extraErrorExp',  -2.0)  # spatial-frequency exponent
+        check_value('telescope', 'extraErrorMin',   0.0)  # [1/m], lower cut of the spectrum (0: none)
+        check_value('telescope', 'extraErrorMax',   0.0)  # [1/m], upper cut of the spectrum (0: none)
+        check_value('telescope', 'extraErrorLoNm',  params['telescope']['extraErrorNm'])  # [nm RMS], a value or [center, edge] of the technical field
+        check_value('telescope', 'extraErrorLoExp', params['telescope']['extraErrorExp'])
+        check_value('telescope', 'extraErrorLoMin', 0.0)
+        check_value('telescope', 'extraErrorLoMax', 0.0)
+        check_value('telescope', 'TechnicalFoV',    0.0)  # [arcsec]
+        check_value('telescope', 'windPsdFile',     None) # FITS file [3, N_f] with the temporal frequencies and the tip/tilt vibration PSDs
+
         # Atmosphere
         check_value('atmosphere','Wavelength', 500e-9) #[m]
 
@@ -159,6 +171,7 @@ class ParameterParser():
         check_value('sensor_HO', 'ThresholdWCoG', 0.0) # (?) = 0.0 or it's a mistake?
         check_value('sensor_HO', 'NewValueThrPix', 0.0)
         check_value('sensor_HO', 'ExcessNoiseFactor', 1.0)
+        check_value('sensor_HO', 'addMcaoWFsensConeError', False) # reduced volume sensed by the LGS WFSs of a tomographic system
 
         # Tip-tilt sensors
         if 'sensor_LO' in params:

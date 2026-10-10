@@ -61,8 +61,16 @@ class TipTorch(torch.nn.Module):
         return self.OTF_static
     
     
-    def InitPupils(self):       
+    def _load_vibration_PSD(self):
+        # As the pupil and apodizer, the wind-shake temporal PSD [3, N_f] (frequencies [Hz], tip and tilt PSDs) is read from the file given
+        # in the config only when it was not provided externally, and only once
+        if self.vibration_PSD is None and self.wind_PSD_file is not None:
+            self.vibration_PSD = self.make_tensor(to_little_endian(fits.getdata(self.wind_PSD_file)))
+
+
+    def InitPupils(self):
         self._load_pupil_and_apodizer()
+        self._load_vibration_PSD()
         self.UpdateStaticOTF()
         
 
@@ -95,6 +103,9 @@ class TipTorch(torch.nn.Module):
         # Guide stars parameters
         self.GS_wvl    = self.config['sources_HO']['Wavelength'] #[m]
         self.GS_height = min_2d(self.config['sources_HO']['Height']) * self.airmass #[m]
+        self.is_LGS    = (self.GS_height > 0) & self.GS_height.isfinite() # a height of 0 (or inf) means an NGS at an infinite distance
+        # Height of the LGS constellation (center of mass of the LGS heights), infinite for NGS: stretches the layer heights and sets the cone effects
+        self.LGS_height = torch.where(self.is_LGS.all(dim=-1, keepdim=True), self.GS_height.mean(dim=-1, keepdim=True), torch.inf) # [N_obs, 1]
         GS_angles   = self.config['sources_HO']['Zenith'] / self.rad2arc # [arcsec] from on-axis
         GS_azimuths = torch.deg2rad(self.config['sources_HO']['Azimuth']) # [deg] from on-axis
         self.GS_dirs_x = torch.tan(GS_angles) * torch.cos(GS_azimuths) # [N_obs, N_GS]
@@ -165,8 +176,9 @@ class TipTorch(torch.nn.Module):
         self.L0 = self.config['atmosphere']['L0'].flatten() # [m]
         
         self.r0_ = lambda : self.r0.abs().flatten() * self.airmass.flatten()**(-3.0/5.0)# [N_obs]
-        self.h_  = lambda: (self.Cn2_heights * (1.0 / (1.0 - self.Cn2_heights/self.GS_height))) # [N_obs, N_layers]
-    
+        # Layer heights stretched by the LGS cone, as P3's strechFactor; NGS heights leave them unchanged
+        self.h_  = lambda: self.Cn2_heights / (1.0 - self.Cn2_heights/self.LGS_height) # [N_obs, N_layers]
+
         self.F   = torch.ones (self.N_src, self.N_wvl, device=self.device)
         self.bg  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
         self.dx  = torch.zeros(self.N_src, self.N_wvl, device=self.device)
@@ -186,6 +198,8 @@ class TipTorch(torch.nn.Module):
         # if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
         self.dn  = torch.zeros(self.N_obs, device=self.device)
 
+        self._init_addon_values()
+
         if self.AO_type is None:
             self._select_AO_correction()
         
@@ -200,8 +214,56 @@ class TipTorch(torch.nn.Module):
         self.IOR_GS_wvl  = self.n_air(self.GS_wvl) # GS_wvl may depend on the filter for SCAO or on LGS wavelength
  
  
-    def _select_AO_correction(self):   
-        use_LGS = torch.all(self.GS_height > 0) and torch.all(self.GS_height.isfinite()) # LGS stars must be at finite altitude
+    def _init_addon_values(self):
+        '''
+        Settings of the P3-style add-on PSDs from the TIPTOP entries [telescope] extraErrorNm / Exp / Min / Max, extraErrorLoNm / LoExp / LoMin /
+        LoMax, TechnicalFoV, windPsdFile and [sensor_HO] addMcaoWFsensConeError. Only the entries present in the config are initialized and
+        nothing is computed unless the corresponding PSD_include entries are enabled. As P3's getPSDatNGSpositions, when the config has a
+        [sources_LO] section its N_LO directions are assumed to be the trailing N_LO sources: they get the LO extra error, the others the HO one.
+        '''
+        get    = lambda section, key, default=None: self.config[section][key] if self.config[section].get(key) is not None else default
+        scalar = lambda x: float(torch.as_tensor(x).flatten()[0])
+
+        self.extra_error_nm = self.extra_error_LO_nm = None
+        rms_HO = scalar(get('telescope', 'extraErrorNm', 0.0))
+        rms_LO = self.make_tensor(get('telescope', 'extraErrorLoNm', rms_HO)).flatten() # one value, or [center, edge] of the technical field
+        N_LO = min(self.config['sources_LO']['Zenith'].numel(), self.N_src) if 'sources_LO' in self.config and rms_LO.sum().item() >= 0 else 0
+
+        if rms_HO > 0 or (N_LO > 0 and rms_LO.sum().item() > 0):
+            exp_HO = scalar(get('telescope', 'extraErrorExp', -2.0))
+            self.extra_error_shape    = (exp_HO, scalar(get('telescope', 'extraErrorMin', 0.0)), scalar(get('telescope', 'extraErrorMax', 0.0)))
+            self.extra_error_LO_shape = (scalar(get('telescope', 'extraErrorLoExp', exp_HO)), scalar(get('telescope', 'extraErrorLoMin', 0.0)), scalar(get('telescope', 'extraErrorLoMax', 0.0)))
+            if N_LO > 0:
+                LO_zenith = self.make_tensor(self.config['sources_LO']['Zenith']).flatten()[:N_LO] # [arcsec]
+                if rms_LO.numel() == 2: # linear interpolation between the field center and the edge of the technical field (as P3's extraErrorLoPSD)
+                    FoV = scalar(get('telescope', 'TechnicalFoV', 0.0))
+                    t = (LO_zenith / (0.5*FoV)).clamp(0, 1) if FoV > 0 else torch.zeros_like(LO_zenith)
+                    rms_LO = rms_LO[0] + (rms_LO[1]-rms_LO[0]) * t
+                elif rms_LO.numel() == 1:
+                    rms_LO = rms_LO.expand(N_LO)
+                else:
+                    raise ValueError('extraErrorLoNm must be a scalar or [center, edge] values')
+            else:
+                rms_LO = rms_LO[:0] # no LO directions
+            science = lambda x: torch.full((self.N_src-N_LO,), x, device=self.device, dtype=self.dtype)
+            self.extra_error_nm    = torch.cat([science(rms_HO), torch.zeros(N_LO, device=self.device, dtype=self.dtype)])  # [N_src]
+            self.extra_error_LO_nm = torch.cat([science(0.0), rms_LO.to(device=self.device, dtype=self.dtype)]) # [N_src]
+
+        self.add_MCAO_cone = bool(get('sensor_HO', 'addMcaoWFsensConeError', False))
+        wind_file = get('telescope', 'windPsdFile')
+        self.wind_PSD_file = str(wind_file) if isinstance(wind_file, (str, Path)) and str(wind_file) not in ('', '0') else None
+
+
+    def _enable_configured_addons(self):
+        ''' Enable the add-on terms the config asks for, as P3 adds them automatically; the tilt and focus filters are left to the caller '''
+        self.PSD_include['extra error']      = self.extra_error_nm is not None
+        self.PSD_include['wind shake']       = self.wind_PSD_file is not None
+        self.PSD_include['cone effect']      = bool(self.N_GS == 1 and self.is_LGS.all())
+        self.PSD_include['MCAO cone effect'] = bool(self.add_MCAO_cone and self.tomography and self.is_LGS.all())
+
+
+    def _select_AO_correction(self):
+        use_LGS = self.is_LGS.all() # LGS stars must be at finite altitude
         multiple_GS = self.GS_dirs_x.size(-1) > 1
         multiple_DM = self.N_DM > 1
         
@@ -233,6 +295,7 @@ class TipTorch(torch.nn.Module):
 
     def _convert_tensors_dtype(self, target_float: torch.dtype, target_complex: torch.dtype) -> None:
         ''' Helper to convert all tensor attributes to specified dtypes '''
+        self._addon_cache = {}
         for attr_name, attr in self.__dict__.items():
             if torch.is_tensor(attr):
                 if torch.is_floating_point(attr):
@@ -311,15 +374,52 @@ class TipTorch(torch.nn.Module):
         return piston_filter, tilt_filter
 
 
+    def _half_sum(self, PSD_half: torch.Tensor) -> torch.Tensor:
+        ''' Sum over the full grid of a half-grid PSD (the last column of the half grid is the DC column, counted once), [..., 1, 1] '''
+        return 2*PSD_half.sum(dim=(-2,-1), keepdim=True) - PSD_half[..., :, -1:].sum(dim=-2, keepdim=True)
+
+
+    def _cached(self, key, compute):
+        ''' Grid-dependent constant tensors of the add-on terms, computed once per grid (the cache is reset by InitGrids) '''
+        if key not in self._addon_cache:
+            self._addon_cache[key] = compute()
+        return self._addon_cache[key]
+
+
+    def _normalized_PSD_half(self, PSD_half: torch.Tensor, rms_nm: torch.Tensor | float) -> torch.Tensor:
+        ''' Scale a half-grid PSD shape so that it integrates over the full grid to the requested RMS² [nm²], given per source or observation '''
+        return self.make_tensor(rms_nm).view(-1, 1, 1, 1).pow(2) * PSD_half / self._half_sum(PSD_half)
+
+
     def _normalized_PSD(self, PSD_half: torch.Tensor, rms_nm: torch.Tensor | float) -> torch.Tensor:
         ''' Expand a half-grid PSD shape to the full grid and scale it to integrate to the requested RMS² [nm²], given per source or observation '''
-        PSD = self.half_PSD_to_full(PSD_half)
-        return self.make_tensor(rms_nm).view(-1, 1, 1, 1).pow(2) * PSD / PSD.sum(dim=(-2,-1), keepdim=True)
+        return self.half_PSD_to_full(self._normalized_PSD_half(PSD_half, rms_nm))
+
+
+    def _PSD_norm(self) -> torch.Tensor:
+        ''' PSDs are computed in [rad²/m²] at the atmosphere wavelength; this factor converts them to [nm²] of OPD per PSD pixel '''
+        return (self.dk * self.wvl_atm * 1e9 / (2*torch.pi))**2
+
+
+    def _full_grid_filters(self) -> tuple[torch.Tensor, torch.Tensor]:
+        ''' Piston and tilt rejection filters on the full half grid [1, nOtf_y, nOtf_x], computed once per grid '''
+        return self._cached('filters', lambda: self._spatial_filters(self.k))
 
 
     def TiltFilter(self) -> torch.Tensor:
         ''' Tilt rejection filter on the full PSD grid, [1, nOtf, nOtf]. The PSD is multiplied by it when tip/tilt is corrected by a separate LO loop '''
-        return self.half_PSD_to_full(self._spatial_filters(self.k)[1])
+        return self.half_PSD_to_full(self._full_grid_filters()[1])
+
+
+    def _extra_error_shape(self, exponent: float, k_min: float, k_max: float) -> torch.Tensor:
+        ''' Unit-power piston-filtered power-law spectrum on the half grid [1, nOtf_y, nOtf_x]; k_min/k_max [1/m] restrict it (k_max <= 0 disables the upper cut) '''
+        def compute():
+            k = self.k
+            in_band = k >= k_min if k_max <= 0 else (k >= k_min) & (k <= k_max)
+            PSD = k.pow(exponent) * self._full_grid_filters()[0] * in_band
+            PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0 # remove the DC component
+            return PSD / self._half_sum(PSD) # unit total power
+        return self._cached(('extra error', exponent, k_min, k_max), compute)
 
 
     def ExtraErrorPSD(self, rms_nm: torch.Tensor | float, exponent: float = -2.0, k_min: float = 0.0, k_max: float = 0.0) -> torch.Tensor:
@@ -328,17 +428,46 @@ class TipTorch(torch.nn.Module):
         rms_nm is a scalar or [N_src] tensor, k_min/k_max [1/m] restrict the spectrum (k_max <= 0 disables the upper cut).
         Returns [N_src or 1, 1, nOtf, nOtf]
         '''
-        k = self.k
-        in_band = k >= k_min if k_max <= 0 else (k >= k_min) & (k <= k_max)
-        PSD = k.pow(exponent) * self._spatial_filters(k)[0] * in_band
-        PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0 # remove the DC component
-        return self._normalized_PSD(PSD, rms_nm)
+        return self._normalized_PSD(self._extra_error_shape(exponent, k_min, k_max), rms_nm)
+
+
+    def _extra_error_PSD_half(self) -> torch.Tensor:
+        ''' Configured HO + LO extra-error PSDs on the half grid in [rad²/m²], [N_src, 1, nOtf_y, nOtf_x]; only the RMS values vary between calls '''
+        rms2 = lambda rms: rms.view(-1, 1, 1, 1).pow(2)
+        PSD = rms2(self.extra_error_nm) * self._extra_error_shape(*self.extra_error_shape)
+        if self.extra_error_LO_nm.sum() > 0:
+            PSD = PSD + rms2(self.extra_error_LO_nm) * self._extra_error_shape(*self.extra_error_LO_shape)
+        return PSD / self._PSD_norm()
+
+
+    def _focus_error_shape(self) -> torch.Tensor:
+        ''' Unit-power global focus spectrum on the half grid [1, nOtf_y, nOtf_x], computed once per grid '''
+        def compute():
+            PSD = 1.0 - 3.0 * self._bessel_j3(torch.pi * self.D * self.k).pow(2)
+            return PSD / self._half_sum(PSD)
+        return self._cached('focus error', compute)
 
 
     def FocusErrorPSD(self, rms_nm: torch.Tensor | float) -> torch.Tensor:
-        ''' Full-grid PSD [nm²] of a residual global focus error with the requested RMS (as P3's FocusFilter), [N_src or 1, 1, nOtf, nOtf] '''
-        PSD = 1.0 - 3.0 * self._bessel_j3(torch.pi * self.D * self.k).pow(2)
-        return self._normalized_PSD(PSD, rms_nm)
+        ''' Full-grid PSD [nm²] of a residual global focus error with the requested RMS, [N_src or 1, 1, nOtf, nOtf] '''
+        return self._normalized_PSD(self._focus_error_shape(), rms_nm)
+
+
+    def _wind_shake_PSD_half(self, vibration_PSD: torch.Tensor) -> torch.Tensor:
+        ''' Wind shake PSD on the AO-corrected half grid in [nm²] per PSD pixel, [N_obs, 1, nOtf_AO_y, nOtf_AO_x] '''
+        data = self.make_tensor(to_little_endian(np.asarray(vibration_PSD)) if not torch.is_tensor(vibration_PSD) else vibration_PSD)
+        rate, gain, delay = self.HOloop_rate.view(-1,1), self.HOloop_gain.view(-1,1), self.HOloop_delay.view(-1,1) # [N_obs, 1]
+
+        f = 0.1 + (0.5*rate - 0.1) * torch.linspace(0, 1, int(5*rate.max().item()), device=self.device, dtype=rate.dtype) # [N_obs, N_f]
+        PSD_t = self._interp1d(f, data[0], data[1]) + self._interp1d(f, data[0], data[2]) # tip + tilt
+        _, rtfInt, _, _ = self.TransferFunctions(f, 1.0/rate, delay, gain)
+        power = ( (rtfInt.pow(2) * PSD_t).sum(dim=-1) * (f[:,1]-f[:,0]) ).abs() # [N_obs]
+
+        def shape(): # unit-power tilt-shaped, piston-filtered spectrum of the AO-corrected area
+            piston_filter, tilt_filter = self._spatial_filters(self.k_AO)
+            PSD = (1.0 - tilt_filter) * piston_filter * self.mask_corrected_AO
+            return PSD / self._half_sum(PSD)
+        return power.view(-1, 1, 1, 1) * self._cached('wind shake', shape)
 
 
     def WindShakePSD(self, vibration_PSD: torch.Tensor) -> torch.Tensor:
@@ -348,18 +477,7 @@ class TipTorch(torch.nn.Module):
         The temporal PSDs are filtered by the HO loop rejection transfer function and integrated. The resulting
         power is spread over the tilt-shaped, piston-filtered part of the AO-corrected area. Returns [N_obs, 1, nOtf, nOtf]
         '''
-        data = self.make_tensor(to_little_endian(np.asarray(vibration_PSD)) if not torch.is_tensor(vibration_PSD) else vibration_PSD)
-        rate, gain, delay = self.HOloop_rate.view(-1,1), self.HOloop_gain.view(-1,1), self.HOloop_delay.view(-1,1) # [N_obs, 1]
-
-        f = 0.1 + (0.5*rate - 0.1) * torch.linspace(0, 1, int(5*rate.max().item()), device=self.device, dtype=rate.dtype) # [N_obs, N_f]
-        PSD_t = self._interp1d(f, data[0], data[1]) + self._interp1d(f, data[0], data[2]) # tip + tilt
-        _, rtfInt, _, _ = self.TransferFunctions(f, 1.0/rate, delay, gain)
-        power = ( (rtfInt.pow(2) * PSD_t).sum(dim=-1) * (f[:,1]-f[:,0]) ).abs() # [N_obs]
-
-        piston_filter, tilt_filter = self._spatial_filters(self.k_AO)
-        PSD  = self.PSD_padder((1.0 - tilt_filter) * piston_filter)
-        mask = self.half_PSD_to_full(self.PSD_padder(self.mask_corrected_AO))
-        return self._normalized_PSD(PSD, power.sqrt()) * mask
+        return self.half_PSD_to_full(self.PSD_padder(self._wind_shake_PSD_half(vibration_PSD)))
 
 
     @staticmethod
@@ -510,7 +628,8 @@ class TipTorch(torch.nn.Module):
         self.PSD_padder = torch.nn.ZeroPad2d( (a:=((self.nOtf-self.nOtf_AO)//2), 0, a, a) ) # pad_left, pad_right, pad_top, pad_bottom
 
         self.piston_filter = self.PistonFilter(self.k_AO)
-        
+        self._addon_cache = {} # grid-dependent shapes of the add-on terms are rebuilt on demand
+
         # To avoid initializing it without a need
         if self.PSD_include['aliasing']:
             self.PR = self.PistonFilter(torch.hypot(self.km, self.kn)) # piston filter for aliased spatial frequencies
@@ -593,9 +712,17 @@ class TipTorch(torch.nn.Module):
             'aliasing',
             'chromatism',
             'Moffat',
-            'diff. refract'
+            'diff. refract',
+            'cone effect',      # focal anisoplanatism of a single LGS (SLAO), computed only for a single LGS
+            'MCAO cone effect', # volume not sensed by the LGS WFSs of a tomographic system, computed only when [sensor_HO] addMcaoWFsensConeError is set
+            'extra error',      # [telescope] extraErrorNm / extraErrorLoNm power-law PSDs
+            'wind shake',       # [telescope] windPsdFile temporal PSD filtered by the HO loop
+            'tilt filter',      # tip/tilt rejection filter applied to the PSD when a separate LO loop corrects tip/tilt
+            'focus error'       # residual global focus error with the RMS given by focus_error_nm
         ]
-        
+        # The P3-style add-ons are excluded unless enabled explicitly or by the config entries (see _enable_configured_addons)
+        PSD_entries_off = ['Moffat', 'cone effect', 'MCAO cone effect', 'extra error', 'wind shake', 'tilt filter', 'focus error']
+
         if PSD_include is not None:
             # One can select which error sources to include in the simulation
             self.PSD_include = PSD_include
@@ -603,9 +730,8 @@ class TipTorch(torch.nn.Module):
             for key in PSD_entries_all:
                 if key not in self.PSD_include: self.PSD_include[key] = False
         else:
-            # Otherwise, all error contributors are simulated except for the Moffat PSD
-            self.PSD_include = { key: True for key in PSD_entries_all }
-            self.PSD_include['Moffat'] = False
+            # Otherwise, all error contributors are simulated except for the Moffat PSD and the add-ons
+            self.PSD_include = { key: key not in PSD_entries_off for key in PSD_entries_all }
         
         if not self.PSD_include['fitting']:
             warnings.warn('The fitting PSD must be always be enabled. Setting it on')
@@ -673,11 +799,16 @@ class TipTorch(torch.nn.Module):
         # Default inversion method for tomographic reconstruction
         self.inversion_method = 'lstsq'
         
-        # Piston filters           
+        # Piston filters
         self.piston_filter = None # piston mode filter in the AO-corrected freqs domain
         self.apodizer = None
         self.PR = None # piston mode filter in aliased freqs domain
- 
+
+        # P3-style add-ons: the wind-shake temporal PSD is loaded with the pupils, the residual focus RMS is set by the caller (e.g. an LO loop)
+        self.vibration_PSD = None
+        self.focus_error_nm = None
+        self._addon_cache = {}
+
         # Read the config data and initialize the AO system
         self.Update(
             config = AO_config,
@@ -685,6 +816,9 @@ class TipTorch(torch.nn.Module):
             pupils = True,
             tomography = True # Try updating the tomographic reconstructors. If AO is not tomographic, the model will figure it out and skip the update
         )
+
+        if PSD_include is None: # unless chosen explicitly, the add-ons follow the config (P3 behaviour)
+            self._enable_configured_addons()
         
 
     def DMProjector(self):
@@ -834,10 +968,31 @@ class TipTorch(torch.nn.Module):
         self.Ry[..., self.nOtf_AO//2, self.nOtf_AO//2] = 1e-12
 
     
+    def _anisoplanatism_phasor(self):
+        '''
+        Layer-weighted phasor between the science directions and the single guide star of a non-tomographic system (as P3's SCAO / SLAO
+        spatio-temporal PSD), [N_src, nOtf_AO_y, nOtf_AO_x]. The layer heights are stretched by the LGS cone. The sign of the exponent is
+        the conjugate of P3's because TipTorch's TransferFunctions use the conjugate temporal convention (z = exp(+2j pi f Ts)); with it the
+        spatio-temporal PSD reproduces P3's. TipTorch pairs the x offset with kx (the first grid axis), as its tomographic projectors and
+        its wind do; P3's SCAO branch pairs it with ky instead.
+        '''
+        theta_x = (self.src_dirs_x.view(-1) - self.GS_dirs_x[:, 0]).view(-1, 1, 1, 1) # [N_src, 1, 1, 1]
+        theta_y = (self.src_dirs_y.view(-1) - self.GS_dirs_y[:, 0]).view(-1, 1, 1, 1)
+        if not (theta_x.any() or theta_y.any()): # all sources on the guide star axis
+            return torch.ones(1, 1, 1, device=self.device, dtype=self.dtype)
+        h = self.h_().view(self.N_obs, 1, 1, self.N_L)
+        w = self.Cn2_weights.view(self.N_obs, 1, 1, self.N_L)
+        return (w * torch.exp(-2j*torch.pi * h * (theta_x*self.kx_AO.unsqueeze(-1) + theta_y*self.ky_AO.unsqueeze(-1)))).sum(dim=-1)
+
+
+    def AnisoplanatismPSD(self):
+        ''' Angular anisoplanatism PSD of a non-tomographic system on the AO half grid [N_src, nOtf_AO_y, nOtf_AO_x] (as P3's anisoplanatismPSD, diagnostic only) '''
+        return 2*(self.Cn2_weights.sum(dim=-1).view(-1, 1, 1) - self._anisoplanatism_phasor().real) * self.W_atm * self.mask_corrected_AO
+
+
     def SpatioTemporalPSD(self):
         if not self.tomography:
-            #TODO: fix it. "A" should be initialized differently? It just ones!
-            A = torch.ones([self.W_atm.shape[0], self.nOtf_AO_y, self.nOtf_AO_x], device=self.device)
+            A = self._anisoplanatism_phasor() # ones on-axis
             Ff = self.Rx*self.SxAv + self.Ry*self.SyAv
             PSD_ST = (1 + Ff.abs()**2 * self.h2 - 2*torch.real(Ff*self.h1*A)) * self.W_atm * self.mask_corrected_AO
             
@@ -935,7 +1090,81 @@ class TipTorch(torch.nn.Module):
         tan_theta = torch.tan((self.IOR_src_wvl - pdims(self.IOR_GS_wvl, 1)) * torch.tan(self.zenith_angle)) # [N_obs, N_wvl]
         
         return self.W_atm.unsqueeze(1) * ( 2*w*(1.0-torch.cos(2*torch.pi*h*k * pdims(tan_theta, 3) * pdims(cos_ang, 1))) ).sum(dim=-1) * self.mask_corrected_AO
-    
+
+
+    def ConeEffectPSD(self, n_phases: int = 5) -> torch.Tensor:
+        '''
+        Focal anisoplanatism (cone effect) PSD of a single LGS on the full half grid [N_obs, nOtf_y, nOtf_x] (as P3's focalAnisoplanatismPSD).
+        Through the cone, a layer sinusoid of frequency f is sensed as a sinusoid of frequency f*(H-h)/H. The RMS fraction left after
+        subtracting the best-scaled sensed sinusoid over the pupil diameter, averaged over n_phases phase offsets, is squared and filters
+        the atmospheric spectrum of every layer. Frequencies that fall beyond the correction band once compressed are left to the fitting
+        error. P3 samples the pupil with 1001 points; here the pupil means of the sinusoids are analytical (mean of cos(2 pi f x) = sinc(f D)).
+        '''
+        H = self.LGS_height # [N_obs, 1]
+        g = ((H - self.Cn2_heights) / H).view(self.N_obs, 1, self.N_L, 1) # frequency compression through the cone
+        f = (torch.arange(self.nOtf_x, device=self.device, dtype=self.dtype) * self.dk).view(1, -1, 1, 1) # [1, N_f, 1, 1] radial frequencies
+        phi = (2*torch.pi * torch.arange(n_phases, device=self.device, dtype=self.dtype) / n_phases).view(1, 1, 1, -1)
+        m = lambda freq: torch.sinc(freq * self.D) # pupil mean of cos(2*pi*freq*x) for x in [-D/2, D/2]
+
+        in_band = (f > 1e-5) & (f * g <= self.kc) # the DC and the frequencies beyond the correction band once compressed are masked at the end
+        f_safe = torch.where(f > 1e-5, f, torch.full_like(f, self.dk)) # keeps the variances below positive, i.e. the gradients finite
+        f_cone = f_safe * g
+        sin2_phi, cos_2phi = torch.sin(phi)**2, torch.cos(2*phi)
+        var_ref  = 0.5 - 0.5*cos_2phi*m(2*f_safe) - sin2_phi*m(f_safe)**2 # pupil variance of sin(2*pi*f*x + phi)
+        var_cone = 0.5 - 0.5*cos_2phi*m(2*f_cone) - sin2_phi*m(f_cone)**2
+        cov = 0.5*(m(f_safe - f_cone) - cos_2phi*m(f_safe + f_cone)) - sin2_phi*m(f_safe)*m(f_cone)
+        correlation = cov / torch.sqrt((var_ref * var_cone).clamp_min(1e-24))
+        coeff = torch.sqrt((2.0 - 2.0*correlation).clamp_min(1e-12)).mean(dim=-1) # [N_obs, N_f, N_L] residual RMS relative to the input sinusoid
+        coeff = coeff * in_band[..., 0]
+
+        # Linear interpolation of the radial coefficients on the 2D grid (clamped at the edge, as np.interp); the grid indices are constant
+        def radial_indices():
+            t  = (self.k[0] / self.dk).clamp(0, self.nOtf_x - 1).flatten()
+            i0 = t.floor().long().clamp(max=self.nOtf_x - 2)
+            return i0, t - i0
+        i0, w = self._cached('cone effect', radial_indices)
+        coeff = coeff.permute(0, 2, 1) # [N_obs, N_L, N_f]
+        c0 = coeff[..., i0]
+        c = (c0 + (coeff[..., i0+1] - c0) * w).view(self.N_obs, self.N_L, self.nOtf_y, self.nOtf_x)
+
+        W_atm = self.VonKarmanSpectrum(self.r0_(), self.L0.abs(), self.k2) # [N_obs, nOtf_y, nOtf_x]
+        return (self.Cn2_weights.view(self.N_obs, self.N_L, 1, 1) * c.pow(2)).sum(dim=1) * W_atm
+
+
+    def MCAOConePSD(self, PSD_residual: torch.Tensor) -> torch.Tensor:
+        '''
+        PSD of the turbulence that the LGS WFSs of a tomographic system do not sense because of the cone effect, on the AO half grid
+        [N_src, N_wvl, nOtf_AO_y, nOtf_AO_x] (as P3's mcaoWFsensConePSD). For every layer and source, the part of the atmospheric spectrum
+        corrected in the AO area (atmosphere minus the residual PSD) is low-pass filtered above the frequency set by the angle between the
+        source and the sensed volume, and scaled by the equivalent sensed aperture.
+        '''
+        src_zenith = self.config['sources_science']['Zenith'].flatten().view(-1, 1) # [N_src, 1] in [arcsec]
+        GS_zenith  = self.config['sources_HO']['Zenith'].view(self.N_obs, -1).amax(dim=-1, keepdim=True) # [N_obs, 1]
+        H = self.LGS_height
+        h = self.Cn2_heights # [N_obs, N_L]
+
+        LGS_FoV = 2*GS_zenith
+        effective_FoV = (LGS_FoV/self.rad2arc - self.D/H) * self.rad2arc
+        angle_E = torch.minimum(src_zenith, GS_zenith) - torch.where(effective_FoV > 0, effective_FoV/2, effective_FoV) # [N_src, 1]
+        angle_L = (src_zenith - LGS_FoV/2).clamp_min(0)
+
+        f_cut = self.rad2arc / (angle_E * h) # [N_src, N_L]
+        D_eq  = (self.D - angle_L * h / self.rad2arc).clamp_max(self.D)
+        valid = (h > 0) & (angle_E > 0) & (f_cut < self.kc) & (D_eq > 0)
+        f_cut = torch.where(valid, f_cut, torch.full_like(f_cut, self.kc)) # invalid cut-off frequencies would overflow the pole below (masked at the end)
+
+        # First-order digital low-pass filter z*(1-z_pole)/(z-z_pole) with z = exp(i*pi*k/(f_s/2)), normalized to the corner frequency of the full grid:
+        # |z| = 1, so 1 - |filter|² = 1 - (1-z_pole)² / (1 + z_pole² - 2*z_pole*cos(pi*k/(f_s/2))) in real arithmetic
+        f_s = 2*self.k.max()
+        cos_k = self._cached('MCAO cone effect', lambda: torch.cos(torch.pi * self.k_AO / (f_s/2))) # [1, nOtf_AO_y, nOtf_AO_x]
+        z_pole = torch.exp(2*torch.pi*f_cut / f_s).view(*f_cut.shape, 1, 1)
+        high_pass = 1 - (1 - z_pole)**2 / (1 + z_pole**2 - 2*z_pole*cos_k)
+        gain = (high_pass * (D_eq/self.D).view(*D_eq.shape, 1, 1)**2).clamp_min(0) * valid.view(*valid.shape, 1, 1) # [N_src, N_L, ny, nx]
+        gain = (self.Cn2_weights.view(self.N_obs, self.N_L, 1, 1) * gain).sum(dim=1).unsqueeze(1) # [N_src, 1, ny, nx]
+
+        W_atm = self.VonKarmanSpectrum(self.r0_(), self.L0.abs(), self.k2_AO).unsqueeze(1) # [N_obs, 1, ny, nx]
+        return gain * (W_atm - PSD_residual.real).clamp_min(0) * self.piston_filter * self.mask_corrected_AO # the tomographic noise term is complex-valued
+
 
     def JitterKernel(self, Jx: torch.Tensor, Jy: torch.Tensor, Jxy: torch.Tensor):
         # Assuming Jxy is in [deg], convert it to [rad]
@@ -1142,9 +1371,8 @@ class TipTorch(torch.nn.Module):
         PSD_half[..., self.nOtf_y // 2, self.nOtf_x - 1] = 0.0
         PSD_half = PSD_half.unsqueeze(1) #[N_obs, 1, nOtf_y, nOtf_x]
         # Match the convention used by ComputePSD(), PSD is converted from rad^2 to nm^2 OPD at λ_atm
-        PSD_norm = (self.dk * self.wvl_atm * 1e9 / (2.0 * torch.pi)) ** 2
         # Recover full centered PSD from the stored half-plane representation.
-        self.PSD_open_loop = self.half_PSD_to_full(PSD_half * PSD_norm)
+        self.PSD_open_loop = self.half_PSD_to_full(PSD_half * self._PSD_norm())
         
         return self.PSD_open_loop # [N_obs, 1, nOtf, nOtf]
 
@@ -1182,11 +1410,21 @@ class TipTorch(torch.nn.Module):
         return self.PSF_open_loop # [N_obs, N_wvl, N_pix, N_pix]
 
 
-    def ComputePSD(self):
+    def ComputePSD(self, update_addons_only: bool = False):
+        '''
+        Residual PSD [N_src, N_wvl, nOtf, nOtf] in [nm²] per pixel. All terms are computed on the half grid, in [rad²/m²] at the atmosphere
+        wavelength, and expanded to the full grid only at the end. With update_addons_only the core PSD of the previous call (fitting,
+        AO-corrected terms, cone effects, kept in PSD_core) is reused and only the add-ons (wind shake, tilt filter, extra error, focus error)
+        are re-applied, e.g. after setting focus_error_nm.
+        '''
         if all(not value for value in self.PSD_include.values()):
             self.PSD = torch.zeros([self.N_src, self.N_wvl, self.nOtf, self.nOtf], device=self.device)
             return self.PSD
-        
+
+        if update_addons_only:
+            PSDs = self.PSDs if self.retain_PSDs and hasattr(self, 'PSDs') else {entry: torch.zeros(1, device=self.device) for entry in self.PSD_include}
+            return self._apply_addons(self.PSD_core, PSDs)
+
         if self.PSD_include['Moffat']:
             amp   = pdims(self.amp,   2)
             b     = pdims(self.b,     2)
@@ -1237,30 +1475,52 @@ class TipTorch(torch.nn.Module):
         if self.PSD_include['diff. refract']:
             PSDs['diff. refract'] = self.DifferentialRefractionPSD()
 
-        #TODO: anisoplanatism for non-tomography!
-        #TODO: SLAO support!
-        
         # Resulting dimensions are: [N_scr, N_wvl, nOtf_AO, nOtf_AO]
-        PSD = PSDs['fitting'] + self.PSD_padder(
-                PSDs['WFS noise'] + \
-                PSDs['spatio-temporal'] + \
-                PSDs['aliasing'] + \
-                PSDs['chromatism'] + \
-                PSDs['Moffat'] + \
-                PSDs['diff. refract']
-              )
-      
+        PSD_AO = PSDs['WFS noise'] + PSDs['spatio-temporal'] + PSDs['aliasing'] + PSDs['chromatism'] + PSDs['Moffat'] + PSDs['diff. refract']
+
+        # The cone effects are part of the core PSD, as in P3's powerSpectrumDensity (the MCAO one depends on the residual PSD in the AO area)
+        if self.PSD_include['MCAO cone effect'] and self.add_MCAO_cone and self.tomography and self.is_LGS.all():
+            PSDs['MCAO cone effect'] = self.MCAOConePSD(PSD_AO)
+            PSD_AO = PSD_AO + PSDs['MCAO cone effect']
+
+        PSD = PSDs['fitting'] + self.PSD_padder(PSD_AO)
+
+        if self.PSD_include['cone effect'] and self.N_GS == 1 and self.is_LGS.all():
+            PSDs['cone effect'] = self.ConeEffectPSD().unsqueeze(1) # full grid, as P3's SLAO case
+            PSD = PSD + PSDs['cone effect']
+
+        self.PSD_core = PSD # half grid [N_src, N_wvl, nOtf_y, nOtf_x] in [rad²/m²], reused by ComputePSD(update_addons_only=True)
+        return self._apply_addons(PSD, PSDs)
+
+
+    def _apply_addons(self, PSD: torch.Tensor, PSDs: dict) -> torch.Tensor:
+        ''' Add the P3-style add-ons to the half-grid core PSD (P3's order: wind shake, tilt filter, extra error; then the focus error) and expand to the full grid '''
+        if self.PSD_include['wind shake'] and self.vibration_PSD is not None:
+            PSDs['wind shake'] = self._wind_shake_PSD_half(self.vibration_PSD) / self._PSD_norm()
+            PSD = PSD + self.PSD_padder(PSDs['wind shake'])
+
+        if self.PSD_include['tilt filter']:
+            PSDs['tilt filter'] = self._full_grid_filters()[1] # the (dimensionless) filter itself: tip/tilt is left to a separate LO loop
+            PSD = PSD * PSDs['tilt filter']
+
+        if self.PSD_include['extra error'] and self.extra_error_nm is not None:
+            PSDs['extra error'] = self._extra_error_PSD_half()
+            PSD = PSD + PSDs['extra error']
+
+        if self.PSD_include['focus error'] and self.focus_error_nm is not None:
+            PSDs['focus error'] = self.make_tensor(self.focus_error_nm).view(-1, 1, 1, 1).pow(2) * self._focus_error_shape() / self._PSD_norm()
+            PSD = PSD + PSDs['focus error']
+
         # Removing the DC component from half-PSD
         PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0
-      
+
         # All PSDs are computed in [rad^2] at the atmospheric wvls and then normalized to [nm^2] OPD at science wvl
-        PSD_norm = (self.dk*self.wvl_atm*1e9/2/torch.pi)**2
         # Recover the full-size PSD from the half-sized one
-        self.PSD = self.half_PSD_to_full(PSD * PSD_norm) # [nm^2]    
-        
+        self.PSD = self.half_PSD_to_full(PSD * self._PSD_norm()) # [nm^2]
+
         if self.retain_PSDs:
             self.PSDs = PSDs  # store all generated PSDs for debugging and visualization purposes
-        
+
         return self.PSD
     
     
@@ -1462,7 +1722,10 @@ class TipTorch(torch.nn.Module):
         for entry in self.PSD_include:
             PSD = self.PSDs[entry]
 
-            if len(PSD.shape) > 1:            
+            if entry == 'tilt filter': # a filter, not a PSD
+                continue
+
+            if len(PSD.shape) > 1:
                 PSD = self.half_PSD_to_full(PSD * PSD_norm).real # [nm^2 m^-2]
                 
                 error_budget[entry] = (PSD * self.dk**2).sum().sqrt().item()

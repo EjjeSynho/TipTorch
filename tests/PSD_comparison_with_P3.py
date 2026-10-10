@@ -8,13 +8,18 @@ Compared term by term, on P3's spatial-frequency grid:
   - the tomographic reconstructor and the layer / DM projectors (W_tomo, W_alpha, P_beta_DM, P_beta_L, freq_t);
   - the P3-style PSD add-ons that are `TipTorch` members: `TiltFilter`, `FocusErrorPSD`, `ExtraErrorPSD`, `WindShakePSD`
     against P3's `TiltFilter`, `FocusFilter`, `extraErrorPSD` and `windShakePSD`.
+  - SLAO (TIPTOP's perfTest/ERIS_LGS.ini, one LGS at 90 km, plus two off-axis science sources): the cone-effect PSD against P3's
+    `focalAnisoplanatismPSD`, the anisoplanatism of the non-tomographic spatio-temporal PSD against P3's `spatioTemporalPSD` and
+    `anisoplanatismPSD`;
+  - MCAO (TIPTOP's perfTest/MAVIStest.ini, 8 LGS, 9 pointings): the PSD of the volume not sensed by the LGS WFSs against P3's
+    `mcaoWFsensConePSD`.
 
 TipTorch's oversampling is tuned so that its odd PSD grid has the same frequency step as P3's even grid with the DC on
 the same pixel (nOtf = 1153 vs 1152 here); TipTorch maps are compared after dropping their last row and column.
 
 Requirements: the `TipTop` conda env (P3 installed with CuPy), the MUSE LTAO parameter file and the VLT pupil calibration
 in the TipTorch data folder, and the TIPTOP repository (`TIPTOP_folder` in project_config.json) for the wind-shake
-temporal PSD FITS. Runtime about 20 s on a GPU.
+temporal PSD FITS and the perfTest configurations. Runtime about one minute on a GPU.
 
 Run `python tests/PSD_comparison_with_P3.py` for the checks and the figures (saved to tests/runs/PSD_comparison/, shown
 unless `--no-plots` is given), or execute the `#%%` cells interactively. The `test_*` functions also work under pytest.
@@ -35,9 +40,11 @@ from astropy.io import fits
 from tiptorch._config import DATA_FOLDER, default_device, default_torch_type, project_settings
 from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.managers.config_manager import ConfigManager
+from tiptorch.tools.tiptop_integration import circular_pupil
 
 PATH_INI      = DATA_FOLDER / 'parameter_files' / 'muse_ltao.ini'
 WIND_PSD_FILE = Path(project_settings['TIPTOP_folder']) / 'TIPTOP' / 'tiptop' / 'data' / 'morfeo_windshake8ms_psd_2022_1k.fits'
+PERF_TEST     = Path(project_settings['TIPTOP_folder']) / 'TIPTOP' / 'tiptop' / 'perfTest'
 OUTPUT        = (Path(__file__).resolve().parent if '__file__' in globals() else Path.cwd()) / 'runs' / 'PSD_comparison'
 SHOW_PLOTS    = '--no-plots' not in sys.argv
 
@@ -83,13 +90,61 @@ def build_models():
     return P3, model
 
 
+def _tiptop_models(ini, N_src, pupil_resolution, obscuration, replace=None, **P3_kwargs):
+    ''' P3 fourierModel and a TipTorch model built from a TIPTOP perfTest configuration (optionally edited), with TipTorch's grid one pixel larger than P3's '''
+    from p3.aoSystem.fourierModel import fourierModel
+
+    content = Path(ini).read_text()
+    if replace is not None:
+        assert replace[0] in content, replace[0]
+        content = content.replace(*replace)
+    fd, temp_ini = tempfile.mkstemp(suffix='.ini')
+    with os.fdopen(fd, 'w') as stream:
+        stream.write(content)
+    try:
+        P3 = fourierModel(temp_ini, calcPSF=False, verbose=False, display=False, computeFocalAnisoCov=False, **P3_kwargs)
+        manager = ConfigManager()
+        config = manager.Load(temp_ini)
+    finally:
+        os.remove(temp_ini)
+    config['NumberSources'] = N_src
+    config = manager.Convert(config, framework='pytorch', device=default_device, dtype=default_torch_type)
+    pupil = circular_pupil(pupil_resolution, obscuration, device=default_device, dtype=default_torch_type)
+    model = TipTorch(AO_config=config, norm_regime=None, device=default_device, retain_PSDs=True, pupil=pupil)
+    if model.nOtf != P3.freq.nOtf + 1: # Nyquist-oversampled detectors: TipTorch's odd grid is one pixel smaller than P3's even one, enlarge the field instead
+        model.SetImageSize(model.N_pix + 2)
+    assert model.nOtf == P3.freq.nOtf + 1 and model.nOtf_AO == P3.freq.resAO, (model.nOtf, P3.freq.nOtf, model.nOtf_AO, P3.freq.resAO)
+    return P3, model
+
+
+@lru_cache(maxsize=1)
+def build_SLAO_models():
+    ''' ERIS_LGS (one LGS at 90 km) with two extra science sources: 10" along the diagonal and 10" along x '''
+    P3, model = _tiptop_models(PERF_TEST / 'ERIS_LGS.ini', 3, 128, 0.16, getErrorBreakDown=True,
+                               replace=('Zenith = [0.0]\nAzimuth = [0.0]\n\n[sources_HO]', 'Zenith = [0.0, 10.0, 10.0]\nAzimuth = [0.0, 45.0, 0.0]\n\n[sources_HO]'))
+    assert P3.ao.aoMode == 'SLAO' and model.AO_type == 'SLAO'
+    model.ComputePSD()
+    return P3, model
+
+
+@lru_cache(maxsize=1)
+def build_MCAO_models():
+    ''' MAVIStest (8 LGS, 9 science pointings on a 3x3 grid) with the LGS WFS cone-effect error enabled '''
+    P3, model = _tiptop_models(PERF_TEST / 'MAVIStest.ini', 9, 320, 0.16, replace=('addMcaoWFsensConeError = False', 'addMcaoWFsensConeError = True'))
+    assert P3.ao.aoMode == 'MCAO' and model.AO_type == 'MCAO' and model.add_MCAO_cone
+    model.ComputePSD()
+    return P3, model
+
+
 # ------------------------------------------------ Grids and units ------------------------------------------------
-def on_P3_grid(x, model):
-    ''' TipTorch half- or full-grid tensor as a NumPy map on P3's grid; TipTorch's grid is one pixel larger with the DC on the same pixel '''
+def on_P3_grid(x, model, n=None):
+    ''' TipTorch half- or full-grid tensor as a NumPy map on P3's grid of n pixels (default: one pixel less), the DC stays on the same pixel '''
     x = x.detach()
     if x.shape[-1] != x.shape[-2]:
         x = model.half_PSD_to_full(x)
-    return host(x.squeeze())[..., :-1, :-1]
+    x = host(x.squeeze())
+    n = x.shape[-1] - 1 if n is None else n
+    return x[..., :n, :n]
 
 
 def operator_on_P3_grid(W, model):
@@ -152,6 +207,38 @@ def addon_terms(P3, model):
         'wind shake':  on_P3_grid(model.WindShakePSD(fits.getdata(WIND_PSD_FILE)), model),
     }
     return P3_terms, TT_terms
+
+
+def SLAO_terms(P3, model):
+    ''' Cone effect (full grid), spatio-temporal and anisoplanatism PSDs (AO grid) per source of the SLAO models, rad² at the science wavelength '''
+    scale = (model.wvl_atm / model.wvl).item()**2
+    n_full, n_AO = P3.freq.nOtf, P3.freq.resAO
+    P3_terms = {
+        'cone effect':     host(P3.focalAnisoplanatismPSD()),
+        'spatio-temporal': np.moveaxis(host(P3.spatioTemporalPSD()), -1, 0),
+        'anisoplanatism':  np.moveaxis(host(P3.anisoplanatismPSD()), -1, 0),
+    }
+    TT_terms = {
+        'cone effect':     on_P3_grid(model.ConeEffectPSD(), model, n_full) * scale,
+        'spatio-temporal': np.stack([on_P3_grid(model.PSDs['spatio-temporal'][s], model, n_AO) for s in range(model.N_src)]) * scale,
+        'anisoplanatism':  np.stack([on_P3_grid(model.AnisoplanatismPSD()[s], model, n_AO) for s in range(model.N_src)]) * scale,
+    }
+    return P3_terms, TT_terms
+
+
+def MCAO_cone_terms(P3, model):
+    ''' PSD of the volume not sensed by the LGS WFSs [N_src, resAO, resAO] of both models, rad² at the science wavelength, from their own residual PSDs '''
+    import cupy as cp
+    xp = cp if hasattr(P3.freq.k2_, 'get') else np
+    i1, n = int(np.ceil(P3.freq.nOtf/2 - P3.freq.resAO/2)), P3.freq.resAO
+    residual = xp.zeros((P3.freq.nOtf, P3.freq.nOtf, model.N_src), dtype=P3.dtype)
+    residual[i1:i1+n, i1:i1+n] = P3.noisePSD() + P3.aliasingPSD()[..., None] + P3.differentialRefractionPSD() + P3.chromatismPSD() + P3.spatioTemporalPSD()
+    cone_P3 = np.moveaxis(host(P3.mcaoWFsensConePSD(residual))[i1:i1+n, i1:i1+n], -1, 0)
+
+    PSD_AO = sum(model.PSDs[key] for key in ('WFS noise', 'aliasing', 'diff. refract', 'chromatism', 'spatio-temporal'))
+    cone_TT = model.MCAOConePSD(PSD_AO)
+    scale = (model.wvl_atm / model.wvl).item()**2
+    return cone_P3, np.stack([on_P3_grid(cone_TT[s], model, n) for s in range(model.N_src)]) * scale
 
 
 def P3_layer_projector(P3, source=0):
@@ -320,9 +407,47 @@ def test_wind_shake_PSD_matches_P3():
     assert np.abs(wind_TT - wind_P3).max() < 2e-2 * wind_P3.max()
 
 
+def test_SLAO_cone_effect_matches_P3():
+    P3, model = build_SLAO_models()
+    P3_terms, TT_terms = SLAO_terms(P3, model)
+    stats = difference_stats(TT_terms['cone effect'], P3_terms['cone effect'], 'cone effect')
+    assert stats['p90_rel'] < 1.0 and stats['max_abs_rel_peak'] < 1.0
+    np.testing.assert_allclose(TT_terms['cone effect'].sum(), P3_terms['cone effect'].sum(), rtol=5e-3) # analytical pupil means vs P3's 1001-point sampling
+    assert 'cone effect' in model.PSDs and model.PSDs['cone effect'].shape[-2:] == (model.nOtf_y, model.nOtf_x)
+
+
+def test_SLAO_anisoplanatism_matches_P3():
+    P3, model = build_SLAO_models()
+    P3_terms, TT_terms = SLAO_terms(P3, model)
+    print('SLAO spatio-temporal PSD with anisoplanatism (sources: on-axis, 10" diagonal, 10" along x):')
+    # P3's SCAO branch pairs the x offset with ky and TipTorch with kx: the maps coincide for the diagonal source and are transposed for the x source
+    for s in (0, 1):
+        assert difference_stats(TT_terms['spatio-temporal'][s], P3_terms['spatio-temporal'][s], f'spatio-temporal {s}')['max_abs_rel_peak'] < 0.5
+    assert difference_stats(TT_terms['anisoplanatism'][1], P3_terms['anisoplanatism'][1], 'anisoplanatism 1')['max_abs_rel_peak'] < 0.1
+    assert difference_stats(TT_terms['anisoplanatism'][2].T, P3_terms['anisoplanatism'][2], 'anisoplanatism 2 (T)')['max_abs_rel_peak'] < 0.1
+    assert difference_stats(TT_terms['anisoplanatism'][2], P3_terms['anisoplanatism'][2])['max_abs_rel_peak'] > 10.0
+    # total HO wavefront error per source (nm RMS) including the cone effect
+    HO_TT, HO_P3 = host(model.PSD.sum(dim=(-2,-1)).sqrt()).flatten(), np.sqrt(host(P3.PSD).sum(axis=(0, 1)))
+    print(f'  HO residual [nm]: TipTorch {np.round(HO_TT, 1)}, P3 {np.round(HO_P3, 1)}')
+    np.testing.assert_allclose(HO_TT[:2], HO_P3[:2], rtol=1e-2)
+
+
+def test_MCAO_cone_effect_matches_P3():
+    P3, model = build_MCAO_models()
+    cone_P3, cone_TT = MCAO_cone_terms(P3, model)
+    assert cone_TT.shape == cone_P3.shape and np.isfinite(cone_TT).all()
+    assert np.abs(cone_P3[4]).max() == 0 and np.abs(cone_TT[4]).max() == 0 # the on-axis pointing is inside the sensed volume
+    print('MCAO LGS WFS cone effect PSD (off-axis pointings):')
+    for s in (0, 1, 3):
+        stats = difference_stats(cone_TT[s], cone_P3[s], f'MCAO cone, pointing {s}')
+        assert stats['max_abs_rel_peak'] < 5.0 # the residual PSDs that feed the term differ by a few percent (aliasing / noise physics)
+    assert 'MCAO cone effect' in model.PSDs and model.PSDs['MCAO cone effect'].shape[0] == model.N_src
+
+
 def run_all():
     for test in (test_PSD_contributors_match_P3, test_tomographic_operators_match_P3, test_tilt_filter_matches_P3,
-                 test_focus_error_PSD_matches_P3, test_extra_error_PSD_matches_P3, test_wind_shake_PSD_matches_P3):
+                 test_focus_error_PSD_matches_P3, test_extra_error_PSD_matches_P3, test_wind_shake_PSD_matches_P3,
+                 test_SLAO_cone_effect_matches_P3, test_SLAO_anisoplanatism_matches_P3, test_MCAO_cone_effect_matches_P3):
         test()
     print('PSD comparison with P3 passed')
 
@@ -350,4 +475,16 @@ if __name__ == '__main__':
     P3_ops, TT_ops = reconstructor_terms(P3, model)
     for key in P3_ops:
         plot_maps(TT_ops[key], P3_ops[key], key, f'operator_{key}', log=False)
+
+    #%% SLAO: cone effect and anisoplanatism (ERIS_LGS with off-axis sources)
+    P3_SLAO, model_SLAO = build_SLAO_models()
+    P3_terms, TT_terms = SLAO_terms(P3_SLAO, model_SLAO)
+    plot_maps(TT_terms['cone effect'], P3_terms['cone effect'], 'cone effect PSD', 'SLAO_cone_effect', crop=3*P3_SLAO.freq.resAO)
+    plot_maps(TT_terms['spatio-temporal'][1], P3_terms['spatio-temporal'][1], 'spatio-temporal PSD, 10" off-axis', 'SLAO_spatio-temporal_off-axis')
+    plot_maps(TT_terms['anisoplanatism'][1], P3_terms['anisoplanatism'][1], 'anisoplanatism PSD, 10" off-axis', 'SLAO_anisoplanatism')
+
+    #%% MCAO: LGS WFS cone effect (MAVIStest)
+    P3_MCAO, model_MCAO = build_MCAO_models()
+    cone_P3, cone_TT = MCAO_cone_terms(P3_MCAO, model_MCAO)
+    plot_maps(cone_TT[0], cone_P3[0], 'MCAO LGS WFS cone effect PSD, corner pointing', 'MCAO_cone_effect')
     print('figures written to', OUTPUT)
