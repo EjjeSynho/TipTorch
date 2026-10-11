@@ -46,7 +46,20 @@
     "nan_recovery": true,
     "max_nan_recoveries": 10,
     "pretrain_epochs": 100,
-    "pretrain_patience": 15
+    "pretrain_patience": 15,
+    "pretrain_standardize": true
+  },
+
+  "loss": {
+    "type": "balanced",
+    "radial_power": 2.0,
+    "r_max": 40.0,
+    "asinh_k": 3.0,
+    "huber_delta": 0.1,
+    "scale": 3.0,
+    "match_background": false,
+    "legacy_weight": 0.0,
+    "LO_sign_penalty": false
   },
 
   "fixed_params": [

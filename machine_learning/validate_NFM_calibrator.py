@@ -147,6 +147,7 @@ if 'trainer' not in dir():
         pre_init_astrometry = cfg['trainer']['pre_init_astrometry'],
         optimize_astrometry = cfg['trainer']['optimize_astrometry'],
         collate_fn          = NFMDataset.collate_batch,
+        loss_cfg            = cfg.get('loss'),
     )
     release_gpu_memory()
     logger.info("Trainer initialized from scratch (standalone mode).")
@@ -202,8 +203,6 @@ for i, name in enumerate(output_names):
 #%%
 from tiptorch.tools.utils import r0
 
-# TODO: something is very wrong with the binned Cn2_weights
-
 with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as handle:
     telemetry_scaler = pickle.load(handle)
     
@@ -216,8 +215,8 @@ X = {
     'r0': r0(muse_df['Seeing (header)'].loc[validation_ids].to_numpy(), 500e-9),
     'L0': muse_df['L0Tot'].loc[validation_ids].to_numpy(),
     'wind_speed_single': muse_df['Wind speed (header)'].loc[validation_ids].to_numpy(),
-    'Cn2_weights_2': x_vec[input_features.index('Cn2_frac_binned_2')],
-    'Cn2_weights_3': x_vec[input_features.index('Cn2_frac_binned_3')]
+    'Cn2_weights_2': x_vec[:, input_features.index('Cn2_frac_binned_2')], # feature columns, not sample rows
+    'Cn2_weights_3': x_vec[:, input_features.index('Cn2_frac_binned_3')]
 }
 X['Cn2_weights_1'] = 1.0 - X['Cn2_weights_2'] - X['Cn2_weights_3']
 
@@ -363,8 +362,16 @@ plt.show()
 #%%
 # Per-sample loss histogram
 # Use the trainer's loss computation for consistency
-x_dict_pred = outputs_transformer.unstack(NN_predictions)
-loss_SR = trainer._loss_per_sample(PSFs_data_cube, PSFs_pred_cube, x_dict_pred).cpu()
+x_dict_pred = outputs_transformer.unstack(NN_predictions.to(default_device))
+with torch.no_grad(): # in chunks on the trainer's device (the balanced loss keeps its weight maps there)
+    loss_SR = torch.cat([
+        trainer._loss_per_sample(
+            PSFs_data_cube[i:i+8].to(default_device),
+            PSFs_pred_cube[i:i+8].to(default_device),
+            {k: v[i:i+8] for k, v in x_dict_pred.items()}
+        ).cpu()
+        for i in range(0, len(PSFs_data_cube), 8)
+    ])
 
 num_best_samples  = 50
 num_worst_samples = 15
@@ -401,6 +408,122 @@ plt.legend(); plt.grid(True); plt.show()
 print(f"Best predicted sample IDs (lowest loss): {true_best_ids}")
 print(f"Worst predicted sample IDs (highest loss): {true_worst_ids}")
 print(f"Middle sample IDs (medium loss): {true_sus_ids}")
+
+#%% ===================================== Residual diagnostics =====================================
+# Where does the residual live? Radial profiles of the residuals (linear and log), the share of the loss coming from
+# each radial band, 2D residual maps (linear and log), and the core accuracy (peak, encircled energy) vs. wavelength.
+D_np = PSFs_data_cube.numpy()
+P_np = PSFs_pred_cube.numpy()
+_, _, H_, W_ = D_np.shape
+yy, xx = np.mgrid[:H_, :W_]
+R_pix = np.hypot(yy - H_//2, xx - W_//2)
+R_int = np.round(R_pix).astype(int).ravel()
+R_cnt = np.bincount(R_int)
+λ_nm  = (lambda_full.cpu().numpy() * 1e9).round().astype(int)
+
+def radial_mean(cube):
+    ''' Azimuthal average around the frame center: [..., H, W] -> [..., N_r] '''
+    flat = cube.reshape(-1, H_*W_)
+    prof = np.stack([np.bincount(R_int, weights=f, minlength=len(R_cnt)) for f in flat]) / R_cnt
+    return prof.reshape(*cube.shape[:-2], -1)
+
+prof_D, prof_P = radial_mean(D_np), radial_mean(P_np)
+prof_abs = radial_mean(np.abs(P_np - D_np))
+r_max_plot = 60
+r_ax = np.arange(r_max_plot)
+wvl_diag = [0, N_wvl_total//2, N_wvl_total-1]
+
+fig, axes = plt.subplots(2, len(wvl_diag), figsize=(15, 8), sharex=True)
+for j, li in enumerate(wvl_diag):
+    ax = axes[0, j]
+    ax.semilogy(r_ax, np.median(prof_D[:, li, :r_max_plot], 0), 'k', label='Data')
+    ax.semilogy(r_ax, np.median(prof_P[:, li, :r_max_plot], 0), 'tab:orange', label='TipTorch')
+    ax.semilogy(r_ax, np.median(prof_abs[:, li, :r_max_plot], 0), 'tab:orange', ls=':', label='|TipTorch - Data|')
+    ax.set_title(f'λ = {λ_nm[li]} nm'); ax.grid(alpha=0.3); ax.legend(fontsize=8)
+
+    ax = axes[1, j]
+    rel_bias = (prof_P - prof_D)[:, li, :r_max_plot] / np.abs(prof_D[:, li, :r_max_plot]).clip(1e-12)
+    ax.plot(r_ax, np.median(rel_bias, 0), 'tab:orange', label='median (model-data)/data')
+    ax.fill_between(r_ax, *np.percentile(rel_bias, [16, 84], 0), color='tab:orange', alpha=0.2, label='16-84%')
+    ax.plot(r_ax, np.median(prof_abs[:, li, :r_max_plot] / np.abs(prof_D[:, li, :r_max_plot]).clip(1e-12), 0), 'tab:red', ls=':', label='median <|Δ|>/data')
+    ax.axhline(0, color='k', lw=0.5); ax.set_ylim(-1, 1.5); ax.set_xlabel('r [pix]'); ax.grid(alpha=0.3); ax.legend(fontsize=8)
+axes[0, 0].set_ylabel('Normalized intensity'); axes[1, 0].set_ylabel('Relative residual')
+plt.tight_layout(); plt.show()
+
+#%%
+# Share of the loss contributed by each radial band, compared to the number of pixels and to the PSF flux in it
+bands = [0, 1.5, 3.5, 6.5, 10.5, 20.5, 40.5, 70.5, R_pix.max() + 1]
+band_names = [f'{a:g}-{b:g}' for a, b in zip(bands[:-1], bands[1:-1] + [np.inf])]
+
+diff_np = P_np - D_np
+shares = {
+    'legacy MSE term': (1200 * diff_np**2).sum(axis=(0, 1)),
+    'legacy MAE term': (1.6 * np.abs(diff_np)).sum(axis=(0, 1)),
+}
+if trainer.balanced_loss is not None:
+    with torch.no_grad():
+        shares['balanced loss'] = sum(
+            trainer.balanced_loss.pixel_map(PSFs_data_cube[i:i+8].to(default_device), PSFs_pred_cube[i:i+8].to(default_device)).sum(dim=(0, 1)).cpu().numpy()
+            for i in range(0, len(PSFs_data_cube), 8)
+        )
+shares['data flux'] = D_np.clip(0).sum(axis=(0, 1))
+
+fig, ax = plt.subplots(figsize=(10, 4))
+x_b = np.arange(len(band_names))
+for k, (name, pix_map) in enumerate(shares.items()):
+    band_share = np.array([pix_map[(R_pix >= a) & (R_pix < b)].sum() for a, b in zip(bands[:-1], bands[1:])]) / pix_map.sum()
+    ax.bar(x_b + (k - len(shares)/2 + 0.5) * 0.8/len(shares), band_share, width=0.8/len(shares), label=name)
+ax.set_xticks(x_b); ax.set_xticklabels(band_names)
+ax.set_xlabel('Radial band [pix]'); ax.set_ylabel('Share'); ax.set_title('Share of the loss / flux per radial band (validation set)')
+ax.legend(); ax.grid(True, axis='y', alpha=0.3); plt.tight_layout(); plt.show()
+
+#%%
+# 2D residual maps: linear (mean residual normalized by the data peak) and log (ratio of the median model to the median data)
+crop_diag = 25
+wvl_maps = [0, N_wvl_total//3, 2*N_wvl_total//3, N_wvl_total-1]
+c_ = H_ // 2
+sl_ = np.s_[:, c_-crop_diag:c_+crop_diag+1, c_-crop_diag:c_+crop_diag+1]
+
+fig, axes = plt.subplots(2, len(wvl_maps), figsize=(4*len(wvl_maps), 7.5))
+for j, li in enumerate(wvl_maps):
+    d, p = D_np[:, li][sl_], P_np[:, li][sl_]
+    lin_map = ((p - d) / d.max(axis=(-2, -1), keepdims=True)).mean(0)
+    v = np.abs(lin_map).max()
+    im = axes[0, j].imshow(lin_map, cmap='RdBu_r', vmin=-v, vmax=v)
+    plt.colorbar(im, ax=axes[0, j], fraction=0.046)
+    axes[0, j].set_title(f'<(model-data)/peak>, {λ_nm[li]} nm', fontsize=9)
+
+    log_map = np.log10(np.median(p, 0).clip(1e-9) / np.median(d, 0).clip(1e-9))
+    im = axes[1, j].imshow(log_map, cmap='RdBu_r', vmin=-0.3, vmax=0.3)
+    plt.colorbar(im, ax=axes[1, j], fraction=0.046)
+    axes[1, j].set_title(f'log10(median model / median data), {λ_nm[li]} nm', fontsize=9)
+plt.tight_layout(); plt.show()
+
+#%%
+# Core accuracy vs. wavelength: peak and encircled energy ratios (model / data)
+c3 = np.s_[..., c_-3:c_+4, c_-3:c_+4]
+peak_ratio = P_np[c3].max(axis=(-2, -1)) / D_np[c3].max(axis=(-2, -1))
+fig, ax = plt.subplots(figsize=(10, 4))
+for name, ratio, col in [('peak', peak_ratio, 'tab:red')] + \
+        [(f'EE(r≤{rr})', P_np[..., R_pix <= rr].sum(-1) / D_np[..., R_pix <= rr].sum(-1), c) for rr, c in ((2, 'tab:blue'), (8, 'tab:green'))]:
+    ax.plot(λ_nm, np.median(ratio, 0), color=col, label=name)
+    ax.fill_between(λ_nm, *np.percentile(ratio, [16, 84], 0), color=col, alpha=0.15)
+ax.axhline(1, color='k', lw=0.5)
+ax.set_xlabel('λ [nm]'); ax.set_ylabel('model / data'); ax.set_title('Core accuracy: median and 16-84% range over the validation set')
+ax.legend(); ax.grid(alpha=0.3); plt.tight_layout(); plt.show()
+
+#%%
+# Worst offenders: per-sample loss, core error and the conditions of the observation
+worst_table = pd.DataFrame({
+    'ID':         validation_ids.numpy(),
+    'loss':       loss_SR.numpy(),
+    'peak ratio': peak_ratio.mean(axis=1),
+    'peak data':  D_np[c3].max(axis=(-2, -1)).mean(axis=1),
+}).set_index('ID')
+_cols = [c for c in ('Seeing (header)', 'Tau0 (header)', 'NGS mag (from ph.)', 'Exp. time', 'Filename') if c in muse_df.columns]
+worst_table = worst_table.join(muse_df[_cols]).sort_values('loss', ascending=False)
+print(worst_table.head(15).to_string(float_format=lambda v: f'{v:.4f}'))
+print(f"Top-10 samples hold {worst_table['loss'].head(10).sum() / worst_table['loss'].sum():.1%} of the total validation loss")
 
 #%%
 peak_err = (PSFs_data_cube - PSFs_pred_cube).amax(dim=(-2,-1)) / PSFs_data_cube.amax(dim=(-2,-1))

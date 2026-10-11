@@ -131,6 +131,79 @@ def release_gpu_memory(sync=False):
             torch.cuda.synchronize()
 
 
+class BalancedPSFLoss:
+    """
+    Dynamic-range-balanced per-sample PSF loss for sum-normalized MUSE-NFM PSFs.
+
+    A linear MSE/MAE on such PSFs is dominated by a few core pixels (MSE) and by the noise in the far wings (MAE),
+    while the halo, which holds most of the flux, barely contributes. Here, every pixel is compared in asinh space:
+
+        e = asinh(model / s) - asinh(data / s),   s = asinh_k * sigma_noise[sample, λ]
+
+    which is ~log(model / data) wherever the PSF is above the noise and ~(model - data) / s in the noise.
+    It handles the negative background-subtracted pixels and weights all samples equally regardless of their Strehl.
+    Pixels are weighted by w(r) ∝ max(r, r_min)^(-radial_power): radial_power = 2 gives each octave of radius
+    (core, AO-corrected halo, seeing halo) the same weight, radial_power = 1 the same weight per unit radius.
+    Pixels beyond r_max (where the data is mostly noise) are ignored. A Huber penalty keeps it robust to outliers.
+
+    match_background mimics the data reduction on the model: the data background was estimated as the minimum of the
+    radial profile (i.e. the level of the outermost annulus) and subtracted before the normalization, which removes
+    the true halo floor at the edge of the field. The same level is subtracted from the model, keeping its total flux.
+    """
+    def __init__(
+        self,
+        H, W, device,
+        radial_power     = 2.0,
+        r_min            = 1.0,
+        r_max            = 80.0,
+        noise_r_min      = 85.0,
+        asinh_k          = 3.0,
+        huber_delta      = 0.1,
+        scale            = 1.0,
+        match_background = True,
+        bg_annulus       = (93.0, 98.0),
+    ):
+        yy, xx = torch.meshgrid(torch.arange(H, device=device, dtype=torch.float32), torch.arange(W, device=device, dtype=torch.float32), indexing='ij')
+        r = torch.hypot(yy - H // 2, xx - W // 2)
+
+        w = r.clamp(min=r_min).pow(-radial_power)
+        w[r > r_max] = 0.0
+        self.weights     = w / w.sum()                    # [H, W]
+        self.noise_mask  = r >= noise_r_min               # background region used to estimate the noise
+        self.bg_mask     = (r >= bg_annulus[0]) & (r < bg_annulus[1])
+        self.asinh_k     = asinh_k
+        self.huber_delta = huber_delta
+        self.scale       = scale
+        self.match_background = match_background
+
+
+    @torch.no_grad()
+    def noise_sigma(self, PSF_data):
+        """Robust (MAD) noise level of the data background, [B, N_λ, 1, 1]."""
+        bg  = PSF_data[..., self.noise_mask]
+        med = bg.median(dim=-1, keepdim=True).values
+        mad = (bg - med).abs().median(dim=-1).values * 1.4826
+        floor = 1e-6 * PSF_data.amax(dim=(-2, -1)) # guards against noiseless (e.g. simulated) data
+        return torch.maximum(mad, floor)[..., None, None]
+
+
+    def pixel_map(self, PSF_data, PSF_pred):
+        """Weighted per-pixel penalty [B, N_λ, H, W]. Summed over pixels and averaged over λ, it gives the per-sample loss."""
+        if self.match_background:
+            total = PSF_pred.sum(dim=(-2, -1), keepdim=True)
+            PSF_pred = PSF_pred - PSF_pred[..., self.bg_mask].mean(dim=-1)[..., None, None]
+            PSF_pred = PSF_pred * total / PSF_pred.sum(dim=(-2, -1), keepdim=True)
+
+        s = self.asinh_k * self.noise_sigma(PSF_data)
+        e = torch.asinh(PSF_pred / s) - torch.asinh(PSF_data / s)
+        rho = torch.nn.functional.huber_loss(e, torch.zeros_like(e), reduction='none', delta=self.huber_delta) / self.huber_delta
+        return self.scale * rho * self.weights
+
+
+    def __call__(self, PSF_data, PSF_pred):
+        return self.pixel_map(PSF_data, PSF_pred).sum(dim=(-2, -1)).mean(dim=-1) # [B]
+
+
 class NFMCalibrator():
     def __init__(
         self,
@@ -428,6 +501,7 @@ class NFMCalibratorTrainer:
         train_idx            = None,
         val_idx              = None,
         collate_fn: Optional[Callable] = None,
+        loss_cfg: Optional[dict] = None,
     ):
         self.PSF_model           = PSF_model
         self.calibrator          = calibrator
@@ -448,6 +522,18 @@ class NFMCalibratorTrainer:
         self.H, self.W   = dataset.H, dataset.W
         self.N_features  = len(dataset.features)
         self.N_outputs   = outputs_transformer.get_stacked_size()
+
+        # PSF loss: 'legacy' (linear MSE + MAE) or 'balanced' (see BalancedPSFLoss), optionally mixed with the legacy term
+        loss_cfg = dict(loss_cfg or {})
+        self.LO_sign_penalty = loss_cfg.pop('LO_sign_penalty', True)
+        loss_type = loss_cfg.pop('type', 'legacy')
+        self.legacy_loss_weight = loss_cfg.pop('legacy_weight', 0.0)
+        if loss_type == 'balanced':
+            self.balanced_loss = BalancedPSFLoss(self.H, self.W, device, **loss_cfg)
+        elif loss_type == 'legacy':
+            self.balanced_loss = None
+        else:
+            raise ValueError(f"Unknown loss type '{loss_type}', expected 'legacy' or 'balanced'")
 
         # Train / val split and loaders
         if train_idx is not None and val_idx is not None:
@@ -580,18 +666,31 @@ class NFMCalibratorTrainer:
 
 
     # ── Loss ──────────────────────────────────────────────────────────────────
-    def _loss_per_sample(self, PSF_data, PSF_pred, x_dict_pred):
+    def _legacy_PSF_loss(self, PSF_data, PSF_pred):
         diff = PSF_pred - PSF_data
         # Empirical scaling to keep PSF reconstruction and regularization terms numerically balanced.
         w = 2e4
+        return w * (diff.pow(2).mean(dim=(1, 2, 3)) * 1200.0 + diff.abs().mean(dim=(1, 2, 3)) * 1.6)
+
+
+    def _loss_per_sample(self, PSF_data, PSF_pred, x_dict_pred):
         # Per-sample PSF reconstruction loss.
-        PSF = w * (diff.pow(2).mean(dim=(1, 2, 3)) * 1200.0 + diff.abs().mean(dim=(1, 2, 3)) * 1.6)
+        if self.balanced_loss is None:
+            PSF = self._legacy_PSF_loss(PSF_data, PSF_pred)
+        else:
+            PSF = self.balanced_loss(PSF_data, PSF_pred)
+            if self.legacy_loss_weight > 0:
+                PSF = PSF + self.legacy_loss_weight * self._legacy_PSF_loss(PSF_data, PSF_pred)
         if self.predict_LO_NCPAs and 'LO_coefs' in x_dict_pred:
-            c  = x_dict_pred['LO_coefs']
-            # L2 regularization of predicted LO modes with sign penalties used in legacy training.
+            c  = x_dict_pred['LO_coefs'] # predicted modes without the phase bump: [defocus, astig., astig., coma, ...]
+            # L2 regularization of predicted LO modes
             LO = c.pow(2).sum(-1) * 1e-7
-            LO = LO + torch.clamp(-c[:, 0], min=0).pow(2) * 5e-5
-            LO = LO + torch.clamp(-c[:, 2], min=0).pow(2) * 1e-7
+            if self.LO_sign_penalty:
+                # Legacy sign penalties on defocus (c[:, 0]) and the first astigmatism (c[:, 2]). Note that the phase bump makes
+                # the sign of defocus identifiable, so forcing it positive biases the solution (flipping the sign of negative fitted
+                # defocus values increases the PSF loss by ~20%).
+                LO = LO + torch.clamp(-c[:, 0], min=0).pow(2) * 5e-5
+                LO = LO + torch.clamp(-c[:, 2], min=0).pow(2) * 1e-7
         else:
             LO = torch.zeros(PSF_data.shape[0], device=PSF_data.device, dtype=PSF_data.dtype)
         return PSF + LO
@@ -654,8 +753,9 @@ class NFMCalibratorTrainer:
             x['LO_coefs'] = x['LO_coefs'][:, 1:]   # strip phase bump; not predicted
         if 'Cn2_weights' in x:
             # Dataset stores Cn2 profile without the GL layer; reconstruct it for full-profile supervision.
-            cn2 = x['Cn2_weights'].clamp(min=1e-6)
-            GL  = (1.0 - cn2.sum(-1, keepdim=True)).clamp(min=1e-6)
+            # Clamped at 1e-3: log(1e-6) targets of the inverse-softmax transform are extreme outliers for a negligible weight
+            cn2 = x['Cn2_weights'].clamp(min=1e-3)
+            GL  = (1.0 - cn2.sum(-1, keepdim=True)).clamp(min=1e-3)
             x['Cn2_weights'] = torch.hstack((GL, cn2))
         return x
 
@@ -684,17 +784,29 @@ class NFMCalibratorTrainer:
         return y
 
 
-    def pretrain(self, num_epochs=100, patience=15, lr=None, save_path=None):
+    def pretrain(self, num_epochs=100, patience=15, lr=None, save_path=None, standardize=True):
         """
         Pretrain the calibrator to predict fitted parameter values (no PSF model involved).
         Provides a warm start before end-to-end PSF training.
+
+        With standardize=True, the squared error of every output is divided by the variance of its target over the
+        training set. Otherwise, the MSE is dominated by the outputs with the largest spread in the normalized space
+        (Cn2 log-weights and LO coefficients, ~85% of the target variance, both barely predictable from telemetry),
+        while r0, J and F, which matter most for the PSF, get only a few percent of the weight.
         """
         lr        = lr or self.lr
         save_path = save_path or (self.weights_dir / 'pretrain_weights.pth')
         opt       = optim.AdamW(self.calibrator.parameters(), lr=lr, weight_decay=5e-4)
         sch       = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=10, min_lr=1e-4)
-        criterion = nn.MSELoss()
         best_loss, best_state, pat_count = float('inf'), None, 0
+
+        if standardize:
+            with torch.no_grad():
+                Y = torch.cat([self._pretrain_target_vector(fit, device=self.device) for _, _, fit, _, _ in self.train_loader])
+            inv_var = 1.0 / Y.var(dim=0).clamp(min=1e-4)
+        else:
+            inv_var = torch.ones(self.N_outputs, device=self.device)
+        criterion = lambda y_pred, y: ((y_pred - y).pow(2) * inv_var).mean()
 
         for epoch in range(num_epochs):
             self.calibrator.train()
@@ -762,7 +874,7 @@ class NFMCalibratorTrainer:
             NN_pred   = torch.zeros((N, self.N_outputs))
             tel_vecs  = torch.zeros((N, self.N_features))
 
-        total_loss, total_batches = 0.0, 0
+        total_loss, total_count = 0.0, 0
         for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
             # Map global dataset ids to local positions in this loader split.
             lpos   = torch.tensor([global_to_local[int(i)] for i in idxs_b.cpu().tolist()], dtype=torch.long)
@@ -776,8 +888,9 @@ class NFMCalibratorTrainer:
             # Inner loop over wavelength subsets to limit memory use and keep lambda coverage complete.
             for lambda_ids in self.lambda_id_sets:
                 PSF_pred_b   = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
-                total_loss  += self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict).item()
-                total_batches += 1
+                # Weight by the batch size so that every sample counts equally
+                total_loss  += self.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict).item() * len(idxs_b)
+                total_count += len(idxs_b)
                 if return_cubes:
                     for wi, li in enumerate(lambda_ids):
                         PSFs_pred[lpos, li] = PSF_pred_b[:, wi].cpu()
@@ -786,7 +899,7 @@ class NFMCalibratorTrainer:
             if verbose:
                 logger.info(f"Validated batch idxs={idxs_b.tolist()}")
 
-        avg_loss = total_loss / max(total_batches, 1)
+        avg_loss = total_loss / max(total_count, 1)
         if return_cubes:
             return PSFs_pred, PSFs_data, local_to_global, NN_pred, tel_vecs, avg_loss
         return avg_loss

@@ -28,7 +28,7 @@ from calibrators.NFM_calibrator import SmallCalibratorNet, NFMCalibratorTrainer,
 # Anything not present in the file falls back to DEFAULT_CONFIG.
 DEFAULT_CONFIG = {
     "name":                 "best_calibrator",
-    "debug":                False,
+    "debug":                True,
     "batch_size":           16,
     "continue_training":    True,
     "run_kfold_difficulty": False,
@@ -70,7 +70,22 @@ DEFAULT_CONFIG = {
         "patience":            20,
         "max_nan_recoveries":  10,
         "pretrain_epochs":     100,
-        "pretrain_patience":   15
+        "pretrain_patience":   15,
+        "pretrain_standardize": True
+    },
+    # PSF loss, see NFMCalibratorTrainer / BalancedPSFLoss. "legacy" is the linear MSE + MAE loss used before.
+    # r_max = 40: beyond it, the model's seeing halo is systematically ~20% fainter than the data (a missing
+    # scattered-light component), and fitting it there degrades the AO-corrected halo and the core.
+    "loss": {
+        "type":             "balanced",
+        "radial_power":     2.0,
+        "r_max":            40.0,
+        "asinh_k":          3.0,
+        "huber_delta":      0.1,
+        "scale":            3.0,
+        "match_background": False,
+        "legacy_weight":    0.0,
+        "LO_sign_penalty":  False
     },
     "fixed_params": [
         "Jxy", "bg_ctrl",
@@ -231,6 +246,10 @@ calibrator = SmallCalibratorNet(
 ).to(default_device)
 
 
+# When continuing training from existing weights, start with a smaller learning
+# rate than a fresh run to avoid disrupting the already-converged calibrator.
+trainer_lr = 2.5e-3 if cfg["continue_training"] else cfg["trainer"]["lr"]
+
 # Instantiate the trainer
 trainer = NFMCalibratorTrainer(
     PSF_model           = PSF_model,
@@ -239,7 +258,7 @@ trainer = NFMCalibratorTrainer(
     outputs_transformer = outputs_transformer,
     device              = default_device,
     batch_size          = cfg["batch_size"],
-    lr                  = cfg["trainer"]["lr"],
+    lr                  = trainer_lr,
     lambda_step         = cfg["trainer"]["lambda_step"],
     predict_LO_NCPAs    = predict_LO_NCPAs,
     predict_Cn2_profile = predict_Cn2_profile,
@@ -247,6 +266,8 @@ trainer = NFMCalibratorTrainer(
     pre_init_astrometry = cfg["trainer"]["pre_init_astrometry"],
     optimize_astrometry = cfg["trainer"]["optimize_astrometry"],
     collate_fn          = NFMDataset.collate_batch,
+    loss_cfg            = cfg["loss"],
+    weights_dir         = WEIGHTS_DIR_CALIB, # keep split / pretrain / meta / bundle next to the checkpoint
 )
 
 # Persist the train/val split so the validation script can reproduce it exactly
@@ -256,13 +277,10 @@ _split_path = trainer.weights_dir / f'{cfg["name"]}_split.npz'
 _max_n = cfg["max_train_samples"]
 if _max_n is not None and _max_n < len(trainer.train_idx):
     _rng_sub = np.random.default_rng(cfg["trainer"]["random_state"])
+    _n_train_full = len(trainer.train_idx)
     trainer.train_idx    = _rng_sub.choice(trainer.train_idx, size=int(_max_n), replace=False)
     trainer.train_loader = trainer._make_loader(trainer.train_idx, shuffle=True)
-    logger.info(
-        f"Training subset: {len(trainer.train_idx)} / "
-        f"{len(trainer.train_idx) + len(trainer.val_idx)} samples "
-        f"(max_train_samples={_max_n})"
-    )
+    logger.info(f"Training subset: {len(trainer.train_idx)} / {_n_train_full} training samples (max_train_samples={_max_n})")
 
 np.savez(_split_path, train_idx=trainer.train_idx, val_idx=trainer.val_idx)
 logger.info(f"Dataset split saved -> {_split_path}")
@@ -271,9 +289,10 @@ logger.info(f"Dataset split saved -> {_split_path}")
 pretrain_path = trainer.weights_dir / 'pretrain_weights.pth'
 if (not cfg["continue_training"]) or not pretrain_path.exists():
     trainer.pretrain(
-        num_epochs = cfg["trainer"]["pretrain_epochs"],
-        patience   = cfg["trainer"]["pretrain_patience"],
-        save_path  = pretrain_path,
+        num_epochs  = cfg["trainer"]["pretrain_epochs"],
+        patience    = cfg["trainer"]["pretrain_patience"],
+        save_path   = pretrain_path,
+        standardize = cfg["trainer"]["pretrain_standardize"],
     )
 else:
     calibrator.load_state_dict(torch.load(pretrain_path, map_location=default_device))
@@ -287,6 +306,9 @@ logger.info(f"Post-pretrain validation loss: {val_loss_pretrain:.6f}")
 #%% ======================== Main training ========================================
 if cfg["continue_training"] and BEST_CALIB_PATH.exists():
     trainer.load_checkpoint(BEST_CALIB_PATH)
+    # The loaded optimizer state carries the learning rate of the checkpointed epoch; restore the intended one
+    for _pg in trainer.optimizer.param_groups[:1]:
+        _pg['lr'] = trainer_lr
 
 BASE_STATE     = deepcopy(calibrator.state_dict())
 sample_weights = None
@@ -354,6 +376,10 @@ with open(_meta_path, 'w') as _f:
     json.dump(_meta, _f, indent=2)
 logger.info(f"Training metadata saved -> {_meta_path}")
 
+# Export the bundle here, before the non-interactive exit below: otherwise CLI runs leave a stale bundle from a
+# previous run, which NFMCalibrator (e.g. the ETC validation) would then load instead of the new checkpoint.
+trainer.save_calibrator(Path(_meta['bundle_path']))
+
 # Quit here if not run with IPython (e.g. from command line)
 if not (hasattr(sys, 'ps1') or sys.flags.interactive):
     logger.info("Non-interactive environment detected. Exiting after training.")
@@ -376,10 +402,10 @@ if cfg["tune"]["enabled"]:
     )
     _meta["tuned_params"] = cfg["tune"]["params"]
 
-with open(_meta_path, 'w') as _f:
-    json.dump(_meta, _f, indent=2)
-    
-logger.info(f"Post-tune metadata updated -> {_meta_path}")
+    with open(_meta_path, 'w') as _f:
+        json.dump(_meta, _f, indent=2)
+
+    logger.info(f"Post-tune metadata updated -> {_meta_path}")
+    trainer.save_calibrator(Path(_meta['bundle_path']))
 
 # %%
-trainer.save_calibrator(Path(_meta['bundle_path']))

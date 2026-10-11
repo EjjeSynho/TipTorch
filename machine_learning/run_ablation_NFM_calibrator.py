@@ -311,14 +311,16 @@ for n_samples in sample_counts:
             collate_fn          = NFMDataset.collate_batch,
             train_idx           = run_train_idx,
             val_idx             = val_idx,
+            loss_cfg            = cfg.get("loss"),
         )
 
         # ── Pretrain ─────────────────────────────────────────────────────────
         pretrain_path = run_dir / 'pretrain_weights.pth'
         trainer.pretrain(
-            num_epochs = cfg["trainer"]["pretrain_epochs"],
-            patience   = cfg["trainer"]["pretrain_patience"],
-            save_path  = pretrain_path,
+            num_epochs  = cfg["trainer"]["pretrain_epochs"],
+            patience    = cfg["trainer"]["pretrain_patience"],
+            save_path   = pretrain_path,
+            standardize = cfg["trainer"].get("pretrain_standardize", True),
         )
         release_gpu_memory(sync=True)
         logger.info(f"  Pretrain done | post-pretrain val = {trainer.validate():.6f}")
