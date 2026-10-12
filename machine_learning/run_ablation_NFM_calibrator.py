@@ -43,11 +43,10 @@ import torch
 from copy import deepcopy
 from pathlib import Path
 from datetime import datetime
-from sklearn.model_selection import train_test_split
 
 from tiptorch._config import *
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
-from calibrators.NFM_calibrator import SmallCalibratorNet, NFMCalibratorTrainer, NFMDataset, release_gpu_memory
+from calibrators.NFM_calibrator import SmallCalibratorNet, NFMCalibratorTrainer, NFMDataset, default_split, release_gpu_memory
 
 # ── Base training config (mirrors DEFAULT_CONFIG in train_NFM_calibrator.py) ──
 _BASE_DEFAULT = {
@@ -244,16 +243,10 @@ logger.info(f"PSF model ready | calibrator: {N_features} → {N_outputs}")
 
 #%% ── 3. Compute fixed train / val split ─────────────────────────────────────
 # All ablation runs share the same validation set for fair comparison.
+# It's the split stored in the dataset cache (grouped by acquisition time), random only for old caches
 _ref_split_seed = cfg["trainer"]["random_state"]
-full_train_idx, val_idx = train_test_split(
-    np.arange(len(dataset)),
-    test_size    = 0.2,
-    random_state = _ref_split_seed,
-)
-logger.info(
-    f"Fixed split (seed={_ref_split_seed}): "
-    f"{len(full_train_idx)} train / {len(val_idx)} val"
-)
+full_train_idx, val_idx = default_split(dataset, test_size=0.2, random_state=_ref_split_seed)
+logger.info(f"Fixed split: {len(full_train_idx)} train / {len(val_idx)} val")
 
 # Save the fixed split so the evaluation script can verify it
 np.savez(ABLATION_DIR / 'fixed_split.npz', train_idx=full_train_idx, val_idx=val_idx)

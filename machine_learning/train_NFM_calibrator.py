@@ -269,6 +269,9 @@ trainer = NFMCalibratorTrainer(
     loss_cfg            = cfg["loss"],
     weights_dir         = WEIGHTS_DIR_CALIB, # keep split / pretrain / meta / bundle next to the checkpoint
 )
+# The trainer takes the train/val split stored in the dataset cache (grouped by acquisition time)
+logger.info(f"Split: {len(trainer.train_idx)} train / {len(trainer.val_idx)} val "
+            f"({'stored in the dataset cache' if dataset.train_idx is not None else 'random, dataset cache has no split'})")
 
 # Persist the train/val split so the validation script can reproduce it exactly
 _split_path = trainer.weights_dir / f'{cfg["name"]}_split.npz'
@@ -282,7 +285,14 @@ if _max_n is not None and _max_n < len(trainer.train_idx):
     trainer.train_loader = trainer._make_loader(trainer.train_idx, shuffle=True)
     logger.info(f"Training subset: {len(trainer.train_idx)} / {_n_train_full} training samples (max_train_samples={_max_n})")
 
-np.savez(_split_path, train_idx=trainer.train_idx, val_idx=trainer.val_idx)
+# Sample IDs are stored as well, so that the validation can detect if the dataset cache was regenerated since training
+np.savez(
+    _split_path,
+    train_idx = trainer.train_idx,
+    val_idx   = trainer.val_idx,
+    train_ids = dataset.sample_ids[trainer.train_idx],
+    val_ids   = dataset.sample_ids[trainer.val_idx],
+)
 logger.info(f"Dataset split saved -> {_split_path}")
 
 #%% ===========================  Pretraining ==================================================

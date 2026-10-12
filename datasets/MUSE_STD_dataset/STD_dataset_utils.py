@@ -52,7 +52,7 @@ def RemoveDuplicatedCubes(cubes_cache_dir, verbose=True, dry_run=False):
     return removed
 
 
-def SplitByAcquisitionTime(acq_times, val_fraction=0.2, max_gap_hours=2.0, seed=42, verbose=True):
+def SplitByAcquisitionTime(acq_times, val_fraction=0.2, max_gap_hours=1.0, seed=42, verbose=True):
     """
     Splits samples into training and validation subsets so that observations acquired close in time
     (and thus sharing nearly the same atmospheric conditions and instrument state) never end up on

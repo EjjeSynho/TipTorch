@@ -153,17 +153,36 @@ if 'trainer' not in dir():
     release_gpu_memory()
     logger.info("Trainer initialized from scratch (standalone mode).")
 
+# The validation must use exactly the split the calibrator was trained with
 if _split_path.exists():
-    _split = np.load(_split_path)
-    if not (np.array_equal(_split['train_idx'], trainer.train_idx) and np.array_equal(_split['val_idx'],   trainer.val_idx)):
-        logger.warning("Trainer split does not match saved split — restoring.")
-        trainer.train_idx    = _split['train_idx']
-        trainer.val_idx      = _split['val_idx']
+    with np.load(_split_path) as _f:
+        _split = dict(_f) # read and close, otherwise the file stays locked on Windows
+
+    if 'train_ids' in _split and 'val_ids' in _split:
+        # Match by sample IDs, so the split stays valid even if the dataset cache was regenerated since training
+        _id_to_pos = {sample_id: pos for pos, sample_id in enumerate(dataset.sample_ids)}
+        _lost_ids  = [i for i in np.concatenate([_split['train_ids'], _split['val_ids']]) if i not in _id_to_pos]
+        if _lost_ids:
+            raise ValueError(f"{len(_lost_ids)} samples of the training split are missing in the current dataset cache "
+                             f"(e.g. {_lost_ids[:5]}). The calibrator was trained on a different dataset.")
+        _train_idx = np.array([_id_to_pos[i] for i in _split['train_ids']], dtype=int)
+        _val_idx   = np.array([_id_to_pos[i] for i in _split['val_ids']],   dtype=int)
+    else:
+        logger.warning("Split file has no sample IDs (older training run); trusting the stored positions.")
+        _train_idx, _val_idx = _split['train_idx'], _split['val_idx']
+
+    if dataset.val_idx is not None and set(_val_idx) != set(dataset.val_idx):
+        logger.warning("The calibrator was trained with a split different from the one stored in the dataset cache.")
+
+    if not (np.array_equal(_train_idx, trainer.train_idx) and np.array_equal(_val_idx, trainer.val_idx)):
+        logger.info("Restoring the training split.")
+        trainer.train_idx    = _train_idx
+        trainer.val_idx      = _val_idx
         trainer.train_loader = trainer._make_loader(trainer.train_idx, shuffle=True)
         trainer.val_loader   = trainer._make_loader(trainer.val_idx,   shuffle=False)
-        logger.info(f"Restored split: {len(trainer.train_idx)} train / {len(trainer.val_idx)} val")
+    logger.info(f"Split: {len(trainer.train_idx)} train / {len(trainer.val_idx)} val")
 else:
-    logger.warning(f"Split file not found at {_split_path}; using current trainer split.")
+    logger.warning(f"Split file not found at {_split_path}; using the split stored in the dataset cache (or a random one for old caches).")
 
 
 #%% ========================== Evaluation & diagnostics ===============================================

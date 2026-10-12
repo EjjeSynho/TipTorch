@@ -358,9 +358,6 @@ reduced_telemetry = {
 with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'wb') as handle:
     pickle.dump(reduced_telemetry, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-# NOTE: the legacy TELEMETRY_CACHE/MUSE/muse_telemetry_{imputer,scaler}.pickle files are not written anymore. They are
-# only read as a fallback by calibrator bundles trained before the preprocessor was stored inside the bundle
-
 
 #%%
 # Now, one must run the fitting routine to get the fitted PSF parameters values for each PSF sample
@@ -368,7 +365,7 @@ with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'wb') as handle:
 # 2. Run 'STD_fitted_df.py' to read the fitted parameters, analyze the fitting results and store the final fitted parameters dataframe
 
 #%%
-# ================================ Write MUSE-NFW STD stars dataset cache ================================
+# ================================ Load MUSE-NFW STD stars dataset cache ================================
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
 
@@ -391,8 +388,8 @@ muse_df = muse_df.loc[muse_fitted_df.index.values]
 good_samples = muse_df.index.values
 
 #%%
-# Pack all data into a cogerent dataset, where reduced telemetry is associated with spectral cubes and fitted PSF model parameters for each sample
-
+# Pack all data into the coherent dataset, where reduced telemetry is associated with spectral cubes and fitted PSF model parameters for each sample
+# TODO: consider storing rotated and derotated PSFs
 for id in tqdm(good_samples):
     try:
         PSF_data, _, _, model_config = LoadSTDStarCache(
@@ -414,6 +411,7 @@ for id in tqdm(good_samples):
         bad_ids.append(id)
         continue
 
+#%%
 if len(bad_ids) > 0:
     print('Bad ids:')
     for bad_id in bad_ids:
@@ -426,7 +424,7 @@ telemetry_records = np.stack(telemetry_records, axis=0) # [N_samples x N_feature
 # Training/validation split: samples acquired close in time must not be shared between the subsets.
 # The real acquisition time is DATE-OBS from the cube header (muse_df['time']), the timestamp in the file name is not it
 acq_times = muse_df.loc[good_ids, 'time'] # [N_samples]
-train_idx, val_idx, time_groups = SplitByAcquisitionTime(acq_times, val_fraction=0.2, max_gap_hours=2.0, seed=42)
+train_idx, val_idx, time_groups = SplitByAcquisitionTime(acq_times, val_fraction=0.2, max_gap_hours=1.0, seed=42)
 
 #%%
 try:

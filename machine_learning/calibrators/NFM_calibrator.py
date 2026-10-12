@@ -22,7 +22,7 @@ from copy import deepcopy
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, Subset
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split, KFold, cross_val_score
+from sklearn.model_selection import train_test_split, KFold, GroupKFold, cross_val_score
 
 from tiptorch._config import *
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
@@ -40,20 +40,40 @@ def load_telemetry_preprocessor(bundle_state: dict) -> TelemetryPreprocessor:
     if bundle_state.get('telemetry_preprocessor') is not None:
         preprocessor = TelemetryPreprocessor.from_state_dict(bundle_state['telemetry_preprocessor'])
     else:
-        logger.warning('Calibrator bundle has no telemetry preprocessor, falling back to the legacy scaler/imputer pickles')
-        
-        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'rb') as handle:
-            imputer = pickle.load(handle)
-        
-        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as handle:
-            scaler = pickle.load(handle)
-            
-        preprocessor = TelemetryPreprocessor.from_sklearn(scaler, imputer)
+        raise ValueError('Calibrator bundle has no telemetry preprocessor')
 
     if (names := bundle_state.get('input_feature_names')) is not None and list(names) != preprocessor.features:
         raise ValueError('Telemetry features of the preprocessor do not match the calibrator inputs')
 
     return preprocessor
+
+
+def default_split(dataset, test_size=0.2, random_state=42):
+    """
+    Train/val split stored in the dataset cache, where samples acquired close in time never end up in both subsets.
+    Older caches without it fall back to a random split.
+    """
+    if getattr(dataset, 'train_idx', None) is not None and getattr(dataset, 'val_idx', None) is not None:
+        return np.asarray(dataset.train_idx, dtype=int), np.asarray(dataset.val_idx, dtype=int)
+
+    logger.warning('Dataset cache has no train/val split, falling back to a random split (samples close in time may leak between subsets)')
+    return train_test_split(np.arange(len(dataset)), test_size=test_size, random_state=random_state)
+
+
+def kfold_splits(dataset, base_indices, n_splits, random_state=42):
+    """
+    K-fold splits of base_indices (relative positions), grouped by acquisition time when the dataset provides
+    time groups, so that samples close in time stay in the same fold.
+    """
+    time_groups = getattr(dataset, 'time_groups', None)
+    if time_groups is None:
+        logger.warning('Dataset cache has no time groups, K-fold splits ignore acquisition times')
+        kf = KFold(n_splits=min(n_splits, len(base_indices)), shuffle=True, random_state=random_state)
+        return list(kf.split(base_indices))
+
+    groups = np.asarray(time_groups)[base_indices]
+    gkf = GroupKFold(n_splits=min(n_splits, len(np.unique(groups))), shuffle=True, random_state=random_state)
+    return list(gkf.split(base_indices, groups=groups))
 
 
 class NFMDataset(Dataset):
@@ -70,6 +90,10 @@ class NFMDataset(Dataset):
         self.fitted_vals = data['fitted_param_values']
         self.features    = list(data['telemetry'][0].keys())
         self.telemetry_preprocessor = data.get('telemetry_preprocessor') # TelemetryPreprocessor.state_dict(), absent in older caches
+        # Train/val split grouped by acquisition time (positions into sample_ids), absent in older caches
+        self.train_idx   = data.get('train_idx')
+        self.val_idx     = data.get('val_idx')
+        self.time_groups = data.get('time_groups')
 
         _rename = {p: p + '_ctrl' for p in ['J', 'F', 'bg', 'dx', 'dy']}
         for i in range(len(self.sample_ids)):
@@ -485,9 +509,7 @@ class NFMCalibratorTrainer:
             self.train_idx = np.asarray(train_idx, dtype=int)
             self.val_idx   = np.asarray(val_idx,   dtype=int)
         else:
-            self.train_idx, self.val_idx = train_test_split(
-                np.arange(len(dataset)), test_size=test_size, random_state=random_state,
-            )
+            self.train_idx, self.val_idx = default_split(dataset, test_size=test_size, random_state=random_state)
         self.train_loader = self._make_loader(self.train_idx, shuffle=True)
         self.val_loader   = self._make_loader(self.val_idx,   shuffle=False)
 
@@ -990,13 +1012,13 @@ class NFMCalibratorTrainer:
             If True, only load existing fold checkpoints; raise error if any are missing.
         """
         base_indices = np.asarray(base_indices, dtype=int)
-        kf         = KFold(n_splits=min(n_splits, len(base_indices)), shuffle=True, random_state=random_state)
+        folds = kfold_splits(self.dataset, base_indices, n_splits, random_state)
         oof_losses = np.full(len(self.dataset), np.nan, dtype=np.float32)
         kfold_dir  = self.weights_dir / 'kfold_difficulty'
         kfold_dir.mkdir(exist_ok=True)
 
         # Determine which folds need to be trained vs. loaded
-        fold_checkpoints = [kfold_dir / f'fold_{fold_id:02d}_best.pth' for fold_id in range(min(n_splits, len(base_indices)))]
+        fold_checkpoints = [kfold_dir / f'fold_{fold_id:02d}_best.pth' for fold_id in range(len(folds))]
         folds_exist = [ckpt.exists() for ckpt in fold_checkpoints]
         n_folds = len(fold_checkpoints)
 
@@ -1020,7 +1042,7 @@ class NFMCalibratorTrainer:
             else:
                 logger.info(f"Training {n_folds} K-fold splits from scratch.")
 
-        for fold_id, (tr_rel, va_rel) in enumerate(kf.split(base_indices)):
+        for fold_id, (tr_rel, va_rel) in enumerate(folds):
             fold_train_idx = base_indices[tr_rel]
             fold_val_idx   = base_indices[va_rel]
             fold_ckpt_path = fold_checkpoints[fold_id]
@@ -1053,7 +1075,7 @@ class NFMCalibratorTrainer:
         X  = np.array([[*self.dataset.telemetry[int(i)].values()] for i in base_indices], dtype=np.float32)
         y  = np.log10(oof_losses[base_indices] + 1e-12)
         rf = RandomForestRegressor(n_estimators=300, random_state=random_state, n_jobs=-1)
-        cv_r2 = cross_val_score(rf, X, y, cv=min(n_splits, len(base_indices)), scoring='r2')
+        cv_r2 = cross_val_score(rf, X, y, cv=folds, scoring='r2')
         logger.info(f"RF difficulty CV R2 = {cv_r2.mean():.4f} +/- {cv_r2.std():.4f}")
         rf.fit(X, y) # High R² means that telemetry has nfo on if calibrator struggles to predict a PSF.
 
@@ -1467,9 +1489,7 @@ class NFMFactorCalibratorTrainer:
             self.train_idx = np.asarray(train_idx, dtype=int)
             self.val_idx   = np.asarray(val_idx,   dtype=int)
         else:
-            self.train_idx, self.val_idx = train_test_split(
-                np.arange(len(dataset)), test_size=test_size, random_state=random_state,
-            )
+            self.train_idx, self.val_idx = default_split(dataset, test_size=test_size, random_state=random_state)
         self.train_loader = self._make_loader(self.train_idx, shuffle=True)
         self.val_loader   = self._make_loader(self.val_idx,   shuffle=False)
 
@@ -2017,12 +2037,12 @@ class NFMFactorCalibratorTrainer:
         Resets the calibrator and optimizer to ``initial_state_dict`` after weighting.
         """
         base_indices = np.asarray(base_indices, dtype=int)
-        kf           = KFold(n_splits=min(n_splits, len(base_indices)), shuffle=True, random_state=random_state)
+        folds = kfold_splits(self.dataset, base_indices, n_splits, random_state)
         oof_losses   = np.full(len(self.dataset), np.nan, dtype=np.float32)
         kfold_dir    = self.weights_dir / 'kfold_difficulty'
         kfold_dir.mkdir(exist_ok=True)
 
-        fold_checkpoints = [kfold_dir / f'fold_{fid:02d}_best.pth' for fid in range(min(n_splits, len(base_indices)))]
+        fold_checkpoints = [kfold_dir / f'fold_{fid:02d}_best.pth' for fid in range(len(folds))]
         folds_exist = [c.exists() for c in fold_checkpoints]
         n_folds     = len(fold_checkpoints)
 
@@ -2034,7 +2054,7 @@ class NFMFactorCalibratorTrainer:
                     f"Set force_retrain=True to train them."
                 )
 
-        for fold_id, (tr_rel, va_rel) in enumerate(kf.split(base_indices)):
+        for fold_id, (tr_rel, va_rel) in enumerate(folds):
             fold_train_idx = base_indices[tr_rel]
             fold_val_idx   = base_indices[va_rel]
             fold_ckpt      = fold_checkpoints[fold_id]
@@ -2062,7 +2082,7 @@ class NFMFactorCalibratorTrainer:
         X  = np.array([[*self.dataset.telemetry[int(i)].values()] for i in base_indices], dtype=np.float32)
         y  = np.log10(oof_losses[base_indices] + 1e-12)
         rf = RandomForestRegressor(n_estimators=300, random_state=random_state, n_jobs=-1)
-        cv_r2 = cross_val_score(rf, X, y, cv=min(n_splits, len(base_indices)), scoring='r2')
+        cv_r2 = cross_val_score(rf, X, y, cv=folds, scoring='r2')
         logger.info(f"[Factor] RF difficulty CV R2 = {cv_r2.mean():.4f} +/- {cv_r2.std():.4f}")
         rf.fit(X, y)
 
