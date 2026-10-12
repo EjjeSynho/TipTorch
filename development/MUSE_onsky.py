@@ -136,7 +136,7 @@ for j in range(N_src):
 
 #%%
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
-from tiptorch.tools.utils import RadialProfileLossSimple
+from tiptorch.tools.utils import RadialProfileLossSimple, BalancedPSFLoss
 
 blurry_PSF_flag = muse_df.loc[ids]['Bad quality'].item()
 
@@ -168,9 +168,32 @@ if λ_weighting:
     wvl_weights = N_wvl / wvl_weights.sum() * wvl_weights # Normalize so that the total energy is preserved
 else:
     wvl_weights = 1.0
+
+# PSF loss: 'balanced' (dynamic-range-balanced, see BalancedPSFLoss; same config as in STD_fitter.py) or 'legacy' (linear MSE + MAE)
+PSF_loss_type = 'balanced'
+
+PSF_LOSS_CFG = {
+    "radial_power":     2.0,
+    "r_max":            40.0,
+    "asinh_k":          3.0,
+    "huber_delta":      0.1,
+    "scale":            3.0,
+    "match_background": False,
+}
+
+if PSF_loss_type == 'balanced':
+    PSF_loss_balanced = BalancedPSFLoss(PSF_0.shape[-2], PSF_0.shape[-1], default_device, **PSF_LOSS_CFG)
     
-    
+elif PSF_loss_type == 'legacy':
+    PSF_loss_balanced = None
+else:
+    raise ValueError(f"Unknown PSF loss type '{PSF_loss_type}', expected 'balanced' or 'legacy'")
+
+
 def loss_PSF(PSF_data, PSF_model, w_MSE, w_MAE):
+    if PSF_loss_balanced is not None:
+        return PSF_loss_balanced(PSF_data, PSF_model).mean()
+
     diff = (PSF_model-PSF_data) * wvl_weights
     w = 2e4 # Empirical weight to balance the loss magnitude with the regularization terms
     MSE_loss = diff.pow(2).mean() * w_MSE
