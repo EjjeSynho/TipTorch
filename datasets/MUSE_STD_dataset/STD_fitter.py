@@ -19,7 +19,7 @@ from torchmin import minimize
 from STD_dataset_utils import *
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import ConfigManager
-from tiptorch.tools.utils import SR, GradientLoss, FWHM_fitter
+from tiptorch.tools.utils import SR, GradientLoss, FWHM_fitter, BalancedPSFLoss
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 
 from tiptorch._config import project_settings, default_device
@@ -38,6 +38,19 @@ import warnings
 
 # Default output folder for fitted parameters, can be overridden by passing a path as an argument
 MUSE_FITTING_FOLDER = Path(project_settings['MUSE_fitted_STD_folder'])
+
+# PSF loss. 'balanced' is the dynamic-range-balanced loss also used to train the NFM calibrator (see BalancedPSFLoss in
+# tiptorch.tools.utils and the "loss" section of machine_learning/NFM_calibrator_config.json); keep both in sync so the fitted
+# values are consistent with the calibrator's objective. 'legacy' is the linear MSE + MAE loss used for the previous fits.
+PSF_LOSS_CFG = {
+    "type":             "balanced",
+    "radial_power":     2.0,
+    "r_max":            40.0,
+    "asinh_k":          3.0,
+    "huber_delta":      0.1,
+    "scale":            3.0,
+    "match_background": False,
+}
 
 warnings.filterwarnings("ignore")
 
@@ -147,6 +160,15 @@ def load_and_fit_sample(id):
     N_src = PSF_0.shape[0]
     wavelengths = PSF_model.λ_sim
 
+    loss_cfg  = dict(PSF_LOSS_CFG)
+    loss_type = loss_cfg.pop('type')
+    if loss_type == 'balanced':
+        PSF_loss_balanced = BalancedPSFLoss(PSF_0.shape[-2], PSF_0.shape[-1], device, **loss_cfg)
+    elif loss_type == 'legacy':
+        PSF_loss_balanced = None
+    else:
+        raise ValueError(f"Unknown PSF loss type '{loss_type}', expected 'balanced' or 'legacy'")
+
     # Retrieve flags from dataframe
     blurry_PSF_flag = psf_df.loc[id]['Bad quality'].item()
     non_point_flag  = psf_df.loc[id]['Non-point'].item()
@@ -209,16 +231,20 @@ def load_and_fit_sample(id):
         return loss * w
 
 
-    def loss_fn(x_, w_MSE, w_MAE, w_bump, w_LO):    
-        diff = (func(x_)-PSF_0) #* wvl_weights
-        w = 2e4
-        MSE_loss = diff.pow(2).mean() * w * w_MSE
-        MAE_loss = diff.abs().mean()  * w * w_MAE
+    def loss_fn(x_, w_MSE, w_MAE, w_bump, w_LO):
+        PSF_pred = func(x_)
+        if PSF_loss_balanced is not None:
+            PSF_loss = PSF_loss_balanced(PSF_0, PSF_pred).mean()
+        else:
+            diff = PSF_pred - PSF_0 #* wvl_weights
+            w = 2e4
+            PSF_loss = (diff.pow(2).mean() * w_MSE + diff.abs().mean() * w_MAE) * w
+
         LO_loss  = loss_LO_fn(w_bump, w_LO) if PSF_model.LO_NCPAs else 0.0
         Moffat_loss = Moffat_loss_fn() if PSF_model.use_Moffat else 0.0
         MAP_loss    = loss_MAP()
 
-        return MSE_loss + MAE_loss + LO_loss + Moffat_loss + MAP_loss
+        return PSF_loss + LO_loss + Moffat_loss + MAP_loss
 
 
     def Moffat_loss_fn():
@@ -258,6 +284,7 @@ def load_and_fit_sample(id):
         return LO_loss
 
 
+    # w_MSE / w_MAE only apply to the legacy PSF loss
     loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6, w_bump=5e-5, w_LO=1e-7)
 
     # Minimization function
@@ -343,7 +370,8 @@ def load_and_fit_sample(id):
     config_manager.Convert(config_dict, framework='numpy')
 
     save_data = {
-        'comments':    'NFM fitting with re-normalized dn',
+        'comments':    f'NFM fitting with re-normalized dn, {loss_type} PSF loss',
+        'loss config': PSF_LOSS_CFG,
         'input_vec':   to_store(x0),
         'config':      config_dict,
         'OPD_map':     OPD_map,

@@ -1,24 +1,49 @@
-# Original code developed by Enrico Congui
+# Original code developed by Enrico Congiu (ESO). Adapted for the TipTorch repository: comments translated from Italian,
+# paths made repository-relative, random sample table shared with the TipTorch Monte Carlo, command-line options added.
+"""
+Monte Carlo generation of MUSE NFM PSFs with vanilla TIPTOP for the ETC comparison.
 
+A table of random observations is drawn per turbulence category (TC) with `generate_random_observations` (seeing, coherence
+time, NGS J magnitude, airmass) and stored in `data/Enrico_ETC/generated_random_PSFs/stars.fits`; the same table is used by
+`run_tiptorch_random_carlo.py`, so the TIPTOP and TipTorch samples are paired. For every row and every science wavelength a
+TIPTOP `.ini` is derived from `data/Enrico_ETC/muse_ltao_Guido.ini` (`build_tiptop_config`) and simulated with
+`tiptop.overallSimulation`; the PSFs land in `data/Enrico_ETC/generated_random_PSFs/{wave}nm/`.
 
-import pickle
-import numpy as np
-import pandas as pd
-from tiptop.tiptop import overallSimulation
+Requirements: the astro-tiptop checkouts on `sys.path` through `tiptop_env.py` (TIPTOP v1.4.3, P3 v1.6.0, MASTSEL v1.5.0 reproduce
+the pregenerated PSFs exactly) and a GPU for cupy (optional). One simulation takes about one second on a GPU.
 
-from astropy.table import Table, vstack
-from astropy.time import Time
+Run from the repository root in the `TipTorch` conda env:
 
-import configparser
+    python development/run_tiptop_random_carlo.py                   # all five wavelengths, per-TC counts of the on-sky table
+    python development/run_tiptop_random_carlo.py --wave 700 900    # subset of wavelengths
+    python development/run_tiptop_random_carlo.py --sampling onsky  # replay the on-sky (seeing, tau0, NGS mag, airmass) rows
+"""
 
 import os
-import subprocess
+import sys
+import time
+import argparse
+import configparser
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-import time
+import numpy as np
+from astropy.table import Table, vstack
 
-import sys
-import argparse
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import tiptop_env  # noqa: F401  (puts the astro-tiptop checkouts on sys.path before importing tiptop)
+from tiptop.tiptop import overallSimulation
+
+REPO_ROOT   = Path(__file__).resolve().parents[1]
+ETC_FOLDER  = REPO_ROOT / 'data' / 'Enrico_ETC'
+BASE_INI    = ETC_FOLDER / 'muse_ltao_Guido.ini'
+PUPIL_PATH  = REPO_ROOT / 'data' / 'calibrations' / 'VLT_CALIBRATION' / 'VLT_PUPIL' / 'ut4pupil320.fits'
+ONSKY_TABLE = ETC_FOLDER / 'onsky_PSFs_params' / 'All_PSF_{wave}.fits'
+OUTPUT_DIR  = ETC_FOLDER / 'generated_random_PSFs'
+STARS_TABLE = OUTPUT_DIR / 'stars.fits'
+
+WAVELENGTHS = [500, 600, 700, 800, 900] # [nm], the wavelengths of the on-sky parameter tables
+TC_LIST     = [10, 20, 30, 50, 100]
 
 
 def NGS_mag_to_photons(Jmag, frequency, airmass, k_J=0.09, delta_mag=0.4):
@@ -54,7 +79,6 @@ def NGS_mag_to_photons(Jmag, frequency, airmass, k_J=0.09, delta_mag=0.4):
         The number of photons as seen by the IRLOS per subaperture.
     """
 
-
     IRLOS_mag = Jmag + delta_mag + k_J * airmass # applying extinction and converting to IRLOS mag
 
     # Convert magnitude to flux using Arseniy formula
@@ -71,7 +95,8 @@ def NGS_mag_to_photons(Jmag, frequency, airmass, k_J=0.09, delta_mag=0.4):
 
 
 def turbulence_categories(seeing, tau):
-
+    """ ESO turbulence category (percentile) from seeing ["] and coherence time [ms] """
+    seeing, tau = np.atleast_1d(seeing), np.atleast_1d(tau)
     tcats = np.zeros(len(seeing), dtype=int)
     mask10 = (seeing <= 0.6) * (tau >= 5.2)
     mask20 = (seeing <= 0.7) * (tau >= 4.4) * ~mask10
@@ -88,7 +113,17 @@ def turbulence_categories(seeing, tau):
     return tcats
 
 
-def generate_random_observations(n, tc, ngs0=[9, 16], seeing_min=0.4, tau_max=10.0):
+def IRLOS_frequency(ngs_mag):
+    """ IRLOS loop frequency [Hz] as a function of the NGS J magnitude (Enrico's regime switch) """
+    return np.where(np.asarray(ngs_mag) <= 16, 500, 200)
+
+
+def IRLOS_gain(ngs_mag):
+    """ IRLOS detector gain as a function of the NGS J magnitude (Enrico's regime switch) """
+    return 1 if ngs_mag <= 10.5 else 68 if ngs_mag <= 16 else 100
+
+
+def generate_random_observations(n, tc, ngs0=[9, 16], seeing_min=0.4, tau_max=10.0, rng=None):
     """
     Generate n random observations for a given turbulence category.
 
@@ -97,6 +132,7 @@ def generate_random_observations(n, tc, ngs0=[9, 16], seeing_min=0.4, tau_max=10
     Points that would fall into a stricter TC are rejected via oversampling.
     The returned table always contains exactly n rows.
     """
+    rng = np.random.default_rng() if rng is None else rng
 
     # TC boundaries: (max_seeing, min_tau)
     tc_bounds = {
@@ -129,8 +165,8 @@ def generate_random_observations(n, tc, ngs0=[9, 16], seeing_min=0.4, tau_max=10
     while len(collected_seeing) < n:
         batch_size = (n - len(collected_seeing)) * oversample
 
-        s = np.random.uniform(seeing_min, seeing_max, batch_size)
-        t = np.random.uniform(tau_min, tau_max, batch_size)
+        s = rng.uniform(seeing_min, seeing_max, batch_size)
+        t = rng.uniform(tau_min, tau_max, batch_size)
 
         if exclude is not None:
             exc_seeing, exc_tau = exclude
@@ -145,19 +181,61 @@ def generate_random_observations(n, tc, ngs0=[9, 16], seeing_min=0.4, tau_max=10
     seeing = np.array(collected_seeing[:n])
     tau = np.array(collected_tau[:n])
 
-    ngs = np.random.uniform(ngs0[0], ngs0[1], n)
-    airmass = np.random.uniform(1, 2, n)
+    ngs = rng.uniform(ngs0[0], ngs0[1], n)
+    airmass = rng.uniform(1, 2, n)
 
+    return make_observations_table(seeing, tau, ngs, airmass)
+
+
+def make_observations_table(seeing, tau, ngs, airmass):
+    """ Observation table with the derived TC and IRLOS flux, as consumed by `build_tiptop_config` """
+    seeing, tau, ngs, airmass = (np.asarray(v, dtype=float) for v in (seeing, tau, ngs, airmass))
     tc_arr = turbulence_categories(seeing, tau)
-
-    frequency = np.where(ngs <= 16, 500, 200)
+    frequency = IRLOS_frequency(ngs)
     ngs_flux = NGS_mag_to_photons(ngs, frequency, airmass)
 
-    table = Table([seeing, tau, ngs, airmass, tc_arr, ngs_flux],
-                  names=['seeing', 'tau', 'ngs', 'airmass', 'tc', 'ngs_flux'])
+    return Table([seeing, tau, ngs, airmass, tc_arr, ngs_flux],
+                 names=['seeing', 'tau', 'ngs', 'airmass', 'tc', 'ngs_flux'])
 
-    return table
 
+def onsky_observations(n, tc, rng, wave=700):
+    """ Replay the on-sky conditions of TC `tc` (n rows drawn from `All_PSF_{wave}.fits`, without replacement when possible) """
+    onsky = Table.read(str(ONSKY_TABLE).format(wave=wave))
+    onsky = onsky[(onsky['tc'] == tc) & np.isfinite(onsky['tau0'])]
+    picks = rng.choice(len(onsky), size=n, replace=n > len(onsky))
+    rows  = onsky[picks]
+    return make_observations_table(rows['seeing'], rows['tau0'], rows['ngs_mag'], rows['airmass'])
+
+
+def onsky_counts_per_TC(wave=700):
+    """ Number of on-sky PSFs per TC, used as the default sample size of the Monte Carlo """
+    onsky = Table.read(str(ONSKY_TABLE).format(wave=wave))
+    tcs, counts = np.unique(np.asarray(onsky['tc']), return_counts=True)
+    return {int(tc): int(c) for tc, c in zip(tcs, counts)}
+
+
+def generate_stars_table(counts, sampling='random', ngs_range=(9.0, 16.0), seed=0):
+    """ Random observation table over all TCs; `counts` maps TC -> number of rows """
+    rng = np.random.default_rng(seed)
+    stars = []
+    for tc in TC_LIST:
+        if counts.get(tc, 0) == 0:
+            continue
+        if sampling == 'random':
+            stars.append(generate_random_observations(counts[tc], tc=tc, ngs0=list(ngs_range), rng=rng))
+        elif sampling == 'onsky':
+            stars.append(onsky_observations(counts[tc], tc=tc, rng=rng))
+        else:
+            raise ValueError(f"Unknown sampling '{sampling}'")
+    stars = vstack(stars)
+    stars.add_column(np.arange(len(stars)), name='index', index=0)
+    stars.meta.update({'sampling': sampling, 'seed': seed, 'ngs_min': ngs_range[0], 'ngs_max': ngs_range[1]})
+    return stars
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# SPIE tuning of TIPTOP per wavelength (Enrico): wavelength-dependent extra jitter FWHM [mas] as a linear function of airmass,
+# quadratically combined with the base jitter of 25 mas already included in the fit.
 def get_extra_jitter_700(tc, airmass, orig=25):
 
     fit_info = {10: [20.426, 32.664],
@@ -243,192 +321,212 @@ def get_extra_jitter_900(tc, airmass, orig=25):
 
     return out
 
-if __name__ == '__main__':
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--wave', type=int, default=900, choices=[500, 600, 700, 800, 900],
-                        help='Wavelength in nm (default: 900)')
-    args = parser.parse_args()
-    wave = args.wave
+# ASM wind speed values
+WIND_SPEED = {
+    10: 10.4,
+    20: 10.5,
+    30: 9.9,
+    50: 10.1,
+    100: 14.5,
+}
 
-    # opening the base ini file
+# ASM wind direction values
+WIND_DIR = {
+    10: 12.5,
+    20: 28.8,
+    30: 40.2,
+    50: 37.2,
+    100: 37.0,
+}
+
+L0 = {
+    10: 12.48,
+    20: 17.1,
+    30: 22.1,
+    50: 23.5,
+    100: 25.5
+}
+
+GLF = {
+    10: 0.971,
+    20: 0.973,
+    30: 0.980,
+    50: 0.972,
+    100: 0.977
+}
+
+# extraerr = {
+#     500: 140,
+#     600: 120,
+#     700: 150,
+#     800: 150,
+#     900: 170,
+# }
+
+EXTRA_ERR = {
+    500: 150,
+    600: 150,
+    700: 130,
+    800: 100,
+    900: 100,
+}
+
+EXTRA_EXP = {
+    500: -2.0,
+    600: -2.0,
+    700: -2.0,
+    800: -2.0,
+    900: -2.0,
+}
+
+Z_COEFF = {
+    500: [0, 0, 0],
+    600: [0, 0, 0],
+    700: [0, 0, 0],
+    800: [0, 0, 0],
+    900: [0, 0, 0],
+}
+
+# zcoeff = {
+#     500: [0, 0, 60],
+#     600: [0, 0, 60],
+#     700: [0, 0, 100],
+#     800: [0, 0, 30],
+#     900: [0, 0, 30],
+# }
+
+EXTRA_JITTER = {
+    500: get_extra_jitter_500,
+    600: get_extra_jitter_600,
+    700: get_extra_jitter_700,
+    800: get_extra_jitter_800,
+    900: get_extra_jitter_900,
+}
+
+HO_PHOTONS = 1740.2396627862904 # [photons/subaperture/frame], LGS WFS flux used by the ETC
+
+
+def read_base_config(path=BASE_INI):
     config = configparser.ConfigParser()
     config.optionxform = str
-    # config.read('../May2025/ETC_calibrator/files/muse_base.ini')
-    config.read('muse_ltao_Guido.ini')
-    suffix = f'SPIE_fix_{wave}'
+    config.read(path)
+    return config
 
 
-    if not os.path.isdir(f'./config_files_{suffix}'):
-        os.mkdir(f'./config_files_{suffix}')
-        subprocess.run(f'cp serviceDescription.json ./config_files_{suffix}', shell=True, capture_output=True, text=True)
-        subprocess.run(f'cp tiptop.py ./config_files_{suffix}', shell=True, capture_output=True, text=True)
-    else:
-        subprocess.run([f'rm ./config_files_{suffix}/*.ini'], capture_output=True, text=True, shell=True)
-
-    if not os.path.isdir(f'./PSF_files_{suffix}'):
-        os.mkdir(f'./PSF_files_{suffix}')
-    else:
-        subprocess.run(f'rm ./PSF_files_{suffix}/*.fits', shell=True, capture_output=True, text=True)
-
-    new = False
-
-    if new:
-        stars = []
-        stars.append(generate_random_observations(30, tc=10,  ngs0=[0.0, 18.0]))  # TC10
-        stars.append(generate_random_observations(30, tc=20,  ngs0=[0.0, 18.0]))  # TC20, excludes TC10
-        stars.append(generate_random_observations(30, tc=30,  ngs0=[0.0, 18.0]))  # TC30, excludes TC20+
-        stars.append(generate_random_observations(30, tc=50,  ngs0=[0.0, 18.0]))  # TC50, excludes TC30+
-        stars.append(generate_random_observations(30, tc=100, ngs0=[0.0, 18.0]))  # TC100, excludes TC50+
-        stars = vstack(stars)
-        stars.write('stars_30.fits', overwrite=True)
-    else:
-        stars = Table.read('stars_30.fits')
+def sample_name(row, index=None):
+    """ File stem of a sample; Enrico's `muse_z{airmass}_s{seeing}_n{ngs}` plus an optional unique row index """
+    name = f'muse_z{row["airmass"]:0.2f}_s{row["seeing"]:0.2f}_n{row["ngs"]:0.2f}'
+    return name if index is None else f'{name}_{int(index):04d}'
 
 
-    # ASM wind speed values
-    wind_speed = {
-        10:10.4,
-        20:10.5,
-        30:9.9,
-        50:10.1,
-        100: 14.5,
-    }
+def build_tiptop_config(config, row, wave, pupil_path=PUPIL_PATH):
+    """
+    Fill the base TIPTOP config (in place) for one observation `row` (seeing, tau, ngs, airmass, tc, ngs_flux) and one science
+    wavelength `wave` [nm]; `wave=None` reproduces Enrico's multi-wavelength mode (five wavelengths with the 700 nm tuning).
+    """
+    tc = int(row['tc'])
+    config['telescope']['PathPupil'] = f"'{pupil_path}'"
+    config['telescope']['ZenithAngle'] = str(np.arccos(1/row['airmass']) * 180/np.pi)
+    config['atmosphere']['Seeing'] = str(row['seeing'])
+    config['atmosphere']['L0'] = str(L0[tc])
+    config['atmosphere']['Cn2Weights'] = str([GLF[tc], 1-GLF[tc]])
+    config['atmosphere']['Cn2Heights'] = str([30, 2000])
+    config['atmosphere']['WindSpeed'] = str([WIND_SPEED[tc]]*2)
+    config['atmosphere']['WindDirection'] = str([WIND_DIR[tc]]*2)
 
-     # ASM wind direction values
-    wind_dir = {
-        10: 12.5,
-        20: 28.8,
-        30: 40.2,
-        50: 37.2,
-        100: 37.0,
-    }
+    ngs_flux = max(float(row['ngs_flux']), 1.0)
 
-    L0 = {
-        10:12.48,
-        20:17.1,
-        30:22.1,
-        50:23.5,
-        100:25.5
-    }
+    config['sensor_LO']['NumberPhotons'] = str([int(ngs_flux)])
+    config['sensor_LO']['Gain'] = str(IRLOS_gain(row['ngs']))
 
-    GLF = {
-        10:0.971,
-        20:0.973,
-        30:0.980,
-        50:0.972,
-        100:0.977
-    }
+    tuning_wave = 700 if wave is None else wave
+    config['telescope']['jitter_FWHM'] = str(EXTRA_JITTER[tuning_wave](tc, row['airmass']))
+    config['telescope']['extraErrorNm'] = str(EXTRA_ERR[tuning_wave])
+    config['telescope']['extraErrorExp'] = str(EXTRA_EXP[tuning_wave])
+    config['telescope']['zCoefStaticOn'] = str(Z_COEFF[tuning_wave])
+    config['sources_science']['Wavelength'] = str([5e-7, 6e-7, 7e-7, 8e-7, 9e-7]) if wave is None else str([wave*1e-9])
 
-    # extraerr = {
-    #     500: 140,
-    #     600: 120,
-    #     700: 150,
-    #     800: 150,
-    #     900: 170,
-    # }
-
-    extraerr = {
-        500: 150,
-        600: 150,
-        700: 130,
-        800: 100,
-        900: 100,
-    }
+    config['sources_HO']['Height'] = str(90e3*row['airmass'])
+    config['sensor_HO']['NumberPhotons'] = str([HO_PHOTONS]*4)
+    config['sensor_science']['FieldOfView'] = str(100)
+    config['RTC']['SensorFrameRate_LO'] = str(int(IRLOS_frequency(row['ngs'])))
+    return config
 
 
-    extraexp = {
-        500: -2.0,
-        600: -2.0,
-        700: -2.0,
-        800: -2.0,
-        900: -2.0,
-    }
-
-    zcoeff = {
-        500: [0, 0, 0],
-        600: [0, 0, 0],
-        700: [0, 0, 0],
-        800: [0, 0, 0],
-        900: [0, 0, 0],
-    }
-
-    # zcoeff = {
-    #     500: [0, 0, 60],
-    #     600: [0, 0, 60],
-    #     700: [0, 0, 100],
-    #     800: [0, 0, 30],
-    #     900: [0, 0, 30],
-    # }
-
-    extrajitt = {
-        500: get_extra_jitter_500,
-        600: get_extra_jitter_600,
-        700: get_extra_jitter_700,
-        800: get_extra_jitter_800,
-        900: get_extra_jitter_900,
-    }
-
-
+def write_configs(stars, wave, config_dir, base_ini=BASE_INI, pupil_path=PUPIL_PATH):
+    """ One `.ini` per row of `stars` in `config_dir`; returns the file stems """
+    config_dir.mkdir(parents=True, exist_ok=True)
+    names = []
     for row in stars:
-        config['telescope']['PathPupil'] = str("'/home/econgiu/Data/ESO/MUSE_PSF/TipTop/SPIE_proceedings/ut4pupil320.fits'")
-        config['telescope']['ZenithAngle'] = str(np.arccos(1/row['airmass']) * 180/np.pi)
-        config['atmosphere']['Seeing'] = str(row['seeing'])
-        config['atmosphere']['L0'] = str(L0[row['tc']])
-        config['atmosphere']['Cn2Weights'] = str([GLF[row['tc']], 1-GLF[row['tc']]])
-        config['atmosphere']['Cn2Heights'] = str([30, 2000])
-        config['atmosphere']['WindSpeed'] = str([wind_speed[row['tc']]]*2)
-        config['atmosphere']['WindDirection'] = str([wind_dir[row['tc']]]*2)
-        
-        if row['ngs_flux'] < 1:
-            row['ngs_flux'] = 1
-            
-        config['sensor_LO']['NumberPhotons'] = str([int(row['ngs_flux'])])
-        config['sensor_LO']['Gain'] = '1' if row['ngs'] <= 10.5 else '68' if row['ngs'] <= 16 else '100'
-        
-        if wave is None:
-            config['telescope']['jitter_FWHM'] = str(extrajitt[700](row['tc'], row['airmass']))
-            config['telescope']['extraErrorNm'] = str(extraerr[700])
-            config['telescope']['extraErrorExp'] = str(extraexp[700])
-            config['telescope']['zCoefStaticOn'] = str(zcoeff[700])
-            config['sources_science']['Wavelength'] = str([5e-7, 6e-7, 7e-7, 8e-7, 9e-7])
-        else:
-            config['telescope']['jitter_FWHM'] = str(extrajitt[wave](row['tc'], row['airmass']))
-            config['telescope']['extraErrorNm'] = str(extraerr[wave])
-            config['telescope']['extraErrorExp'] = str(extraexp[wave])
-            config['telescope']['zCoefStaticOn'] = str(zcoeff[wave])
-            config['sources_science']['Wavelength'] = str([wave*1e-9])
-
-        config['sources_HO']['Height'] = str(90e3*row['airmass'])
-        config['sensor_HO']['NumberPhotons'] = str([1740.2396627862904, 1740.2396627862904, 1740.2396627862904, 1740.2396627862904])
-        config['sensor_science']['FieldOfView'] = str(100)
-        config['RTC']['SensorFrameRate_LO'] = str(500 if row['ngs'] <= 16 else 200)
-        # save to a file
-        with open(f'config_files_{suffix}/muse_z{row["airmass"]:0.2f}_s{row["seeing"]:0.2f}_n{row["ngs"]:0.2f}.ini', 'w') as configfile:
+        config = build_tiptop_config(read_base_config(base_ini), row, wave, pupil_path)
+        name = sample_name(row, row['index'])
+        with open(config_dir / f'{name}.ini', 'w') as configfile:
             config.write(configfile)
+        names.append(name)
+    return names
+
+
+def run_simulations(names, config_dir, psf_dir, max_workers=4, overwrite=False):
+    """ Run `overallSimulation` for every config (thread pool, as in Enrico's script); existing PSFs are skipped unless `overwrite` """
+    psf_dir.mkdir(parents=True, exist_ok=True)
+    todo = [n for n in names if overwrite or not (psf_dir / f'{n}.fits').exists()]
+    print(f'{len(todo)} simulations to run ({len(names) - len(todo)} already present) -> {psf_dir}')
+
+    def run_simulation(name):
+        try:
+            overallSimulation(str(config_dir), name, str(psf_dir), name)
+        except SyntaxError:
+            print(name)
+        except Exception as e:  # keep the pool alive; the missing PSF is reported at the end
+            print(f'{name}: {type(e).__name__}: {e}')
 
     start = time.time()
+    # Run the simulations in parallel with a ThreadPoolExecutor (4 workers, or fewer if there are fewer files)
+    with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(todo)))) as executor:
+        list(executor.map(run_simulation, todo))
+    print(f'Execution time: {time.time() - start:.2f} s')
 
-    # Raccogli tutti i file .ini da processare
-    config_files = [f for f in os.listdir(f'config_files_{suffix}') if f.endswith('.ini')]
-
-    # Esegui le simulazioni in parallelo con ThreadPoolExecutor
-    max_workers = min(4, len(config_files))  # Usa 4 worker o meno se ci sono meno file
-
-    def run_simulation(file):
-        config_dir = f'config_files_{suffix}'
-        psf_dir = f'PSF_files_{suffix}'
-        config_name = file.replace('.ini', '')
-        
-        try:
-            overallSimulation(config_dir, config_name, psf_dir, config_name)
-            
-        except SyntaxError:
-            print(config_name)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        list(executor.map(run_simulation, config_files))
-
-    print(f"Tempo di esecuzione: {time.time() - start:.2f} secondi")
+    missing = [n for n in names if not (psf_dir / f'{n}.fits').exists()]
+    if missing:
+        print(f'WARNING: {len(missing)} PSFs missing, e.g. {missing[:3]}')
+    return missing
 
 
+def load_or_generate_stars(path=STARS_TABLE, counts=None, sampling='random', ngs_range=(9.0, 16.0), seed=0, regenerate=False):
+    path = Path(path)
+    if path.exists() and not regenerate:
+        stars = Table.read(path)
+        print(f'Loaded {len(stars)} random observations from {path}')
+        return stars
+    counts = onsky_counts_per_TC() if counts is None else counts
+    stars = generate_stars_table(counts, sampling=sampling, ngs_range=ngs_range, seed=seed)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stars.write(path, overwrite=True)
+    print(f'Generated {len(stars)} random observations ({sampling}, seed {seed}) -> {path}')
+    return stars
+
+
+if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('--wave', type=int, nargs='*', default=WAVELENGTHS, choices=WAVELENGTHS, help='Science wavelengths in nm (default: all)')
+    parser.add_argument('--n-per-tc', type=int, default=None, help='Samples per TC (default: the on-sky counts per TC)')
+    parser.add_argument('--sampling', choices=['random', 'onsky'], default='random', help='Uniform random conditions within each TC (Enrico) or replay of the on-sky conditions')
+    parser.add_argument('--ngs-range', type=float, nargs=2, default=(9.0, 16.0), metavar=('MIN', 'MAX'), help='NGS J magnitude range for random sampling')
+    parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--workers', type=int, default=4)
+    parser.add_argument('--out-dir', type=Path, default=OUTPUT_DIR)
+    parser.add_argument('--stars', type=Path, default=None, help='Observation table (default: <out-dir>/stars.fits)')
+    parser.add_argument('--regenerate-stars', action='store_true', help='Draw a new observation table even if one exists')
+    parser.add_argument('--overwrite', action='store_true', help='Re-simulate PSFs that already exist')
+    args = parser.parse_args()
+
+    counts = None if args.n_per_tc is None else {tc: args.n_per_tc for tc in TC_LIST}
+    stars  = load_or_generate_stars(args.stars or args.out_dir / 'stars.fits', counts, args.sampling, tuple(args.ngs_range), args.seed, args.regenerate_stars)
+
+    for wave in args.wave:
+        wave_dir   = args.out_dir / f'{wave}nm'
+        config_dir = wave_dir / 'configs'
+        names = write_configs(stars, wave, config_dir)
+        run_simulations(names, config_dir, wave_dir, max_workers=args.workers, overwrite=args.overwrite)
