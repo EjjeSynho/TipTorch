@@ -1,10 +1,108 @@
 from data_processing.MUSE_data_utils import *
 
 
-STD_FOLDER     = Path(project_settings["MUSE_STD_data_folder"])
-CUBES_FOLDER   = STD_FOLDER / 'cubes/'
-RAW_FOLDER     = STD_FOLDER / 'raw/'
-CUBES_CACHE    = STD_FOLDER / 'cached_cubes/'
+STD_FOLDER   = Path(project_settings["MUSE_STD_data_folder"])
+CUBES_FOLDER = STD_FOLDER / 'cubes/'
+RAW_FOLDER   = STD_FOLDER / 'raw/'
+CUBES_CACHE  = STD_FOLDER / 'cached_cubes/'
+
+
+def RemoveDuplicatedCubes(cubes_cache_dir, verbose=True, dry_run=False):
+    """
+    Removes cached cubes that share the same observation (the filename without
+    the leading numeric ID prefix, e.g. 'M.MUSE.2021-03-30T15-04-31.323.pickle')
+    but have different IDs. The file with the lowest ID is kept.
+
+    Args:
+        cubes_cache_dir: Path to cached cubes directory
+        verbose:         Print progress information
+        dry_run:         If True, only report what would be removed
+
+    Returns:
+        list of removed (or, in dry run, to-be-removed) filenames
+    """
+    import re
+    from collections import defaultdict
+
+    id_pattern = re.compile(r'^(?:(\d+)_)?(.+)$')
+
+    groups = defaultdict(list)
+    for pfile in os.listdir(cubes_cache_dir):
+        if not pfile.endswith('.pickle'):
+            continue
+        m = id_pattern.match(pfile)
+        file_id = int(m.group(1)) if m.group(1) is not None else -1
+        groups[m.group(2)].append((file_id, pfile))
+
+    removed = []
+    for base, files in groups.items():
+        if len(files) < 2:
+            continue
+        files.sort()
+        kept = files[0][1]
+        for _, pfile in files[1:]:
+            if verbose:
+                print(f"  Duplicate of '{kept}': {'would remove' if dry_run else 'removing'} '{pfile}'")
+            if not dry_run:
+                os.remove(os.path.join(cubes_cache_dir, pfile))
+            removed.append(pfile)
+
+    if verbose:
+        print(f"{len(removed)} duplicated cube(s) {'found' if dry_run else 'removed'}")
+    return removed
+
+
+def SplitByAcquisitionTime(acq_times, val_fraction=0.2, max_gap_hours=2.0, seed=42, verbose=True):
+    """
+    Splits samples into training and validation subsets so that observations acquired close in time
+    (and thus sharing nearly the same atmospheric conditions and instrument state) never end up on
+    different sides of the split.
+
+    Samples are sorted by acquisition time and chunked into groups: a new group starts whenever the
+    gap to the previous sample exceeds max_gap_hours. Whole groups are then randomly assigned to the
+    validation set until it holds ~val_fraction of the samples.
+
+    Args:
+        acq_times:      [N] array-like of real acquisition times (DATE-OBS of the cube header, not the
+                        timestamp in the file name), anything pd.to_datetime understands
+        val_fraction:   Target fraction of samples in the validation subset
+        max_gap_hours:  Max time gap between consecutive samples of the same group
+        seed:           RNG seed for the group shuffling
+        verbose:        Print summary
+
+    Returns:
+        train_idx, val_idx, group_ids: positions into acq_times (sorted), and the [N] group label of every sample
+    """
+    times = pd.to_datetime(pd.Series(np.asarray(acq_times)), utc=True)
+    order = np.argsort(times.values, kind='stable')
+    gaps  = times.iloc[order].diff().dt.total_seconds().fillna(np.inf).values / 3600.0
+
+    group_sorted = np.cumsum(gaps > max_gap_hours) - 1
+    group_ids = np.empty(len(times), dtype=int)
+    group_ids[order] = group_sorted
+
+    rng = np.random.default_rng(seed)
+    n_val_target = val_fraction * len(times)
+    val_groups, n_val = [], 0
+
+    for g in rng.permutation(group_ids.max() + 1):
+        if n_val >= n_val_target:
+            break
+        size = int((group_ids == g).sum())
+        # Skip a group that would overshoot the target by more than it brings closer to it
+        if n_val + size - n_val_target > n_val_target - n_val and n_val > 0:
+            continue
+        val_groups.append(g)
+        n_val += size
+
+    is_val = np.isin(group_ids, val_groups)
+    train_idx, val_idx = np.where(~is_val)[0], np.where(is_val)[0]
+
+    if verbose:
+        print(f'Split by acquisition time: {group_ids.max()+1} groups (gap > {max_gap_hours} h), '
+              f'{len(train_idx)} train / {len(val_idx)} val ({100*len(val_idx)/len(times):.1f}%)')
+    
+    return train_idx, val_idx, group_ids
 
 
 def ReasignIDsByDate(cubes_cache_dir, verbose=True):
@@ -45,15 +143,19 @@ def ReasignIDsByDate(cubes_cache_dir, verbose=True):
     for pfile in os.listdir(cubes_cache_dir):
         if not pfile.endswith('.pickle'):
             continue
+        
         m = id_pattern.match(pfile)
         if not m:
             continue
+        
         base = m.group(1)       # filename without the leading ID prefix
         dt   = parse_date(base)
+        
         if dt is None:
             if verbose:
                 print(f"  WARNING: cannot parse date from '{pfile}' — skipping")
             continue
+        
         samples.append((dt, pfile, base))
 
     samples.sort(key=lambda x: x[0])   # chronological order

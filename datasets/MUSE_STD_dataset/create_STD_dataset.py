@@ -19,30 +19,30 @@ import pandas as pd
 from STD_dataset_utils import *
 
 #%%
-with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
-    muse_df = pickle.load(handle)
+# with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
+#     muse_df = pickle.load(handle)
     
-#%%
-with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
-    # reduced_telemetry = pickle.load(handle)['telemetry imputed df']
-    reduced_telemetry = pickle.load(handle)['telemetry normalized imputed df']
+# #%%
+# with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
+#     # reduced_telemetry = pickle.load(handle)['telemetry imputed df']
+#     reduced_telemetry = pickle.load(handle)['telemetry normalized imputed df']
    
-#%%
-cn2_1 = 1 - reduced_telemetry['Cn2_frac_binned_2'] - reduced_telemetry['Cn2_frac_binned_3']
-cn2_2 = reduced_telemetry['Cn2_frac_binned_2']
-cn2_3 = reduced_telemetry['Cn2_frac_binned_3']
+# #%%
+# cn2_1 = 1 - reduced_telemetry['Cn2_frac_binned_2'] - reduced_telemetry['Cn2_frac_binned_3']
+# cn2_2 = reduced_telemetry['Cn2_frac_binned_2']
+# cn2_3 = reduced_telemetry['Cn2_frac_binned_3']
 
-fig, ax = plt.subplots(figsize=(20, 15))
-ax.hist(cn2_1, bins=100, alpha=0.5, label='Cn2_frac_1')
-ax.hist(cn2_2, bins=100, alpha=0.5, label='Cn2_frac_2')
-ax.hist(cn2_3, bins=100, alpha=0.5, label='Cn2_frac_3')
-ax.legend()
-plt.show()
+# fig, ax = plt.subplots(figsize=(20, 15))
+# ax.hist(cn2_1, bins=100, alpha=0.5, label='Cn2_frac_1')
+# ax.hist(cn2_2, bins=100, alpha=0.5, label='Cn2_frac_2')
+# ax.hist(cn2_3, bins=100, alpha=0.5, label='Cn2_frac_3')
+# ax.legend()
+# plt.show()
 
 #%%
 # Check the existence of all necessary folders and create them if they don't exist
-std_stars_folders = [CUBES_FOLDER, RAW_FOLDER, STD_FOLDER, CUBES_CACHE, TELEMETRY_CACHE, STD_FOLDER / 'NFM_cubes_temp/']
-for folder in std_stars_folders:
+STD_stars_folders = [CUBES_FOLDER, RAW_FOLDER, STD_FOLDER, CUBES_CACHE, TELEMETRY_CACHE, STD_FOLDER / 'NFM_cubes_temp/']
+for folder in STD_stars_folders:
     if not os.path.exists(folder):
         os.makedirs(folder)
         print(f'Created folder: {folder}')
@@ -71,7 +71,7 @@ else:
     files_mismatches = pd.read_csv(STD_FOLDER / 'files_mismatches.csv')
     files_mismatches.set_index('date', inplace=True)
     files_mismatches = files_mismatches.sort_index()
-    print(f'Read file matches file from {match_path}')
+    print(f'Read the existing raw and cubes matches file from {match_path}')
 
 #%
 # # Move all files which are in file_mismatches raw column to a specified folder:
@@ -102,12 +102,16 @@ verbose = False
 
 ids_process = range(0, len(files_matches))
 
-for file_id in tqdm(ids_process):
-    fname_new = files_matches.iloc[file_id]['cube'].replace('.fits','.pickle').replace(':','-')
-    fname_new = f'{file_id}_{fname_new}'
+# Cached files are named '{ID}_{cube_name}.pickle', where ID may change between runs,
+# so existing cubes are identified by the name part only
+cached_names = { f.split('_', 1)[-1] for f in os.listdir(CUBES_CACHE) }
 
-    if fname_new in os.listdir(CUBES_CACHE) and not rewrite:
-        if verbose: print(f'File {fname_new} already exists. Skipping...')
+for file_id in tqdm(ids_process):
+    cube_name = files_matches.iloc[file_id]['cube'].replace('.fits','.pickle').replace(':','-')
+    fname_new = f'{file_id}_{cube_name}'
+
+    if cube_name in cached_names and not rewrite:
+        if verbose: print(f'Cube {cube_name} already cached. Skipping...')
         continue
 
     print(f'\n\n>>>>>>>>>>>>>> Processing file {file_id}...')
@@ -126,6 +130,7 @@ for file_id in tqdm(ids_process):
         )
         with open(CUBES_CACHE / fname_new, 'wb') as handle:
             pickle.dump(sample, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        cached_names.add(cube_name)
 
     except Exception as e:
         if verbose: print(f'Error with file {fname_new}: {e}')
@@ -136,11 +141,18 @@ print(f'Failed files: {bad_files}')
 
 #%%
 # Ensure unique sample IDs, assign IDs based on observation date
+RemoveDuplicatedCubes(CUBES_CACHE, verbose=True)
 ReasignIDsByDate(CUBES_CACHE, verbose=True)
 
 #%% ================================ Render the STD stars dataset ================================
+# IDs can be reassigned by date, so existing images are matched by the name part only
+IMAGES_FOLDER = STD_FOLDER / 'MUSE_images'
+IMAGES_FOLDER.mkdir(parents=True, exist_ok=True)
+rendered_names = { f.split('_', 1)[-1] for f in os.listdir(IMAGES_FOLDER) if f.endswith('.png') }
+
 for file in tqdm(os.listdir(CUBES_CACHE)):
-    if (fx:=file.replace(".pickle",".png")) in os.listdir(STD_FOLDER / f'MUSE_images/') and not rewrite:
+    fx = file.replace(".pickle",".png")
+    if fx.split('_', 1)[-1] in rendered_names and not rewrite:
         if verbose: print(f'File {fx} already exists. Skipping...')
         continue
     try:
@@ -149,6 +161,7 @@ for file in tqdm(os.listdir(CUBES_CACHE)):
             
         plt.savefig(STD_FOLDER / f'MUSE_images/{file.replace(".pickle",".png")}')
         plt.close()
+        rendered_names.add(fx.split('_', 1)[-1])
         
     except Exception as e:
         if verbose: print(f'{e}')
@@ -173,7 +186,7 @@ else:
 
 #%% ================================ Assemble STD stars reduced telemetry dataset ================================
 
-# Compose dataset of MUSE NFM redued telemetry values based on the data associated with cahed data cubes
+# Compose dataset of MUSE NFM reduced telemetry values based on the data associated with cahed data cubes
 if not os.path.exists(STD_FOLDER / 'muse_df.pickle'):
     # Load labels information
     all_labels = []
@@ -228,6 +241,7 @@ if not os.path.exists(STD_FOLDER / 'muse_df.pickle'):
         pickle.dump(muse_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 else:
+    print(f'Loading cached MUSE dataframe from {STD_FOLDER / "muse_df.pickle"}')
     with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
         muse_df = pickle.load(handle)
 
@@ -249,15 +263,10 @@ muse_df_pruned = reduce_dataframe(filter_dataframe(muse_df.copy()))
 numeric_cols = muse_df_pruned.select_dtypes(include="number").columns
 nan_mask     = muse_df_pruned[numeric_cols].isna().values  # (N_samples, N_numeric_cols)
 
-median_imputer   = SimpleImputer(strategy='median')
+# StandardScaler ignores NaNs when fitting and preserves them when transforming, so no pre-filling is needed.
+# Pre-filling NaNs with medians would shrink the std of the features with many missing values
 telemetry_scaler = StandardScaler()
-
-# Fill NaNs with median so the scaler can be fitted on complete data
-muse_df_filled = muse_df_pruned.copy()
-muse_df_filled[numeric_cols] = median_imputer.fit_transform(muse_df_pruned[numeric_cols])
-
-# Fit scaler on NaN-free data, then standardize the original (NaNs are preserved)
-telemetry_scaler.fit(muse_df_filled[numeric_cols])
+telemetry_scaler.fit(muse_df_pruned[numeric_cols])
 
 muse_df_pruned_scaled = muse_df_pruned.copy()
 muse_df_pruned_scaled[numeric_cols] = telemetry_scaler.transform(muse_df_pruned[numeric_cols])
@@ -269,16 +278,25 @@ if verbose:
     plt.show()
     
     plot_data_filling(muse_df_pruned)
+    print(f'Total number of remaining features in pruned telemetry dataset: {len(muse_df_pruned.columns)}')
+
+# if verbose:
     # for entry in muse_df_pruned.columns.values:
     #     sns.displot(data=muse_df_pruned, x=entry, kde=True, bins=100)
     #     plt.show()
-    print(f'Total number of remaining features in pruned telemetry dataset: {len(muse_df_pruned.columns)}')
 
 #%%
 # from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
 
-# Impute missing values
-iterative_imputer = IterativeImputer(max_iter=200, random_state=3, verbose=(2 if verbose else 0))
+# Impute missing values. Imputed values are clipped to the observed range of each feature, so the imputer can't
+# extrapolate, neither here nor at inference time. See benchmark_telemetry_imputation.py for the comparison of methods
+iterative_imputer = IterativeImputer(
+    max_iter = 200,
+    min_value = muse_df_pruned_scaled[numeric_cols].min().values,
+    max_value = muse_df_pruned_scaled[numeric_cols].max().values,
+    random_state = 3,
+    verbose = (2 if verbose else 0)
+)
 # 
 # iterative_imputer = IterativeImputer(
 #     estimator = ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=16),
@@ -290,17 +308,10 @@ imputed_data = iterative_imputer.fit_transform(muse_df_pruned_scaled[numeric_col
 muse_df_pruned_scaled_imputed = pd.DataFrame(imputed_data, index=muse_df_pruned_scaled.index, columns=numeric_cols)
 
 #%%
-imputing_ouliers = analyze_outliers(
-    muse_df_pruned_scaled_imputed,
-    outlier_threshold=3,
-    nan_mask=nan_mask,
-    verbose=verbose
-)
-#%% Impute outliers with median values
-median_imputer = SimpleImputer(strategy='median')
-muse_df_pruned_scaled_imputed[imputing_ouliers] = np.nan
-muse_df_pruned_scaled_imputed = median_imputer.fit_transform(muse_df_pruned_scaled_imputed)
-muse_df_pruned_scaled_imputed = pd.DataFrame(muse_df_pruned_scaled_imputed, index=muse_df_pruned_scaled.index, columns=numeric_cols)
+# Imputed values beyond ±3 std are NOT replaced with medians anymore: the benchmark shows that they are mostly
+# correct and the replacement increases the imputation error. Besides, it can't be reproduced at inference time
+if verbose:
+    _ = analyze_outliers(muse_df_pruned_scaled_imputed, outlier_threshold=3, nan_mask=nan_mask, verbose=verbose)
 
 # Unscaling back to physical values ranges
 muse_df_pruned_imputed = pd.DataFrame(
@@ -326,21 +337,29 @@ if verbose:
     
 
 #%%
-# Pack all data into a single dictionary and store it
+from data_processing.telemetry_preprocessor import TelemetryPreprocessor
+
+# Merge the scaler and the imputer into a single lightweight object to process new (e.g. science) telemetry the same way.
+# It goes into the dataset cache and from there into every trained calibrator bundle
+telemetry_preprocessor = TelemetryPreprocessor.from_sklearn(telemetry_scaler, iterative_imputer)
+
+assert np.allclose(
+    telemetry_preprocessor.transform(muse_df_pruned[numeric_cols]),
+    iterative_imputer.transform(muse_df_pruned_scaled[numeric_cols]), atol=1e-10
+), 'TelemetryPreprocessor does not reproduce the sklearn scaler + imputer'
+
+# Pack all data into a single dictionary and store it (for debugging, the training uses the dataset cache below)
 reduced_telemetry = {
     'telemetry normalized imputed df': muse_df_pruned_scaled_imputed,
-    'telemetry imputed df': muse_df_pruned_imputed
+    'telemetry imputed df': muse_df_pruned_imputed,
+    'telemetry preprocessor': telemetry_preprocessor.state_dict(),
 }
 
 with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'wb') as handle:
     pickle.dump(reduced_telemetry, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-# Save imputer and scaler as separate pickle files
-with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'wb') as handle:
-    pickle.dump(iterative_imputer, handle, protocol=pickle.HIGHEST_PROTOCOL)
-
-with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'wb') as handle:
-    pickle.dump(telemetry_scaler, handle, protocol=pickle.HIGHEST_PROTOCOL)
+# NOTE: the legacy TELEMETRY_CACHE/MUSE/muse_telemetry_{imputer,scaler}.pickle files are not written anymore. They are
+# only read as a fallback by calibrator bundles trained before the preprocessor was stored inside the bundle
 
 
 #%%
@@ -354,8 +373,10 @@ with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
     muse_df = pickle.load(handle)
 
 with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
-    reduced_telemetry = pickle.load(handle)['telemetry normalized imputed df']
-    
+    _telemetry_data = pickle.load(handle)
+    reduced_telemetry = _telemetry_data['telemetry normalized imputed df']
+    telemetry_preprocessor_state = _telemetry_data['telemetry preprocessor'] # scaler + imputer to process new telemetry
+
 with open(STD_FOLDER / 'muse_fitted_df.pickle', 'rb') as handle:
     muse_fitted_df = pickle.load(handle)['fitted_values']
 
@@ -402,6 +423,12 @@ good_ids = np.array(good_ids) # [N_samples]
 PSF_cubes = np.stack(PSF_cubes, axis=0) # [N_samples x H x W x N_wvl]
 telemetry_records = np.stack(telemetry_records, axis=0) # [N_samples x N_features]
 
+# Training/validation split: samples acquired close in time must not be shared between the subsets.
+# The real acquisition time is DATE-OBS from the cube header (muse_df['time']), the timestamp in the file name is not it
+acq_times = muse_df.loc[good_ids, 'time'] # [N_samples]
+train_idx, val_idx, time_groups = SplitByAcquisitionTime(acq_times, val_fraction=0.2, max_gap_hours=2.0, seed=42)
+
+#%%
 try:
     # Store dataset caches
     torch.save({
@@ -410,6 +437,11 @@ try:
         'sample_ids': good_ids,
         'model_configs': configs,
         'fitted_param_values': fitted_values,
+        'acquisition_times': acq_times.astype(str).values, # [N_samples], UTC
+        'train_idx': train_idx, # positions into sample_ids
+        'val_idx': val_idx,
+        'time_groups': time_groups, # [N_samples], samples with the same label are close in acquisition time
+        'telemetry_preprocessor': telemetry_preprocessor_state, # TelemetryPreprocessor.state_dict(), copied into calibrator bundles
     }, DATASET_CACHE / 'muse_STD_stars_dataset.pt')
     
     print('Dataset cache saved successfully.')

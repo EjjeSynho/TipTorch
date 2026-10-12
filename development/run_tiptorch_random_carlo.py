@@ -229,7 +229,7 @@ if __name__ == '__main__':
     zenith_deg   = np.degrees(np.arccos(1.0 / np.asarray(stars['airmass'], dtype=float)))
 
     template_physical = pd.DataFrame(
-        calibrator.telemetry_scaler.inverse_transform(telemetry_scaled.iloc[template_idx].to_numpy()),
+        calibrator.telemetry_preprocessor.inverse_transform(telemetry_scaled.iloc[template_idx].to_numpy()),
         columns=calibrator.features,
     )
     telemetry_physical = build_telemetry(template_physical, stars, zenith_deg)

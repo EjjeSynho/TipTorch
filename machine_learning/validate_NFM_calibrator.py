@@ -19,6 +19,7 @@ from calibrators.NFM_calibrator import (
     NFMCalibrator,
     NFMCalibratorTrainer,
     NFMDataset,
+    load_telemetry_preprocessor,
     release_gpu_memory
 )
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
@@ -203,13 +204,13 @@ for i, name in enumerate(output_names):
 #%%
 from tiptorch.tools.utils import r0
 
-with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as handle:
-    telemetry_scaler = pickle.load(handle)
-    
+# Telemetry scaler + imputer the validated calibrator was trained with
+telemetry_preprocessor = load_telemetry_preprocessor(torch.load(BEST_CALIB_PATH, map_location='cpu', weights_only=False))
+
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as fh:
     muse_df = pickle.load(fh)
 
-x_vec = telemetry_scaler.inverse_transform(telemetry_vecs.cpu().numpy())
+x_vec = telemetry_preprocessor.inverse_transform(telemetry_vecs.cpu().numpy())
 
 X = {
     'r0': r0(muse_df['Seeing (header)'].loc[validation_ids].to_numpy(), 500e-9),
@@ -714,7 +715,7 @@ def build_ETC_telemetry(telemetry_vectors, TCs, calibrator):
         raise ValueError(f"Expected one ETC category per telemetry row, got {len(TCs)} categories for {len(telemetry_vectors)} rows.")
 
     telemetry_physical = pd.DataFrame(
-        calibrator.telemetry_scaler.inverse_transform(telemetry_vectors.cpu().numpy()),
+        calibrator.telemetry_preprocessor.inverse_transform(telemetry_vectors.cpu().numpy()),
         columns=calibrator.features,
     )
 

@@ -136,7 +136,7 @@ for j in range(N_src):
 
 #%%
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
-from tiptorch.tools.utils import RadialProfileLossSimple, BalancedPSFLoss
+from tiptorch.tools.utils import BalancedPSFLoss
 
 blurry_PSF_flag = muse_df.loc[ids]['Bad quality'].item()
 

@@ -33,6 +33,7 @@ def to_little_endian(array):
     new_type = type_map.get(array.dtype.str)
     if new_type:
         return array.astype(new_type)
+    
     return array
 
 
@@ -263,9 +264,9 @@ def GetROIaroundMax(image, win=200):
 
     # 3) final ROI of size ~ (2*win+1) around refined center
     ids = CroppedROI(work, max_id, int(win))
-    roi = work[ids]
+    ROI = work[ids]
 
-    return roi, ids, max_id
+    return ROI, ids, max_id
 
 
 def GetJmag(N_ph):
@@ -469,8 +470,8 @@ def FitGauss2D_astropy(PSF):
     y, x = np.indices(PSF_cropped.shape)
 
     # Estimate initial parameters from data
-    A_init = PSF_cropped.max()
-    total = PSF_cropped.sum()
+    A_init  = PSF_cropped.max()
+    total   = PSF_cropped.sum()
     x0_init = (x * PSF_cropped).sum() / total
     y0_init = (y * PSF_cropped).sum() / total
     sx_init = np.sqrt(((x - x0_init)**2 * PSF_cropped).sum() / total)
@@ -478,9 +479,11 @@ def FitGauss2D_astropy(PSF):
     offset_init = PSF_cropped.min()
 
     # Initial model: Gaussian + constant offset
-    gauss_init = models.Gaussian2D(amplitude=A_init, x_mean=x0_init, y_mean=y0_init,
-                                   x_stddev=sx_init, y_stddev=sy_init) \
-                 + models.Const2D(offset_init)
+    gauss_init = \
+        models.Gaussian2D(
+            amplitude=A_init, x_mean=x0_init, y_mean=y0_init,
+            x_stddev=sx_init, y_stddev=sy_init
+        ) + models.Const2D(offset_init)
 
     # Fit the model
     fitter = fitting.LevMarLSQFitter()
@@ -514,6 +517,7 @@ def FWHM_fitter(PSF_stack, function='Moffat', verbose=False):
                 f_x, f_y, _, _ = func_(PSF_stack[i,l,:,:])
                 FWHMs[i,l,0] = f_x.item()
                 FWHMs[i,l,1] = f_y.item()
+                
             except Exception:
                 pass  # leaves NaNs in place
     return FWHMs
@@ -677,12 +681,13 @@ def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pix
 
         def make_island_TT_mode(X, petal, normalize=True):
             mode = X - X[np.where(petal > 0.5)].mean()
+            
             if normalize:
                 mode /= mode[np.where(petal > 0.5)].std()
             return mode * petal
 
-        tips  = [make_island_TT_mode(y_rot_norm, petal, False) for petal in petals]
-        tilts = [make_island_TT_mode(x_rot_norm, petal, False) for petal in petals]
+        tips  = [ make_island_TT_mode(y_rot_norm, petal, False) for petal in petals ]
+        tilts = [ make_island_TT_mode(x_rot_norm, petal, False) for petal in petals ]
 
         petal_modes = np.dstack([*petals, *tips, *tilts])
         
@@ -691,21 +696,66 @@ def PupilVLT(samples, rotation_angle=0, petal_modes=False, vangle=[0,0], one_pix
         return mask_spiders
     
 
+def weighted_kmeans_1d(x, w, n_clusters):
+    """
+    Exact weighted K-means for 1D data via dynamic programming (optimal partition of the sorted points into
+    contiguous segments, which is always the case for the optimal 1D clustering). Returns cluster labels,
+    which are ordered by increasing x. Unlike sklearn's KMeans, it's deterministic and uses no OpenMP threads,
+    which can deadlock on Windows when torch's and sklearn's OpenMP runtimes are loaded together.
+    """
+    x, w = np.asarray(x, float), np.asarray(w, float)
+    n = len(x)
+    if n < n_clusters:
+        raise ValueError(f'n_samples={n} should be >= n_clusters={n_clusters}')
+
+    order = np.argsort(x, kind='stable')
+    xs, ws = x[order], w[order]
+
+    # Prefix sums for O(1) weighted SSE of any contiguous segment [i, j)
+    W  = np.concatenate([[0], np.cumsum(ws)])
+    S  = np.concatenate([[0], np.cumsum(ws * xs)])
+    Q  = np.concatenate([[0], np.cumsum(ws * xs**2)])
+
+    def cost(i, j):
+        w_ij = W[j] - W[i]
+        return Q[j] - Q[i] - (S[j] - S[i])**2 / w_ij if w_ij > 0 else 0.0
+
+    # D[k, j]: min cost of splitting the first j points into k+1 clusters; B[k, j]: start of the last cluster
+    D = np.full((n_clusters, n+1), np.inf)
+    B = np.zeros((n_clusters, n+1), dtype=int)
+    
+    for j in range(1, n+1):
+        D[0, j] = cost(0, j)
+        
+    for k in range(1, n_clusters):
+        for j in range(k+1, n+1):
+            for i in range(k, j):
+                c = D[k-1, i] + cost(i, j)
+                if c < D[k, j]:
+                    D[k, j], B[k, j] = c, i
+
+    labels_sorted = np.empty(n, dtype=int)
+    j = n
+    
+    for k in range(n_clusters-1, -1, -1):
+        i = B[k, j] if k > 0 else 0
+        labels_sorted[i:j] = k
+        j = i
+
+    labels = np.empty(n, dtype=int)
+    labels[order] = labels_sorted
+    
+    return labels
+
+
 def recompute_Cn2_Kmeans(Cn2_alts, Cn2_weights, n_layers=5, enforce_0_GL=False, min_separation=None):
     """" Re-compute simplified Cn2 profile using weighted K-means clustering. """
-    
-    from sklearn.cluster import KMeans
-
     Cn2_alts = np.asarray(Cn2_alts, float)
     Cn2_weights = np.asarray(Cn2_weights, float)
-    
-    x = Cn2_alts
 
-    # Weighted KMeans
-    kmeans = KMeans(n_clusters=n_layers, random_state=42, n_init=10)
-    kmeans.fit(x.reshape(-1, 1), sample_weight=Cn2_weights)
-    labels = kmeans.labels_
-    
+    # Weighted KMeans (exact 1D solution)
+    labels = weighted_kmeans_1d(Cn2_alts, Cn2_weights, n_layers)
+
     # Recompute centers and weights in the original space (h)
     H = np.zeros(n_layers)
     W = np.zeros(n_layers)
@@ -732,6 +782,7 @@ def recompute_Cn2_Kmeans(Cn2_alts, Cn2_weights, n_layers=5, enforce_0_GL=False, 
         for i in range(1, len(H)-1):
             if d1 := np.abs(H[i] - H[i-1]) < min_separation:
                 H[i] += min_separation - d1
+            
             if d2 := np.abs(H[i+1] - H[i]) < min_separation:
                 H[i] -= min_separation - d2
             
@@ -760,6 +811,79 @@ def recompute_Cn2_simple(Cn2_alts, Cn2_weights, h_bounds, enforce_0_GL=False):
         if len(H) > 0: H[0] = 0 # Enforce ground layer at 0 m
         
     return H, W
+
+
+def BinCn2(
+    Cn2_weights,
+    layer_altitudes,
+    N_binned: int,
+    wind_direction = None,
+    wind_speed = None,
+    dtype: Optional[torch.dtype] = torch.float32,
+    eps: Optional[float] = None,
+):
+    """
+    Bin Cn2, altitude, and optionally wind direction/speed.
+
+    Wind direction is in degrees, clockwise from north, and describes
+    where the wind comes from.
+
+    Returns:
+        Without wind:
+            Cn2_binned, h_binned
+
+        With wind:
+            Cn2_binned, h_binned, wind_direction_binned, wind_speed_binned
+    """
+    Cn2 = torch.as_tensor(Cn2_weights, dtype=dtype)
+    h = torch.as_tensor(layer_altitudes, dtype=Cn2.dtype, device=Cn2.device)
+
+    has_wind = wind_direction is not None or wind_speed is not None
+    if has_wind:
+        if wind_direction is None or wind_speed is None:
+            raise ValueError("Provide both wind_direction and wind_speed")
+
+        direction = torch.as_tensor(wind_direction, dtype=Cn2.dtype, device=Cn2.device)
+        speed = torch.as_tensor(wind_speed, dtype=Cn2.dtype, device=Cn2.device)
+        Cn2, h, direction, speed = torch.broadcast_tensors(Cn2, h, direction, speed)
+    else:
+        Cn2, h = torch.broadcast_tensors(Cn2, h)
+
+    n_layers = Cn2.shape[-1]
+    N_binned = int(N_binned)
+
+    if not 1 <= N_binned <= n_layers:
+        raise ValueError("N_binned must be between 1 and the number of layers")
+
+    slab_size = n_layers // N_binned
+    groups = (torch.arange(n_layers, device=Cn2.device) // slab_size).clamp_max(N_binned - 1).expand_as(Cn2)
+
+    output_shape = (*Cn2.shape[:-1], N_binned)
+
+    def bin_sum(x):
+        return Cn2.new_zeros(output_shape).scatter_add_(-1, groups, x)
+
+    power = 5/3
+    Cn2_binned = bin_sum(Cn2)
+    denominator = Cn2_binned if eps is None else Cn2_binned.clamp_min(eps)
+
+    h_binned = (bin_sum(Cn2 * h.pow(power)) / denominator).pow(1 / power)
+
+    if not has_wind:
+        return Cn2_binned, h_binned
+
+    # Convert meteorological direction/speed to east/north components.
+    theta = torch.deg2rad(direction)
+    wind_x = -speed * torch.sin(theta)
+    wind_y = -speed * torch.cos(theta)
+
+    wind_x = bin_sum(Cn2 * wind_x) / denominator
+    wind_y = bin_sum(Cn2 * wind_y) / denominator
+
+    speed_binned = torch.hypot(wind_x, wind_y)
+    direction_binned = torch.rad2deg(torch.atan2(-wind_x, -wind_y)).remainder(360)
+
+    return Cn2_binned, h_binned, direction_binned, speed_binned
 
 
 class GradientLoss(nn.Module):
@@ -827,6 +951,7 @@ def check_types(obj, prefix=''):
         print(f'{prefix}: {type(obj).__name__}')
 '''
 
+'''
 class CombinedLoss:
     def __init__(self, data, func, wvl_weights, mae_weight=2500, mse_weight=1120):
         self.data = data
@@ -840,22 +965,23 @@ class CombinedLoss:
         mse_loss = (diff * self.mse_weight).pow(2).mean()
         mae_loss = (diff * self.mae_weight).abs().mean()
         return (mse_loss + mae_loss)
+    '''
     
-    
+"""
 class RadialProfileLossSimple(nn.Module):
-    """
-    Differentiable radial-profile loss for PSFs of shape (N, N_wvl, H, W).
-    Assumes PSFs are already normalized and centered.
+    
+    # Differentiable radial-profile loss for PSFs of shape (N, N_wvl, H, W).
+    # Assumes PSFs are already normalized and centered.
 
-    Args:
-      n_bins: number of radial bins
-      r_max: max radius in pixels (default: half of min(H,W) minus 1)
-      sigma_scale: Gaussian bin width factor (sigma = sigma_scale * bin_width)
-      loss: 'mse' or 'fvu'
-      bin_weight: 'uniform' | 'counts' | 'r'   (optional emphasis on wings/area)
-      log_profile: if True, profile over log(PSF+eps) to emphasize wings
-      eps: numerical stability
-    """
+    # Args:
+    #   n_bins: number of radial bins
+    #   r_max: max radius in pixels (default: half of min(H,W) minus 1)
+    #   sigma_scale: Gaussian bin width factor (sigma = sigma_scale * bin_width)
+    #   loss: 'mse' or 'fvu'
+    #   bin_weight: 'uniform' | 'counts' | 'r'   (optional emphasis on wings/area)
+    #   log_profile: if True, profile over log(PSF+eps) to emphasize wings
+    #   eps: numerical stability
+    
     def __init__(
         self,
         n_bins: int = 64,
@@ -966,7 +1092,7 @@ class RadialProfileLossSimple(nn.Module):
             loss = fvu.mean()
 
         return loss
-
+"""
 
 class BalancedPSFLoss:
     """
@@ -1040,7 +1166,7 @@ class BalancedPSFLoss:
     def __call__(self, PSF_data, PSF_pred):
         return self.pixel_map(PSF_data, PSF_pred).sum(dim=(-2, -1)).mean(dim=-1) # [B]
 
-
+'''
 def scan_cuda_tensors(obj):
     from collections.abc import Mapping, Sequence
     found = {}
@@ -1091,76 +1217,5 @@ def scan_cuda_tensors(obj):
                 )
 
     return found
+'''
 
-
-def BinCn2(
-    Cn2_weights,
-    layer_altitudes,
-    N_binned: int,
-    wind_direction = None,
-    wind_speed = None,
-    dtype: Optional[torch.dtype] = torch.float32,
-    eps: Optional[float] = None,
-):
-    """
-    Bin Cn2, altitude, and optionally wind direction/speed.
-
-    Wind direction is in degrees, clockwise from north, and describes
-    where the wind comes from.
-
-    Returns:
-        Without wind:
-            Cn2_binned, h_binned
-
-        With wind:
-            Cn2_binned, h_binned, wind_direction_binned, wind_speed_binned
-    """
-    Cn2 = torch.as_tensor(Cn2_weights, dtype=dtype)
-    h = torch.as_tensor(layer_altitudes, dtype=Cn2.dtype, device=Cn2.device)
-
-    has_wind = wind_direction is not None or wind_speed is not None
-    if has_wind:
-        if wind_direction is None or wind_speed is None:
-            raise ValueError("Provide both wind_direction and wind_speed")
-
-        direction = torch.as_tensor(wind_direction, dtype=Cn2.dtype, device=Cn2.device)
-        speed = torch.as_tensor(wind_speed, dtype=Cn2.dtype, device=Cn2.device)
-        Cn2, h, direction, speed = torch.broadcast_tensors(Cn2, h, direction, speed)
-    else:
-        Cn2, h = torch.broadcast_tensors(Cn2, h)
-
-    n_layers = Cn2.shape[-1]
-    N_binned = int(N_binned)
-
-    if not 1 <= N_binned <= n_layers:
-        raise ValueError("N_binned must be between 1 and the number of layers")
-
-    slab_size = n_layers // N_binned
-    groups = (torch.arange(n_layers, device=Cn2.device) // slab_size).clamp_max(N_binned - 1).expand_as(Cn2)
-
-    output_shape = (*Cn2.shape[:-1], N_binned)
-
-    def bin_sum(x):
-        return Cn2.new_zeros(output_shape).scatter_add_(-1, groups, x)
-
-    power = 5/3
-    Cn2_binned = bin_sum(Cn2)
-    denominator = Cn2_binned if eps is None else Cn2_binned.clamp_min(eps)
-
-    h_binned = (bin_sum(Cn2 * h.pow(power)) / denominator).pow(1 / power)
-
-    if not has_wind:
-        return Cn2_binned, h_binned
-
-    # Convert meteorological direction/speed to east/north components.
-    theta = torch.deg2rad(direction)
-    wind_x = -speed * torch.sin(theta)
-    wind_y = -speed * torch.cos(theta)
-
-    wind_x = bin_sum(Cn2 * wind_x) / denominator
-    wind_y = bin_sum(Cn2 * wind_y) / denominator
-
-    speed_binned = torch.hypot(wind_x, wind_y)
-    direction_binned = torch.rad2deg(torch.atan2(-wind_x, -wind_y)).remainder(360)
-
-    return Cn2_binned, h_binned, direction_binned, speed_binned

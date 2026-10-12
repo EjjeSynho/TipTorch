@@ -14,6 +14,7 @@ import torch.optim as optim
 
 from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
 from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe, TELEMETRY_CACHE
+from data_processing.telemetry_preprocessor import TelemetryPreprocessor
 from tiptorch.managers.input_manager import InputsTransformer
 from tiptorch.tools.utils import BalancedPSFLoss
 
@@ -31,6 +32,30 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
+def load_telemetry_preprocessor(bundle_state: dict) -> TelemetryPreprocessor:
+    """
+    Telemetry scaler + imputer the calibrator was trained with. Bundles store it since the dataset cache carries it,
+    older bundles fall back to the legacy sklearn pickles in TELEMETRY_CACHE.
+    """
+    if bundle_state.get('telemetry_preprocessor') is not None:
+        preprocessor = TelemetryPreprocessor.from_state_dict(bundle_state['telemetry_preprocessor'])
+    else:
+        logger.warning('Calibrator bundle has no telemetry preprocessor, falling back to the legacy scaler/imputer pickles')
+        
+        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'rb') as handle:
+            imputer = pickle.load(handle)
+        
+        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as handle:
+            scaler = pickle.load(handle)
+            
+        preprocessor = TelemetryPreprocessor.from_sklearn(scaler, imputer)
+
+    if (names := bundle_state.get('input_feature_names')) is not None and list(names) != preprocessor.features:
+        raise ValueError('Telemetry features of the preprocessor do not match the calibrator inputs')
+
+    return preprocessor
+
+
 class NFMDataset(Dataset):
     """
     Dataset of MUSE NFM PSF cubes with paired telemetry and fitted parameter values.
@@ -44,6 +69,7 @@ class NFMDataset(Dataset):
         self.configs     = data['model_configs']
         self.fitted_vals = data['fitted_param_values']
         self.features    = list(data['telemetry'][0].keys())
+        self.telemetry_preprocessor = data.get('telemetry_preprocessor') # TelemetryPreprocessor.state_dict(), absent in older caches
 
         _rename = {p: p + '_ctrl' for p in ['J', 'F', 'bg', 'dx', 'dy']}
         for i in range(len(self.sample_ids)):
@@ -159,14 +185,9 @@ class NFMCalibrator():
         raw = state['outputs_transformer']
         self.outputs_transformer = InputsTransformer.load(data=raw)
         
-        # Inputs transformers
-        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'rb') as handle:
-            self.telemetry_imputer = pickle.load(handle)
-        self.telemetry_imputer.verbose = 0
-
-        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as handle:
-            self.telemetry_scaler = pickle.load(handle)
-            self.features = self.telemetry_scaler.feature_names_in_
+        # Inputs transformer (scaler + imputer)
+        self.telemetry_preprocessor = load_telemetry_preprocessor(state)
+        self.features = self.telemetry_preprocessor.features
 
         # Aux params
         self.LO_modes_max   = state.get('LO_modes_max', None)
@@ -194,6 +215,7 @@ class NFMCalibrator():
         """
         state = deepcopy(self._bundle_state)
         state['net_state_dict'] = self._tree_to_cpu(self.net.state_dict())
+        state['telemetry_preprocessor'] = self.telemetry_preprocessor.state_dict()
         if metadata:
             state['fine_tuning'] = metadata
         path = Path(path)
@@ -205,12 +227,7 @@ class NFMCalibrator():
 
     def prepare_features(self, telemetry_features: pd.DataFrame) -> torch.Tensor:
         """Scale and impute telemetry already reduced to the calibrator features."""
-        # Standardize/normalize features
-        telemetry_ = self.telemetry_scaler.transform(telemetry_features[self.features])
-        # Restore feature names back to avoid warnings
-        telemetry_ = pd.DataFrame(telemetry_, columns=self.features, index=telemetry_features.index)
-        # Impute missing values
-        telemetry_ = self.telemetry_imputer.transform(telemetry_)
+        telemetry_ = self.telemetry_preprocessor.transform(telemetry_features)
         return torch.tensor(telemetry_, dtype=torch.float32, device=self.device)
 
 
@@ -1165,6 +1182,7 @@ class NFMCalibratorTrainer:
             'input_feature_names':  self.dataset.features,
             'output_feature_names': list(self.outputs_transformer.slices.keys()),
             'outputs_transformer':  self.outputs_transformer.save(),
+            'telemetry_preprocessor': getattr(self.dataset, 'telemetry_preprocessor', None),
             'predict_LO_NCPAs':     self.predict_LO_NCPAs,
             'predict_Cn2_profile':  self.predict_Cn2_profile,
             'LO_modes_max':         self.PSF_model.Z_mode_max,
@@ -1295,22 +1313,15 @@ class NFMFactorCalibrator:
         self.LO_coefs_const = torch.tensor(state['LO_coefs_const'], device=device, dtype=torch.float32)
 
         # Telemetry preprocessing (mirrors NFMCalibrator)
-        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_imputer.pickle', 'rb') as f:
-            self.telemetry_imputer = pickle.load(f)
-        self.telemetry_imputer.verbose = 0
-
-        with open(TELEMETRY_CACHE / 'MUSE/muse_telemetry_scaler.pickle', 'rb') as f:
-            self.telemetry_scaler = pickle.load(f)
-        self.features = self.telemetry_scaler.feature_names_in_
+        self.telemetry_preprocessor = load_telemetry_preprocessor(state)
+        self.features = self.telemetry_preprocessor.features
 
         self.LO_modes_max   = state.get('LO_modes_max', None)
         self.N_spline_nodes = state.get('N_spline_nodes', None)
 
     def prepare_telemetry(self, reduced_telemetry: pd.DataFrame) -> torch.Tensor:
         telemetry_pruned = reduce_dataframe(filter_dataframe(reduced_telemetry))
-        telemetry_ = self.telemetry_scaler.transform(telemetry_pruned[self.features])
-        telemetry_ = pd.DataFrame(telemetry_, columns=self.features, index=telemetry_pruned.index)
-        telemetry_ = self.telemetry_imputer.transform(telemetry_)
+        telemetry_ = self.telemetry_preprocessor.transform(telemetry_pruned)
         return torch.tensor(telemetry_, dtype=torch.float32, device=self.device)
 
     def forward(self, reduced_telemetry: pd.DataFrame, base_params: dict) -> dict:
@@ -2085,6 +2096,7 @@ class NFMFactorCalibratorTrainer:
                 'dropout_rate':     self.calibrator.network[3].p,
             },
             'direct_transformer':   self.direct_transformer.save(),
+            'telemetry_preprocessor': getattr(self.dataset, 'telemetry_preprocessor', None),
             'factor_slices':        factor_slices_serial,
             'active_factor_keys':   self.active_factor_keys,
             'F_ctrl_const':         self.F_ctrl_const.detach().cpu().numpy(),
