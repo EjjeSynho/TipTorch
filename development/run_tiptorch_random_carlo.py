@@ -26,12 +26,11 @@ Run from the repository root in the `TipTorch` conda env:
 
     python development/run_tiptorch_random_carlo.py [--batch-size 16] [--seed 0] [--overwrite]
 
-With `--predictor NAME` the ETC calibrator bundle (`machine_learning/train_ETC_calibrator.py`, presets in
-`calibrators.ETC_calibrator.PREDICTOR_PRESETS`: impute, gaussian, donor, donor-profile, donor-params, direct-net, ...) replaces the
-recipe above: the sampled conditions are passed to the predictor (one draw per row for stochastic predictors) and the PSFs are
-rendered by `ETCPSFRenderer`; the default output folder becomes `tiptorch_random_PSFs_<NAME>/`:
+With `--predictor NAME` (donor, donor-nearest or direct-net) the ETC calibrator bundle (`machine_learning/train_ETC_calibrator.py`)
+replaces the recipe above: the sampled conditions are passed to the predictor (one draw per row) and the PSFs are rendered by
+`ETCPSFRenderer`; the default output folder becomes `tiptorch_random_PSFs_<NAME>/`:
 
-    python development/run_tiptorch_random_carlo.py --predictor donor-params [--etc-bundle PATH]
+    python development/run_tiptorch_random_carlo.py --predictor donor [--etc-bundle PATH]
 """
 
 import sys
@@ -53,7 +52,7 @@ from tiptorch._config import DATA_FOLDER, WEIGHTS_FOLDER, default_device, projec
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 from calibrators.NFM_calibrator import NFMCalibrator, release_gpu_memory
-from calibrators.ETC_calibrator import ETCCalibrator, PREDICTOR_PRESETS, etc_table_from_stars
+from calibrators.ETC_calibrator import ETCCalibrator, PREDICTORS, etc_table_from_stars
 
 import tiptop_env  # noqa: F401
 import run_tiptop_random_carlo as rc
@@ -221,9 +220,8 @@ def etc_bundle_path(config_path=ETC_CONFIG):
 def simulate_with_predictor(stars, predictor_name, out_dir, bundle_path=None, batch_size=16, seed=0, overwrite=False):
     """ Monte Carlo PSFs of the observation table with an ETC calibrator predictor (one draw per row), TIPTOP's FITS layout """
     etc_cal = ETCCalibrator(bundle_path or etc_bundle_path(), device=default_device)
-    kind, kw, heights_policy, _ = PREDICTOR_PRESETS[predictor_name]
-    predictor = etc_cal.predictor(kind, **kw)
-    renderer  = etc_cal.renderer(rc.WAVELENGTHS, heights_policy=heights_policy, batch_size=batch_size)
+    predictor = etc_cal.predictor(predictor_name)
+    renderer  = etc_cal.renderer(rc.WAVELENGTHS, batch_size=batch_size)
     etc = etc_table_from_stars(stars)
     names = [rc.sample_name(row, row['index']) for row in stars]
     todo  = [i for i, n in enumerate(names) if overwrite or not all((out_dir / f'{w}nm' / f'{n}.fits').exists() for w in rc.WAVELENGTHS)]
@@ -265,7 +263,7 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=16)
     parser.add_argument('--seed', type=int, default=0, help='Seed for the choice of the template observations')
     parser.add_argument('--overwrite', action='store_true', help='Re-simulate samples whose PSF files already exist')
-    parser.add_argument('--predictor', default=None, choices=list(PREDICTOR_PRESETS), help='ETC calibrator predictor instead of the recipe above')
+    parser.add_argument('--predictor', default=None, choices=PREDICTORS, help='ETC calibrator predictor instead of the recipe above')
     parser.add_argument('--etc-bundle', type=Path, default=None, help='ETC calibrator bundle (default: from ETC_calibrator_config.json metadata)')
     args = parser.parse_args()
 

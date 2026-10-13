@@ -3,7 +3,7 @@ Round-trip test of the NFM calibrator bundle (`NFMCalibratorTrainer.save_calibra
 scaler + imputer stored in the bundle must be the one of the dataset cache, reproduce the training telemetry vectors from the raw
 MUSE telemetry (`muse_df.pickle` -> filter / reduce / scale / impute), and the loaded network must reproduce the checkpoint.
 
-1. The bundle's `telemetry_preprocessor` state equals the dataset cache's one, feature names match the calibrator inputs.
+1. The bundle's `telemetry_preprocessor` state (and Cn2 grid) equals the dataset cache's one, feature names match the calibrator inputs.
 2. `NFMCalibrator.prepare_telemetry(raw telemetry)` reproduces the dataset telemetry vectors of every sample (atol 1e-5).
 3. `NFMCalibrator.forward_prepared` reproduces the best checkpoint's network, with the phase-bump column prepended to LO_coefs.
 4. `NFMCalibrator.save` -> reload gives the same outputs and the same preprocessor; `inverse_transform` inverts the scaling.
@@ -73,6 +73,11 @@ def main():
         results.append(check(same, 'bundle preprocessor state == dataset cache preprocessor state'))
     results.append(check(list(calibrator.features) == list(dataset.features) == list(bundle['input_feature_names']),
                          f'feature names of the preprocessor, the dataset and the bundle match ({len(dataset.features)} features)'))
+    if dataset.Cn2_grid is not None: # caches since 2026-10-13: the Cn2 grid of the features goes into the bundle
+        same_grid = bundle.get('Cn2_grid') is not None and all(np.allclose(np.asarray(dataset.Cn2_grid[k]), np.asarray(bundle['Cn2_grid'][k])) for k in dataset.Cn2_grid)
+        results.append(check(same_grid and calibrator.Cn2_binning == 'grid', f'bundle carries the Cn2 grid of the dataset cache ({calibrator.Cn2_grid})'))
+    else:
+        results.append(check(calibrator.Cn2_binning == 'kmeans', 'old cache without Cn2 grid: the bundle uses the K-means Cn2 features'))
 
     # 2. Raw telemetry -> prepared vectors reproduces the dataset
     rng = np.random.default_rng(0)

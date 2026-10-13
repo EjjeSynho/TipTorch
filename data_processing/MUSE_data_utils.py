@@ -23,6 +23,15 @@ from astropy.io import fits
 from scipy.ndimage import binary_dilation
 from pathlib import Path
 from tiptorch.tools.utils import GetROIaroundMax, GetJmag, check_framework, recompute_Cn2_Kmeans, rad2arc
+from data_processing.Cn2_profile import Cn2Grid, ALT_COLS, FRAC_COLS
+from functools import lru_cache
+
+# Reduction of the AOF Cn2 profile to the PSF-model layers and the calibrator features, used by default by InitNFMConfig (configs) and
+# reduce_dataframe (telemetry features); both must agree with the dataset cache the calibrator was trained on:
+#   'kmeans': weighted K-means into 3 layers with free altitudes (features Cn2_alt/frac_binned_2/3), the mechanism of the current datasets
+#   'grid':   repaired profile on the fixed altitude grid, fixed altitude bins (features Cn2_grid_1..8 + Cn2_layer_alt_2/3), see
+#             data_processing.Cn2_profile and agents/execplans/cn2-profile-input-execplan.md (tested 2026-10-13, no gain for the calibrator)
+CN2_BINNING = 'kmeans'
 from tools.plotting import wavelength_to_RGB
 from tiptorch.managers.config_manager import ConfigManager
 from scipy.ndimage import rotate
@@ -1838,11 +1847,13 @@ def _pad_Cn2_to_n_layers(Cn2_alt, Cn2_frac, n_layers, median_Cn2_alts):
     return Cn2_alt, Cn2_frac
 
 
-def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, convert_config=True, plotting=False):
+def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, convert_config=True, plotting=False, Cn2_binning=None):
     """
     Specialized routine for loading configs for the cached MUSE NFM data samples.
     It largely overloads the standard config creation routine from the ConfigManager class and tailors it to MUSE NFM PSF data format.
+    Cn2_binning: 'kmeans' or 'grid' reduction of the AOF Cn2 profile (CN2_BINNING by default).
     """
+    Cn2_binning = Cn2_binning or CN2_BINNING
     if PSF_data is None:
         PSF_data = sample['images']['cube']
         
@@ -1857,49 +1868,86 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, co
     config_manager = ConfigManager()
     config_dict = config_manager.Load(DATA_FOLDER / 'parameter_files/muse_ltao.ini')
 
-    # >>>>>>> Compute simplified Cn2 profile
-    # Read median Cn2 profile from the json file to serve as a fallback
-    with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'r') as f:
-        profile = json.load(f)
-        median_Cn2_alts, median_Cn2_fracs = np.array(profile['median_Cn2_alts']), np.array(profile['median_Cn2_fracs'])
+    if Cn2_binning == 'grid':
+        # >>>>>>> Cn2 profile: the 8 AOF layers repaired and projected onto the fixed altitude grid, then binned into the model layers
+        # (data_processing.Cn2_profile.Cn2Grid). The same reduction gives the Cn2_grid_* telemetry features of the calibrator, so the
+        # weights it predicts refer to the layers of this config. Samples without a usable profile get the median grid profile.
+        Cn2_grid = load_Cn2_grid()
+        try:
+            if sample.get('Raw Cn2 data') is None:
+                raise ValueError("No raw Cn2 data recorded")
+            Cn2_alt  = np.array([sample['All data'][f'ALT{i}'].item()          for i in range(1, 9)], dtype=float)
+            Cn2_frac = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)], dtype=float)
+        except (KeyError, ValueError, AttributeError) as e:
+            print(f"Warning: Cn2 profile data is missing ({e}). Using the median profile.")
+            Cn2_alt, Cn2_frac = np.full(8, np.nan), np.full(8, np.nan)
 
-    try:
-        # Attempt to extract the profile from the sample data
-        if sample.get('Raw Cn2 data') is None:
-            raise ValueError("No raw Cn2 data recorded")
+        Cn2_alt_rep, Cn2_frac_rep, n_repaired, valid = Cn2_grid.repair(Cn2_alt[None, :], Cn2_frac[None, :])
+        if not valid[0] and np.isfinite(Cn2_frac).any():
+            print("Warning: Cn2 profile data is invalid. Using the median profile.")
+        Cn2_grid_fracs = Cn2_grid.to_grid(Cn2_alt_rep, Cn2_frac_rep)
+        Cn2_frac_binned, Cn2_alt_binned = (x[0] for x in Cn2_grid.to_layers(Cn2_grid_fracs)) # [km]
+
+        if plotting:
+            if valid[0]:
+                plt.plot(Cn2_frac_rep[0], Cn2_alt_rep[0], 'o-', label='AOF Cn2 profile (repaired)')
+                plt.plot(Cn2_grid_fracs[0], Cn2_grid.nodes, 's:', alpha=0.7, label='On the fixed grid')
+            plt.plot(Cn2_grid.median_fracs, Cn2_grid.nodes, '--', alpha=0.5, label='Median grid profile')
+            plt.plot(Cn2_frac_binned, Cn2_alt_binned, 'o--', label='Model layers')
+            for b in Cn2_grid.boundaries:
+                plt.axhline(b, color='gray', alpha=0.3)
+            plt.xlim(-0.01, 1)
+            plt.ylim(0, 30)
+            plt.xlabel('Cn2 Fraction')
+            plt.ylabel('Altitude (km)')
+            plt.title(f'AOF Cn2 profile')
+            plt.legend()
+            plt.show()
+
+    else: # weighted K-means into 3 layers with free altitudes
+        # >>>>>>> Compute simplified Cn2 profile
+        # Read median Cn2 profile from the json file to serve as a fallback
+        with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'r') as f:
+            profile = json.load(f)
+            median_Cn2_alts, median_Cn2_fracs = np.array(profile['median_Cn2_alts']), np.array(profile['median_Cn2_fracs'])
+
+        try:
+            # Attempt to extract the profile from the sample data
+            if sample.get('Raw Cn2 data') is None:
+                raise ValueError("No raw Cn2 data recorded")
         
-        Cn2_alt  = np.array([sample['All data'][f'ALT{i}'].item()          for i in range(1, 9)])
-        Cn2_frac = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
+            Cn2_alt  = np.array([sample['All data'][f'ALT{i}'].item()          for i in range(1, 9)])
+            Cn2_frac = np.array([sample['All data'][f'CN2_FRAC_ALT{i}'].item() for i in range(1, 9)])
 
-        # Check for invalid data (all NaNs)
-        if np.all(np.isnan(Cn2_alt)) or np.all(np.isnan(Cn2_frac)):
-            raise ValueError("Recorded Cn2 data consists of NaNs")
+            # Check for invalid data (all NaNs)
+            if np.all(np.isnan(Cn2_alt)) or np.all(np.isnan(Cn2_frac)):
+                raise ValueError("Recorded Cn2 data consists of NaNs")
 
-        Cn2_alt, Cn2_frac = process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts)
-        # Check if there is a layer with weight close to one (unphysical)
-        if np.isclose(Cn2_frac, 1.0, atol=1e-6).any():
-            raise ValueError("Recorded Cn2 data contains unphysical layer with weight close to one")
+            Cn2_alt, Cn2_frac = process_AOF_Cn2_profile(Cn2_alt, Cn2_frac, median_Cn2_alts)
+            # Check if there is a layer with weight close to one (unphysical)
+            if np.isclose(Cn2_frac, 1.0, atol=1e-6).any():
+                raise ValueError("Recorded Cn2 data contains unphysical layer with weight close to one")
         
-    except (KeyError, ValueError, AttributeError) as e:
-        print(f"Warning: Cn2 profile data is missing or invalid ({e}). Using median profile.")
-        Cn2_alt, Cn2_frac = median_Cn2_alts, median_Cn2_fracs
+        except (KeyError, ValueError, AttributeError) as e:
+            print(f"Warning: Cn2 profile data is missing or invalid ({e}). Using median profile.")
+            Cn2_alt, Cn2_frac = median_Cn2_alts, median_Cn2_fracs
 
-    N_simplified_layers = 3
+        N_simplified_layers = 3
 
-    Cn2_alt, Cn2_frac = _pad_Cn2_to_n_layers(Cn2_alt, Cn2_frac, N_simplified_layers, median_Cn2_alts)
-    Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_Kmeans(Cn2_alt, Cn2_frac, n_layers=N_simplified_layers, enforce_0_GL=True, min_separation=3.0)
+        Cn2_alt, Cn2_frac = _pad_Cn2_to_n_layers(Cn2_alt, Cn2_frac, N_simplified_layers, median_Cn2_alts)
+        Cn2_alt_binned, Cn2_frac_binned = recompute_Cn2_Kmeans(Cn2_alt, Cn2_frac, n_layers=N_simplified_layers, enforce_0_GL=True, min_separation=3.0)
 
-    if plotting:
-        plt.plot(Cn2_frac, Cn2_alt, 'o-')
-        plt.plot(median_Cn2_fracs, median_Cn2_alts, '--', alpha=0.5, label='Median Cn2 profile')
-        plt.plot(Cn2_frac_binned,  Cn2_alt_binned,  'o--', label='Binned Cn2 profile')
-        plt.xlim(-0.01, 1)
-        plt.ylim(0, 30)
-        plt.xlabel('Cn2 Fraction')
-        plt.ylabel('Altitude (km)')
-        plt.title(f'AOF Cn2 profile')
-        plt.legend()
-        plt.show()
+        if plotting:
+            plt.plot(Cn2_frac, Cn2_alt, 'o-')
+            plt.plot(median_Cn2_fracs, median_Cn2_alts, '--', alpha=0.5, label='Median Cn2 profile')
+            plt.plot(Cn2_frac_binned,  Cn2_alt_binned,  'o--', label='Binned Cn2 profile')
+            plt.xlim(-0.01, 1)
+            plt.ylim(0, 30)
+            plt.xlabel('Cn2 Fraction')
+            plt.ylabel('Altitude (km)')
+            plt.title(f'AOF Cn2 profile')
+            plt.legend()
+            plt.show()
 
     # >>>>>>> Modify the rest of the config according to the data for the sample
     # Cn2-related data
@@ -2086,7 +2134,45 @@ def compute_mass_turb_statistics(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def compute_fraction_below_layer(df: pd.DataFrame, h_GL: float = 2000) -> pd.DataFrame:
+@lru_cache(maxsize=1)
+def load_Cn2_grid() -> Cn2Grid:
+    """Fixed Cn2 grid of the MUSE NFM dataset (datasets/MUSE_STD_dataset/STD_dataset_utils.store_Cn2_grid)."""
+    return Cn2Grid.load(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_Cn2_grid.json')
+
+
+def raw_Cn2_profiles(df: pd.DataFrame):
+    """Raw AOF profiles of a telemetry dataframe: altitudes [N, 8] in [km] and fractions [N, 8], NaN where the columns are missing."""
+    alts  = np.column_stack([df[c].to_numpy(float) if c in df else np.full(len(df), np.nan) for c in ALT_COLS])
+    fracs = np.column_stack([df[c].to_numpy(float) if c in df else np.full(len(df), np.nan) for c in FRAC_COLS])
+    return alts, fracs
+
+
+def compute_Cn2_grid_features(df: pd.DataFrame, grid: Cn2Grid | None = None) -> pd.DataFrame:
+    """
+    Cn2 profile features of the calibrator: the repaired profile projected onto the fixed altitude grid (Cn2_grid_1..N, fractions
+    summing to 1) and the effective altitudes of the upper model layers (Cn2_layer_alt_2.., [km]). Missing profiles stay NaN and
+    are imputed with the rest of the telemetry. The grid of the dataset (AOF_Cn2_grid.json) unless given (e.g. the one of a bundle).
+    """
+    grid = grid or load_Cn2_grid()
+    grid_fracs, _, heights, n_repaired, valid = grid.process(*raw_Cn2_profiles(df))
+
+    df = df.copy()
+    for k, name in enumerate(grid.feature_names):
+        df[name] = grid_fracs[:, k]
+    for k in range(1, grid.N_layers):
+        df[f'Cn2_layer_alt_{k+1}'] = np.where(valid, heights[:, k], np.nan)
+    return df
+
+
+def compute_fraction_below_layer(df: pd.DataFrame, h_GL: float = 2000, repaired: bool = False) -> pd.DataFrame:
+    """Fraction of the Cn2 profile below h_GL [m]; from the raw AOF layers (as before 2026-10-13) or from the repaired profile."""
+    if repaired:
+        grid = load_Cn2_grid()
+        alts, fracs, _, _ = grid.repair(*raw_Cn2_profiles(df))
+        df = df.copy()
+        df[f'Cn2 fraction below {h_GL}m'] = grid.fraction_below(alts, fracs, h_GL / 1000.0)
+        return df
+
     GL_fracs = []
 
     for j in range(len(df)):
@@ -2148,12 +2234,16 @@ def recompute_simplified_Cn2(df: pd.DataFrame, n_layers: int) -> pd.DataFrame:
     return df
 
 
-def compute_anisoplanatic_angle(df: pd.DataFrame) -> pd.DataFrame:
+def compute_anisoplanatic_angle(df: pd.DataFrame, repaired: bool = False) -> pd.DataFrame:
     df = df.copy()
 
-    w     = df[[f'CN2_FRAC_ALT{i}' for i in range(1, 9)]].values
-    h_km  = df[[f'ALT{i}' for i in range(1, 9)]].values
-    h_m   = 1000.0 * h_km
+    if repaired: # repaired profile (NaN rows for the samples without one)
+        h_km, w = load_Cn2_grid().repair(*raw_Cn2_profiles(df))[:2]
+        h_m     = 1000.0 * h_km
+    else:
+        w     = df[[f'CN2_FRAC_ALT{i}' for i in range(1, 9)]].values
+        h_km  = df[[f'ALT{i}' for i in range(1, 9)]].values
+        h_m   = 1000.0 * h_km
 
     # Effective height for anisoplanatism (h^(5/3) moment)
     h_eff = (np.nansum(w * (h_m ** (5/3)), axis=1) / np.nansum(w, axis=1)) ** (3/5)
@@ -2175,7 +2265,15 @@ def compute_anisoplanatic_angle(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # Dataset cleaning
-def reduce_dataframe(df):
+def reduce_dataframe(df, Cn2_binning=None, Cn2_grid=None):
+    """
+    Telemetry features of the calibrator from the full MUSE telemetry dataframe. Cn2_binning selects the Cn2 profile features
+    (CN2_BINNING by default): 'kmeans' (3-layer K-means features Cn2_alt/frac_binned_2/3), 'grid' (fractions at the fixed altitude
+    grid + model-layer altitudes, see compute_Cn2_grid_features) or 'both'.
+    """
+    Cn2_binning = Cn2_binning or CN2_BINNING
+    if Cn2_binning not in ('grid', 'kmeans', 'both'):
+        raise ValueError(f"Unknown Cn2_binning '{Cn2_binning}', expected 'grid', 'kmeans' or 'both'")
     df_ = df.copy()
     
     df_['LGS_R0']         = df_[[f'LGS{i}_R0'         for i in range(1,5)]].median(axis=1, skipna=True)
@@ -2201,12 +2299,15 @@ def reduce_dataframe(df):
     
     # Compute turbulence statistics
     df_ = compute_mass_turb_statistics(df_)
-    # Compute Cn² fractions below a specified altitude in [m]
-    df_ = compute_fraction_below_layer(df_, h_GL=2000)
-    # Compute simplified Cn2 profile
-    df_ = recompute_simplified_Cn2(df_, n_layers=3)
+    # Compute Cn² fractions below a specified altitude in [m] (from the repaired profile in grid mode)
+    df_ = compute_fraction_below_layer(df_, h_GL=2000, repaired=(Cn2_binning != 'kmeans'))
+    # Cn2 profile features
+    if Cn2_binning in ('grid', 'both'):
+        df_ = compute_Cn2_grid_features(df_, grid=Cn2_grid)
+    if Cn2_binning in ('kmeans', 'both'):
+        df_ = recompute_simplified_Cn2(df_, n_layers=3)
     # Compute anisoplanatic angle
-    df_ = compute_anisoplanatic_angle(df_)
+    df_ = compute_anisoplanatic_angle(df_, repaired=(Cn2_binning != 'kmeans'))
 
 
     entries_to_drop = [

@@ -84,20 +84,6 @@ Cross-validated R^2 (standardized targets) and PSF-level cost of replacing the g
   yet cost 12.6 % of peak error when fixed to their median: this is the floor of any telemetry-only calibrator, and it is of
   the order of the whole error of the current calibrator (19 %). The remaining lever is a better prediction of r0 / dn / Cn2.
 
-## Same procedures for both calibrator types (2026-10-13)
-
-- `train_NFM_calibrator.py`, `validate_NFM_calibrator.py` (incl. the ETC-regime section) and `run_ablation_NFM_calibrator.py`
-  build the PSF model / network / trainer through `build_NFM_trainer` and work for `cfg["calibrator"]["type"]` direct or
-  factor; the validation plots of the predicted parameters use the normalized parameter space of both
-  (`_params_to_normalized`), the SHAP values are those of the raw outputs (corrections for the factor type).
-- Defaults: `NFM_factor_calibrator_config.json` = `NFM_calibrator_config.json` with `type: factor`, `factor_keys`,
-  `const_keys`, `shrink_weight 0`, `fit_reg_weight 0` (the best settings found); `train_NFM_calibrator.py` documents the
-  factor keys in `DEFAULT_CONFIG`. Usage: `python train_NFM_calibrator.py --config NFM_factor_calibrator_config.json`, then
-  `python validate_NFM_calibrator.py --config NFM_factor_calibrator_config.json` (or run the cells after training in the same
-  IPython session, as for the direct one).
-- Known environment issue: `shap` cannot be imported (numba requires numpy <= 2.4, installed 2.5), so the SHAP cells of the
-  validation stop there for both types; the import now raises a clear message.
-
 ## Follow-up: Cn2 profile input (2026-10-13)
 
 The 8 AOF layers are K-means-clustered into 3 layers with free altitudes (`recompute_simplified_Cn2`), but the PSF-model configs

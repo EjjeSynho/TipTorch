@@ -218,3 +218,21 @@ still scales r0 and the layer heights with the sampled airmass, but the jitter a
 measurement noise floor (Enrico's values vs the dataset cubes) is about half an IQR, comparable to the best scores. (3) Three
 draws per stochastic predictor; the scores of the stochastic predictors fluctuate by a few hundredths between seeds.
 (4) The direct network was trained once (no hyper-parameter search); its validation PSF loss is clearly above the PSF-R one.
+
+## Cleanup (2026-10-13)
+
+- Decision: only the two retained predictors stay in the code: the donor sampler (`donor`, deterministic variant `donor-nearest`;
+  formerly `donor-params`) and the direct network (`direct-net`). The strategy-B variants (imputed / Gaussian / donor-completed
+  telemetry through the PSF-R calibrator) and the `*-mean`, `impute-white` and `donor-profile` presets were removed, together with
+  the ETC bundle's dependence on the PSF-R calibrator: the donor pool now stores only the six ETC inputs, the fitted parameters
+  and the Cn2 heights of the 427 training observations. Their validation tables and figures are kept in
+  `data/Enrico_ETC/ETC_calibrator/archive_v1/` and `data/Enrico_ETC/plots/ETC_calibrator/archive_v1/` (scores in the
+  Outcomes section above); the Monte Carlo folders were renamed `tiptorch_random_PSFs_donor[_onsky]` and the comparison outputs
+  re-tagged `_donor`, `_validation_donor`, `_replay_donor`, `_direct-net`.
+  Rationale: the comparison was decided; a lookup table plus TipTorch is the whole ETC product.
+- The feature analysis (predictability, gradient importance, ablation of the PSF-R calibrator inputs) moved to
+  `machine_learning/ETC_feature_analysis.py`, since it is the only part that needs the PSF-R calibrator.
+- `validate_ETC_calibrator.py` now carries the metrics used by the cell script (`distribution_summary`, `accuracy_metrics`
+  with the paired bootstrap against TIPTOP, `per_sample_metrics`) and writes `comparison_summary.md`, `accuracy.png`,
+  `summary_medians.png` and the per-wavelength histograms; `ETC_validation_cells.py` produces the presentation figures
+  (`ETC_accuracy.png`, `ETC_per_sample.png`, `ETC_distributions_donor_vs_TIPTOP*.png`, `ETC_pooled_FWHM_EE_donor_vs_TIPTOP.png/.pdf`).

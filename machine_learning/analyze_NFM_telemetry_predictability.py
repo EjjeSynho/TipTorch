@@ -28,6 +28,7 @@ from tiptorch._config import *
 from calibrators.NFM_calibrator import NFMDataset, kfold_splits, telemetry_base_params, build_NFM_trainer, release_gpu_memory
 from calibrators.NFM_validation import predict_cubes, core_halo_metrics, metrics_table
 from data_processing.telemetry_preprocessor import TelemetryPreprocessor
+from data_processing.Cn2_profile import Cn2Grid
 
 _parser = argparse.ArgumentParser(description="Telemetry predictability of the fitted NFM PSF parameters")
 _parser.add_argument('--config',   type=str, default=None, help='training config (default: NFM_calibrator_config.json next to this script)')
@@ -94,7 +95,8 @@ table = pd.DataFrame(rows).set_index('target')
 # Factor parameters: how much of the variance the telemetry-derived base value explains by itself (R^2 of using it directly,
 # in log space), and how predictable the remaining log-ratio is. A base that explains most of the variance with an
 # unpredictable residual is best used with a shrinkage prior (factor = 1); a predictable residual is what the factor head learns.
-base = {k: v.numpy().reshape(N, -1) for k, v in telemetry_base_params(X_phys, features, L0_const=np.median(fit['L0'])).items()}
+_Cn2_grid = Cn2Grid.from_state_dict(dataset.Cn2_grid) if getattr(dataset, 'Cn2_grid', None) else None # grid features of the caches since 2026-10-13
+base = {k: v.numpy().reshape(N, -1) for k, v in telemetry_base_params(X_phys, features, L0_const=np.median(fit['L0']), Cn2_grid=_Cn2_grid).items()}
 
 for key in ['r0', 'L0', 'wind_speed_single', 'Cn2_weights']:
     for j in range(base[key].shape[1]):

@@ -32,7 +32,10 @@
   "calibrator": {
     "type": "direct",
     "hidden_dim": 48,
-    "dropout_rate": 0.2
+    "dropout_rate": 0.2,
+    "Cn2_mix": "fixed",
+    "Cn2_targets": "fits",
+    "Cn2_offset": false
   },
   "trainer": {
     "lr": 0.01,

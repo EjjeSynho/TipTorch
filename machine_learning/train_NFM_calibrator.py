@@ -60,7 +60,10 @@ DEFAULT_CONFIG = {
         "hidden_dim":   48,
         "dropout_rate": 0.2,
         "factor_keys":  ["r0", "L0", "wind_speed_single", "Cn2_weights"], # factor type only: parameters predicted as log-factors on telemetry priors
-        "const_keys":   ["F_ctrl", "LO_coefs"]                             # factor type only: dataset-level constants, the rest is predicted directly
+        "const_keys":   ["F_ctrl", "LO_coefs"],                            # factor type only: dataset-level constants, the rest is predicted directly
+        "Cn2_mix":      "fixed",   # factor type only, grid Cn2 features: reduction of the 8-node profile to the model layers, "learned" (soft assignment trained end-to-end) or "fixed" (altitude bins)
+        "Cn2_targets":  "fits",    # factor type only: pretraining target of the Cn2 corrections, "fits" (log-ratio to the fitted profile) or "prior" (zero: the telemetry profile itself)
+        "Cn2_offset":   False      # factor type only: learned dataset-level log-offset of the Cn2 layer weights
     },
     "trainer": {
         "lr":                  0.01,

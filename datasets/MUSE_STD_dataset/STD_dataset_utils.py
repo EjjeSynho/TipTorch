@@ -603,3 +603,135 @@ def AOF_Cn2_profiles_stats(STD_stars_df, store=False):
             json.dump(Cn2_profile_dict, json_file)
 
     return (median_Cn2_alts, median_Cn2_fracs), (p16_Cn2_alts, p84_Cn2_fracs), (p16_Cn2_fracs, p84_Cn2_alts)
+
+
+DEFAULT_CN2_BOUNDARIES_KM = (4.0, 13.0)
+
+def store_Cn2_grid(STD_stars_df, boundaries_km=None, pin_ground_layer=None, store=True, verbose=True):
+    """
+    Fixed Cn2 grid of the dataset (data_processing.Cn2_profile.Cn2Grid): nodes = median AOF layer altitudes, model-layer boundaries
+    in [km], median grid profile. Stored in data/reduced_telemetry/MUSE/AOF_Cn2_grid.json; the dataset cache and the calibrator
+    bundles carry a copy. The boundaries are chosen with machine_learning/analyze_Cn2_binning.py; None keeps the ones of the stored
+    grid (DEFAULT_CN2_BOUNDARIES_KM if there is none yet).
+    """
+    from data_processing.Cn2_profile import Cn2Grid, fit_Cn2_grid, ALT_COLS, FRAC_COLS
+
+    grid_path = DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_Cn2_grid.json'
+    stored = Cn2Grid.load(grid_path) if grid_path.exists() else None
+    if boundaries_km is None:
+        boundaries_km = stored.boundaries if stored is not None else DEFAULT_CN2_BOUNDARIES_KM
+    if pin_ground_layer is None:
+        pin_ground_layer = stored.pin_ground_layer if stored is not None else True
+    grid = fit_Cn2_grid(STD_stars_df[ALT_COLS].to_numpy(float), STD_stars_df[FRAC_COLS].to_numpy(float), boundaries_km, pin_ground_layer=pin_ground_layer)
+    if verbose:
+        w, h = grid.default_layers()
+        print(f'{grid} | median grid profile {np.round(grid.median_fracs, 3).tolist()} | median layers: weights {np.round(w, 3).tolist()}, heights {np.round(h, 2).tolist()} km')
+    if store:
+        grid.save(grid_path)
+    return grid
+
+
+def fit_telemetry_preprocessor(muse_df, Cn2_binning=None, random_state=3, max_iter=200, verbose=False):
+    """
+    Calibrator telemetry features from the full MUSE telemetry dataframe: filter / reduce, standardize (StandardScaler ignores NaNs
+    when fitting and preserves them, so no pre-filling that would shrink the std of the sparse features) and impute (IterativeImputer,
+    imputed values clipped to the observed range of each feature; see benchmark_telemetry_imputation.py for the comparison of methods).
+    Returns the pruned dataframe (physical units, NaNs), its standardized version, the standardized imputed and the imputed (physical
+    units) dataframes, and the TelemetryPreprocessor (scaler + imputer merged) that goes into the dataset cache and the bundles.
+    """
+    from sklearn.experimental import enable_iterative_imputer
+    from sklearn.impute import IterativeImputer
+    from sklearn.preprocessing import StandardScaler
+    from data_processing.telemetry_preprocessor import TelemetryPreprocessor
+    from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe, CN2_BINNING
+
+    Cn2_binning    = Cn2_binning or CN2_BINNING # must match the reduction InitNFMConfig uses for the configs
+    muse_df_pruned = reduce_dataframe(filter_dataframe(muse_df.copy()), Cn2_binning=Cn2_binning)
+    numeric_cols   = muse_df_pruned.select_dtypes(include="number").columns
+
+    telemetry_scaler = StandardScaler().fit(muse_df_pruned[numeric_cols])
+    muse_df_pruned_scaled = muse_df_pruned.copy()
+    muse_df_pruned_scaled[numeric_cols] = telemetry_scaler.transform(muse_df_pruned[numeric_cols])
+
+    iterative_imputer = IterativeImputer(
+        max_iter     = max_iter,
+        min_value    = muse_df_pruned_scaled[numeric_cols].min().values,
+        max_value    = muse_df_pruned_scaled[numeric_cols].max().values,
+        random_state = random_state,
+        verbose      = (2 if verbose else 0)
+    )
+    imputed_data = iterative_imputer.fit_transform(muse_df_pruned_scaled[numeric_cols])
+    muse_df_pruned_scaled_imputed = pd.DataFrame(imputed_data, index=muse_df_pruned_scaled.index, columns=numeric_cols)
+    muse_df_pruned_imputed = pd.DataFrame(
+        telemetry_scaler.inverse_transform(muse_df_pruned_scaled_imputed[numeric_cols]), index=muse_df_pruned.index, columns=numeric_cols
+    )
+
+    telemetry_preprocessor = TelemetryPreprocessor.from_sklearn(telemetry_scaler, iterative_imputer)
+    assert np.allclose(
+        telemetry_preprocessor.transform(muse_df_pruned[numeric_cols]),
+        iterative_imputer.transform(muse_df_pruned_scaled[numeric_cols]), atol=1e-10
+    ), 'TelemetryPreprocessor does not reproduce the sklearn scaler + imputer'
+
+    if verbose:
+        print(f'{len(numeric_cols)} telemetry features, {len(muse_df_pruned)} samples, imputer iterations: {iterative_imputer.n_iter_}')
+
+    return muse_df_pruned, muse_df_pruned_scaled, muse_df_pruned_scaled_imputed, muse_df_pruned_imputed, telemetry_preprocessor
+
+
+def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_preprocessor_state, out_path, Cn2_grid_state=None, verbose=True):
+    """
+    Dataset cache of the NFM calibrator: derotated, normalized, background-subtracted PSF cubes [N, H, W, N_wvl] of the good samples
+    with the standardized imputed telemetry, the per-sample PSF-model configs (InitNFMConfig, incl. the binned Cn2 profile), the fitted
+    parameters, the time-grouped train / val split and the telemetry preprocessor / Cn2 grid states (copied into the calibrator bundles).
+    Returns (good_ids, bad_ids).
+    """
+    muse_df = muse_df[(muse_df['Corrupted'] == False) & (muse_df['Bad quality'] == False)]
+    muse_df = muse_df.loc[muse_fitted_df.index.values] # the same samples in the same order as the fitted parameters
+    good_samples = muse_df.index.values
+
+    PSF_cubes, configs, telemetry_records, fitted_values, good_ids, bad_ids = [], [], [], [], [], []
+    # TODO: consider storing rotated and derotated PSFs
+    for id in tqdm(good_samples, disable=not verbose):
+        try:
+            PSF_data, _, _, model_config = LoadSTDStarCache(
+                ids = id,
+                derotate_PSF = True,
+                normalize = True,
+                subtract_background = True,
+                ensure_odd_pixels = True,
+                device = torch.device('cpu')
+            )
+            telemetry_records.append(reduced_telemetry.loc[id].to_dict())
+            fitted_values.append(muse_fitted_df.loc[id].to_dict())
+            good_ids.append(id)
+            PSF_cubes.append(np.moveaxis(PSF_data.squeeze(0).numpy(), 0, -1)) # [1 x N_wvl x H x W]  -->  [H x W x N_wvl]
+            configs.append(model_config)
+        except Exception as e:
+            print(f'Error with id {id}: {e}')
+            bad_ids.append(id)
+
+    good_ids  = np.array(good_ids)
+    PSF_cubes = np.stack(PSF_cubes, axis=0) # [N_samples x H x W x N_wvl]
+    telemetry_records = np.stack(telemetry_records, axis=0)
+
+    # Training/validation split: samples acquired close in time must not be shared between the subsets.
+    # The real acquisition time is DATE-OBS from the cube header (muse_df['time']), the timestamp in the file name is not it
+    acq_times = muse_df.loc[good_ids, 'time']
+    train_idx, val_idx, time_groups = SplitByAcquisitionTime(acq_times, val_fraction=0.2, max_gap_hours=1.0, seed=42, verbose=verbose)
+
+    torch.save({
+        'PSF_cubes':           PSF_cubes,
+        'telemetry':           telemetry_records,
+        'sample_ids':          good_ids,
+        'model_configs':       configs,
+        'fitted_param_values': fitted_values,
+        'acquisition_times':   acq_times.astype(str).values, # [N_samples], UTC
+        'train_idx':           train_idx, # positions into sample_ids
+        'val_idx':             val_idx,
+        'time_groups':         time_groups, # [N_samples], samples with the same label are close in acquisition time
+        'telemetry_preprocessor': telemetry_preprocessor_state, # TelemetryPreprocessor.state_dict(), copied into calibrator bundles
+        'Cn2_grid':            Cn2_grid_state, # Cn2Grid.state_dict() of the Cn2 features / configs, copied into calibrator bundles
+    }, out_path)
+    if verbose:
+        print(f'Dataset cache saved -> {out_path} ({len(good_ids)} samples, {len(bad_ids)} failed)')
+    return good_ids, bad_ids

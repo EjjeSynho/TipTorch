@@ -42,7 +42,10 @@
     "const_keys": [
       "F_ctrl",
       "LO_coefs"
-    ]
+    ],
+    "Cn2_mix": "fixed",
+    "Cn2_targets": "fits",
+    "Cn2_offset": false
   },
   "trainer": {
     "lr": 0.01,

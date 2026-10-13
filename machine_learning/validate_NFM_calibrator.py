@@ -22,8 +22,11 @@ from calibrators.NFM_calibrator import (
     build_NFM_trainer,
     load_NFM_calibrator,
     load_telemetry_preprocessor,
-    release_gpu_memory
+    release_gpu_memory,
+    telemetry_base_params,
+    Cn2_grid_features_from_GLF
 )
+from data_processing.Cn2_profile import Cn2Grid
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
 from data_processing.telemetry_preprocessor import TelemetryPreprocessor # after calibrators (adds the repo root to sys.path)
 
@@ -185,14 +188,18 @@ with open(STD_FOLDER / 'muse_df.pickle', 'rb') as fh:
 
 x_vec = telemetry_preprocessor.inverse_transform(telemetry_vecs.cpu().numpy())
 
+# Telemetry-derived Cn2 profile (the base of the factor calibrator: AOF profile on the fixed grid binned into the model layers,
+# or the K-means fractions of the older datasets)
+_Cn2_base = telemetry_base_params(x_vec, input_features, Cn2_grid=getattr(trainer, 'Cn2_grid', None) or
+                                  (Cn2Grid.from_state_dict(dataset.Cn2_grid) if getattr(dataset, 'Cn2_grid', None) else None))['Cn2_weights'].numpy()
 X = {
     'r0': r0(muse_df['Seeing (header)'].loc[validation_ids].to_numpy(), 500e-9),
     'L0': muse_df['L0Tot'].loc[validation_ids].to_numpy(),
     'wind_speed_single': muse_df['Wind speed (header)'].loc[validation_ids].to_numpy(),
-    'Cn2_weights_2': x_vec[:, input_features.index('Cn2_frac_binned_2')], # feature columns, not sample rows
-    'Cn2_weights_3': x_vec[:, input_features.index('Cn2_frac_binned_3')]
+    'Cn2_weights_1': _Cn2_base[:, 0],
+    'Cn2_weights_2': _Cn2_base[:, 1],
+    'Cn2_weights_3': _Cn2_base[:, 2],
 }
-X['Cn2_weights_1'] = 1.0 - X['Cn2_weights_2'] - X['Cn2_weights_3']
 
 features_of_interest = list(X.keys()) + ['Cn2_weights']
 
@@ -722,7 +729,9 @@ def build_ETC_telemetry(telemetry_vectors, TCs, calibrator):
         'Cn2_alt_binned_3':              np.full_like(seeing, 20.0),
         'Cn2_frac_binned_3':             np.zeros_like(seeing),
     }
-    
+    if getattr(calibrator, 'Cn2_grid', None) is not None: # grid profile features: GLF on the ground node, the median profile above
+        replacements.update(Cn2_grid_features_from_GLF(calibrator.Cn2_grid, GLF))
+
     for feature, values in replacements.items():
         if feature in telemetry_physical:
             telemetry_physical[feature] = values

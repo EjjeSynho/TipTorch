@@ -247,29 +247,23 @@ else:
 
 
 _ = AOF_Cn2_profiles_stats(muse_df, store=True) # Update median AOF Cn2 profile
+# Fixed Cn2 grid (nodes = median AOF layer altitudes, model-layer boundaries chosen with machine_learning/analyze_Cn2_binning.py)
+Cn2_grid = store_Cn2_grid(muse_df, boundaries_km=None) # None: keep the boundaries of the stored grid
 
 #%% ================================= MUSE NFM STD stars dataset cleaning, imputation and scaling ==================================
-from sklearn.experimental import enable_iterative_imputer
-from sklearn.impute import SimpleImputer, IterativeImputer
-from sklearn.preprocessing import StandardScaler
 from data_processing.data_analysis_utils import *
-from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe
+from data_processing.MUSE_data_utils import CN2_BINNING
 
 verbose = True
 
-# Filter and reduce the telemetry dataframe
-muse_df_pruned = reduce_dataframe(filter_dataframe(muse_df.copy()))
+# Filter and reduce the telemetry dataframe, fit the scaler and the iterative imputer (see fit_telemetry_preprocessor). The scaler and
+# the imputer are merged into a single lightweight TelemetryPreprocessor to process new (e.g. science) telemetry the same way;
+# it goes into the dataset cache and from there into every trained calibrator bundle
+muse_df_pruned, muse_df_pruned_scaled, muse_df_pruned_scaled_imputed, muse_df_pruned_imputed, telemetry_preprocessor = \
+    fit_telemetry_preprocessor(muse_df, Cn2_binning=CN2_BINNING, verbose=verbose) # same reduction as the configs (MUSE_data_utils.CN2_BINNING)
 
 numeric_cols = muse_df_pruned.select_dtypes(include="number").columns
 nan_mask     = muse_df_pruned[numeric_cols].isna().values  # (N_samples, N_numeric_cols)
-
-# StandardScaler ignores NaNs when fitting and preserves them when transforming, so no pre-filling is needed.
-# Pre-filling NaNs with medians would shrink the std of the features with many missing values
-telemetry_scaler = StandardScaler()
-telemetry_scaler.fit(muse_df_pruned[numeric_cols])
-
-muse_df_pruned_scaled = muse_df_pruned.copy()
-muse_df_pruned_scaled[numeric_cols] = telemetry_scaler.transform(muse_df_pruned[numeric_cols])
 
 #%%
 if verbose:
@@ -286,41 +280,11 @@ if verbose:
     #     plt.show()
 
 #%%
-# from sklearn.ensemble import RandomForestRegressor, ExtraTreesRegressor
-
-# Impute missing values. Imputed values are clipped to the observed range of each feature, so the imputer can't
-# extrapolate, neither here nor at inference time. See benchmark_telemetry_imputation.py for the comparison of methods
-iterative_imputer = IterativeImputer(
-    max_iter = 200,
-    min_value = muse_df_pruned_scaled[numeric_cols].min().values,
-    max_value = muse_df_pruned_scaled[numeric_cols].max().values,
-    random_state = 3,
-    verbose = (2 if verbose else 0)
-)
-# 
-# iterative_imputer = IterativeImputer(
-#     estimator = ExtraTreesRegressor(n_estimators=100, random_state=42, n_jobs=16),
-#     random_state = 42,
-#     max_iter = 30,
-#     verbose = (2 if verbose else 0))
-
-imputed_data = iterative_imputer.fit_transform(muse_df_pruned_scaled[numeric_cols])
-muse_df_pruned_scaled_imputed = pd.DataFrame(imputed_data, index=muse_df_pruned_scaled.index, columns=numeric_cols)
-
-#%%
 # Imputed values beyond ±3 std are NOT replaced with medians anymore: the benchmark shows that they are mostly
 # correct and the replacement increases the imputation error. Besides, it can't be reproduced at inference time
 if verbose:
     _ = analyze_outliers(muse_df_pruned_scaled_imputed, outlier_threshold=3, nan_mask=nan_mask, verbose=verbose)
 
-# Unscaling back to physical values ranges
-muse_df_pruned_imputed = pd.DataFrame(
-    telemetry_scaler.inverse_transform(muse_df_pruned_scaled_imputed[numeric_cols]),
-    index=muse_df_pruned.index,
-    columns=numeric_cols
-)
-
-if verbose:
     muse_df_pruned_scaled_imputed.plot.hist(bins=100, alpha=0.5, figsize=(20, 15))
     plt.legend(ncol=4, fontsize=8, loc='upper right')
     plt.title('Distribution of normalized features per feature')
@@ -337,22 +301,12 @@ if verbose:
     
 
 #%%
-from data_processing.telemetry_preprocessor import TelemetryPreprocessor
-
-# Merge the scaler and the imputer into a single lightweight object to process new (e.g. science) telemetry the same way.
-# It goes into the dataset cache and from there into every trained calibrator bundle
-telemetry_preprocessor = TelemetryPreprocessor.from_sklearn(telemetry_scaler, iterative_imputer)
-
-assert np.allclose(
-    telemetry_preprocessor.transform(muse_df_pruned[numeric_cols]),
-    iterative_imputer.transform(muse_df_pruned_scaled[numeric_cols]), atol=1e-10
-), 'TelemetryPreprocessor does not reproduce the sklearn scaler + imputer'
-
 # Pack all data into a single dictionary and store it (for debugging, the training uses the dataset cache below)
 reduced_telemetry = {
     'telemetry normalized imputed df': muse_df_pruned_scaled_imputed,
     'telemetry imputed df': muse_df_pruned_imputed,
     'telemetry preprocessor': telemetry_preprocessor.state_dict(),
+    'Cn2 grid': Cn2_grid.state_dict() if CN2_BINNING == 'grid' else None, # the grid is stored only when the features use it
 }
 
 with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'wb') as handle:
@@ -373,79 +327,27 @@ with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
     _telemetry_data = pickle.load(handle)
     reduced_telemetry = _telemetry_data['telemetry normalized imputed df']
     telemetry_preprocessor_state = _telemetry_data['telemetry preprocessor'] # scaler + imputer to process new telemetry
+    Cn2_grid_state = _telemetry_data.get('Cn2 grid') # the Cn2 grid of the telemetry features (and of the configs, via InitNFMConfig)
 
 with open(STD_FOLDER / 'muse_fitted_df.pickle', 'rb') as handle:
     muse_fitted_df = pickle.load(handle)['fitted_values']
 
 DATASET_CACHE = STD_FOLDER / 'dataset_cache'
-PSF_cubes, configs, telemetry_records, fitted_values, good_ids, bad_ids = [], [], [], [], [], []
-
-muse_df = muse_df[muse_df['Corrupted']   == False]
-muse_df = muse_df[muse_df['Bad quality'] == False]
-
-# Make sure that muse_df and muse_fitted_df contain the same samples in the same order
-muse_df = muse_df.loc[muse_fitted_df.index.values]
-good_samples = muse_df.index.values
 
 #%%
-# Pack all data into the coherent dataset, where reduced telemetry is associated with spectral cubes and fitted PSF model parameters for each sample
-# TODO: consider storing rotated and derotated PSFs
-for id in tqdm(good_samples):
-    try:
-        PSF_data, _, _, model_config = LoadSTDStarCache(
-            ids = id,
-            derotate_PSF = True,
-            normalize = True,
-            subtract_background = True,
-            ensure_odd_pixels = True,
-            device = torch.device('cpu')
-        )
-        telemetry_records.append(reduced_telemetry.loc[id].to_dict())
-        fitted_values.append(muse_fitted_df.loc[id].to_dict())
-        good_ids.append(id)
-        PSF_cubes.append(np.moveaxis(PSF_data.squeeze(0).numpy(), 0, -1)) # [1 x N_wvl x H x W]  -->  [H x W x N_wvl]
-        configs.append(model_config)
+# Pack all data into the coherent dataset, where reduced telemetry is associated with spectral cubes and fitted PSF model parameters
+# for each sample (see build_dataset_cache: good samples only, derotated normalized PSFs, time-grouped train / val split)
+good_ids, bad_ids = build_dataset_cache(
+    muse_df, reduced_telemetry, muse_fitted_df, telemetry_preprocessor_state,
+    out_path       = DATASET_CACHE / 'muse_STD_stars_dataset.pt',
+    Cn2_grid_state = Cn2_grid_state,
+    verbose        = True
+)
 
-    except Exception as e:
-        print(f'Error with id {id}: {e}')
-        bad_ids.append(id)
-        continue
-
-#%%
 if len(bad_ids) > 0:
     print('Bad ids:')
     for bad_id in bad_ids:
         print(bad_id)
-
-good_ids = np.array(good_ids) # [N_samples]
-PSF_cubes = np.stack(PSF_cubes, axis=0) # [N_samples x H x W x N_wvl]
-telemetry_records = np.stack(telemetry_records, axis=0) # [N_samples x N_features]
-
-# Training/validation split: samples acquired close in time must not be shared between the subsets.
-# The real acquisition time is DATE-OBS from the cube header (muse_df['time']), the timestamp in the file name is not it
-acq_times = muse_df.loc[good_ids, 'time'] # [N_samples]
-train_idx, val_idx, time_groups = SplitByAcquisitionTime(acq_times, val_fraction=0.2, max_gap_hours=1.0, seed=42)
-
-#%%
-try:
-    # Store dataset caches
-    torch.save({
-        'PSF_cubes': PSF_cubes,
-        'telemetry': telemetry_records,
-        'sample_ids': good_ids,
-        'model_configs': configs,
-        'fitted_param_values': fitted_values,
-        'acquisition_times': acq_times.astype(str).values, # [N_samples], UTC
-        'train_idx': train_idx, # positions into sample_ids
-        'val_idx': val_idx,
-        'time_groups': time_groups, # [N_samples], samples with the same label are close in acquisition time
-        'telemetry_preprocessor': telemetry_preprocessor_state, # TelemetryPreprocessor.state_dict(), copied into calibrator bundles
-    }, DATASET_CACHE / 'muse_STD_stars_dataset.pt')
-    
-    print('Dataset cache saved successfully.')
-    
-except Exception as e:
-    print(f'Error saving dataset cache: {e}')
 
 
 #%%
