@@ -611,7 +611,7 @@ def store_Cn2_grid(STD_stars_df, boundaries_km=None, pin_ground_layer=None, stor
     """
     Fixed Cn2 grid of the dataset (data_processing.Cn2_profile.Cn2Grid): nodes = median AOF layer altitudes, model-layer boundaries
     in [km], median grid profile. Stored in data/reduced_telemetry/MUSE/AOF_Cn2_grid.json; the dataset cache and the calibrator
-    bundles carry a copy. The boundaries are chosen with machine_learning/analyze_Cn2_binning.py; None keeps the ones of the stored
+    bundles carry a copy. The boundaries are chosen with machine_learning/analysis/analyze_Cn2_binning.py; None keeps the ones of the stored
     grid (DEFAULT_CN2_BOUNDARIES_KM if there is none yet).
     """
     from data_processing.Cn2_profile import Cn2Grid, fit_Cn2_grid, ALT_COLS, FRAC_COLS

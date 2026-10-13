@@ -24,14 +24,17 @@ from sklearn.linear_model import Ridge
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.model_selection import cross_val_predict
 
+# machine_learning/ on sys.path (the `calibrators` package), from a script or from IPython cells
+_here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
+sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
-from calibrators.NFM_calibrator import NFMDataset, kfold_splits, telemetry_base_params, build_NFM_trainer, release_gpu_memory
-from calibrators.NFM_validation import predict_cubes, core_halo_metrics, metrics_table
+from calibrators.NFM_calibrator import NFMDataset, kfold_splits, telemetry_base_params, build_NFM_trainer, release_gpu_memory, CONFIGS_FOLDER
+from calibrators.NFM_validation_utils import predict_cubes, core_halo_metrics, metrics_table
 from data_processing.telemetry_preprocessor import TelemetryPreprocessor
 from data_processing.Cn2_profile import Cn2Grid
 
 _parser = argparse.ArgumentParser(description="Telemetry predictability of the fitted NFM PSF parameters")
-_parser.add_argument('--config',   type=str, default=None, help='training config (default: NFM_calibrator_config.json next to this script)')
+_parser.add_argument('--config',   type=str, default=None, help='training config (default: calibrators/configs/NFM_calibrator_config.json)')
 _parser.add_argument('--device',   type=str, default=None)
 _parser.add_argument('--skip-psf', action='store_true', help='skip the PSF-level cost of the median replacement (no GPU needed)')
 try:
@@ -39,8 +42,7 @@ try:
 except SystemExit:
     _args = _parser.parse_args([])
 
-_script_dir = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd()
-with open(_args.config or _script_dir / 'NFM_calibrator_config.json') as f:
+with open(_args.config or CONFIGS_FOLDER / 'NFM_calibrator_config.json') as f:
     cfg = json.load(f)
 
 device     = torch.device(_args.device) if _args.device else default_device
@@ -75,18 +77,24 @@ print(f'{N} samples, {len(features)} features, {len(targets)} targets, {len(fold
 #%%
 # Cross-validated R^2 of a linear and of a non-linear regressor per target. Targets are standardized, so R^2 compares across
 # parameters; the random forest is the upper bound of what the small calibrator network could extract.
-def cv_r2(model, X, y):
+def CV_R2(model, X, y):
     y_pred = cross_val_predict(model, X, y, cv=folds)
     return 1.0 - np.mean((y - y_pred)**2) / np.var(y)
 
-ridge = lambda: Ridge(alpha=10.0)
+ridge  = lambda: Ridge(alpha=10.0)
 forest = lambda: RandomForestRegressor(n_estimators=300, min_samples_leaf=3, random_state=0, n_jobs=-1)
 
 rows = []
 for name, y in targets.items():
     y_std = (y - y.mean()) / y.std()
-    rows.append({'target': name, 'R2_ridge': cv_r2(ridge(), X_tel, y_std), 'R2_forest': cv_r2(forest(), X_tel, y_std),
-                 'median': np.median(y), 'std': y.std()})
+    rows.append(
+    {
+        'target': name,
+        'R2_ridge': CV_R2(ridge(), X_tel, y_std),
+        'R2_forest': CV_R2(forest(), X_tel, y_std),
+        'median': np.median(y), 'std': y.std()
+    })
+    
     print(f"{name:20s} R2 ridge {rows[-1]['R2_ridge']:+.3f}  forest {rows[-1]['R2_forest']:+.3f}", flush=True)
 
 table = pd.DataFrame(rows).set_index('target')
@@ -107,7 +115,7 @@ for key in ['r0', 'L0', 'wind_speed_single', 'Cn2_weights']:
         table.loc[name, 'corr_base']      = np.corrcoef(y, b)[0, 1]
         table.loc[name, 'R2_base_direct'] = 1.0 - np.var(ratio) / np.var(y)         # fitted ~ base, no learning at all
         table.loc[name, 'std_log_ratio']  = ratio.std()                              # width of the shrinkage prior
-        table.loc[name, 'R2_ratio_forest'] = cv_r2(forest(), X_tel, (ratio - ratio.mean()) / ratio.std())
+        table.loc[name, 'R2_ratio_forest'] = CV_R2(forest(), X_tel, (ratio - ratio.mean()) / ratio.std())
         print(f"{name:20s} corr(fit, base) {table.loc[name, 'corr_base']:+.3f}  R2 base alone {table.loc[name, 'R2_base_direct']:+.3f}  "
               f"log-ratio std {ratio.std():.3f}  R2 of the ratio (forest) {table.loc[name, 'R2_ratio_forest']:+.3f}", flush=True)
 
@@ -162,12 +170,15 @@ fig, ax = plt.subplots(figsize=(14, 4.5))
 x = np.arange(len(table))
 ax.bar(x - 0.2, table['R2_ridge'],  width=0.4, label='ridge (linear)')
 ax.bar(x + 0.2, table['R2_forest'], width=0.4, label='random forest')
+
 if 'R2_base_direct' in table:
     ax.scatter(x, table['R2_base_direct'], color='k', marker='_', s=300, label='telemetry base value alone', zorder=3)
+    
 ax.axhline(0, color='k', lw=0.5)
 ax.set_xticks(x); ax.set_xticklabels(table.index, rotation=60, ha='right', fontsize=8)
 ax.set_ylabel('cross-validated $R^2$'); ax.set_ylim(-0.3, 1); ax.grid(alpha=0.3, axis='y'); ax.legend()
 ax.set_title('Predictability of the fitted PSF parameters from the telemetry (5 time-grouped folds)')
 plt.tight_layout()
 plt.savefig(OUT_FOLDER / 'telemetry_predictability.png', dpi=150)
+
 print(f'Saved -> {OUT_FOLDER}')

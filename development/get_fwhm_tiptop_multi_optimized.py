@@ -1,5 +1,5 @@
 # Original code developed by Enrico Congiu (ESO). Adapted for the TipTorch repository: comments translated from Italian, paths
-# made repository-relative, the PSF measurements moved to `ETC_psf_metrics.py` / `ETC_compute_PSF_params.py` so that the TIPTOP
+# made repository-relative, the PSF measurements moved to `tools/ETC_tools.py` / `ETC_compute_PSF_params.py` so that the TIPTOP
 # and TipTorch PSFs are measured by the same code.
 """
 PSF parameters of the TIPTOP Monte Carlo PSFs (FWHM, Strehl, encircled energy) and Enrico's comparison plots against the on-sky

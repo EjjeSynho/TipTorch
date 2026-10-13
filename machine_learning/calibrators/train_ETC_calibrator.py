@@ -9,7 +9,7 @@ Build the ETC calibrator bundle for MUSE NFM (`calibrators/ETC_calibrator.py`, E
 Requirements: the dataset cache (with its telemetry preprocessor and stored split) and a CUDA device (~20 s per epoch).
 Run from the repository root in the `TipTorch` conda env:
 
-    python machine_learning/train_ETC_calibrator.py [--config machine_learning/ETC_calibrator_config.json] [--skip-direct-net]
+    python machine_learning/calibrators/train_ETC_calibrator.py [--config machine_learning/calibrators/configs/ETC_calibrator_config.json] [--skip-direct-net]
 """
 
 import sys
@@ -23,7 +23,7 @@ from datetime import datetime
 import numpy as np
 import torch
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / 'machine_learning'))
 
 from tiptorch._config import WEIGHTS_FOLDER, default_device, project_settings
@@ -32,7 +32,8 @@ from calibrators.NFM_calibrator import NFMDataset, NFMCalibratorTrainer, SmallCa
 from calibrators.ETC_calibrator import ETCDataset, ETC_INPUTS
 
 DATASET_CACHE  = Path(project_settings['MUSE_STD_data_folder']) / 'dataset_cache' / 'muse_STD_stars_dataset.pt'
-DEFAULT_CONFIG = REPO_ROOT / 'machine_learning' / 'ETC_calibrator_config.json'
+# The ETC calibrator config lives with the other calibrator configs in machine_learning/calibrators/configs/
+DEFAULT_CONFIG = REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'ETC_calibrator_config.json'
 FITTED_KEYS    = ['F', 'J', 'r0', 'L0', 'dn', 'wind_speed_single', 'Cn2_weights', 'LO_coefs']
 
 logger = logging.getLogger('train_ETC_calibrator')

@@ -1,5 +1,5 @@
 """
-Validation helpers shared by the NFM calibrator scripts: PSF cubes of a parameter predictor on a data loader and the core / halo
+Validation helpers shared by the NFM calibrator scripts (calibrators/validate_NFM_calibrator.py, analysis/*): PSF cubes of a parameter predictor on a data loader and the core / halo
 metrics used to compare predictors (the loss value alone does not tell where the error is).
 """
 import numpy as np
@@ -55,10 +55,12 @@ def core_halo_metrics(PSF_data, PSF_pred, trainer, wavelengths_nm, wvl_select=No
     lam_nm     = np.asarray(wavelengths_nm).round().astype(int)
     device     = trainer.device
 
-    losses = {'balanced': [], 'legacy': []}
+    losses = { 'balanced': [], 'legacy': [] }
+    
     for i in range(0, N, chunk):
         d, p = PSF_data[i:i+chunk].to(device), PSF_pred[i:i+chunk].to(device)
         losses['legacy'].append(trainer._legacy_PSF_loss(d, p).cpu())
+        
         if trainer.balanced_loss is not None:
             losses['balanced'].append(trainer.balanced_loss(d, p).cpu())
 
@@ -111,14 +113,19 @@ def metrics_table(results: dict) -> str:
     for key in ('balanced_loss_mean', 'legacy_loss_mean'):
         if key in first:
             add(key, lambda r: f"{r[key]:.4f}")
+            
     add('|peak err| % median', lambda r: f"{r['peak_err_pct_median']:.1f}")
     add('peak ratio p16-p84',  lambda r: f"{r['peak_ratio_p16_p84'][0]:.2f}-{r['peak_ratio_p16_p84'][1]:.2f}")
+   
     for l in first['peak_ratio_median']:
         add(f'peak ratio median @{l} nm', lambda r, l=l: f"{r['peak_ratio_median'][l]:.3f}")
+        
     for rr in (2, 8):
         add(f'EE{rr} ratio / |err| %', lambda r, rr=rr: f"{r[f'EE{rr}_ratio_median']:.3f} / {r[f'EE{rr}_err_pct_median']:.1f}")
+        
     for l in first['profile_max_err_pct']:
         add(f'profile max err % @{l} nm', lambda r, l=l: f"{r['profile_max_err_pct'][l]:.2f}")
+        
     for b in first['radial_rel_bias']:
         add(f'rel. bias {b} px (med / |med|)', lambda r, b=b: f"{r['radial_rel_bias'][b][0]:+.3f} / {r['radial_rel_bias'][b][1]:.3f}")
 

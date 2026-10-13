@@ -21,7 +21,7 @@ Artefacts saved under WEIGHTS_FOLDER / <ablation.output_subdir>:
         ablation_summary.json    ← list of completed runs + best_val_loss table
 
 Usage:
-    python run_ablation_NFM_calibrator.py --config NFM_calibrator_config.json
+    python machine_learning/analysis/run_ablation_NFM_calibrator.py --config <training config>
 """
 
 #%%
@@ -44,8 +44,11 @@ from copy import deepcopy
 from pathlib import Path
 from datetime import datetime
 
+# machine_learning/ on sys.path (the `calibrators` package), from a script or from IPython cells
+_here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
+sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
-from calibrators.NFM_calibrator import NFMDataset, default_split, build_NFM_trainer, release_gpu_memory
+from calibrators.NFM_calibrator import NFMDataset, default_split, build_NFM_trainer, release_gpu_memory, CONFIGS_FOLDER
 
 # ── Base training config (mirrors DEFAULT_CONFIG in train_NFM_calibrator.py) ──
 _BASE_DEFAULT = {
@@ -135,10 +138,9 @@ else:
     if _cfg_path:
         print(f"Warning: config not found at {_cfg_path}. Using defaults.")
 
-# Fall back to default config JSON next to this script when running interactively
+# Fall back to the direct calibrator's config in calibrators/configs/ when running interactively
 if 'cfg' not in dir():
-    _script_dir = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd()
-    _default_cfg_path = _script_dir / 'NFM_calibrator_config.json'
+    _default_cfg_path = CONFIGS_FOLDER / 'NFM_calibrator_config.json'
     if _default_cfg_path.exists():
         with open(_default_cfg_path) as _f:
             _loaded = json.load(_f)
@@ -157,7 +159,7 @@ DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 ABLATION_DIR  = WEIGHTS_FOLDER / abl["output_subdir"]
 ABLATION_DIR.mkdir(parents=True, exist_ok=True)
 
-log_dir = Path('../data/logs')
+log_dir = DATA_FOLDER / 'logs' # the data folder of project_config.json, independent of the working directory
 log_dir.mkdir(parents=True, exist_ok=True)
 log_filename = log_dir / f'ablation_NFM_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 logging.basicConfig(

@@ -3,7 +3,7 @@ Monte Carlo generation of MUSE NFM PSFs with the calibrated TipTorch model (`PSF
 `run_tiptop_random_carlo.py` for the ETC comparison.
 
 The same random observation table (`data/Enrico_ETC/generated_random_PSFs/stars.fits`: seeing, tau0, NGS J magnitude, airmass,
-TC) is replayed through the calibrated model, following the ETC recipe of `machine_learning/validate_NFM_calibrator.py`:
+TC) is replayed through the calibrated model, following the ETC recipe of `machine_learning/calibrators/validate_NFM_calibrator.py`:
 
 - every sample borrows the config and telemetry of a random real observation of the calibrator dataset (template) for the
   quantities the ETC does not provide (pointing, exposure time, temperature, ...);
@@ -16,7 +16,7 @@ TC) is replayed through the calibrated model, following the ETC recipe of `machi
 
 PSFs are cropped to TIPTOP's 100 x 100 px field (25 mas/px, peak at pixel 50) and stored one file per sample and wavelength in
 `data/Enrico_ETC/tiptorch_random_PSFs/{wave}nm/<name>.fits` in TIPTOP's FITS layout, with TIPTOP's header metrics (SR, FWHM, EE50)
-computed by `ETC_psf_metrics.tiptop_metrics`. The predicted model parameters go to `tiptorch_random_PSFs/predicted_params.fits`
+computed by `tools.ETC_tools.tiptop_metrics`. The predicted model parameters go to `tiptorch_random_PSFs/predicted_params.fits`
 and the telemetry to `tiptorch_random_PSFs/telemetry.csv`.
 
 Requirements: the trained calibrator bundle referenced by `machine_learning/NFM_calibrator_config.json` (`*_meta.json` in
@@ -26,7 +26,7 @@ Run from the repository root in the `TipTorch` conda env:
 
     python development/run_tiptorch_random_carlo.py [--batch-size 16] [--seed 0] [--overwrite]
 
-With `--predictor NAME` (donor, donor-nearest or direct-net) the ETC calibrator bundle (`machine_learning/train_ETC_calibrator.py`)
+With `--predictor NAME` (donor, donor-nearest or direct-net) the ETC calibrator bundle (`machine_learning/calibrators/train_ETC_calibrator.py`)
 replaces the recipe above: the sampled conditions are passed to the predictor (one draw per row) and the PSFs are rendered by
 `ETCPSFRenderer`; the default output folder becomes `tiptorch_random_PSFs_<NAME>/`:
 
@@ -54,15 +54,15 @@ from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservati
 from calibrators.NFM_calibrator import NFMCalibrator, release_gpu_memory
 from calibrators.ETC_calibrator import ETCCalibrator, PREDICTORS, etc_table_from_stars
 
-import tiptop_env  # noqa: F401
+from tools import tiptop_env  # noqa: F401
 import run_tiptop_random_carlo as rc
-from ETC_psf_metrics import load_pupil, tiptop_metrics, write_psf_file, crop_center, normalize_psf, PIXEL_SCALE_MAS, PSF_SIZE
+from tools.ETC_tools import load_pupil, tiptop_metrics, write_psf_file, crop_center, normalize_psf, PIXEL_SCALE_MAS, PSF_SIZE
 
 ETC_FOLDER    = REPO_ROOT / 'data' / 'Enrico_ETC'
-ETC_CONFIG    = REPO_ROOT / 'machine_learning' / 'ETC_calibrator_config.json'
+ETC_CONFIG    = REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'ETC_calibrator_config.json'
 OUTPUT_DIR    = ETC_FOLDER / 'tiptorch_random_PSFs'
 STARS_TABLE   = ETC_FOLDER / 'generated_random_PSFs' / 'stars.fits'
-CONFIG_PATH   = REPO_ROOT / 'machine_learning' / 'NFM_calibrator_config.json'
+CONFIG_PATH   = REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'NFM_calibrator_config.json'
 DATASET_CACHE = Path(project_settings['MUSE_STD_data_folder']) / 'dataset_cache' / 'muse_STD_stars_dataset.pt'
 PUPIL_PATH    = DATA_FOLDER / 'calibrations' / 'VLT_CALIBRATION' / 'VLT_PUPIL' / 'ut4pupil320.fits'
 

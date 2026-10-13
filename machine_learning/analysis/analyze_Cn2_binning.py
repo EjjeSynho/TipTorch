@@ -6,7 +6,7 @@ the current weighted K-means with free altitudes (the configs of the dataset cac
 (projection error alone), the median profile (no information) and fixed altitude boundaries between the grid nodes, with per-sample
 (5/3)-moment layer heights or dataset-level heights. The best boundaries go into data/reduced_telemetry/MUSE/AOF_Cn2_grid.json.
 
-    python analyze_Cn2_binning.py [--device cuda:1] [--n-samples 64] [--batch 8] [--store]
+    python machine_learning/analysis/analyze_Cn2_binning.py [--device cuda:1] [--n-samples 64] [--batch 8] [--store]
 
 Outputs: data/analysis/NFM_calibrator/Cn2_binning.csv / .png. Needs the dataset cache and muse_df.pickle; ~5 min on a GPU.
 """
@@ -21,6 +21,9 @@ import matplotlib.pyplot as plt
 from copy import deepcopy
 from pathlib import Path
 
+# machine_learning/ on sys.path (the `calibrators` package), from a script or from IPython cells
+_here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
+sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
 from tiptorch.tools.utils import BalancedPSFLoss
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
@@ -238,7 +241,7 @@ print(f'Saved -> {OUT_FOLDER / "Cn2_binning.csv"} / .png')
 
 #%%
 if _args.store:
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'datasets' / 'MUSE_STD_dataset'))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'datasets' / 'MUSE_STD_dataset'))
     from STD_dataset_utils import store_Cn2_grid
     store_Cn2_grid(muse_df, boundaries_km=best_b, pin_ground_layer=best_pin)
     print(f'Stored the grid with the boundaries {best_b} km, ground layer {"pinned" if best_pin else "split"}')

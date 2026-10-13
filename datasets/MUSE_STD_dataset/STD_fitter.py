@@ -40,7 +40,7 @@ import warnings
 MUSE_FITTING_FOLDER = Path(project_settings['MUSE_fitted_STD_folder'])
 
 # PSF loss. 'balanced' is the dynamic-range-balanced loss also used to train the NFM calibrator (see BalancedPSFLoss in
-# tiptorch.tools.utils and the "loss" section of machine_learning/NFM_calibrator_config.json); keep both in sync so the fitted
+# tiptorch.tools.utils and the "loss" section of machine_learning/calibrators/configs/NFM_calibrator_config.json); keep both in sync so the fitted
 # values are consistent with the calibrator's objective. 'legacy' is the linear MSE + MAE loss used for the previous fits.
 PSF_LOSS_CFG = {
     "type":             "balanced",

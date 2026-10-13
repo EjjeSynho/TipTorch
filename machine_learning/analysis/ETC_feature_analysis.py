@@ -4,12 +4,12 @@ Which inputs of the PSF-R calibrator matter, and how well the ETC can replace th
 1. Predictability of every non-ETC calibrator input from the six ETC inputs (grouped 5-fold CV R2 of a random forest).
 2. Gradient importance of the PSF-R calibrator (`NFMCalibrator`) per input feature and per feature group.
 3. Ablation: feature groups replaced by the calibrator's trained imputer, effect on the FWHM / Strehl / EE50 of the validation
-   set measured against the on-sky metrics of `validate_ETC_calibrator.py --stage onsky` (`params_onsky.csv` must exist).
+   set measured against the on-sky metrics of `validate_ETC_calibrator.py` (`params_onsky.csv` must exist).
 
 Outputs: `data/Enrico_ETC/ETC_calibrator/features_report.md` (+ CSVs) and `data/Enrico_ETC/plots/ETC_calibrator/features_*.png`.
 Requirements: the PSF-R calibrator bundle (`NFM_calibrator_config.json` metadata), the ETC bundle, the dataset cache, a CUDA device.
 
-    python machine_learning/ETC_feature_analysis.py [--no-psfao] [--processes 40]
+    python machine_learning/analysis/ETC_feature_analysis.py [--no-psfao] [--processes 40]
 """
 
 import os
@@ -34,14 +34,14 @@ import matplotlib
 matplotlib.use('agg')
 import matplotlib.pyplot as plt
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
 for p in (REPO_ROOT, REPO_ROOT / 'machine_learning', REPO_ROOT / 'development'):
     sys.path.insert(0, str(p))
 
 from tiptorch._config import WEIGHTS_FOLDER, default_device
 from calibrators.NFM_calibrator import NFMDataset, NFMCalibrator
 from calibrators.ETC_calibrator import ETC_INPUTS, PUPIL_PATH
-import validate_ETC_calibrator as V
+from calibrators import ETC_validation_utils as V
 
 FEATURE_GROUPS = {
     'ETC inputs':     ETC_INPUTS,
@@ -57,7 +57,7 @@ ABLATIONS = {'real telemetry': [], 'impute AO diagnostics': ['AO diagnostics'], 
 
 
 def psfr_calibrator():
-    with open(REPO_ROOT / 'machine_learning' / 'NFM_calibrator_config.json') as f:
+    with open(REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'NFM_calibrator_config.json') as f:
         cfg = json.load(f)
     with open(WEIGHTS_FOLDER / cfg['weights_subdir'] / f'{cfg["name"]}_meta.json') as f:
         return NFMCalibrator(json.load(f)['bundle_path'], device=default_device)

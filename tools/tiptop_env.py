@@ -5,7 +5,7 @@ The repositories are expected one level above the TipTorch repository, in ``<pro
 (``git clone https://github.com/astro-tiptop/<name>.git``), and MAOPPY (used for the PSFAO Strehl metric) unpacked in
 ``<projects>/maoppy``. Import this module before anything from ``tiptop``, ``p3``, ``mastsel`` or ``maoppy``::
 
-    import tiptop_env  # noqa: F401
+    from tools import tiptop_env  # noqa: F401
     from tiptop.tiptop import overallSimulation
 
 ``tiptop.asterismSimulation`` imports ``torchmetrics`` (only needed for its NN asterism selector); when the package is missing, a stub

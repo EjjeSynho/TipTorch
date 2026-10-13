@@ -30,8 +30,9 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from astropy.table import Table, vstack
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import tiptop_env  # noqa: F401  (puts the astro-tiptop checkouts on sys.path before importing tiptop)
+for _p in (Path(__file__).resolve().parent, Path(__file__).resolve().parents[1]): # this folder and the repository root (`tools`)
+    sys.path.insert(0, str(_p))
+from tools import tiptop_env  # noqa: F401  (puts the astro-tiptop checkouts on sys.path before importing tiptop)
 from tiptop.tiptop import overallSimulation
 
 REPO_ROOT   = Path(__file__).resolve().parents[1]

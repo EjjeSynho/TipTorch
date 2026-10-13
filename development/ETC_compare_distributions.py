@@ -84,7 +84,7 @@ def onsky_to_dataset_ids(onsky_dates):
         muse_df = pickle.load(f)
     data = torch.load(std_folder / 'dataset_cache' / 'muse_STD_stars_dataset.pt', weights_only=False, mmap=True)
     sample_ids = np.asarray(data['sample_ids'])
-    with open(REPO_ROOT / 'machine_learning' / 'NFM_calibrator_config.json') as f:
+    with open(REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'NFM_calibrator_config.json') as f:
         cfg = json.load(f)
     with open(WEIGHTS_FOLDER / cfg['weights_subdir'] / f'{cfg["name"]}_meta.json') as f:
         split = np.load(json.load(f)['split_path'])

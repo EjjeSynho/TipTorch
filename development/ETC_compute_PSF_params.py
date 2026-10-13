@@ -3,7 +3,7 @@ PSF parameter tables of the Monte Carlo PSFs (TIPTOP or calibrated TipTorch), th
 `data/Enrico_ETC/onsky_PSFs_params/All_PSF_{wave}.fits`.
 
 For every row of the shared observation table (`stars.fits`) and every wavelength the PSF file `<folder>/{wave}nm/<name>.fits`
-is measured with `ETC_psf_metrics`: `fwhm` (Enrico's oversampled radial profile, [mas]), `strehl` (MAOPPY PSFAO fit at the PSF
+is measured with `tools.ETC_tools`: `fwhm` (Enrico's oversampled radial profile, [mas]), `strehl` (MAOPPY PSFAO fit at the PSF
 wavelength) and the TIPTOP-style header metrics `strehl_tt` (SR), `fwhm_tt` and `ensquared_tt` (EE within 50 mas), which both
 generators write with the same code. The result is `<folder>/psf_params_{wave}.fits` with the observation columns
 (`index, airmass, seeing, tau, ngs, tc, ngs_flux`) and the parameters; missing PSFs give NaN rows.
@@ -27,9 +27,10 @@ for _var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
 import numpy as np
 from astropy.table import Table
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import tiptop_env  # noqa: F401  (MAOPPY on sys.path; the workers only need numpy / scipy / maoppy)
-from ETC_psf_metrics import read_psf_file, normalize_psf, compute_fwhm, compute_strehl_psfao
+for _p in (Path(__file__).resolve().parent, Path(__file__).resolve().parents[1]): # this folder and the repository root (`tools`)
+    sys.path.insert(0, str(_p))
+from tools import tiptop_env  # noqa: F401  (MAOPPY on sys.path; the workers only need numpy / scipy / maoppy)
+from tools.ETC_tools import read_psf_file, normalize_psf, compute_FWHM, compute_strehl_psfao
 
 REPO_ROOT  = Path(__file__).resolve().parents[1]
 ETC_FOLDER = REPO_ROOT / 'data' / 'Enrico_ETC'
@@ -54,7 +55,7 @@ def measure_psf_file(args):
         print(f'{path}: {type(e).__name__}: {e}')
         return out
     psf = normalize_psf(f['psf'])
-    out['fwhm']         = compute_fwhm(psf, pixel_scale_mas=f['pix_mas'])
+    out['fwhm']         = compute_FWHM(psf, pixel_scale_mas=f['pix_mas'])
     out['strehl_tt']    = f['sr_hdr']
     out['fwhm_tt']      = f['fwhm_hdr']
     out['ensquared_tt'] = f['ee_hdr']

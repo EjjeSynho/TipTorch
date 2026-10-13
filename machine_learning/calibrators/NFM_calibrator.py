@@ -32,6 +32,9 @@ from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservati
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
+# Calibrator configs (NFM_calibrator_config.json: direct, NFM_factor_calibrator_config.json: factor, ETC_calibrator_config.json)
+CONFIGS_FOLDER = Path(__file__).resolve().parent / 'configs'
+
 
 def load_telemetry_preprocessor(bundle_state: dict) -> TelemetryPreprocessor:
     """
@@ -481,7 +484,7 @@ class NFMCalibrator():
 def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 0, **trainer_overrides):
     """
     PSF model, calibrator network, outputs transformer and trainer from a training config (the "model", "calibrator", "trainer",
-    "loss" and "fixed_params" sections of NFM_calibrator_config.json), as train_NFM_calibrator.py builds them. Shared by the
+    "loss" and "fixed_params" sections of calibrators/configs/NFM_calibrator_config.json), as train_NFM_calibrator.py builds them. Shared by the
     validation / analysis scripts so that they reproduce the training setup exactly.
 
     trainer_overrides (e.g. train_idx, val_idx, random_state) replace the corresponding trainer arguments.
@@ -1488,7 +1491,7 @@ class NFMCalibratorTrainer:
 #  Factor calibrator
 #
 #  The network predicts corrections to prior values instead of absolute parameters, so that a zero output reproduces the prior
-#  and the corrections can be shrunk towards it (shrink_weight in the "loss" section of NFM_factor_calibrator_config.json):
+#  and the corrections can be shrunk towards it (shrink_weight in the "loss" section of calibrators/configs/NFM_factor_calibrator_config.json):
 #    factor keys (r0, L0, wind_speed_single, Cn2_weights): value = base * exp(delta + mean log-ratio), the base derived from
 #        the telemetry (telemetry_base_params), L0 from the median of the fits; the Cn2 weights are renormalized to 1.
 #        The Cn2 base is the AOF profile on the fixed altitude grid (Cn2_grid_* features) reduced to the model layers with the
@@ -1682,7 +1685,7 @@ class NFMFactorCalibratorTrainer(NFMCalibratorTrainer):
     machinery, but the network predicts corrections (FactorParameterization) and the constant keys are dataset-level
     parameters optimized together with the network (at a tenth of the learning rate).
 
-    factor_keys, const_keys, Cn2_mix, Cn2_targets, Cn2_offset : see the "calibrator" section of NFM_factor_calibrator_config.json.
+    factor_keys, const_keys, Cn2_mix, Cn2_targets, Cn2_offset : see the "calibrator" section of calibrators/configs/NFM_factor_calibrator_config.json.
     The remaining outputs are predicted directly as corrections to the median of the fits. Cn2_mix 'learned' makes the reduction
     of the grid profile to the model layers (softmax of Cn2_mix_logits [N_grid, N_layers]) a dataset-level parameter trained
     end-to-end (at the full learning rate, unlike the constants); 'fixed' keeps the altitude bins of the grid. Cn2_offset adds a

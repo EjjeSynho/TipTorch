@@ -247,7 +247,7 @@ else:
 
 
 _ = AOF_Cn2_profiles_stats(muse_df, store=True) # Update median AOF Cn2 profile
-# Fixed Cn2 grid (nodes = median AOF layer altitudes, model-layer boundaries chosen with machine_learning/analyze_Cn2_binning.py)
+# Fixed Cn2 grid (nodes = median AOF layer altitudes, model-layer boundaries chosen with machine_learning/analysis/analyze_Cn2_binning.py)
 Cn2_grid = store_Cn2_grid(muse_df, boundaries_km=None) # None: keep the boundaries of the stored grid
 
 #%% ================================= MUSE NFM STD stars dataset cleaning, imputation and scaling ==================================

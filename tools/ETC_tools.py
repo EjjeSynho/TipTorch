@@ -5,7 +5,7 @@ The same functions are applied to the TIPTOP PSFs (`data/Enrico_ETC/generated_ra
 PSFs (`data/Enrico_ETC/tiptorch_random_PSFs/{wave}nm/*.fits`, written by `write_psf_file` in the same FITS layout), so the two
 simulators are measured identically:
 
-- `compute_fwhm`         Enrico's FWHM [mas] from a 5x oversampled radial profile around the peak.
+- `compute_FWHM`         Enrico's FWHM [mas] from a 5x oversampled radial profile around the peak.
 - `compute_strehl_psfao` Enrico's Strehl from a MAOPPY PSFAO fit (`maoppy.psfmodel.Psfao`, MUSE NFM sampling at the PSF wavelength).
 - `tiptop_metrics`       TIPTOP's own header metrics (`baseSimulation.computeMetrics`): P3 `getStrehl(method='max', psfInOnePix=True)`,
                          `getFWHM(method='contour')` and the encircled energy within 50 mas (`EE50`).
@@ -23,8 +23,8 @@ from astropy.io import fits
 from scipy.ndimage import zoom
 from scipy.interpolate import interp1d
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import tiptop_env  # noqa: F401
+sys.path.insert(0, str(Path(__file__).resolve().parents[1])) # repository root, for `tools`
+from tools import tiptop_env  # noqa: F401
 from p3.aoSystem import np as p3np  # cupy when P3 runs on the GPU, numpy otherwise
 from p3.aoSystem.FourierUtils import getStrehl, getFWHM, getEncircledEnergy
 from mastsel.mavisPsf import centeredPixelCoords
@@ -43,7 +43,7 @@ def normalize_psf(data):
     return data / np.nansum(data)
 
 
-def compute_fwhm(image, oversampling=5, pixel_scale_mas=PIXEL_SCALE_MAS):  # OPTIMIZATION: reduced from 10 to 5 (4x faster)
+def compute_FWHM(image, oversampling=5, pixel_scale_mas=PIXEL_SCALE_MAS):  # OPTIMIZATION: reduced from 10 to 5 (4x faster)
     """ Enrico's FWHM [mas]: radius at which the radial profile around the peak of the oversampled image crosses half maximum """
     # Oversample the image
     image_oversampled = zoom(image, oversampling, order=1)  # OPTIMIZATION: order=1 instead of 3
@@ -127,7 +127,7 @@ def psf_parameters(psf, wave_nm, pupil, pixel_scale_mas=PIXEL_SCALE_MAS, do_psfa
     psf = normalize_psf(np.asarray(psf, dtype=float))
     sr_tt, fwhm_tt, ee_tt = tiptop_metrics(psf, wave_nm, pupil, pixel_scale_mas)
     out = {
-        'fwhm':         compute_fwhm(psf, pixel_scale_mas=pixel_scale_mas),
+        'fwhm':         compute_FWHM(psf, pixel_scale_mas=pixel_scale_mas),
         'strehl':       np.nan,
         'strehl_tt':    sr_tt,
         'fwhm_tt':      fwhm_tt,

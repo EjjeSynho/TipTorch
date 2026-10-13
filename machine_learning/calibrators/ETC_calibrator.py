@@ -78,7 +78,7 @@ def NGS_mag_to_photons(Jmag, frequency, airmass, k_J=0.09, delta_mag=0.4):
     return 1.9e12 / 368 * 10 ** (-0.4 * IRLOS_mag) / (4 * np.asarray(frequency, float))
 
 
-def etc_table(seeing, tau0, airmass, ngs_mag, irlos_freq=None, irlos_gain=None, tc=None):
+def ETC_table(seeing, tau0, airmass, ngs_mag, irlos_freq=None, irlos_gain=None, tc=None):
     """
     ETC conditions table: `seeing` ["], `tau0` [s], `airmass`, `ngs_mag` [J mag]; the TC and the IRLOS regime are derived unless
     given. Adds `zenith_deg` and `ngs_flux` [photons/subaperture/frame].
@@ -94,23 +94,23 @@ def etc_table(seeing, tau0, airmass, ngs_mag, irlos_freq=None, irlos_gain=None, 
     return df
 
 
-def etc_table_from_stars(stars):
+def ETC_table_from_stars(stars):
     """ ETC table from the Monte Carlo observation table of `run_tiptop_random_carlo.py` (`tau` in ms, `ngs` in J mag) """
-    df = etc_table(stars['seeing'], np.asarray(stars['tau'], float) * 1e-3, stars['airmass'], stars['ngs'], tc=stars['tc'])
+    df = ETC_table(stars['seeing'], np.asarray(stars['tau'], float) * 1e-3, stars['airmass'], stars['ngs'], tc=stars['tc'])
     if 'index' in stars.colnames:
         df.insert(0, 'index', np.asarray(stars['index']))
     return df
 
 
-def etc_table_from_telemetry(telemetry_physical: pd.DataFrame, real_irlos=True):
+def ETC_table_from_telemetry(telemetry_physical: pd.DataFrame, real_irlos=True):
     """ ETC table replaying real observations from their physical-unit telemetry (`ETC_INPUTS` columns) """
     t = telemetry_physical
     airmass = 1.0 / np.cos(np.deg2rad(90.0 - t['Tel. altitude'].to_numpy(float)))
     kw = {'irlos_freq': t['IRLOS frequency'].to_numpy(float), 'irlos_gain': t['IRLOS gain'].to_numpy(float)} if real_irlos else {}
-    return etc_table(t['Seeing (header)'].to_numpy(float), t['Tau0 (header)'].to_numpy(float), airmass, t['NGS mag (from ph.)'].to_numpy(float), **kw)
+    return ETC_table(t['Seeing (header)'].to_numpy(float), t['Tau0 (header)'].to_numpy(float), airmass, t['NGS mag (from ph.)'].to_numpy(float), **kw)
 
 
-def etc_inputs(etc: pd.DataFrame):
+def ETC_inputs(etc: pd.DataFrame):
     """ The ETC inputs of an ETC table as the calibrator telemetry features, physical units [N, 6] """
     return np.column_stack([etc['seeing'], etc['tau0'], 90.0 - etc['zenith_deg'], etc['ngs_mag'], etc['irlos_freq'], etc['irlos_gain']]).astype(float)
 
@@ -134,7 +134,7 @@ class DonorPredictor:
 
     def donors(self, etc: pd.DataFrame, rng):
         """ Pool index of the donor of every query row """
-        z = (etc_inputs(etc) - self.mean) / self.scale
+        z = (ETC_inputs(etc) - self.mean) / self.scale
         order = np.argsort(np.linalg.norm(z[:, None, :] - self.pool_z[None, :, :], axis=-1), axis=1)[:, :self.k]
         pick = np.zeros(len(etc), int) if self.nearest else rng.integers(0, order.shape[1], size=len(etc))
         return order[np.arange(len(etc)), pick]
@@ -169,7 +169,7 @@ class DirectNetPredictor:
 
     @torch.no_grad()
     def predict(self, etc: pd.DataFrame, rng=None):
-        z = torch.as_tensor((etc_inputs(etc) - self.mean) / self.scale, dtype=torch.float32, device=self.device)
+        z = torch.as_tensor((ETC_inputs(etc) - self.mean) / self.scale, dtype=torch.float32, device=self.device)
         x = self.outputs_transformer.unstack(self.net(z))
         bump = torch.full((len(etc), 1), self.phase_bump, dtype=x['LO_coefs'].dtype, device=self.device)
         x['LO_coefs'] = torch.cat([bump, x['LO_coefs']], dim=1)
@@ -177,7 +177,7 @@ class DirectNetPredictor:
 
 
 # ------------------------------------------------- Rendering -------------------------------------------------
-def build_etc_config(template: dict, row, wavelengths_m, heights):
+def build_ETC_config(template: dict, row, wavelengths_m, heights):
     """
     TipTorch config (lists layout) of one ETC row: the template with the ETC atmosphere (seeing, TC outer scale / ground-layer
     fraction / ASM wind, `heights` [3] in m), zenith angle, LGS flux, NGS flux and IRLOS regime, science wavelengths [m].
@@ -213,6 +213,7 @@ def flatten_x_dict(x_dict):
             cols[key] = v.reshape(-1)
         else:
             cols.update({f'{key}[{j}]': v[:, j] for j in range(v.shape[1])})
+            
     return cols
 
 
@@ -226,10 +227,12 @@ class ETCPSFRenderer:
         self.wavelengths_nm = [float(w) for w in wavelengths_nm]
         self.median_heights = [float(h) for h in median_heights]
 
+
     def make_model(self, configs):
         config = MultipleTargetsInDifferentObservations(configs, device=self.device)
         config['DM']['NumberReconstructedLayers'] = torch.tensor(config['atmosphere']['Cn2Heights'].shape[-1], device=self.device)
         return PSFModelNFM(config, multiple_obs=True, device=self.device, **self.model_cfg)
+
 
     @torch.no_grad()
     def render(self, predictor, etc: pd.DataFrame, rng=None, n_draws=1, return_DL=False, verbose=False):
@@ -241,26 +244,33 @@ class ETCPSFRenderer:
         n_draws = n_draws if predictor.stochastic else 1
         wvl_m = [w * 1e-9 for w in self.wavelengths_nm]
         PSFs, DLs, tables = [], [], []
+        
         for draw in range(n_draws):
             x_all, info = predictor.predict(etc, rng)
+            
             for start in range(0, len(etc), self.batch_size):
                 ids = list(range(start, min(start + self.batch_size, len(etc))))
                 heights = lambda i: self.median_heights if info['heights'] is None else info['heights'][i]
-                model = self.make_model([build_etc_config(self.template, etc.iloc[i], wvl_m, heights(i)) for i in ids])
+                model = self.make_model([build_ETC_config(self.template, etc.iloc[i], wvl_m, heights(i)) for i in ids])
                 model.update_manager_params({k: v[ids] for k, v in x_all.items()})
                 PSFs.append(model().detach().cpu())
+                
                 if return_DL:
                     dl = model.model.DLPSF().detach().cpu()
                     DLs.append(dl.expand(len(ids), -1, -1, -1) if dl.shape[0] == 1 else dl)
+                    
                 model.cleanup()
                 del model
                 release_gpu_memory()
                 if verbose:
                     print(f'\r  {predictor.name}: draw {draw + 1}/{n_draws}, {ids[-1] + 1}/{len(etc)} rendered', end='', flush=True)
+           
             table = etc.reset_index(drop=True).assign(draw=draw, donor=info['donor'], **flatten_x_dict(x_all))
             tables.append(table)
+            
         if verbose:
             print()
+            
         out = (torch.cat(PSFs, 0), pd.concat(tables, ignore_index=True))
         return out + (torch.cat(DLs, 0),) if return_DL else out
 
@@ -305,6 +315,7 @@ class ETCCalibrator:
         self.median_heights, self.phase_bump = list(self.state['median_heights']), float(self.state['phase_bump_median'])
         self.template_config, self.model_cfg = self.state['template_config'], self.state['model_cfg']
 
+
     def predictor(self, name, **kw):
         """ 'donor' | 'donor-nearest' (kw: k, rescale) | 'direct-net' """
         if name in ('donor', 'donor-nearest'):
@@ -318,6 +329,7 @@ class ETCCalibrator:
             return DirectNetPredictor(net, InputsTransformer.load(data=d['outputs_transformer']), d['feature_mean'], d['feature_scale'],
                                       phase_bump=self.phase_bump, device=self.device)
         raise ValueError(f"Unknown predictor '{name}', expected one of {PREDICTORS}")
+
 
     def renderer(self, wavelengths_nm, batch_size=16):
         return ETCPSFRenderer(self.template_config, self.model_cfg, wavelengths_nm, self.median_heights, batch_size, self.device)

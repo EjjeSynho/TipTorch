@@ -13,6 +13,11 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+from pathlib import Path
+# machine_learning/ on sys.path (the `calibrators` package), from a script or from IPython cells
+_here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
+sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
+sys.path.insert(0, str(_here.parents[1])) # repository root (`tools`, `data_processing`)
 from tools.plotting import plot_radial_PSF_profiles, LWE_basis, cropper, draw_PSF_stack
 from tiptorch.PSF_models.TipToy_SPHERE_multisrc import TipTorch
 from data_processing.SPHERE.STD_dataset.STD_dataset_utils import SPHERE_preprocess, SamplesByIds

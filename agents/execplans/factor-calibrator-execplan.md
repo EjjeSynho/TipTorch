@@ -119,10 +119,6 @@ altitudes as features. First check, in the fitting pipeline, that fits with the 
 - The learned dataset-level constants matter: the trained factor calibrator (15.5 %) beats the fits with *median*
   constants (20.2 %), i.e. the end-to-end optimized LO_coefs / F_ctrl are a better "average NCPA" than the median.
 
-## Surprises & discoveries
-
-## Decision log
-
 ## Decision log
 
 - Factor trainer as a subclass of the direct trainer (hooks `_predict` / `_params_from_pred` / `_regularization` /

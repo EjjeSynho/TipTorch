@@ -3,9 +3,10 @@
 %autoreload 2
 
 import os
+from re import S
 import sys
-from tabnanny import verbose
-sys.path.append('..')
+from pathlib import Path
+sys.path.append(str(Path(__file__).resolve().parents[2]) if '__file__' in dir() else '../..') # repository root (`data_processing`)
 
 import torch
 import torch.nn as nn
@@ -16,6 +17,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.neural_network import MLPRegressor
+import xgboost as xgb
 from sklearn.multioutput import MultiOutputRegressor
 from sklearn.linear_model import LinearRegression
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
@@ -77,50 +79,183 @@ def AnalyseImpurities(model, feature_names, X_test=None, y_test=None, save_dir=N
     return forest_importances_MDI, forest_importances_MDI_std, forest_importances_perm, forest_importances_perm_std
 
 #%% Initialize data sample
-with open(STD_FOLDER / 'sphere_df.pickle', 'rb') as handle:
-    psf_df = pickle.load(handle)
+with open(STD_FOLDER / '~old/fitted_df_old.pickle', 'rb') as handle:
+    fitted_df_old = pickle.load(handle)
+    
+with open(STD_FOLDER / '~old/sphere_df_old.pickle', 'rb') as handle:
+    psf_df_old = pickle.load(handle)
 
 with open(STD_FOLDER / 'sphere_fitted_df.pickle', 'rb') as handle:
-    fitted_df = pickle.load(handle)
+    fitted_df_new = pickle.load(handle)
 
-with open(STD_FOLDER / 'sphere_fitted_df_norm.pickle', 'rb') as handle:
-    fitted_df_norm = pickle.load(handle)
+with open(STD_FOLDER / 'sphere_df.pickle', 'rb') as handle:
+    psf_df_new = pickle.load(handle)
 
-with open(STD_FOLDER / 'sphere_df_norm.pickle', 'rb') as handle:
-    psf_df_norm = pickle.load(handle)
+#%%
+def filter_psf_df(psf_df):
+    # psf_df['Nph WFS (log)' ] = np.log(psf_df['Nph WFS'])
+    # psf_df['Flux WFS (log)'] = np.log(psf_df['Flux WFS'])
+    psf_df['Temperature (200 mbar)'] = psf_df['Temperature (200 mbar)'].apply(lambda x: np.nan if x > 100 else x)
+    psf_df = psf_df[psf_df['Corrupted'] == False]
+    psf_df = psf_df[psf_df['Multiples'] == False]
+    psf_df = psf_df[psf_df['Central hole'] == False]
 
-with open(STD_FOLDER / 'IRDIS_images_df.pickle', 'rb') as handle:
-    images_df = pickle.load(handle)
+    ids_low         = psf_df['Low quality'] == True
+    ids_medium      = psf_df['Medium quality'] == True
+    ids_high        = psf_df['High quality'] == True
+    ids_corrupted   = psf_df['Corrupted'] == True
+    ids_medium_low  = ids_medium &  ids_low
+    ids_medium_high = ids_medium &  ids_high
+    ids_high        = ids_high   & ~ids_medium_high
+    ids_medium      = ids_medium & ~ids_medium_high
+    ids_medium      = ids_medium & ~ids_medium_low
+    ids_low         = ids_low    & ~ids_medium_low
 
+    ids_select = ids_high | ids_medium_high | ids_medium | ids_medium_low
+
+    quality_data = {
+        'Low quality':         ids_low.sum()         / len(psf_df) * 100,
+        'Low-Medium quality':  ids_medium_low.sum()  / len(psf_df) * 100,
+        'Medium quality':      ids_medium.sum()      / len(psf_df) * 100,
+        'Medium-High quality': ids_medium_high.sum() / len(psf_df) * 100,
+        'High quality':        ids_high.sum()        / len(psf_df) * 100,
+    }
+
+    plt.bar(quality_data.keys(), quality_data.values())
+    plt.title('PSF samples quality distribution')
+    plt.xticks(rotation=45)
+    plt.ylabel('Percentage')
+    plt.show()
+
+    psf_df = psf_df[ids_select]
+    print(f'Remaining number of samples: {len(psf_df)}')
+
+    # listo = ['Bad center', 'Central hole', 'Corrupted', 'Crossed', 'Extra',
+        #    'High SNR', 'High quality', 'LWE', 'Low quality', 'Medium quality',
+        #    'Multiples', 'Wings']
+    # 
+    # for entry in listo:
+        # print(f'{entry}: {psf_df.loc[637][entry].sum()}')
+    # 
+
+    # Compute number of NaNs
+    presence_factor = {}
+
+    for entry in psf_df.columns.values.tolist():
+        num_nans = psf_df[entry].isnull().sum()
+        presence = 100 - num_nans / len(psf_df)*100
+        presence_factor[entry] = presence
+        
+    def percent_presence_gt(percentage, comparator, verbose=True):
+        fields = []
+        for entry in presence_factor:
+            if comparator(presence_factor[entry], percentage):
+                if verbose:
+                    print(f'-- {entry}: {presence_factor[entry]:.1f}%')
+                fields.append(entry)
+        return fields
+
+    good_fields = percent_presence_gt(75, np.greater_equal, True)
+
+    remove_entries = [
+        'Filter WFS', 'Filter common', 'Filter LR',
+        'Jitter X', 'Jitter Y',
+        'mag V', 'mag R', 'mag G', 'mag J', 'mag H', 'mag K',
+        # 'RA', 'DEC',
+        # 'Humidity',
+        # 'Temperature',
+        # 'Wind direction (MASSDIMM)',
+        # 'Wind speed (MASSDIMM)',
+    ]
+
+    for entry in remove_entries:
+        good_fields.pop(good_fields.index(entry))
+
+    # Copy only the good fields into a new dataframe
+    psf_df_filtered = psf_df[good_fields].dropna()
+
+    print('\n>>>> Samples remained:', len(psf_df_filtered))
+
+    # Make all complex values real in df:
+    for entry in psf_df_filtered.columns.values:
+        if np.iscomplexobj(psf_df_filtered[entry].values):
+            psf_df_filtered[entry] = psf_df_filtered[entry].apply(lambda x: x.real)
+
+    return psf_df_filtered
+
+
+#%%
 SPHERE_pupil = fits.getdata('../data/calibrations/VLT_CALIBRATION/VLT_PUPIL/ALC2LyotStop_measured.fits')
 LWE_basis = np.load('../data/misc/LWE_basis_SPHERE.npy')
 
 df_transforms_onsky  = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/SPHERE/sphere_telemetry_scaler.pickle')
 df_transforms_fitted = CreateTransformSequenceFromFile(DATA_FOLDER / 'reduced_telemetry/SPHERE/IRDIS_model_norm_transforms.pickle')
 
-get_ids = lambda df: set( df.index.values.tolist() )
+#%%
+print('Old PSF df shape before the filter:', psf_df_old.shape)
+print('New PSF df shape before the filter:', psf_df_new.shape)
+print('-----------------------------------------------')
+psf_df_old = filter_psf_df(psf_df_old)
+psf_df_new = filter_psf_df(psf_df_new)
 
-ids_0 = get_ids(fitted_df)
-ids_1 = get_ids(psf_df)
-ids_2 = get_ids(fitted_df_norm)
-ids_3 = get_ids(psf_df_norm)
-ids   = list( ids_0.intersection(ids_1).intersection(ids_2).intersection(ids_3) )
+print('Old PSF df shape after the filter:', psf_df_old.shape)
+print('New PSF df shape after the filter:', psf_df_new.shape)
 
-print('Final number of good samples:', len(ids))
+#%%
+# Intersect psf_df_new and fitted_df_new by filenames:
+psf_df_common = psf_df_new[psf_df_new['Filename'].isin(psf_df_old['Filename'])]
+# Create a mapping from filename to ID from psf_df_old
+filename_to_id_mapping = dict(zip(psf_df_old['Filename'], psf_df_old.index))
+# Map the IDs and set as new index
+psf_df_common.index = psf_df_common['Filename'].map(filename_to_id_mapping)
+psf_df_common = psf_df_common.sort_index()
 
-psf_df = psf_df.loc[ids]
-fitted_df = fitted_df.loc[ids]
-psf_df_norm = psf_df_norm.loc[ids]
-fitted_df_norm = fitted_df_norm.loc[ids]
+fitted_df_common = fitted_df_old[fitted_df_old.index.isin(psf_df_common.index)]
+psf_df_common = psf_df_common.loc[fitted_df_common.index]
+
+print('Common PSF df shape:', psf_df_common.shape)
+
+'''
+# psf_df_common = psf_df_old.copy()
+# fitted_df_common = fitted_df_old.copy()
+
+# psf_df_common = psf_df_new.copy()
+# fitted_df_common = fitted_df_new.copy()
+
+# Mathc by index
+psf_df_common = psf_df_common[psf_df_common.index.isin(fitted_df_common.index)]
+fitted_df_common = fitted_df_common.loc[psf_df_common.index]
+print('Common PSF df shape:', psf_df_common.shape)
+'''
+
+assert len(psf_df_common) == len(fitted_df_common), "PSF and fitted dataframes have different lengths after matching."
+
+#%%
+fitted_df_norm = fitted_df_common.copy()
+psf_df_norm = psf_df_common.copy()
+
+for entry in list(set(df_transforms_fitted).intersection(set(fitted_df_norm.columns))):
+    fitted_df_norm[entry] = df_transforms_fitted[entry].forward(fitted_df_norm[entry].values)
+
+for entry in list(set(df_transforms_onsky).intersection(set(psf_df_norm.columns))):
+    psf_df_norm[entry] = df_transforms_onsky[entry].forward(psf_df_norm[entry].values)
 
 for entry in ['r0', 'Jx', 'Jy', 'Jxy']: #,'F L','F R']:
-    fitted_df[entry] = fitted_df[entry].abs()
+    fitted_df_common[entry] = fitted_df_common[entry].abs()
     fitted_df_norm[entry] = fitted_df_norm[entry].abs()
 
+#%%
+psf_df_norm.sort_index(inplace=True)
+fitted_df_norm.sort_index(inplace=True)
 
-#%% ================================== Predict Strehl ==================================
 df_norm = pd.concat([psf_df_norm, fitted_df_norm], axis=1)#.fillna(0)
 
+df_norm.dropna(inplace=True)
+
+print('Total samples for ML:', len(df_norm))
+
+
+#%% ================================== Predict LWE WFE ==================================
 selected_entries_X = [
     'Airmass',
     'r0 (SPARTA)',
@@ -154,71 +289,34 @@ selected_entries_X = [
     # 'mag V', 'mag R', 'mag G', 'mag J', 'mag H', 'mag K'
 ]
 
-selected_entries_Y = ['Strehl']
 
-for entry in selected_entries_Y:
-    if entry in selected_entries_X:
-        selected_entries_X.pop(selected_entries_X.index(entry))
+# X = df_norm[selected_entries_X].to_numpy()
 
-    if entry not in df_norm.columns.values:
-        selected_entries_X.pop(selected_entries_X.index(entry))
+input_features = psf_df_norm.select_dtypes(include=[np.number])
+# input_features = input_features[selected_entries_X]
+# Select K best
+# from sklearn.feature_selection import SelectKBest, f_regression
 
-X = df_norm[selected_entries_X].to_numpy()
-Y = df_norm[selected_entries_Y].to_numpy()
-
-#%%
-X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42, verbose=1)
-gbr.fit(X_train, y_train)
-y_pred = gbr.predict(X_test)
-
-test_df = pd.DataFrame({
-    'SR predicted': df_transforms_onsky['Strehl'].inverse(y_pred),
-    'SR from data': df_transforms_onsky['Strehl'].inverse(y_test.flatten()),
-})
-corr_plot(test_df, 'SR predicted', 'SR from data')
-
-_ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
-
-
-#%% ================================== Predict all ==================================
-# =======================================================================================
-
-selected_entries_Y = ['r0', 'dn', 'Jx', 'Jy', 'Jxy', 'F L', 'F R']
-
-X = df_norm[selected_entries_X].to_numpy()
-Y = df_norm[selected_entries_Y].to_numpy()
-
-X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
-
-mlp = MLPRegressor(hidden_layer_sizes=(50,50,), max_iter=2000, random_state=42)
-mlp.fit(X_train, y_train)
-y_pred = mlp.predict(X_test)
-
-#%%
-param_to_plot = 'F R'
-id = selected_entries_Y.index(param_to_plot)
-
-test_df = pd.DataFrame({
-    param_to_plot+' predicted':   df_transforms_fitted[param_to_plot].inverse(y_pred[:,id].flatten()),
-    param_to_plot+' from fitted': df_transforms_fitted[param_to_plot].inverse(y_test[:,id].flatten()),
-})
-corr_plot(test_df, param_to_plot+' predicted', param_to_plot+' from fitted')
-
-# _ = AnalyseImpurities(gbr, selected_entries_X, X_test, y_test)
-
-
-
-#%% ================================== Predict LWE WFE ==================================
-
-# df_norm = df_norm[df_norm['LWE'] == True]
-X = df_norm[selected_entries_X].to_numpy()
+X = input_features.to_numpy()
 Y = df_norm['LWE coefs'].apply(lambda x: np.linalg.norm(x, ord=2)) # Just calculate the normalized LWE WFE
 
 X_train, X_test, y_train, y_test = train_test_split(X, Y, test_size=0.2, random_state=42)
 
-gbr_LWE = GradientBoostingRegressor(n_estimators=200, learning_rate=0.05, max_depth=10, random_state=42, verbose=1, n_iter_no_change=100)
+# Option 1: XGBoost (usually best for tabular data)
+
+xgb_model = xgb.XGBRegressor(
+    n_estimators=300,
+    learning_rate=0.05,
+    max_depth=8,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    random_state=42,
+    n_jobs=-1
+)
+xgb_model.fit(X_train, y_train)
+gbr_LWE = xgb_model
+print("Using XGBoost")
+
 gbr_LWE.fit(X_train, y_train)
 
 y_pred = gbr_LWE.predict(X_test)
@@ -229,24 +327,139 @@ test_df = pd.DataFrame({
     'LWE from fitted': df_transforms_fitted['LWE coefs'].inverse(y_test),
 })
 corr_plot(test_df, 'LWE predicted', 'LWE from fitted', lims=[0, 200])
+plt.savefig('C:/Users/akuznets/Desktop/LWE_WFE_prediction_correlation.pdf', dpi=300)
 
 # _ = AnalyseImpurities(gbr_LWE, selected_entries_X, X_test, y_test)
+#%%
+
+a = df_transforms_fitted['LWE coefs'].inverse(y_pred)
+b = df_transforms_fitted['LWE coefs'].inverse(y_test)
+
+err = np.abs(a - b)
+
+_ = plt.figure(figsize=(10, 7))
+_ = plt.hist(err, bins=30)
+plt.title('LWE WFE Prediction Error Distribution')
+plt.xlabel('Absolute Error [nm RMS]')
+plt.ylabel('Number of Samples')
 
 #%%
 from sklearn.metrics import mean_absolute_error, mean_absolute_percentage_error, explained_variance_score, median_absolute_error
+from sklearn.metrics import r2_score
+
+r2 = r2_score(y_test, y_pred)  # 1.0 is perfect, can be negative
+print(f'R² Score: {r2:.3f}')
 
 MAPE  = mean_absolute_percentage_error(y_test, y_pred)
 EVP   = explained_variance_score(y_test, y_pred) # 1.0 is the best
 MedAE = median_absolute_error(y_test, y_pred)
 
+print( 'R² Score: {:.3f}'.format(r2) )
 print( 'Mean absolute percentage error (MAPE): {:.3f}'.format(MAPE) )
 print( 'Explained Variance Score (EVP) {:.3f}'.format(EVP) )
 print( 'Median absolute error (MedAE) {:.3f}'.format(MedAE) )
 
+#%% ============================ SHAP Analysis for LWE WFE Predictor ============================
+import shap
+
+print("\n" + "="*60)
+print("SHAP ANALYSIS FOR LWE WFE PREDICTOR")
+print("="*60)
+
+# Get feature names (use numerical column names from psf_df_norm)
+feature_names = input_features.columns.tolist()
+
+# Calculate SHAP values for test set (use subset for speed)
+# X_shap = X_test[:min(100, len(X_test))]  # Use first 100 samples or all if less
+X_shap = X_test.copy()
+
+'''
+# Try TreeExplainer first, fallback to other explainers if it fails
+try:
+    # Create SHAP explainer for XGBoost
+    explainer = shap.TreeExplainer(gbr_LWE.predict)
+    shap_values = explainer.shap_values(X_shap)
+    print("Using TreeExplainer")
+    
+except (ValueError, Exception) as tree_error:
+    print(f"TreeExplainer failed ({tree_error}), trying Explainer...")
+    try:
+        # Fallback to general Explainer
+        # Use a separate background sample that doesn't overlap with test data
+        background_indices = np.random.choice(len(X_train), size=min(100, len(X_train)), replace=False)
+        X_background = X_train[background_indices]
+        explainer = shap.Explainer(gbr_LWE.predict, X_background)
+        shap_values = explainer(X_shap).values
+        print("Using general Explainer with separate background data")
+        
+    except Exception as general_error:
+        print(f"General Explainer failed ({general_error}), trying KernelExplainer...")
+    '''
+
+# Last resort: KernelExplainer (slower but more robust)
+# Use random sample from training data as background (standard practice for KernelExplainer)
+background = shap.sample(X_train, 50)  # Use 50 background samples
+explainer = shap.KernelExplainer(gbr_LWE.predict, background)
+shap_values = explainer.shap_values(X_shap)
+print("Using KernelExplainer")
+
+print(f"Calculated SHAP values for {X_shap.shape[0]} test samples")
+print(f"Feature importance shape: {shap_values.shape}")
+#%%
+# Summary plot
+plt.figure(figsize=(12, 8))
+shap.summary_plot(shap_values, X_shap, feature_names=feature_names, show=False)
+plt.title('SHAP Summary Plot - LWE WFE Prediction')
+plt.tight_layout()
+# plt.show()
+plt.savefig('C:/Users/akuznets/Desktop/SHAP_summary_LWE_WFE_prediction.pdf', dpi=300)
+
+# Feature importance plot
+plt.figure(figsize=(12, 6))
+shap.summary_plot(shap_values, X_shap, feature_names=feature_names, plot_type="bar", show=False)
+plt.title('SHAP Feature Importance - LWE WFE Prediction')
+plt.tight_layout()
+# plt.show()
+plt.savefig('C:/Users/akuznets/Desktop/SHAP_feature_importance_LWE_WFE_prediction.pdf', dpi=300)
+
+# Get mean absolute SHAP values for ranking
+mean_shap = np.abs(shap_values).mean(0)
+importance_df = pd.DataFrame({
+    'feature': feature_names,
+    'importance': mean_shap
+}).sort_values('importance', ascending=False)
+
+print("\nTop 10 Most Important Features (SHAP):")
+print("-" * 45)
+for idx, row in importance_df.head(10).iterrows():
+    print(f"{row['feature']:30s}: {row['importance']:.4f}")
+
+# Waterfall plot for a single prediction
+if len(X_shap) > 0:
+    sample_idx = 0
+    plt.figure(figsize=(12, 8))
+    shap.waterfall_plot(explainer.expected_value, shap_values[sample_idx], X_shap[sample_idx], 
+                        feature_names=feature_names, show=False)
+    plt.title(f'SHAP Waterfall Plot - Sample {sample_idx}')
+    plt.tight_layout()
+    plt.show()
+
+# Store SHAP results for later use
+shap_results = {
+    'explainer': explainer,
+    'shap_values': shap_values,
+    'feature_names': feature_names,
+    'importance_ranking': importance_df
+}
+
+print("="*60)
+
+# except ImportError:
+#     print("SHAP not available. Install with: pip install shap")
+# except Exception as e:
+#     print(f"SHAP analysis failed: {e}")
 
 #%% ============================ Predict LWE coefficients ============================
-# ====================================================================================
-
 from sklearn.decomposition import PCA
 
 LWE_coefs = np.array([x for x in df_norm['LWE coefs'].to_numpy()])
@@ -265,14 +478,65 @@ Y_pca = pca.transform(LWE_coefs)
 # Make dataframes from the PCA results
 X_train, X_test, y_train_pca, y_test_pca = train_test_split(X, Y_pca, test_size=0.2, random_state=42)
 
-gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42, verbose=1)
-mor = MultiOutputRegressor(gbr, n_jobs=-1, verbose=1)
+# gbr = GradientBoostingRegressor(n_estimators=100, learning_rate=0.1, max_depth=7, random_state=42, verbose=1)
+# mor = MultiOutputRegressor(gbr, n_jobs=-1, verbose=1)
+
+# Try simpler model for individual coefficients
+xgb_model = xgb.XGBRegressor(
+    n_estimators=500,     # More trees
+    learning_rate=0.02,   # Lower learning rate
+    max_depth=4,          # Shallower trees
+    subsample=0.9,
+    colsample_bytree=0.9,
+    reg_alpha=0.5,        # More L1 regularization
+    reg_lambda=0.5,       # More L2 regularization
+    random_state=42,
+    n_jobs=-1
+)
+mor = MultiOutputRegressor(xgb_model, n_jobs=-1)
 mor.fit(X_train, y_train_pca)
+
+
 y_pred_pca = mor.predict(X_test)
 
 y_pred  = df_transforms_fitted['LWE coefs'].inverse(pca.inverse_transform(y_pred_pca))
 y_test  = df_transforms_fitted['LWE coefs'].inverse(pca.inverse_transform(y_test_pca))
 y_train = df_transforms_fitted['LWE coefs'].inverse(pca.inverse_transform(y_train_pca))
+
+#%% Evaluate LWE coefficients prediction performance
+print("\n" + "="*60)
+print("LWE COEFFICIENTS PREDICTION METRICS")
+print("="*60)
+
+# Calculate metrics for each coefficient
+coef_metrics = []
+for i in range(y_pred.shape[1]):
+    r2_coef    = r2_score(y_test[:, i], y_pred[:, i])
+    mape_coef  = mean_absolute_percentage_error(np.abs(y_test[:, i]) + 1e-8, np.abs(y_pred[:, i]) + 1e-8)  # Add small epsilon for numerical stability
+    evp_coef   = explained_variance_score(y_test[:, i], y_pred[:, i])
+    medae_coef = median_absolute_error(y_test[:, i], y_pred[:, i])
+    
+    coef_metrics.append({
+        'coefficient': i,
+        'r2':    r2_coef,
+        'mape':  mape_coef,
+        'evp':   evp_coef,
+        'medae': medae_coef
+    })
+    
+    print(f'Coef {i+1:2d} - R²: {r2_coef:.3f}, MAPE: {mape_coef:.3f}, EVP: {evp_coef:.3f}, MedAE: {medae_coef:.3f}')
+
+# Overall metrics (flattened arrays)
+y_test_flat = y_test.flatten()
+y_pred_flat = y_pred.flatten()
+
+r2_overall    = r2_score(y_test_flat, y_pred_flat)
+mape_overall  = mean_absolute_percentage_error(np.abs(y_test_flat) + 1e-8, np.abs(y_pred_flat) + 1e-8)
+evp_overall   = explained_variance_score(y_test_flat, y_pred_flat)
+medae_overall = median_absolute_error(y_test_flat, y_pred_flat)
+
+print(f'\n{"OVERALL":>8} - R²: {r2_overall:.3f}, MAPE: {mape_overall:.3f}, EVP: {evp_overall:.3f}, MedAE: {medae_overall:.3f}')
+print("="*60)
 
 #%%
 from joblib import dump, load
@@ -305,7 +569,13 @@ y_pred_norm *= WFE_pred_pow[:,None]
 WFE_pred = np.linalg.norm(y_pred_norm, ord=2, axis=1)
 WFE_test = np.linalg.norm(y_test, ord=2, axis=1)
 
-plt.scatter(WFE_test, WFE_pred, s=2)
+test_df = pd.DataFrame({
+    'LWE predicted (from coefs)':   WFE_pred,
+    'LWE from fitted (from coefs)': WFE_test,
+})
+corr_plot(test_df, 'LWE predicted (from coefs)', 'LWE from fitted (from coefs)', lims=[0, 200])
+
+# plt.scatter(WFE_test, WFE_pred, s=2)
 # plt.scatter(WFE_pred, WFE_pred_pow, s=2)
 
 # plt.xlim(0, 200)

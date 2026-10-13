@@ -7,9 +7,9 @@ Numerical test of the adapted `development/run_tiptop_random_carlo.py` against E
    (`PathPupil` excepted, `NumberPhotons` of the LO sensor within 3 % because the magnitude is rounded in the file name).
 2. PSF reproduction: every pregenerated `.ini` is re-simulated with the astro-tiptop checkouts on `sys.path` (pupil path
    localized) and compared with the stored PSF cube (relative L2 < 1e-6) and header metrics (SR, FWHM, EE50).
-3. Metrics: `ETC_psf_metrics.tiptop_metrics` reproduces the stored header SR / FWHM / EE50 from the PSF arrays.
+3. Metrics: `tools.ETC_tools.tiptop_metrics` reproduces the stored header SR / FWHM / EE50 from the PSF arrays.
 
-Needs the astro-tiptop checkouts pinned at TIPTOP v1.4.3, P3 v1.6.0, MASTSEL v1.5.0 (see `development/tiptop_env.py`), the
+Needs the astro-tiptop checkouts pinned at TIPTOP v1.4.3, P3 v1.6.0, MASTSEL v1.5.0 (see `tools/tiptop_env.py`), the
 local VLT pupil in `data/calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits` and ~1 min on a GPU.
 Run from the repository root in the `TipTorch` conda env:
 
@@ -28,12 +28,13 @@ import numpy as np
 from astropy.io import fits
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / 'development'))
+for _p in (REPO_ROOT, REPO_ROOT / 'development'): # `tools` (tiptop_env, ETC_tools) and the development scripts
+    sys.path.insert(0, str(_p))
 
-import tiptop_env  # noqa: F401
+from tools import tiptop_env  # noqa: F401
 from tiptop.tiptop import overallSimulation
 import run_tiptop_random_carlo as rc
-from ETC_psf_metrics import load_pupil, tiptop_metrics, read_psf_file, normalize_psf
+from tools.ETC_tools import load_pupil, tiptop_metrics, read_psf_file, normalize_psf
 
 PREGENERATED = REPO_ROOT / 'data' / 'Enrico_ETC' / 'pregenerated_random_PSFs'
 L0_TO_TC = {v: k for k, v in rc.L0.items()}

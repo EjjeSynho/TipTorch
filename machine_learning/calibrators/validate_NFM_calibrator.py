@@ -11,6 +11,10 @@ from copy import deepcopy
 from pathlib import Path
 from scipy.stats import pearsonr, spearmanr
 
+import sys
+# machine_learning/ on sys.path (the `calibrators` package), from a script or from IPython cells
+_here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
+sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
 from tiptorch.tools.utils import r0
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
@@ -24,7 +28,8 @@ from calibrators.NFM_calibrator import (
     load_telemetry_preprocessor,
     release_gpu_memory,
     telemetry_base_params,
-    Cn2_grid_features_from_GLF
+    Cn2_grid_features_from_GLF,
+    CONFIGS_FOLDER
 )
 from data_processing.Cn2_profile import Cn2Grid
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
@@ -37,8 +42,10 @@ DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 
 #%%
 # ── Load training config ──────────────────────────────────────────────────────
+# The validation takes the config the calibrator was trained with (calibrators/configs/NFM_calibrator_config.json or
+# NFM_factor_calibrator_config.json): it rebuilds the same PSF model / trainer and reads the run's weights from weights_subdir / name.
 _vparser = argparse.ArgumentParser(description="Validate NFM Calibrator")
-_vparser.add_argument('--config', type=str, default=None, help='Path to the JSON config used for training')
+_vparser.add_argument('--config', type=str, default=None, help='JSON config used for training (default: calibrators/configs/NFM_calibrator_config.json)')
 try:
     _vargs       = _vparser.parse_args()
     _config_path = Path(_vargs.config) if _vargs.config else None
@@ -50,10 +57,8 @@ if _config_path and _config_path.exists():
         cfg = json.load(_f)
 
 elif 'cfg' not in dir():
-    # Fall back to NFM_calibrator_config.json in the same directory as this script.
-    # Works for both CLI (uses __file__) and plain IPython (uses cwd).
-    _script_dir = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd()
-    _default_cfg_path = _script_dir / 'NFM_calibrator_config.json'
+    # Fall back to the direct calibrator's config in calibrators/configs/
+    _default_cfg_path = CONFIGS_FOLDER / 'NFM_calibrator_config.json'
     
     if _default_cfg_path.exists():
         with open(_default_cfg_path) as _f:

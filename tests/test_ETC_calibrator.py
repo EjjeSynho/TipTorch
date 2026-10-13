@@ -2,7 +2,7 @@
 Checks of `machine_learning/calibrators/ETC_calibrator.py`: TC constants and regime switches agree with Enrico's Monte Carlo
 script, ETC tables are consistent, and both predictors render finite PSFs through `ETCPSFRenderer`.
 
-Requires the ETC bundle (`train_ETC_calibrator.py`), the astro-tiptop checkouts (`development/tiptop_env.py`) and a CUDA device.
+Requires the ETC bundle (`train_ETC_calibrator.py`), the astro-tiptop checkouts (`tools/tiptop_env.py`) and a CUDA device.
 Run from the repository root: python tests/test_ETC_calibrator.py
 """
 
@@ -39,7 +39,7 @@ def test_etc_table():
 
 
 def test_predictors():
-    with open(REPO_ROOT / 'machine_learning' / 'ETC_calibrator_config.json') as f:
+    with open(REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'ETC_calibrator_config.json') as f:
         cfg = json.load(f)
     with open(WEIGHTS_FOLDER / cfg['weights_subdir'] / f'{cfg["name"]}_meta.json') as f:
         etc_cal = E.ETCCalibrator(json.load(f)['bundle_path'])

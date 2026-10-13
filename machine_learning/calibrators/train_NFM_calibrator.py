@@ -21,8 +21,11 @@ from copy import deepcopy
 from pathlib import Path
 from datetime import datetime
 
+# machine_learning/ on sys.path (the `calibrators` package), from a script or from IPython cells
+_here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
+sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
-from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory
+from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory, CONFIGS_FOLDER
 
 # ── JSON config ───────────────────────────────────────────────────────────────
 # All training settings live in an external JSON file; pass it via --config.
@@ -56,7 +59,7 @@ DEFAULT_CONFIG = {
         "Z_mode_max":     9
     },
     "calibrator": {
-        "type":         "direct", # "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors, NFM_factor_calibrator_config.json)
+        "type":         "direct", # "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors, configs/NFM_factor_calibrator_config.json)
         "hidden_dim":   48,
         "dropout_rate": 0.2,
         "factor_keys":  ["r0", "L0", "wind_speed_single", "Cn2_weights"], # factor type only: parameters predicted as log-factors on telemetry priors
@@ -109,8 +112,11 @@ DEFAULT_CONFIG = {
     "max_train_samples":  None
 }
 
+# The training configs live in calibrators/configs/ (NFM_calibrator_config.json: direct calibrator, NFM_factor_calibrator_config.json:
+# factor calibrator). The JSON given with --config overrides DEFAULT_CONFIG above section by section; without --config the direct one is used.
+# The validation / ablation / comparison scripts take the same file to rebuild the identical setup and find the run's weights.
 _parser = argparse.ArgumentParser(description="Train NFM Calibrator")
-_parser.add_argument('--config', type=str, default=None, help='Path to JSON training config file')
+_parser.add_argument('--config', type=str, default=str(CONFIGS_FOLDER / 'NFM_calibrator_config.json'), help='JSON training config (default: calibrators/configs/NFM_calibrator_config.json)')
 _parser.add_argument('--device', type=str, default=None, help="Torch device, e.g. 'cuda:1' (default: the one of project_config.json)")
 
 try:
@@ -147,7 +153,7 @@ WEIGHTS_DIR_CALIB = WEIGHTS_FOLDER / cfg["weights_subdir"]
 BEST_CALIB_PATH   = WEIGHTS_DIR_CALIB / f'{cfg["name"]}_checkpoint.pth'
 
 # ── Logging ───────────────────────────────────────────────────────────────────
-log_dir = Path('../data/logs')
+log_dir = DATA_FOLDER / 'logs' # the data folder of project_config.json, independent of the working directory
 log_dir.mkdir(parents=True, exist_ok=True)
 log_filename = log_dir / f'training_NFM_{datetime.now().strftime("%Y%m%d_%H%M%S")}.log'
 
