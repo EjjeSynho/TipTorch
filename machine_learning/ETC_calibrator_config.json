@@ -1,0 +1,52 @@
+{
+  "name": "ETC_calibrator",
+  "weights_subdir": "ETC_calibrator",
+  "psfr_config": "machine_learning/NFM_calibrator_config.json",
+  "batch_size": 16,
+
+  "pool": {
+    "k": 10
+  },
+
+  "direct_net": {
+    "enabled": true,
+    "hidden_dim": 32,
+    "dropout_rate": 0.1,
+    "lr": 0.01,
+    "num_epochs": 300,
+    "patience": 25,
+    "pretrain_epochs": 150,
+    "pretrain_patience": 20,
+    "pretrain_standardize": true,
+    "lambda_step": 1,
+    "random_state": 43,
+    "train_heights": "median"
+  },
+
+  "model": {
+    "LO_NCPAs": true,
+    "chrom_defocus": false,
+    "use_Moffat": false,
+    "retain_PSDs": false,
+    "N_spline_nodes": 5,
+    "Z_mode_max": 9
+  },
+
+  "loss": {
+    "type": "balanced",
+    "radial_power": 2.0,
+    "r_max": 40.0,
+    "asinh_k": 3.0,
+    "huber_delta": 0.1,
+    "scale": 3.0,
+    "match_background": false,
+    "legacy_weight": 0.0,
+    "LO_sign_penalty": false
+  },
+
+  "fixed_params": [
+    "Jxy", "bg_ctrl", "dx_ctrl", "dy_ctrl",
+    "F_norm", "F_norm_lambda_ctrl", "src_dirs_x", "src_dirs_y",
+    "wind_dir_single", "F_norm_λ_ctrl"
+  ]
+}

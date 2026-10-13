@@ -1570,7 +1570,9 @@ class TipTorch(torch.nn.Module):
         # Resulting combined OTF
         self.OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
         # self.OTF = OTF_static
-        self.OTF_norm = pdims(self.OTF.abs()[..., self.nOtf//2, self.nOtf//2], 2)
+        # Index before abs(): the gradient of abs() is z/|z|, NaN where the OTF underflows to exactly zero (far wings at low r0),
+        # and 0 * NaN from the indexing then poisons the whole batch in the backward pass
+        self.OTF_norm = pdims(self.OTF[..., self.nOtf//2, self.nOtf//2].abs(), 2)
         self.OTF = self.OTF / self.OTF_norm
         
         # Computing final PSF

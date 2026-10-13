@@ -152,8 +152,9 @@ except Exception as e:
     use_cupy = False
     warnings.warn(f"Error during CuPy/GPU detection or initialization:\n {str(e)}. Using NumPy instead.")
 
-# Update the project settings with the resolved device and backend information
-update_config(project_settings)
+# The resolved device is kept in memory only. It must not be written back to project_config.json: the resolution depends on
+# the process environment (CUDA_VISIBLE_DEVICES, a CPU-only run), and persisting it silently replaced the user's preference
+# (e.g. 'cuda:1') by 'cpu' or 'cuda:0' for every later run.
 
 
 # =============== Lazy resource synchronization ================

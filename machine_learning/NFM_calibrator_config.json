@@ -1,23 +1,26 @@
 {
   "name": "best_calibrator",
   "debug": false,
+  "seed": 43,
   "batch_size": 16,
   "continue_training": false,
+  "reuse_pretrain": false,
   "run_kfold_difficulty": false,
   "kfolds": 5,
   "kfold_epochs": 120,
   "kfold_patience": 12,
-  "difficulty_alpha": 0.30,
-  "difficulty_clip_min": 0.50,
-  "difficulty_clip_max": 2.00,
-
+  "difficulty_alpha": 0.3,
+  "difficulty_clip_min": 0.5,
+  "difficulty_clip_max": 2.0,
   "tune": {
     "enabled": false,
-    "params": ["F_ctrl", "dn"],
+    "params": [
+      "F_ctrl",
+      "dn"
+    ],
     "num_epochs": 20,
-    "lr": 1e-3
+    "lr": 0.001
   },
-
   "model": {
     "LO_NCPAs": true,
     "chrom_defocus": false,
@@ -26,12 +29,11 @@
     "N_spline_nodes": 5,
     "Z_mode_max": 9
   },
-
   "calibrator": {
+    "type": "direct",
     "hidden_dim": 48,
     "dropout_rate": 0.2
   },
-
   "trainer": {
     "lr": 0.01,
     "lambda_step": 1,
@@ -49,7 +51,6 @@
     "pretrain_patience": 15,
     "pretrain_standardize": true
   },
-
   "loss": {
     "type": "balanced",
     "radial_power": 2.0,
@@ -59,22 +60,39 @@
     "scale": 3.0,
     "match_background": false,
     "legacy_weight": 0.0,
-    "LO_sign_penalty": false
+    "LO_sign_penalty": false,
+    "fit_reg_weight": 0.0
   },
-
   "fixed_params": [
-    "Jxy", "bg_ctrl", "dx_ctrl", "dy_ctrl",
-    "F_norm", "F_norm_lambda_ctrl", "src_dirs_x", "src_dirs_y",
-    "wind_dir_single", "F_norm_λ_ctrl"
+    "Jxy",
+    "bg_ctrl",
+    "dx_ctrl",
+    "dy_ctrl",
+    "F_norm",
+    "F_norm_lambda_ctrl",
+    "src_dirs_x",
+    "src_dirs_y",
+    "wind_dir_single",
+    "F_norm_\u03bb_ctrl"
   ],
-
   "weights_subdir": "NFM_calibrator",
   "max_train_samples": null,
   "ablation": {
-    "sample_counts":  [10, 20, 50, 100, 150, 200, 250, 300, 350, 400],
-    "n_repeats":      5,
-    "base_seed":      200,
-    "output_subdir":  "NFM_data_ablation",
+    "sample_counts": [
+      10,
+      20,
+      50,
+      100,
+      150,
+      200,
+      250,
+      300,
+      350,
+      400
+    ],
+    "n_repeats": 5,
+    "base_seed": 200,
+    "output_subdir": "NFM_data_ablation",
     "include_full_dataset": true
   }
 }

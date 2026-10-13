@@ -25,6 +25,13 @@ read), a CUDA device (~1 min for 466 samples) and the astro-tiptop checkouts for
 Run from the repository root in the `TipTorch` conda env:
 
     python development/run_tiptorch_random_carlo.py [--batch-size 16] [--seed 0] [--overwrite]
+
+With `--predictor NAME` the ETC calibrator bundle (`machine_learning/train_ETC_calibrator.py`, presets in
+`calibrators.ETC_calibrator.PREDICTOR_PRESETS`: impute, gaussian, donor, donor-profile, donor-params, direct-net, ...) replaces the
+recipe above: the sampled conditions are passed to the predictor (one draw per row for stochastic predictors) and the PSFs are
+rendered by `ETCPSFRenderer`; the default output folder becomes `tiptorch_random_PSFs_<NAME>/`:
+
+    python development/run_tiptorch_random_carlo.py --predictor donor-params [--etc-bundle PATH]
 """
 
 import sys
@@ -46,12 +53,14 @@ from tiptorch._config import DATA_FOLDER, WEIGHTS_FOLDER, default_device, projec
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 from calibrators.NFM_calibrator import NFMCalibrator, release_gpu_memory
+from calibrators.ETC_calibrator import ETCCalibrator, PREDICTOR_PRESETS, etc_table_from_stars
 
 import tiptop_env  # noqa: F401
 import run_tiptop_random_carlo as rc
 from ETC_psf_metrics import load_pupil, tiptop_metrics, write_psf_file, crop_center, normalize_psf, PIXEL_SCALE_MAS, PSF_SIZE
 
 ETC_FOLDER    = REPO_ROOT / 'data' / 'Enrico_ETC'
+ETC_CONFIG    = REPO_ROOT / 'machine_learning' / 'ETC_calibrator_config.json'
 OUTPUT_DIR    = ETC_FOLDER / 'tiptorch_random_PSFs'
 STARS_TABLE   = ETC_FOLDER / 'generated_random_PSFs' / 'stars.fits'
 CONFIG_PATH   = REPO_ROOT / 'machine_learning' / 'NFM_calibrator_config.json'
@@ -202,6 +211,52 @@ def simulate_chunk(chunk_configs, chunk_telemetry, calibrator, cfg):
     return PSFs, PSFs_DL, flatten_predictions(x_dict_pred)
 
 
+def etc_bundle_path(config_path=ETC_CONFIG):
+    with open(config_path) as f:
+        cfg = json.load(f)
+    with open(WEIGHTS_FOLDER / cfg['weights_subdir'] / f'{cfg["name"]}_meta.json') as f:
+        return Path(json.load(f)['bundle_path'])
+
+
+def simulate_with_predictor(stars, predictor_name, out_dir, bundle_path=None, batch_size=16, seed=0, overwrite=False):
+    """ Monte Carlo PSFs of the observation table with an ETC calibrator predictor (one draw per row), TIPTOP's FITS layout """
+    etc_cal = ETCCalibrator(bundle_path or etc_bundle_path(), device=default_device)
+    kind, kw, heights_policy, _ = PREDICTOR_PRESETS[predictor_name]
+    predictor = etc_cal.predictor(kind, **kw)
+    renderer  = etc_cal.renderer(rc.WAVELENGTHS, heights_policy=heights_policy, batch_size=batch_size)
+    etc = etc_table_from_stars(stars)
+    names = [rc.sample_name(row, row['index']) for row in stars]
+    todo  = [i for i, n in enumerate(names) if overwrite or not all((out_dir / f'{w}nm' / f'{n}.fits').exists() for w in rc.WAVELENGTHS)]
+    print(f'{predictor.name}: {len(todo)} samples to simulate ({len(names) - len(todo)} already present) -> {out_dir}')
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for wave in rc.WAVELENGTHS:
+        (out_dir / f'{wave}nm').mkdir(exist_ok=True)
+    if not todo:
+        return
+    PSFs, pred, PSFs_DL = renderer.render(predictor, etc.iloc[todo].reset_index(drop=True), np.random.default_rng(seed), n_draws=1, return_DL=True, verbose=True)
+    PSFs, PSFs_DL = crop_center(PSFs.numpy(), PSF_SIZE), crop_center(PSFs_DL.numpy(), PSF_SIZE)
+    pupil = load_pupil(PUPIL_PATH)
+    for b, i in enumerate(todo):
+        row = stars[i]
+        header_items = {f'sample {k}': row[k] for k in stars.colnames}
+        header_items.update({'sample predictor': predictor.name, 'sample donor': int(pred['donor'].iloc[b]), 'telescope ZenithAngle': float(etc['zenith_deg'].iloc[i])})
+        for wi, wave in enumerate(rc.WAVELENGTHS):
+            psf = normalize_psf(PSFs[b, wi])
+            sr, fwhm, ee = tiptop_metrics(psf, wave, pupil, PIXEL_SCALE_MAS)
+            write_psf_file(out_dir / f'{wave}nm' / f'{names[i]}.fits', psf, normalize_psf(PSFs_DL[b, wi]), wave, PIXEL_SCALE_MAS, {'sr': sr, 'fwhm': fwhm, 'ee': ee}, header_items)
+    pred = pred.drop(columns=['draw'])
+    pred_path = out_dir / 'predicted_params.fits'
+    pred_table = Table.from_pandas(pred)
+    if pred_path.exists() and not overwrite:
+        from astropy.table import vstack
+        old = Table.read(pred_path)
+        old = old[~np.isin(old['index'], pred_table['index'])]
+        pred_table = vstack([old, pred_table]) if len(old) else pred_table
+    pred_table.sort('index')
+    pred_table.write(pred_path, overwrite=True)
+    print(f'Predicted model parameters -> {pred_path}')
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--stars', type=Path, default=STARS_TABLE, help='Observation table shared with run_tiptop_random_carlo.py')
@@ -210,12 +265,19 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=16)
     parser.add_argument('--seed', type=int, default=0, help='Seed for the choice of the template observations')
     parser.add_argument('--overwrite', action='store_true', help='Re-simulate samples whose PSF files already exist')
+    parser.add_argument('--predictor', default=None, choices=list(PREDICTOR_PRESETS), help='ETC calibrator predictor instead of the recipe above')
+    parser.add_argument('--etc-bundle', type=Path, default=None, help='ETC calibrator bundle (default: from ETC_calibrator_config.json metadata)')
     args = parser.parse_args()
 
     if not args.stars.exists():
         rc.load_or_generate_stars(args.stars)
     stars = Table.read(args.stars)
     print(f'{len(stars)} observations from {args.stars}')
+
+    if args.predictor is not None:
+        out_dir = args.out_dir if args.out_dir != OUTPUT_DIR else OUTPUT_DIR.with_name(f'{OUTPUT_DIR.name}_{args.predictor}')
+        simulate_with_predictor(stars, args.predictor, out_dir, args.etc_bundle, args.batch_size, args.seed, args.overwrite)
+        sys.exit(0)
 
     cfg, meta, bundle_path = load_calibrator_setup(args.config)
     calibrator = NFMCalibrator(bundle_path, device=default_device)

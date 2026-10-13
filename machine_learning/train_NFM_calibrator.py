@@ -10,6 +10,7 @@ except NameError:
 import os
 import sys
 import json
+import random
 import logging
 import argparse
 import pickle
@@ -21,7 +22,7 @@ from pathlib import Path
 from datetime import datetime
 
 from tiptorch._config import *
-from calibrators.NFM_calibrator import SmallCalibratorNet, NFMCalibratorTrainer, NFMDataset, release_gpu_memory
+from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory
 
 # ── JSON config ───────────────────────────────────────────────────────────────
 # All training settings live in an external JSON file; pass it via --config.
@@ -29,8 +30,10 @@ from calibrators.NFM_calibrator import SmallCalibratorNet, NFMCalibratorTrainer,
 DEFAULT_CONFIG = {
     "name":                 "best_calibrator",
     "debug":                True,
+    "seed":                 43,
     "batch_size":           16,
-    "continue_training":    True,
+    "continue_training":    False,
+    "reuse_pretrain":       False,
     "run_kfold_difficulty": False,
     "kfolds":               5,
     "kfold_epochs":         120,
@@ -53,6 +56,7 @@ DEFAULT_CONFIG = {
         "Z_mode_max":     9
     },
     "calibrator": {
+        "type":         "direct", # "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors)
         "hidden_dim":   48,
         "dropout_rate": 0.2
     },
@@ -85,7 +89,9 @@ DEFAULT_CONFIG = {
         "scale":            3.0,
         "match_background": False,
         "legacy_weight":    0.0,
-        "LO_sign_penalty":  False
+        "LO_sign_penalty":  False,
+        "fit_reg_weight":   0.0,  # parameter-space distance to the per-sample fits, see NFMCalibratorTrainer._regularization
+        "shrink_weight":    0.0   # factor calibrator only: shrinkage of the corrections towards the prior
     },
     "fixed_params": [
         "Jxy", "bg_ctrl",
@@ -100,10 +106,13 @@ DEFAULT_CONFIG = {
 
 _parser = argparse.ArgumentParser(description="Train NFM Calibrator")
 _parser.add_argument('--config', type=str, default=None, help='Path to JSON training config file')
+_parser.add_argument('--device', type=str, default=None, help="Torch device, e.g. 'cuda:1' (default: the one of project_config.json)")
 
 try:
     _cli        = _parser.parse_args()
     _cfg_path   = Path(_cli.config) if _cli.config else None
+    if _cli.device:
+        default_device = torch.device(_cli.device) # overrides the project setting for this run only
 except SystemExit:
     _cfg_path   = None
 
@@ -152,6 +161,12 @@ logger.info(f"Log file: {log_filename}")
 if _cfg_path:
     logger.info(f"Config loaded from: {_cfg_path}")
 
+# ── Reproducibility ───────────────────────────────────────────────────────────
+# Seeds the network initialization, the batch order and the dropout masks, so that runs differing only in the config (e.g. the
+# loss) are comparable. The train/val split does not depend on it: it is stored in the dataset cache (see trainer.random_state).
+random.seed(cfg["seed"]); np.random.seed(cfg["seed"]); torch.manual_seed(cfg["seed"])
+logger.info(f"Seed: {cfg['seed']}")
+
 
 #%%
 dataset     = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
@@ -159,73 +174,27 @@ N_wvl_total = dataset.C
 logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W})")
 
 #%%
-# Initialize the PSF model with a representative batch config
-from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
-
-_tmp_batch  = tuple([dataset[i] for i in np.random.randint(0, len(dataset), size=cfg["batch_size"])])
-_, _, _, _tmp_config, _ = dataset.collate_batch(_tmp_batch, device=default_device)
+# PSF model, calibrator network (direct or factor, see cfg["calibrator"]["type"]), outputs transformer and trainer
+# When continuing training from existing weights, start with a smaller learning rate than a fresh run to avoid disrupting
+# the already-converged calibrator.
+trainer_lr = 2.5e-3 if cfg["continue_training"] else cfg["trainer"]["lr"]
 
 if 'PSF_model' in locals():
     del PSF_model
 
-with torch.no_grad():
-    PSF_model = PSFModelNFM(
-        _tmp_config,
-        multiple_obs   = True,
-        LO_NCPAs       = cfg["model"]["LO_NCPAs"],
-        chrom_defocus  = cfg["model"]["chrom_defocus"],
-        use_Moffat     = cfg["model"]["use_Moffat"],
-        retain_PSDs    = cfg["model"]["retain_PSDs"],
-        N_spline_nodes = cfg["model"]["N_spline_nodes"],
-        Z_mode_max     = cfg["model"]["Z_mode_max"],
-        device         = default_device,
-    )
-    
-del _tmp_batch, _tmp_config
+PSF_model, calibrator, outputs_transformer, trainer = build_NFM_trainer(
+    cfg         = {**cfg, "trainer": {**cfg["trainer"], "lr": trainer_lr}},
+    dataset     = dataset,
+    device      = default_device,
+    weights_dir = WEIGHTS_DIR_CALIB, # keep split / pretrain / meta / bundle next to the checkpoint
+    seed        = cfg["seed"],
+)
 release_gpu_memory(sync=True)
-
-# fixed_params = [
-#     'Jxy', 'bg_ctrl', 'dx_ctrl', 'dy_ctrl', 'L0',
-#     'F_norm', 'F_norm_lambda_ctrl', 'src_dirs_x', 'src_dirs_y',
-#     'wind_speed_single', 'wind_dir_single', 'F_norm_λ_ctrl'
-# ]
-
-fixed_params = cfg["fixed_params"]
-
-# Remove parameters that are fixed externally and do not need to be predicted
-for _key in fixed_params:
-    try:
-        PSF_model.inputs_manager.delete(_key)
-    except Exception:
-        pass   # key may have an alternate name; delete what is present
-
-if PSF_model.use_Moffat:
-    PSF_model.inputs_manager.delete('theta')
-    PSF_model.inputs_manager.delete('ratio')
-
-predict_LO_NCPAs    = cfg["trainer"]["predict_LO_NCPAs"]
-predict_Cn2_profile = cfg["trainer"]["predict_Cn2_profile"]
-predict_wind_speed  = cfg["trainer"]["predict_wind_speed"]
-
-PSF_model.inputs_manager.set_optimizable(['LO_coefs'],          predict_LO_NCPAs)
-PSF_model.inputs_manager.set_optimizable(['Cn2_weights'],       predict_Cn2_profile)
-PSF_model.inputs_manager.set_optimizable(['wind_speed_single'], predict_wind_speed)
-
 print(PSF_model.inputs_manager)
-
-#%%
-# Build the outputs transformer: maps calibrator predictions <-> PSF model inputs
-outputs_transformer = deepcopy(PSF_model.inputs_manager.get_transformer())
-_buf = outputs_transformer.unstack(PSF_model.inputs_manager.stack())
-if 'LO_coefs' in _buf:
-    _buf['LO_coefs'] = _buf['LO_coefs'][:, 1:] # strip phase-bump column; not predicted
-_ = outputs_transformer.stack(_buf)
-del _buf
 
 N_outputs  = outputs_transformer.get_stacked_size()
 N_features = len(dataset.features)
-release_gpu_memory()
-print(f"Calibrator: {N_features} inputs -> {N_outputs} outputs")
+print(f"Calibrator ({trainer.calibrator_type}): {N_features} inputs -> {N_outputs} outputs")
 
 # Build readable output names from the transformer
 output_names = []
@@ -236,39 +205,6 @@ for param_name, slc in outputs_transformer.slices.items():
     else:
         output_names.extend([f"{param_name}[{i}]" for i in range(width)])
 
-#%%
-# Calibrator network  (can be swapped for any nn.Module with the same I/O contract)
-calibrator = SmallCalibratorNet(
-    n_features   = N_features,
-    n_outputs    = N_outputs,
-    hidden_dim   = cfg["calibrator"]["hidden_dim"],
-    dropout_rate = cfg["calibrator"]["dropout_rate"],
-).to(default_device)
-
-
-# When continuing training from existing weights, start with a smaller learning
-# rate than a fresh run to avoid disrupting the already-converged calibrator.
-trainer_lr = 2.5e-3 if cfg["continue_training"] else cfg["trainer"]["lr"]
-
-# Instantiate the trainer
-trainer = NFMCalibratorTrainer(
-    PSF_model           = PSF_model,
-    calibrator          = calibrator,
-    dataset             = dataset,
-    outputs_transformer = outputs_transformer,
-    device              = default_device,
-    batch_size          = cfg["batch_size"],
-    lr                  = trainer_lr,
-    lambda_step         = cfg["trainer"]["lambda_step"],
-    predict_LO_NCPAs    = predict_LO_NCPAs,
-    predict_Cn2_profile = predict_Cn2_profile,
-    random_state        = cfg["trainer"]["random_state"],
-    pre_init_astrometry = cfg["trainer"]["pre_init_astrometry"],
-    optimize_astrometry = cfg["trainer"]["optimize_astrometry"],
-    collate_fn          = NFMDataset.collate_batch,
-    loss_cfg            = cfg["loss"],
-    weights_dir         = WEIGHTS_DIR_CALIB, # keep split / pretrain / meta / bundle next to the checkpoint
-)
 # The trainer takes the train/val split stored in the dataset cache (grouped by acquisition time)
 logger.info(f"Split: {len(trainer.train_idx)} train / {len(trainer.val_idx)} val "
             f"({'stored in the dataset cache' if dataset.train_idx is not None else 'random, dataset cache has no split'})")
@@ -296,17 +232,18 @@ np.savez(
 logger.info(f"Dataset split saved -> {_split_path}")
 
 #%% ===========================  Pretraining ==================================================
+# The pretraining does not depend on the PSF loss, so runs that compare losses can start from the same warm start (reuse_pretrain)
 pretrain_path = trainer.weights_dir / 'pretrain_weights.pth'
-if (not cfg["continue_training"]) or not pretrain_path.exists():
+if pretrain_path.exists() and (cfg["continue_training"] or cfg["reuse_pretrain"]):
+    calibrator.load_state_dict(torch.load(pretrain_path, map_location=default_device))
+    logger.info(f"Loaded pretrain weights from {pretrain_path}")
+else:
     trainer.pretrain(
         num_epochs  = cfg["trainer"]["pretrain_epochs"],
         patience    = cfg["trainer"]["pretrain_patience"],
         save_path   = pretrain_path,
         standardize = cfg["trainer"]["pretrain_standardize"],
     )
-else:
-    calibrator.load_state_dict(torch.load(pretrain_path, map_location=default_device))
-    logger.info(f"Loaded pretrain weights from {pretrain_path}")
 
 release_gpu_memory(sync=True)
 
@@ -367,6 +304,7 @@ if _kfold_dir.exists():
 # ── Save post-training metadata ───────────────────────────────────────────────
 _meta = {
     "name":                  cfg["name"],
+    "calibrator_type":       trainer.calibrator_type,
     "checkpoint_path":       str(BEST_CALIB_PATH),
     "split_path":            str(_split_path),
     "bundle_path":           str(trainer.weights_dir / f'{cfg["name"]}_bundle.pth'),
@@ -384,6 +322,7 @@ _meta = {
 _meta_path = trainer.weights_dir / f'{cfg["name"]}_meta.json'
 with open(_meta_path, 'w') as _f:
     json.dump(_meta, _f, indent=2)
+
 logger.info(f"Training metadata saved -> {_meta_path}")
 
 # Export the bundle here, before the non-interactive exit below: otherwise CLI runs leave a stale bundle from a

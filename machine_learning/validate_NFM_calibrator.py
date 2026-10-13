@@ -14,11 +14,14 @@ from scipy.stats import pearsonr, spearmanr
 from tiptorch._config import *
 from tiptorch.tools.utils import r0
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
+from data_processing.telemetry_preprocessor import TelemetryPreprocessor
 from calibrators.NFM_calibrator import (
     SmallCalibratorNet,
     NFMCalibrator,
     NFMCalibratorTrainer,
     NFMDataset,
+    build_NFM_trainer,
+    load_NFM_calibrator,
     load_telemetry_preprocessor,
     release_gpu_memory
 )
@@ -87,69 +90,7 @@ if 'trainer' not in dir():
     dataset = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
     logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W})")
 
-    _tmp_batch  = tuple([dataset[i] for i in np.random.randint(0, len(dataset), size=cfg['batch_size'])])
-    _, _, _, _tmp_config, _ = NFMDataset.collate_batch(_tmp_batch, default_device)
-
-    with torch.no_grad():
-        PSF_model = PSFModelNFM(
-            _tmp_config,
-            multiple_obs   = True,
-            LO_NCPAs       = cfg['model']['LO_NCPAs'],
-            chrom_defocus  = cfg['model']['chrom_defocus'],
-            use_Moffat     = cfg['model']['use_Moffat'],
-            retain_PSDs    = cfg['model']['retain_PSDs'],
-            N_spline_nodes = cfg['model']['N_spline_nodes'],
-            Z_mode_max     = cfg['model']['Z_mode_max'],
-            device         = default_device,
-        )
-    del _tmp_batch, _tmp_config
-
-    for _key in cfg['fixed_params']:
-        try:
-            PSF_model.inputs_manager.delete(_key)
-        except Exception:
-            pass
-    
-    if PSF_model.use_Moffat:
-        PSF_model.inputs_manager.delete('theta')
-        PSF_model.inputs_manager.delete('ratio')
-
-    PSF_model.inputs_manager.set_optimizable(['LO_coefs'],          cfg['trainer']['predict_LO_NCPAs'])
-    PSF_model.inputs_manager.set_optimizable(['Cn2_weights'],       cfg['trainer']['predict_Cn2_profile'])
-    PSF_model.inputs_manager.set_optimizable(['wind_speed_single'], cfg['trainer']['predict_wind_speed'])
-
-    outputs_transformer = deepcopy(PSF_model.inputs_manager.get_transformer())
-    _buf = outputs_transformer.unstack(PSF_model.inputs_manager.stack())
-    
-    if 'LO_coefs' in _buf:
-        _buf['LO_coefs'] = _buf['LO_coefs'][:, 1:]
-    _ = outputs_transformer.stack(_buf)
-    del _buf
-
-    calibrator = SmallCalibratorNet(
-        n_features   = train_meta['N_features'],
-        n_outputs    = train_meta['N_outputs'],
-        hidden_dim   = cfg['calibrator']['hidden_dim'],
-        dropout_rate = cfg['calibrator']['dropout_rate'],
-    ).to(default_device)
-
-    trainer = NFMCalibratorTrainer(
-        PSF_model           = PSF_model,
-        calibrator          = calibrator,
-        dataset             = dataset,
-        outputs_transformer = outputs_transformer,
-        device              = default_device,
-        batch_size          = cfg['batch_size'],
-        lr                  = cfg['trainer']['lr'],
-        lambda_step         = cfg['trainer']['lambda_step'],
-        predict_LO_NCPAs    = cfg['trainer']['predict_LO_NCPAs'],
-        predict_Cn2_profile = cfg['trainer']['predict_Cn2_profile'],
-        random_state        = cfg['trainer']['random_state'],
-        pre_init_astrometry = cfg['trainer']['pre_init_astrometry'],
-        optimize_astrometry = cfg['trainer']['optimize_astrometry'],
-        collate_fn          = NFMDataset.collate_batch,
-        loss_cfg            = cfg.get('loss'),
-    )
+    PSF_model, calibrator, outputs_transformer, trainer = build_NFM_trainer(cfg, dataset, default_device, weights_dir=WEIGHTS_FOLDER / cfg['weights_subdir'])
     release_gpu_memory()
     logger.info("Trainer initialized from scratch (standalone mode).")
 
@@ -223,8 +164,14 @@ for i, name in enumerate(output_names):
 #%%
 from tiptorch.tools.utils import r0
 
-# Telemetry scaler + imputer the validated calibrator was trained with
-telemetry_preprocessor = load_telemetry_preprocessor(torch.load(BEST_CALIB_PATH, map_location='cpu', weights_only=False))
+# Telemetry scaler + imputer the validated calibrator was trained with. It is stored in the bundle (the checkpoint holds only the
+# network weights); without a bundle, the one of the dataset cache is the same by construction (see NFMCalibratorTrainer.save_calibrator)
+_bundle_path = Path(train_meta['bundle_path'])
+if _bundle_path.exists():
+    telemetry_preprocessor = load_telemetry_preprocessor(torch.load(_bundle_path, map_location='cpu', weights_only=False))
+else:
+    logger.warning(f"Calibrator bundle not found at {_bundle_path}, taking the telemetry preprocessor from the dataset cache")
+    telemetry_preprocessor = TelemetryPreprocessor.from_state_dict(dataset.telemetry_preprocessor)
 
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as fh:
     muse_df = pickle.load(fh)
@@ -242,7 +189,10 @@ X['Cn2_weights_1'] = 1.0 - X['Cn2_weights_2'] - X['Cn2_weights_3']
 
 features_of_interest = list(X.keys()) + ['Cn2_weights']
 
-Y = {k: v.cpu().numpy() for k, v in trainer.outputs_transformer.unstack(NN_predictions).items() if k in features_of_interest}
+# Network outputs -> PSF-model parameters (for the factor calibrator the outputs are corrections, see FactorParameterization)
+with torch.no_grad():
+    _params = trainer._params_from_pred(NN_predictions.to(default_device), telemetry_vecs.to(default_device))
+Y = {k: v.cpu().numpy() for k, v in _params.items() if k in features_of_interest}
 Y['Cn2_weights_1'] = Y['Cn2_weights'][:, 0]
 Y['Cn2_weights_2'] = Y['Cn2_weights'][:, 1]
 Y['Cn2_weights_3'] = Y['Cn2_weights'][:, 2]
@@ -801,7 +751,7 @@ print(f"TC distribution across the validation set: {dict(sorted(Counter(ETC_TCs)
 # Batched over samples (like the DataLoader batches) and over wavelength subsets (like
 # NFMCalibratorTrainer.run_model/validate) to keep peak VRAM usage bounded and avoid OOM.
 ETC_CALIB_PATH = Path(train_meta.get('bundle_path', WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth'))
-ETC_calibrator = NFMCalibrator(ETC_CALIB_PATH, device=default_device)
+ETC_calibrator = load_NFM_calibrator(ETC_CALIB_PATH, device=default_device) # direct or factor bundle
 
 # NFMDataset stores telemetry after the same scaling/imputation pipeline used by
 # NFMCalibrator. Guard the feature ordering before passing those prepared vectors
