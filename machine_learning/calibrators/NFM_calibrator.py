@@ -447,12 +447,13 @@ class NFMCalibrator():
 
 
 
-def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 0):
+def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 0, **trainer_overrides):
     """
     PSF model, calibrator network, outputs transformer and trainer from a training config (the "model", "calibrator", "trainer",
     "loss" and "fixed_params" sections of NFM_calibrator_config.json), as train_NFM_calibrator.py builds them. Shared by the
     validation / analysis scripts so that they reproduce the training setup exactly.
 
+    trainer_overrides (e.g. train_idx, val_idx, random_state) replace the corresponding trainer arguments.
     Returns (PSF_model, calibrator, outputs_transformer, trainer).
     """
     from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
@@ -514,6 +515,7 @@ def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 
         loss_cfg            = cfg.get('loss'),
         weights_dir         = weights_dir,
     )
+    trainer_kwargs.update(trainer_overrides)
 
     if calibrator_type == 'direct':
         calibrator = SmallCalibratorNet(
@@ -798,6 +800,18 @@ class NFMCalibratorTrainer:
     def _predict(self, tel_b):
         x_pred = self.calibrator(tel_b)
         return x_pred, self._params_from_pred(x_pred, tel_b)
+
+
+    def _params_to_normalized(self, x_dict):
+        """PSF-model parameters (phase bump excluded) -> stacked vector in the normalized space of the outputs transformer,
+        i.e. the direct calibrator's output space, for plots comparable between the direct and the factor calibrators."""
+        B = next(iter(x_dict.values())).shape[0]
+        y = torch.zeros(B, self.N_outputs, device=self.device, dtype=torch.float32)
+        for key, sl in self.outputs_transformer.slices.items():
+            if key in x_dict:
+                val = x_dict[key]
+                y[:, sl] = self.outputs_transformer.transforms[key](val.unsqueeze(-1) if val.dim() == 1 else val)
+        return y
 
 
     def _train_fit_dict(self):

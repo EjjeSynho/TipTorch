@@ -14,7 +14,6 @@ from scipy.stats import pearsonr, spearmanr
 from tiptorch._config import *
 from tiptorch.tools.utils import r0
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
-from data_processing.telemetry_preprocessor import TelemetryPreprocessor
 from calibrators.NFM_calibrator import (
     SmallCalibratorNet,
     NFMCalibrator,
@@ -26,6 +25,7 @@ from calibrators.NFM_calibrator import (
     release_gpu_memory
 )
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack
+from data_processing.telemetry_preprocessor import TelemetryPreprocessor # after calibrators (adds the repo root to sys.path)
 
 logger = logging.getLogger(__name__)
 
@@ -136,13 +136,20 @@ PSFs_pred_cube = PSFs_pred_cube.cpu()
 PSFs_data_cube = PSFs_data_cube.cpu()
 validation_ids = validation_ids.cpu()
 
+# Network outputs -> PSF-model parameters -> normalized parameter space (the direct calibrator's output space). For the
+# direct calibrator NN_params == NN_predictions; for the factor one NN_predictions are corrections, see FactorParameterization
+with torch.no_grad():
+    x_dict_pred = trainer._params_from_pred(NN_predictions.to(default_device), telemetry_vecs.to(default_device))
+    NN_params   = trainer._params_to_normalized(x_dict_pred).cpu()
+    x_dict_pred = {k: v.cpu() for k, v in x_dict_pred.items()}
+
 release_gpu_memory()
 print(f"Validation loss: {final_val_loss:.6f} | PSF cubes {PSFs_pred_cube.shape}")
 
 
 #%%
-stds  = NN_predictions.std(dim=0)
-means = NN_predictions.mean(dim=0)
+stds  = NN_params.std(dim=0)
+means = NN_params.mean(dim=0)
 
 plt.bar(np.arange(len(means)), means.cpu().numpy(), yerr=stds.cpu().numpy(), alpha=0.7, capsize=3)
 plt.xticks(ticks=np.arange(len(means)), labels=output_names, rotation=45, ha='right')
@@ -189,10 +196,7 @@ X['Cn2_weights_1'] = 1.0 - X['Cn2_weights_2'] - X['Cn2_weights_3']
 
 features_of_interest = list(X.keys()) + ['Cn2_weights']
 
-# Network outputs -> PSF-model parameters (for the factor calibrator the outputs are corrections, see FactorParameterization)
-with torch.no_grad():
-    _params = trainer._params_from_pred(NN_predictions.to(default_device), telemetry_vecs.to(default_device))
-Y = {k: v.cpu().numpy() for k, v in _params.items() if k in features_of_interest}
+Y = {k: v.numpy() for k, v in x_dict_pred.items() if k in features_of_interest}
 Y['Cn2_weights_1'] = Y['Cn2_weights'][:, 0]
 Y['Cn2_weights_2'] = Y['Cn2_weights'][:, 1]
 Y['Cn2_weights_3'] = Y['Cn2_weights'][:, 2]
@@ -332,13 +336,12 @@ plt.show()
 #%%
 # Per-sample loss histogram
 # Use the trainer's loss computation for consistency
-x_dict_pred = outputs_transformer.unstack(NN_predictions.to(default_device))
 with torch.no_grad(): # in chunks on the trainer's device (the balanced loss keeps its weight maps there)
     loss_SR = torch.cat([
         trainer._loss_per_sample(
             PSFs_data_cube[i:i+8].to(default_device),
             PSFs_pred_cube[i:i+8].to(default_device),
-            {k: v[i:i+8] for k, v in x_dict_pred.items()}
+            {k: v[i:i+8].to(default_device) for k, v in x_dict_pred.items()}
         ).cpu()
         for i in range(0, len(PSFs_data_cube), 8)
     ])
@@ -940,9 +943,9 @@ plt.show()
 #%%
 # Similar plot for telemetry OUTPUTS (calibrator predictions) based on category
 # Extract output vectors for each category
-out_vecs_best  = NN_predictions[best_sample_ids]
-out_vecs_worst = NN_predictions[worst_sample_ids]
-out_vecs_sus   = NN_predictions[sus_ids]
+out_vecs_best  = NN_params[best_sample_ids]
+out_vecs_worst = NN_params[worst_sample_ids]
+out_vecs_sus   = NN_params[sus_ids]
 
 # Compute statistics for outputs
 med_out_best,  q16_out_best,  q84_out_best  = feature_stats(out_vecs_best)
@@ -965,8 +968,8 @@ for offset, (med, q16, q84, label, color) in enumerate(groups_out):
 
 ax.set_xticks(x_out)
 ax.set_xticklabels(output_names, rotation=45, ha='right')
-ax.set_ylabel('Output value')
-ax.set_title('Calibrator output distributions: median ± 1σ quantile (best / middle / worst samples)')
+ax.set_ylabel('Normalized parameter')
+ax.set_title('Predicted parameter distributions: median ± 1σ quantile (best / middle / worst samples)')
 ax.legend()
 ax.grid(True, axis='y', alpha=0.4)
 plt.tight_layout()
@@ -1034,7 +1037,10 @@ plt.grid(True, alpha=0.3); plt.show()
 #   - Which outputs are controlled by which inputs?
 #   - Which features are essentially irrelevant for all outputs?
 # =============================================================================
-import shap
+try:
+    import shap
+except ImportError as _e: # e.g. numba incompatible with the installed numpy
+    raise ImportError(f"shap is not usable in this environment ({_e}); the SHAP cells below are skipped") from _e
 
 # ── 1.  Prepare background and test sets ─────────────────────────────────────
 # Rebuild the telemetry matrix directly from the dataset so that `tel_np` and
@@ -1063,7 +1069,8 @@ calibrator.eval()
 explainer = shap.GradientExplainer(calibrator, background)
 sv_list   = explainer.shap_values(X_explain)    # list of N_outputs arrays [N, N_feat]
 shap_values = np.stack(sv_list)        # [N, N_feat, N_out]
-print(f"SHAP values computed: {shap_values.shape}  (samples x features x outputs)") 
+print(f"SHAP values computed: {shap_values.shape}  (samples x features x outputs)")
+# NOTE: for the factor calibrator the outputs are corrections to the telemetry-derived priors, not the parameters themselves
 
 # Mean |SHAP| across samples: [N_feat, N_out]
 mean_abs_shap = np.abs(shap_values).mean(axis=0)

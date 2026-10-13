@@ -56,9 +56,11 @@ DEFAULT_CONFIG = {
         "Z_mode_max":     9
     },
     "calibrator": {
-        "type":         "direct", # "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors)
+        "type":         "direct", # "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors, NFM_factor_calibrator_config.json)
         "hidden_dim":   48,
-        "dropout_rate": 0.2
+        "dropout_rate": 0.2,
+        "factor_keys":  ["r0", "L0", "wind_speed_single", "Cn2_weights"], # factor type only: parameters predicted as log-factors on telemetry priors
+        "const_keys":   ["F_ctrl", "LO_coefs"]                             # factor type only: dataset-level constants, the rest is predicted directly
     },
     "trainer": {
         "lr":                  0.01,

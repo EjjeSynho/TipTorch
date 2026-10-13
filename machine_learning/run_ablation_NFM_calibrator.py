@@ -45,8 +45,7 @@ from pathlib import Path
 from datetime import datetime
 
 from tiptorch._config import *
-from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
-from calibrators.NFM_calibrator import SmallCalibratorNet, NFMCalibratorTrainer, NFMDataset, default_split, release_gpu_memory
+from calibrators.NFM_calibrator import NFMDataset, default_split, build_NFM_trainer, release_gpu_memory
 
 # ── Base training config (mirrors DEFAULT_CONFIG in train_NFM_calibrator.py) ──
 _BASE_DEFAULT = {
@@ -183,63 +182,24 @@ def _cleanup_epoch_checkpoints(directory: Path) -> None:
         logger.info(f"  Cleaned {len(files)} epoch checkpoint(s) from {directory.name}/")
 
 
-def _build_outputs_transformer(PSF_model):
-    from copy import deepcopy
-    ot = deepcopy(PSF_model.inputs_manager.get_transformer())
-    _buf = ot.unstack(PSF_model.inputs_manager.stack())
-    if 'LO_coefs' in _buf:
-        _buf['LO_coefs'] = _buf['LO_coefs'][:, 1:]   # strip phase-bump column
-    _ = ot.stack(_buf)
-    return ot
-
-
 #%% ── 1. Load dataset (shared across all runs) ──────────────────────────────
 dataset     = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
 N_wvl_total = dataset.C
 logger.info(f"Dataset: {len(dataset)} samples | cubes ({dataset.C}, {dataset.H}, {dataset.W})")
 
-#%% ── 2. Initialise PSF model (shared across all runs) ──────────────────────
-_tmp_batch  = tuple([dataset[i] for i in np.random.randint(0, len(dataset), size=cfg["batch_size"])])
-_, _, _, _tmp_config, _ = NFMDataset.collate_batch(_tmp_batch, default_device)
-
-with torch.no_grad():
-    PSF_model = PSFModelNFM(
-        _tmp_config,
-        multiple_obs   = True,
-        LO_NCPAs       = cfg["model"]["LO_NCPAs"],
-        chrom_defocus  = cfg["model"]["chrom_defocus"],
-        use_Moffat     = cfg["model"]["use_Moffat"],
-        retain_PSDs    = cfg["model"]["retain_PSDs"],
-        N_spline_nodes = cfg["model"]["N_spline_nodes"],
-        Z_mode_max     = cfg["model"]["Z_mode_max"],
-        device         = default_device,
-    )
-del _tmp_batch, _tmp_config
-release_gpu_memory(sync=True)
-
-for _key in cfg["fixed_params"]:
-    try:
-        PSF_model.inputs_manager.delete(_key)
-    except Exception:
-        pass
-if PSF_model.use_Moffat:
-    PSF_model.inputs_manager.delete('theta')
-    PSF_model.inputs_manager.delete('ratio')
-
-PSF_model.inputs_manager.set_optimizable(['LO_coefs'],          cfg["trainer"]["predict_LO_NCPAs"])
-PSF_model.inputs_manager.set_optimizable(['Cn2_weights'],       cfg["trainer"]["predict_Cn2_profile"])
-PSF_model.inputs_manager.set_optimizable(['wind_speed_single'], cfg["trainer"]["predict_wind_speed"])
-
-outputs_transformer = _build_outputs_transformer(PSF_model)
-N_outputs  = outputs_transformer.get_stacked_size()
+#%% ── 2. Output layout (the PSF model and the trainer are rebuilt per run) ─────
+_PSF_model, _, _outputs_transformer, _ = build_NFM_trainer(cfg, dataset, default_device, weights_dir=ABLATION_DIR)
+N_outputs  = _outputs_transformer.get_stacked_size()
 N_features = len(dataset.features)
 
 output_names = []
-for _pname, _slc in outputs_transformer.slices.items():
+for _pname, _slc in _outputs_transformer.slices.items():
     _w = _slc.stop - _slc.start
     output_names += [_pname] if _w == 1 else [f"{_pname}[{i}]" for i in range(_w)]
 
-logger.info(f"PSF model ready | calibrator: {N_features} → {N_outputs}")
+del _PSF_model, _outputs_transformer
+release_gpu_memory(sync=True)
+logger.info(f"Calibrator ({cfg['calibrator'].get('type', 'direct')}): {N_features} → {N_outputs}")
 
 #%% ── 3. Compute fixed train / val split ─────────────────────────────────────
 # All ablation runs share the same validation set for fair comparison.
@@ -278,33 +238,17 @@ for n_samples in sample_counts:
         else:
             run_train_idx = full_train_idx.copy()
 
-        # ── Fresh calibrator ─────────────────────────────────────────────────
-        calibrator = SmallCalibratorNet(
-            n_features   = N_features,
-            n_outputs    = N_outputs,
-            hidden_dim   = cfg["calibrator"]["hidden_dim"],
-            dropout_rate = cfg["calibrator"]["dropout_rate"],
-        ).to(default_device)
-
-        # ── Fresh trainer (pre-loaded with fixed split) ──────────────────────
-        trainer = NFMCalibratorTrainer(
-            PSF_model           = PSF_model,
-            calibrator          = calibrator,
-            dataset             = dataset,
-            outputs_transformer = deepcopy(outputs_transformer),
-            device              = default_device,
-            batch_size          = cfg["batch_size"],
-            lr                  = cfg["trainer"]["lr"],
-            lambda_step         = cfg["trainer"]["lambda_step"],
-            predict_LO_NCPAs    = cfg["trainer"]["predict_LO_NCPAs"],
-            predict_Cn2_profile = cfg["trainer"]["predict_Cn2_profile"],
-            random_state        = run_seed,
-            pre_init_astrometry = cfg["trainer"]["pre_init_astrometry"],
-            optimize_astrometry = cfg["trainer"]["optimize_astrometry"],
-            collate_fn          = NFMDataset.collate_batch,
-            train_idx           = run_train_idx,
-            val_idx             = val_idx,
-            loss_cfg            = cfg.get("loss"),
+        # ── Fresh PSF model, calibrator (direct or factor, cfg["calibrator"]["type"]) and trainer on the fixed split ──
+        torch.manual_seed(run_seed); np.random.seed(run_seed)
+        PSF_model, calibrator, _, trainer = build_NFM_trainer(
+            cfg          = cfg,
+            dataset      = dataset,
+            device       = default_device,
+            weights_dir  = run_dir,
+            seed         = run_seed,
+            train_idx    = run_train_idx,
+            val_idx      = val_idx,
+            random_state = run_seed,
         )
 
         # ── Pretrain ─────────────────────────────────────────────────────────
@@ -397,7 +341,7 @@ for n_samples in sample_counts:
         with open(ABLATION_DIR / 'ablation_summary.json', 'w') as _f:
             json.dump(summary_rows, _f, indent=2)
 
-        del calibrator, trainer, PSFs_pred_cube, PSFs_data_cube
+        del PSF_model, calibrator, trainer, PSFs_pred_cube, PSFs_data_cube
         del NN_predictions, telemetry_vecs, validation_ids
         release_gpu_memory(sync=True)
 
