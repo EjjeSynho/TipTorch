@@ -38,8 +38,7 @@ class TipTorch(torch.nn.Module):
 
             if apodizer_loaded:
                 self.apodizer = TF.rotate(self.apodizer.unsqueeze(0), -angle, interpolation=TF.InterpolationMode.BILINEAR).squeeze(0)
-
-
+                
 
     def UpdateStaticOTF(self):
         """Recompute diffraction-limited static OTF for the current grid sampling."""
@@ -234,14 +233,18 @@ class TipTorch(torch.nn.Module):
         rms_LO = self.make_tensor(get('telescope', 'extraErrorLoNm', rms_HO)).flatten() # one value, or [center, edge] of the technical field
         N_LO = min(self.config['sources_LO']['Zenith'].numel(), self.N_src) if 'sources_LO' in self.config and rms_LO.sum().item() >= 0 else 0
         self.extra_error_LO_nm = None
+        
         if N_LO > 0 and rms_LO.sum().item() > 0:
             if rms_LO.numel() == 2: # linear interpolation between the field center and the edge of the technical field (as P3's extraErrorLoPSD)
                 FoV = scalar(get('telescope', 'TechnicalFoV', 0.0))
                 LO_zenith = self.make_tensor(self.config['sources_LO']['Zenith']).flatten()[:N_LO] # [arcsec]
                 rms_LO = rms_LO[0] + (rms_LO[1]-rms_LO[0]) * ((LO_zenith / (0.5*FoV)).clamp(0, 1) if FoV > 0 else torch.zeros_like(LO_zenith))
+            
             elif rms_LO.numel() != 1:
                 raise ValueError('extraErrorLoNm must be a scalar or [center, edge] values')
+            
             self.extra_error_LO_nm = torch.cat([full(self.N_src-N_LO, 0.0), rms_LO.expand(N_LO).to(device=self.device, dtype=self.dtype)]) # [N_src]
+            
             if self.extra_error_nm is not None: # the NGS directions get the LO extra error instead of the HO one (as P3)
                 self.extra_error_nm = torch.cat([self.extra_error_nm[:self.N_src-N_LO], full(N_LO, 0.0)])
 
@@ -256,6 +259,8 @@ class TipTorch(torch.nn.Module):
         self.PSD_include['LO extra error'] = self.extra_error_LO_nm is not None
         self.PSD_include['wind shake']     = self.wind_PSD_file is not None
         self.PSD_include['cone effect']    = bool(self.is_LGS.all() and (self.N_GS == 1 or (self.tomography and self.add_MCAO_cone)))
+    
+    
     def _select_AO_correction(self):
         use_LGS = self.is_LGS.all() # LGS stars must be at finite altitude
         multiple_GS = self.GS_dirs_x.size(-1) > 1
@@ -381,12 +386,15 @@ class TipTorch(torch.nn.Module):
                     in_band &= k <= k_max
                 PSD = k.pow(exponent) * self._spatial_filters(k)[0] * in_band
                 PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0 # remove the DC component
+                
             elif name == 'focus error':
                 PSD = 1.0 - 3.0 * self._bessel_j3(torch.pi * self.D * self.k).pow(2)
+                
             elif name == 'wind shake':
                 piston_filter, tilt_filter = self._spatial_filters(self.k_AO)
                 PSD = (1.0 - tilt_filter) * piston_filter * self.mask_corrected_AO
             return PSD / self._half_sum(PSD)
+        
         return self._cached(name, compute)
 
 
@@ -1367,6 +1375,7 @@ class TipTorch(torch.nn.Module):
         }
         PSDs = {name: term() for name, term in AO_terms.items() if include[name]}
         PSD_AO = sum(PSDs.values(), torch.zeros(1, device=self.device))
+        
         if include['cone effect']:
             PSDs['cone effect'] = self.ConeEffectPSD(PSD_AO)
             PSD_AO = PSD_AO + PSDs['cone effect']
@@ -1375,11 +1384,10 @@ class TipTorch(torch.nn.Module):
         PSD = self.PSD_padder(PSD_AO) if PSD_AO.dim() == 4 else PSD_AO
         if include['fitting']:
             PSDs['fitting'] = self.VonKarmanPSD().unsqueeze(1)
-     
             # if getattr(self, 'fitting_excess', None) is not None: # diagnostic multiplicative excess (1 + eps) [N_obs] of the fitting error, None by default
             #     PSDs['fitting'] = PSDs['fitting'] * (1.0 + self.fitting_excess.view(-1, 1, 1, 1))
-                
             PSD = PSD + PSDs['fitting']
+                
         if include['extra error'] and self.extra_error_nm is not None:
             PSDs['extra error'] = self.extra_error_nm.view(-1, 1, 1, 1).pow(2) * self._unit_spectrum('extra error') / self._PSD_norm()
             PSD = PSD + PSDs['extra error']
@@ -1396,12 +1404,15 @@ class TipTorch(torch.nn.Module):
         if include['wind shake'] and self.vibration_PSD is not None:
             PSDs['wind shake'] = rms2(self._wind_shake_power().sqrt()) * self._unit_spectrum('wind shake')
             PSD = PSD + self.PSD_padder(PSDs['wind shake'])
+        
         if include['tilt filter']: # the (dimensionless) filter itself: tip/tilt is left to a separate LO loop
             PSDs['tilt filter'] = self._cached('tilt filter', lambda: self._spatial_filters(self.k)[1])
             PSD = PSD * PSDs['tilt filter']
+        
         if include['LO extra error'] and self.extra_error_LO_nm is not None:
             PSDs['LO extra error'] = rms2(self.extra_error_LO_nm) * self._unit_spectrum('LO extra error')
             PSD = PSD + PSDs['LO extra error']
+       
         if include['focus error'] and self.focus_error_nm is not None:
             PSDs['focus error'] = rms2(self.focus_error_nm) * self._unit_spectrum('focus error')
             PSD = PSD + PSDs['focus error']
@@ -1411,6 +1422,8 @@ class TipTorch(torch.nn.Module):
         if self.retain_PSDs:
             self.PSDs = PSDs # all computed terms, for the error budget and diagnostics
         return self.PSD
+    
+    
     def half_PSD_to_full(self, half_PSD):
         return torch.cat([
             half_PSD,
@@ -1447,115 +1460,6 @@ class TipTorch(torch.nn.Module):
                 PSF.append( PSF_cropped )
 
         return torch.hstack(PSF)
-    
-    
-    # def complex_grid_sample(self, x, grid, mode='bicubic'):
-    #     """
-    #     x    : [B, 1, H, W] complex, centered
-    #     grid : [B, Hout, Wout, 2] in normalized source coordinates
-    #         last dim = (x, y)
-    #     """
-    #     xr = grid_sample(x.real, grid, mode=mode, padding_mode='zeros', align_corners=True)
-    #     xi = grid_sample(x.imag, grid, mode=mode, padding_mode='zeros', align_corners=True)
-    #     return torch.complex(xr, xi)
-
-
-    # def detector_OTF_grid(self, N):
-    #     """
-    #     Centered detector OTF coordinates consistent with fftshift/ifftshift.
-    #     Returned coordinates are normalized so that they live roughly in [-1, 1).
-    #     """
-    #     u = 2.0 * torch.fft.fftshift(torch.fft.fftfreq(N, d=1.0, device=self.device, dtype=self.dtype))
-    #     V_det, U_det = torch.meshgrid(u, u, indexing='ij')
-    #     return U_det, V_det
-
-
-    # def pixel_MTF_detector_grid(self, U_det, V_det):
-    #     """
-    #     Square-pixel detector MTF on the detector OTF grid.
-    #     torch.sinc(x) = sin(pi x)/(pi x)
-    #     """
-    #     mtf = torch.sinc(0.5 * U_det) * torch.sinc(0.5 * V_det)
-    #     return mtf.unsqueeze(0).unsqueeze(0)  # [1,1,N,N]
-
-
-    # def zoom_OTF_complex(self, OTF, scale, out_size, mode='bicubic'):
-    #     """
-    #     OTF     : [N_src, 1, H, W] complex, centered, sampled on the source normalized grid
-    #             used in this codebase (self.U/self.V ~ linspace(-1,1,self.nOtf))
-    #     scale   : >1 compresses PSF in image space
-    #     out_size: detector-grid size
-
-    #     Returns : [N_src, 1, out_size, out_size] complex, centered
-    #     """
-
-    #     # Detector OTF coordinates on the OUTPUT Fourier grid
-    #     U_det, V_det = self.detector_OTF_grid(out_size)
-
-    #     # Image compression by scale s <=> OTF(u,v) evaluated at (u/s, v/s)
-    #     # Since the source OTF grid is normalized to [-1,1] in this codebase,
-    #     # these are directly the grid_sample coordinates when align_corners=True.
-    #     grid = torch.stack((U_det/scale, V_det/scale), dim=-1)  # [N, N, 2]
-    #     grid = grid.unsqueeze(0).expand(self.N_src, -1, -1, -1) # [N_src, N, N, 2]
-
-    #     return self.complex_grid_sample(OTF, grid, mode=mode)
-
-
-    # def OTF2PSF(self, OTF):
-    #     """
-    #     OTF: [B, Nwvl or 1, H, W] complex, centered
-    #     Returns detector-sampled PSFs [B, Nwvl, N_pix, N_pix]
-    #     """
-    #     out = []
-    #     eps = torch.finfo(OTF.real.dtype).eps
-
-    #     for i in range(self.wvl.shape[-1]):
-    #         n = 0 if OTF.shape[1] == 1 else i
-
-    #         # effective image-plane compression factor for this wavelength
-    #         s = float(self.nOtfs[i]) / float(self.N_pix)
-
-    #         OTF_i = OTF[:, n:n+1, :, :]  # [B,1,H,W], centered
-
-    #         # 1) resample OTF onto the detector Fourier grid
-    #         OTF_det = self.zoom_OTF_complex(OTF_i, scale=s, out_size=self.N_pix, mode='bicubic')
-
-    #         # 2) apply square-pixel MTF on THAT detector grid
-    #         U_det, V_det = self.detector_OTF_grid(self.N_pix)
-    #         pix_mtf = self.pixel_MTF_detector_grid(U_det, V_det)
-    #         OTF_det = OTF_det * pix_mtf
-
-    #         # 3) preserve DC exactly (helps keep total flux stable after interpolation)
-    #         dc_src  = OTF_i[..., OTF_i.shape[-2] // 2, OTF_i.shape[-1] // 2].real
-    #         dc_det  = OTF_det[..., self.N_pix // 2, self.N_pix // 2].real.clamp_min(eps)
-    #         OTF_det = OTF_det * (dc_src / dc_det).unsqueeze(-1).unsqueeze(-1)
-
-    #         # 4) detector-sampled PSF
-    #         PSF_i = torch.fft.fftshift( torch.fft.ifft2( torch.fft.ifftshift(OTF_det, dim=(-2, -1)), dim=(-2, -1) ), dim=(-2, -1) ).real
-
-    #         # numerical cleanup
-    #         PSF_i = PSF_i.clamp_min(0.0)
-
-    #         out.append(PSF_i)
-
-    #     return torch.cat(out, dim=1)
-
-
-    # def OTF2PSF_no_interp(self, OTF):
-    #     ''' Debug version of OTF2PSF that only center-crops without interpolation '''
-    #     PSF_big = fft.fftshift(fft.ifft2(fft.ifftshift(OTF, dim=(-2,-1))), dim=(-2,-1)).abs()
-        
-    #     PSF = []
-    #     for i in range(self.wvl.shape[-1]):
-    #         transform = transforms.CenterCrop((self.nOtfs[i], self.nOtfs[i]))
-    #         n = 0 if PSF_big.shape[1] == 1 else i # when there is no chromatic OTF
-            
-    #         PSF_cropped = transforms.CenterCrop((self.N_pix, self.N_pix))(
-    #             transform(PSF_big[:,n,...])
-    #         ).unsqueeze(1)
-    #         PSF.append(PSF_cropped)
-
-    #     return torch.hstack(PSF)
 
 
     def PSD2PSF(self, PSD: torch.Tensor, OTF_static: torch.Tensor):
@@ -1641,6 +1545,7 @@ class TipTorch(torch.nn.Module):
                 ``ComputeStaticOTF(phase)`` — this skips a wasted pupil FFT per batch.
         '''
         self.config['sources_science']['Wavelength'] = wavelengths.view(1,-1) # [nm]
+        
         if refresh_static_OTF:
             # Full update: grids + diffraction-limited static OTF + tomography projector.
             self.Update(grids=True, pupils=False, tomography=True) # Avoid an expensive update of pupil masks

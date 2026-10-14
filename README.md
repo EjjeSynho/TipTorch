@@ -12,10 +12,10 @@ A differentiable, GPU-accelerated adaptive optics (AO) point spread function (PS
 - GPU-accelerated (CUDA) with optional CuPy integration
 - Fast PSF fitting to observational data
 - ML-based calibration from integrated AO telemetry
-- Currently supports SCAO, LTAO, MCAO
+- Currently supports SCAO, SLAO, LTAO, and MCAO correction types
 - Compatible with `astro-tiptop` configurations
 
-Validated on VLT/MUSE Narrow-Field Mode and VLT/SPHERE-IRDIS instrument data.
+Validated on VLT/MUSE Narrow-Field Mode and VLT/SPHERE-IRDIS on-sky data.
 
 
 ## Installation
