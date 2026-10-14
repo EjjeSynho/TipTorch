@@ -59,7 +59,7 @@ DEFAULT_CONFIG = {
         "Z_mode_max":     9
     },
     "calibrator": {
-        "type":         "direct", # "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors, configs/NFM_factor_calibrator_config.json)
+        "type":         "factor", # "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors, configs/NFM_factor_calibrator_config.json)
         "hidden_dim":   48,
         "dropout_rate": 0.2,
         "factor_keys":  ["r0", "L0", "wind_speed_single", "Cn2_weights"], # factor type only: parameters predicted as log-factors on telemetry priors
@@ -86,8 +86,10 @@ DEFAULT_CONFIG = {
         "pretrain_standardize": True
     },
     # PSF loss, see NFMCalibratorTrainer / BalancedPSFLoss. "legacy" is the linear MSE + MAE loss used before.
-    # r_max = 40: beyond it, the model's seeing halo is systematically ~20% fainter than the data (a missing
-    # scattered-light component), and fitting it there degrades the AO-corrected halo and the core.
+    # r_max = 40: beyond it, the model's seeing halo is systematically 25-35 % fainter than the data (ratio 0.74 at 40-60 px,
+    # 0.64 at 60-85 px), and fitting it there degrades the AO-corrected halo and the core. The deficit is not a background offset
+    # nor an atmospheric normalization problem: it grows outward, with the fitted r0 and towards the red, i.e. a few % of the
+    # flux sit in a grey, flatter-than-Kolmogorov wing missing from the model (analysis/analyze_halo_deficit.py, 2026-10-14).
     "loss": {
         "type":             "balanced",
         "radial_power":     2.0,
@@ -101,6 +103,13 @@ DEFAULT_CONFIG = {
         "fit_reg_weight":   0.0,  # parameter-space distance to the per-sample fits, see NFMCalibratorTrainer._regularization
         "shrink_weight":    0.0   # factor calibrator only: shrinkage of the corrections towards the prior
     },
+    # Alternative: legacy loss (linear MSE + MAE)
+    # "loss": {
+    #     "type":             "legacy",
+    #     "LO_sign_penalty":  False,
+    #     "fit_reg_weight":   0.0,
+    #     "shrink_weight":    0.0
+    # },
     "fixed_params": [
         "Jxy", "bg_ctrl",
         "dx_ctrl", "dy_ctrl",
@@ -124,6 +133,7 @@ try:
     _cfg_path   = Path(_cli.config) if _cli.config else None
     if _cli.device:
         default_device = torch.device(_cli.device) # overrides the project setting for this run only
+        
 except SystemExit:
     _cfg_path   = None
 
@@ -329,6 +339,7 @@ _meta = {
     "final_val_loss":        float(val_losses[-1]),
     "best_val_loss":         float(min(val_losses)),
     "tuned_params":          None,
+    "config":                cfg, # the resolved training config: the validation rebuilds the trainer from it, not from the config file
 }
 _meta_path = trainer.weights_dir / f'{cfg["name"]}_meta.json'
 with open(_meta_path, 'w') as _f:
@@ -349,7 +360,8 @@ fig, ax = plt.subplots(figsize=(9, 4))
 ax.plot(train_losses, label='Train')
 ax.plot(val_losses, label='Val')
 ax.set(xlabel='Epoch', ylabel='Loss', title='Training Losses')
-ax.legend(); ax.grid(True)
+ax.legend()
+ax.grid(True)
 plt.tight_layout(); plt.show()
 
 #%%

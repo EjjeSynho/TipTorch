@@ -33,7 +33,7 @@ from pathlib import Path
 for _var in ('OMP_NUM_THREADS', 'MKL_NUM_THREADS', 'OPENBLAS_NUM_THREADS'):
     os.environ.setdefault(_var, '1') # one thread per worker process of the PSF measurements
 
-import numpy as np
+import numpy  as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -42,7 +42,7 @@ _here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().r
 sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from calibrators.NFM_calibrator import NFMDataset
 from calibrators.ETC_calibrator import PREDICTORS, TC_LIST
-from calibrators import ETC_validation_utils as V # also brings the repository root and development/ onto sys.path
+from calibrators import ETC_validation_utils as ETC_utils # also brings the repository root and development/ onto sys.path
 
 # ── Settings (CLI when run as a script, defaults in IPython) ──────────────────
 _parser = argparse.ArgumentParser(description="ETC-regime validation of the TipTorch ETC predictors against on-sky PSFs and TIPTOP")
@@ -67,15 +67,15 @@ PSFAO     = not args.no_psfao
 
 #%%
 # ── Bundle, dataset, validation conditions ────────────────────────────────────
-etc_cal = V.load_bundle(args.bundle)
-dataset = NFMDataset(V.DATASET_CACHE)
-etc     = V.load_validation(etc_cal, dataset)
-bins, waves_nm  = V.nearest_bins(np.array(dataset.configs[0]['sources_science']['Wavelength']) * 1e9)
-renderer, pupil = etc_cal.renderer(waves_nm, batch_size=args.batch_size), V.load_pupil()
+etc_cal = ETC_utils.load_bundle(args.bundle)
+dataset = NFMDataset(ETC_utils.DATASET_CACHE)
+etc     = ETC_utils.load_validation(etc_cal, dataset)
+bins, waves_nm  = ETC_utils.nearest_bins(np.array(dataset.configs[0]['sources_science']['Wavelength']) * 1e9)
+renderer, pupil = etc_cal.renderer(waves_nm, batch_size=args.batch_size), ETC_utils.load_pupil()
 
-V.OUT_DIR.mkdir(parents=True, exist_ok=True)
-V.PLOTS_DIR.mkdir(parents=True, exist_ok=True)
-etc.to_csv(V.OUT_DIR / 'validation_conditions.csv', index=False)
+ETC_utils.OUT_DIR.mkdir(parents=True, exist_ok=True)
+ETC_utils.PLOTS_DIR.mkdir(parents=True, exist_ok=True)
+etc.to_csv(ETC_utils.OUT_DIR / 'validation_conditions.csv', index=False)
 print(f'ETC bundle {etc_cal.path.name}; validation: {len(etc)} observations, per TC ' + ', '.join(f'{tc}%: {(etc.tc == tc).sum()}' for tc in TC_LIST))
 print(f'wavelength bins {np.round(waves_nm, 1).tolist()} nm')
 
@@ -85,30 +85,33 @@ print(f'wavelength bins {np.round(waves_nm, 1).tolist()} nm')
 tables = {}
 with mp.get_context('fork').Pool(args.processes) as pool:
     for name in ['onsky'] + SOURCES:
-        cache = V.OUT_DIR / f'params_{name}.csv'
+        cache = ETC_utils.OUT_DIR / f'params_{name}.csv'
+        
         if cache.exists() and name not in RECOMPUTE:
             tables[name] = pd.read_csv(cache)
             print(f'{name}: loaded {cache.name}')
         elif name == 'onsky':
-            tables[name] = V.compute_onsky(dataset, etc, bins, waves_nm, pupil, pool, PSFAO)
+            tables[name] = ETC_utils.compute_onsky(dataset, etc, bins, waves_nm, pupil, pool, PSFAO)
+            
         elif name == 'tiptop':
-            tables[name] = V.compute_tiptop(etc, waves_nm, pupil, pool, PSFAO)
+            tables[name] = ETC_utils.compute_tiptop(etc, waves_nm, pupil, pool, PSFAO)
         else:
-            tables[name] = V.compute_predictor(name, etc_cal, etc, renderer, pupil, pool, PSFAO, args.draws, args.seed)
+            tables[name] = ETC_utils.compute_predictor(name, etc_cal, etc, renderer, pupil, pool, PSFAO, args.draws, args.seed)
+            
 onsky = tables.pop('onsky')
 onsky[onsky.wave == 700][['fwhm', 'strehl', 'strehl_tt', 'ensquared_tt']].describe().round(3)
 
 #%%
 # ── Comparison: distribution and per-sample accuracy, tables and report ──
-summary = V.distribution_summary(onsky, tables)
-acc     = V.accuracy_metrics(onsky, tables)
-acc_sum = V.accuracy_summary(acc)
-ps      = V.per_sample_metrics(onsky, tables)
-ps_sum  = V.per_sample_summary(ps)
+summary = ETC_utils.distribution_summary(onsky, tables)
+acc     = ETC_utils.accuracy_metrics(onsky, tables)
+acc_sum = ETC_utils.accuracy_summary(acc)
+ps      = ETC_utils.per_sample_metrics(onsky, tables)
+ps_sum  = ETC_utils.per_sample_summary(ps)
 
 for df, name in ((summary, 'distribution_summary'), (acc, 'accuracy_metrics'), (acc_sum, 'accuracy_summary'), (ps, 'per_sample_metrics'), (ps_sum, 'per_sample_summary')):
-    df.to_csv(V.OUT_DIR / f'{name}{args.tag}.csv', index=name.endswith('summary'))
-lines = V.write_report(etc, summary, acc_sum, ps_sum, V.OUT_DIR / f'comparison_summary{args.tag}.md')
+    df.to_csv(ETC_utils.OUT_DIR / f'{name}{args.tag}.csv', index=name.endswith('summary'))
+lines = ETC_utils.write_report(etc, summary, acc_sum, ps_sum, ETC_utils.OUT_DIR / f'comparison_summary{args.tag}.md')
 print('\n'.join(lines[4:10]))
 
 print(acc.pivot_table(index=['param', 'wave'], columns='source', values='W1_over_IQR').round(2))
@@ -116,18 +119,20 @@ print(ps[ps.wave == 700].round(3).to_string(index=False))
 
 #%%
 # ── Figures: accuracy per cell, per-sample scatter, medians per TC ──
-V.plot_accuracy(acc, V.PLOTS_DIR / f'ETC_accuracy{args.tag}.png')
-V.plot_per_sample(onsky, tables, ps, out_path=V.PLOTS_DIR / f'ETC_per_sample{args.tag}.png')
-V.plot_summary_medians(summary, V.PLOTS_DIR / f'summary_medians{args.tag}.png')
+ETC_utils.plot_accuracy(acc, ETC_utils.PLOTS_DIR / f'ETC_accuracy{args.tag}.png')
+ETC_utils.plot_per_sample(onsky, tables, ps, out_path=ETC_utils.PLOTS_DIR / f'ETC_per_sample{args.tag}.png')
+ETC_utils.plot_summary_medians(summary, ETC_utils.PLOTS_DIR / f'summary_medians{args.tag}.png')
 plt.show()
 
 #%%
 # ── Distributions per wavelength (all TCs, then one figure per TC) and the pooled presentation figure ──
 series = [('onsky', onsky), ('tiptop', tables['tiptop']), (BEST, tables[BEST])]
-V.plot_distributions(series, out_path=V.PLOTS_DIR / f'ETC_distributions_{BEST}_vs_TIPTOP{args.tag}.png')
+ETC_utils.plot_distributions(series, out_path=ETC_utils.PLOTS_DIR / f'ETC_distributions_{BEST}_vs_TIPTOP{args.tag}.png')
+
 for tc in TC_LIST:
-    V.plot_distributions(series, tc=tc, out_path=V.PLOTS_DIR / f'ETC_distributions_{BEST}_vs_TIPTOP_TC{tc}{args.tag}.png')
+    ETC_utils.plot_distributions(series, tc=tc, out_path=ETC_utils.PLOTS_DIR / f'ETC_distributions_{BEST}_vs_TIPTOP_TC{tc}{args.tag}.png')
     plt.close()
-V.plot_pooled_distributions(series, out_path=V.PLOTS_DIR / f'ETC_pooled_FWHM_EE_{BEST}_vs_TIPTOP{args.tag}.png')
+    
+ETC_utils.plot_pooled_distributions(series, out_path=ETC_utils.PLOTS_DIR / f'ETC_pooled_FWHM_EE_{BEST}_vs_TIPTOP{args.tag}.png')
 plt.show()
-print(f'tables -> {V.OUT_DIR}, figures -> {V.PLOTS_DIR}')
+print(f'tables -> {ETC_utils.OUT_DIR}, figures -> {ETC_utils.PLOTS_DIR}')

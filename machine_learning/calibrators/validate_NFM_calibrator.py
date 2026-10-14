@@ -19,9 +19,6 @@ from tiptorch._config import *
 from tiptorch.tools.utils import r0
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from calibrators.NFM_calibrator import (
-    SmallCalibratorNet,
-    NFMCalibrator,
-    NFMCalibratorTrainer,
     NFMDataset,
     build_NFM_trainer,
     load_NFM_calibrator,
@@ -47,7 +44,7 @@ DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 _vparser = argparse.ArgumentParser(description="Validate NFM Calibrator")
 _vparser.add_argument('--config', type=str, default=None, help='JSON config used for training (default: calibrators/configs/NFM_calibrator_config.json)')
 try:
-    _vargs       = _vparser.parse_args()
+    _vargs, _    = _vparser.parse_known_args() # known only: IPython kernels add their own arguments (--f=...)
     _config_path = Path(_vargs.config) if _vargs.config else None
 except SystemExit:
     _config_path = None
@@ -57,8 +54,16 @@ if _config_path and _config_path.exists():
         cfg = json.load(_f)
 
 elif 'cfg' not in dir():
-    # Fall back to the direct calibrator's config in calibrators/configs/
-    _default_cfg_path = CONFIGS_FOLDER / 'NFM_calibrator_config.json'
+    # No --config: take the config (direct or factor) whose training metadata is the most recent one
+    _candidates = []
+    for _p in sorted(CONFIGS_FOLDER.glob('NFM*_config.json')):
+        with open(_p) as _f:
+            _c = json.load(_f)
+        _m = WEIGHTS_FOLDER / _c.get('weights_subdir', '') / f'{_c.get("name", "")}_meta.json'
+        if _m.exists():
+            _candidates.append((_m.stat().st_mtime, _p))
+
+    _default_cfg_path = max(_candidates)[1] if _candidates else CONFIGS_FOLDER / 'NFM_calibrator_config.json'
     
     if _default_cfg_path.exists():
         with open(_default_cfg_path) as _f:
@@ -81,6 +86,14 @@ if not _meta_path.exists():
 with open(_meta_path) as _f:
     train_meta = json.load(_f)
 
+# The config file only locates the run: the run itself may differ from it (from IPython, train_NFM_calibrator.py ignores
+# --config and trains with its DEFAULT_CONFIG under the same name), so the trainer is rebuilt from the run's own config
+if 'config' in train_meta:
+    cfg = train_meta['config']
+elif train_meta.get('calibrator_type', 'direct') != cfg.get('calibrator', {}).get('type', 'direct'):
+    raise ValueError(f"{_meta_path.name} is a '{train_meta['calibrator_type']}' calibrator run, but the config describes a "
+                     f"'{cfg.get('calibrator', {}).get('type', 'direct')}' one, and the metadata has no training config to rebuild it from")
+
 BEST_CALIB_PATH = Path(train_meta['checkpoint_path'])
 output_names    = train_meta['output_names']
 N_wvl_total     = train_meta['N_wvl_total']
@@ -93,8 +106,8 @@ logger.info(f"Metadata loaded: name={train_meta['name']} | best_val={train_meta[
 # ── Ensure consistent dataset split ──────────────────────────────────────────
 _split_path = Path(train_meta['split_path'])
 
-# ── Initialize trainer (when running standalone, outside a training session) ──
-if 'trainer' not in dir():
+# ── Initialize trainer (when running standalone, outside a training session, or when the session's trainer is of another type) ──
+if 'trainer' not in dir() or trainer.calibrator_type != train_meta.get('calibrator_type', 'direct'):
     dataset = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
     logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W})")
 

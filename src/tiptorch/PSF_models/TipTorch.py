@@ -597,9 +597,11 @@ class TipTorch(torch.nn.Module):
 
         if self.is_float:
             self._to_float()
+        
         # Update grids used for computation of PSDs and OTFs. This is necessary when the sampling has changed.
         if grids:
             self.InitGrids()
+        
         # Update pupil and apodizer masks
         if pupils:
             self.InitPupils()
@@ -611,9 +613,7 @@ class TipTorch(torch.nn.Module):
                 # Caller will set OTF_static via ComputeStaticOTF(phase); skip the expensive
                 # pupil FFT but still refresh the pupil_padder which depends on sampling_min.
                 phase_size = self.pupil.shape[-1]
-                self.pupil_padder = torch.nn.ZeroPad2d(
-                    int(round(phase_size * self.sampling_min / 2 - phase_size / 2))
-                )
+                self.pupil_padder = torch.nn.ZeroPad2d( int(round(phase_size * self.sampling_min / 2 - phase_size / 2)) )
         
         # If the number of sources have changed, reinitialize the tomography projector
         if (self.tomography and tomography) or (self.tomography and grids):
@@ -1028,6 +1028,7 @@ class TipTorch(torch.nn.Module):
         W_atm = self.VonKarmanSpectrum(self.r0_(), self.L0.abs(), self.k2_AO) # [N_obs, ny, nx]
 
         if not self.tomography:
+            
             g = ((H - h) / H).view(self.N_obs, 1, self.N_L, 1) # frequency compression through the cone
             N_f = int(self.k_AO.max().item() / self.dk) + 2
             f = (torch.arange(N_f, device=self.device, dtype=self.dtype) * self.dk).view(1, -1, 1, 1) # [1, N_f, 1, 1] radial frequencies
@@ -1047,9 +1048,11 @@ class TipTorch(torch.nn.Module):
                 t  = (self.k_AO[0] / self.dk).clamp(0, N_f - 1).flatten()
                 i0 = t.floor().long().clamp(max=N_f - 2)
                 return i0, t - i0
+           
             i0, t = self._cached('cone effect indices', radial_indices)
             coeff = coeff.permute(0, 2, 1) # [N_obs, N_L, N_f]
             c = (coeff[..., i0] + (coeff[..., i0+1] - coeff[..., i0]) * t).view(self.N_obs, self.N_L, self.nOtf_AO_y, self.nOtf_AO_x)
+            
             return ((w * c.pow(2)).sum(dim=1) * W_atm * self.mask_corrected_AO).unsqueeze(1)
 
         src_zenith = self.config['sources_science']['Zenith'].flatten().view(-1, 1) # [N_src, 1] in [arcsec]
@@ -1072,7 +1075,10 @@ class TipTorch(torch.nn.Module):
         high_pass = 1 - (1 - z_pole)**2 / (1 + z_pole**2 - 2*z_pole*cos_k)
         gain = (high_pass * (D_eq/self.D).view(*D_eq.shape, 1, 1)**2).clamp_min(0) * valid.view(*valid.shape, 1, 1) # [N_src, N_L, ny, nx]
         gain = (w * gain).sum(dim=1).unsqueeze(1) # [N_src, 1, ny, nx]
+        
         return gain * (W_atm.unsqueeze(1) - PSD_AO.real).clamp_min(0) * self.piston_filter * self.mask_corrected_AO # the tomographic noise term is complex-valued
+    
+    
     def JitterKernel(self, Jx: torch.Tensor, Jy: torch.Tensor, Jxy: torch.Tensor):
         # Assuming Jxy is in [deg], convert it to [rad]
         cos_theta = torch.cos( torch.deg2rad(Jxy) )
@@ -1337,12 +1343,16 @@ class TipTorch(torch.nn.Module):
             # TODO: check the wind direction sign conventions! sin and cos might be swapped and - should b in front of wind speed
             self.vx = self.wind_speed * torch.cos( torch.deg2rad(self.wind_dir) )
             self.vy = self.wind_speed * torch.sin( torch.deg2rad(self.wind_dir) )
+            
             self.freq_t = self.vx.view(self.N_obs, 1, 1, self.N_L) * pdims(self.kx_AO, 1) + \
                           self.vy.view(self.N_obs, 1, 1, self.N_L) * pdims(self.ky_AO, 1) # [N_src, nOtf_AO, nOtf_AO, nL]
+                          
             self.Controller()
             self.ReconstructionFilter(WFS_noise_var)
+            
             if self.tomography:
                 self.TomographicReconstructors(WFS_noise_var, inv_method=self.inversion_method)
+                
                 if not self.on_axis:
                     self.DMProjector()
 
@@ -1365,6 +1375,10 @@ class TipTorch(torch.nn.Module):
         PSD = self.PSD_padder(PSD_AO) if PSD_AO.dim() == 4 else PSD_AO
         if include['fitting']:
             PSDs['fitting'] = self.VonKarmanPSD().unsqueeze(1)
+     
+            # if getattr(self, 'fitting_excess', None) is not None: # diagnostic multiplicative excess (1 + eps) [N_obs] of the fitting error, None by default
+            #     PSDs['fitting'] = PSDs['fitting'] * (1.0 + self.fitting_excess.view(-1, 1, 1, 1))
+                
             PSD = PSD + PSDs['fitting']
         if include['extra error'] and self.extra_error_nm is not None:
             PSDs['extra error'] = self.extra_error_nm.view(-1, 1, 1, 1).pow(2) * self._unit_spectrum('extra error') / self._PSD_norm()

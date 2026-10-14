@@ -28,11 +28,11 @@ import torch
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
-sys.path.insert(0, str(REPO_ROOT / 'machine_learning'))
+# sys.path.insert(0, str(REPO_ROOT / 'machine_learning'))
 
 from tiptorch._config import project_settings, WEIGHTS_FOLDER
 from data_processing.telemetry_preprocessor import TelemetryPreprocessor
-from calibrators.NFM_calibrator import NFMCalibrator, NFMFactorCalibrator, NFMDataset, SmallCalibratorNet, load_NFM_calibrator
+from machine_learning.calibrators.NFM_calibrator import NFMCalibrator, NFMFactorCalibrator, NFMDataset, SmallCalibratorNet, load_NFM_calibrator
 
 
 def check(condition, message):
@@ -83,8 +83,10 @@ def main():
     rng = np.random.default_rng(0)
     pos = np.sort(rng.choice(len(dataset), size=min(args.n_samples, len(dataset)), replace=False))
     ids = dataset.sample_ids[pos]
+    
     with open(std_folder / 'muse_df.pickle', 'rb') as fh:
         muse_df = pickle.load(fh)
+        
     prepared = calibrator.prepare_telemetry(muse_df.loc[ids].copy())
     stored = torch.stack([dataset[int(i)][1] for i in pos]).to(device)
     err = (prepared - stored).abs().max().item()
