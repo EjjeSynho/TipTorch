@@ -196,6 +196,9 @@ class TipTorch(torch.nn.Module):
 
         # if self.PSD_include['WFS noise'] or self.PSD_include['spatio-temporal'] or self.PSD_include ['aliasing']:
         self.dn  = torch.zeros(self.N_obs, device=self.device)
+        # Half-width [deg] of the wind direction drift during the acquisition, wind_dir ± wind_dir_drift, [N_obs] or [N_obs, N_L].
+        # It only acts when nTh > 1. The PSF is even in it, so its gradient vanishes at 0: start a fit from a non-zero value
+        self.wind_dir_drift = torch.zeros(self.N_obs, device=self.device)
 
         self._init_error_terms()
 
@@ -367,6 +370,7 @@ class TipTorch(torch.nn.Module):
         ''' Grid-dependent constant tensors, computed once per grid (the cache is reset by InitGrids and on dtype conversion) '''
         if key not in self._spectra_cache:
             self._spectra_cache[key] = compute()
+            
         return self._spectra_cache[key]
 
 
@@ -382,8 +386,10 @@ class TipTorch(torch.nn.Module):
                 exponent, k_min, k_max = self.extra_error_shape if name == 'extra error' else self.extra_error_LO_shape
                 k = self.k
                 in_band = k >= k_min
+                
                 if k_max > 0:
                     in_band &= k <= k_max
+                    
                 PSD = k.pow(exponent) * self._spatial_filters(k)[0] * in_band
                 PSD[..., self.nOtf_y//2, self.nOtf_x-1] = 0.0 # remove the DC component
                 
@@ -393,6 +399,7 @@ class TipTorch(torch.nn.Module):
             elif name == 'wind shake':
                 piston_filter, tilt_filter = self._spatial_filters(self.k_AO)
                 PSD = (1.0 - tilt_filter) * piston_filter * self.mask_corrected_AO
+                
             return PSD / self._half_sum(PSD)
         
         return self._cached(name, compute)
@@ -402,8 +409,10 @@ class TipTorch(torch.nn.Module):
         ''' Tip + tilt vibration power [nm²] left by the HO loop, [N_obs]: the temporal PSDs vibration_PSD [3, N_f] filtered by the rejection transfer function and integrated (as P3's windShakePSD) '''
         rate, gain, delay = self.HOloop_rate.view(-1,1), self.HOloop_gain.view(-1,1), self.HOloop_delay.view(-1,1) # [N_obs, 1]
         f = 0.1 + (0.5*rate - 0.1) * torch.linspace(0, 1, int(5*rate.max().item()), device=self.device, dtype=rate.dtype) # [N_obs, N_f]
+        
         PSD_t = self._interp1d(f, self.vibration_PSD[0], self.vibration_PSD[1]) + self._interp1d(f, self.vibration_PSD[0], self.vibration_PSD[2])
         _, rtfInt, _, _ = self.TransferFunctions(f, 1.0/rate, delay, gain)
+        
         return ( (rtfInt.pow(2) * PSD_t).sum(dim=-1) * (f[:,1]-f[:,0]) ).abs()
 
 
@@ -425,6 +434,7 @@ class TipTorch(torch.nn.Module):
         odd = int(np.round(x))
         if odd % 2 == 0:
             odd += 1 if x > odd else -1
+
         return odd
         
     
@@ -684,7 +694,8 @@ class TipTorch(torch.nn.Module):
                  norm_regime: str = 'sum',
                  device: torch.device = torch.device('cpu'),
                  oversampling: int = 1,
-                 dtype: torch.dtype = torch.float32):
+                 dtype: torch.dtype = torch.float32,
+                 nTh: int = 0):
         
         super().__init__()
         
@@ -731,6 +742,13 @@ class TipTorch(torch.nn.Module):
         
         # Default inversion method for tomographic reconstruction
         self.inversion_method = 'lstsq'
+
+        # Number of wind directions sampled within the wind direction drift by the controller (0 = fixed wind direction)
+        self.nTh = nTh
+        if self.nTh > 0:
+            # Gauss-Legendre nodes on [-1, 1] and weights summing to 1: the average over the drift is the weighted sum over its nodes
+            nodes, weights = np.polynomial.legendre.leggauss(self.nTh)
+            self.wind_drift_nodes, self.wind_drift_weights = self.make_tensor(nodes), self.make_tensor(weights/2) # [nTh]
         
         # Piston filters
         self.piston_filter = None # piston mode filter in the AO-corrected freqs domain
@@ -825,61 +843,61 @@ class TipTorch(torch.nn.Module):
         return hInt, rtfInt, atfInt, ntfInt
 
 
-    # TODO: accelerate this function
     def NoiseGain(self, nF: int = 1000):
         if not self.approx_noise_gain:
-            Ts = 1.0 / self.HOloop_rate  # sampling time
-            delay    = self.HOloop_delay # latency between the measurement and the correction
-            loopGain = self.HOloop_gain
-            
-            f = torch.zeros([self.N_obs, nF], device=self.device)
-            
-            # TODO: this is slow
-            for i in range(self.N_obs):
-                f[i,:] = torch.logspace(-3, torch.log10(0.5/Ts[i]).item(), nF)
+            Ts = min_2d(1.0 / self.HOloop_rate) # sampling time, [N_obs, 1]
+            delay    = min_2d(self.HOloop_delay) # latency between the measurement and the correction
+            loopGain = min_2d(self.HOloop_gain)
 
-            # NOTE: faster version: Create end values for logspace for all sources at once
-            # log_end = torch.log10(0.5/Ts.flatten())  # [N_obs]
-            # log_start = torch.full((self.N_obs,), -3, device=self.device)
-            # steps = torch.linspace(0, 1, nF, device=self.device).unsqueeze(0)  # [1, nF]
-            # f = 10 ** (log_start.unsqueeze(1) + (log_end.unsqueeze(1) - log_start.unsqueeze(1)) * steps)
+            # Log-spaced frequencies from 1e-3 Hz to Nyquist for all observations at once,
+            # without a per-observation loop and the host-device syncs caused by .item()
+            steps = torch.linspace(0, 1, nF, device=self.device, dtype=Ts.dtype).unsqueeze(0) # [1, nF]
+            f = 10 ** (-3 + (torch.log10(0.5/Ts) + 3) * steps) # [N_obs, nF]
 
-            _, _, _, ntfInt = self.TransferFunctions(f, min_2d(Ts), min_2d(delay), min_2d(loopGain))
-            self.noise_gain = torch.trapz(ntfInt.abs().pow(2), f, dim=1).view(self.N_obs, 1, 1) * 2*Ts
+            _, _, _, ntfInt = self.TransferFunctions(f, Ts, delay, loopGain)
+            self.noise_gain = (torch.trapz(ntfInt.abs().pow(2), f, dim=1) * 2*Ts.squeeze(1)).view(self.N_obs, 1, 1)
         else:
             # An average value of the noise transfer function as a function of the delay in frames for an integrator gain of 0.5
             self.noise_gain = torch.min(torch.tensor(0.8, device=self.device), 0.4 + 0.1333 * self.HOloop_delay).pow(2).view(self.N_obs, 1, 1)
     
      
     def Controller(self):
-        #nTh = 1
-        idim = lambda x: x.view(self.N_obs, 1, 1, self.N_L)
-        
-        vy = idim(self.vy)
-        vx = idim(self.vx)
-        kx = self.kx_AO.unsqueeze(-1) # add atmo. layers dimension: [N_src, nOtf_AO, nOtf_AO, nL]
-        ky = self.ky_AO.unsqueeze(-1) # add atmo. layers dimension: [N_src, nOtf_AO, nOtf_AO, nL]
-        
+        '''
+        Spatialized AO loop transfer functions under the frozen-flow hypothesis, f = -k·v (Correia et al. 2017, JOSA A 34, 1877, Eqs. 13-15).
+        The wind direction may drift within wind_dir ± wind_dir_drift [deg] during the acquisition: the transfer functions are then averaged
+        uniformly over these directions at a fixed wind speed (ibid., Eqs. 23-24, with the same direction bounds for H1, H2 and Hn), using an
+        nTh-node Gauss-Legendre quadrature. With nTh = 0, the wind direction is fixed and the averaging is skipped.
+        '''
         Ts =  1.0 / self.HOloop_rate  # sampling time
         delay     = self.HOloop_delay # latency between the measurement and the correction
         loop_gain = self.HOloop_gain
-        
-        #TODO: implement nTh to incorparate the uncertainty in wind direction
-        thetaWind = torch.zeros(1, device=self.device) #torch.linspace(0, 2*torch.pi-2*torch.pi/nTh, nTh) TODO: remove GPU initialization of 0
-        costh = torch.cos(thetaWind) # stays for the uncertainty in the wind diirection
 
-        fi = -(vx*kx + vy*ky)*costh # [N_src, nOtf_AO, nOtf_AO, nL]
+        if self.nTh == 0:
+            idim = lambda x: x.view(self.N_obs, 1, 1, self.N_L)
+            vx, vy = idim(self.vx), idim(self.vy)
+            kx, ky = self.kx_AO.unsqueeze(-1), self.ky_AO.unsqueeze(-1) # add atmo. layers dimension: [N_src, nOtf_AO, nOtf_AO, 1]
+            w = idim(self.Cn2_weights)
+            
+        else:
+            idim = lambda x: x.view(self.N_obs, 1, 1, -1, 1)
+            # Wind velocities rotated by the drift angles sampled within ± wind_dir_drift
+            d_theta = torch.deg2rad(idim(self.wind_dir_drift)) * self.wind_drift_nodes # [N_obs, 1, 1, nL or 1, nTh]
+            cos_dth, sin_dth = torch.cos(d_theta), torch.sin(d_theta)
+            vx = idim(self.vx)*cos_dth - idim(self.vy)*sin_dth # [N_obs, 1, 1, nL, nTh]
+            vy = idim(self.vx)*sin_dth + idim(self.vy)*cos_dth
+           
+            kx, ky = pdims(self.kx_AO, 2), pdims(self.ky_AO, 2) # add atmo. layers and wind directions dimensions: [N_src, nOtf_AO, nOtf_AO, 1, 1]
+            w = idim(self.Cn2_weights) * self.wind_drift_weights
 
-        _, _, atfInt, ntfInt = self.TransferFunctions(fi, pdims(Ts,3), pdims(delay,3), pdims(loop_gain,3))
-        
-        # AO transfer function
-        self.h1 = idim(self.Cn2_weights) * atfInt #/nTh
-        self.h2 = idim(self.Cn2_weights) * atfInt.abs().pow(2) #/nTh
-        self.hn = idim(self.Cn2_weights) * ntfInt.abs().pow(2) #/nTh
+        fi = -(vx*kx + vy*ky) # [N_src, nOtf_AO, nOtf_AO, nL] or [N_src, nOtf_AO, nOtf_AO, nL, nTh]
+        n_ext = fi.dim() - 1 # trailing dimensions to add to the per-observation loop parameters
 
-        self.h1 = self.h1.sum(dim=-1) # sum over the atmospheric layers
-        self.h2 = self.h2.sum(dim=-1) 
-        self.hn = self.hn.sum(dim=-1) 
+        _, _, atfInt, ntfInt = self.TransferFunctions(fi, pdims(Ts, n_ext), pdims(delay, n_ext), pdims(loop_gain, n_ext))
+
+        # AO transfer functions, averaged over the wind directions and summed over the atmospheric layers
+        self.h1 = (w * atfInt).flatten(3).sum(dim=-1)
+        self.h2 = (w * atfInt.abs().pow(2)).flatten(3).sum(dim=-1)
+        self.hn = (w * ntfInt.abs().pow(2)).flatten(3).sum(dim=-1)
 
 
     def ReconstructionFilter(self, WFS_noise_var: torch.Tensor, MV: int = 0): # TODO: make MV switchable
@@ -911,10 +929,13 @@ class TipTorch(torch.nn.Module):
         '''
         theta_x = (self.src_dirs_x.view(-1) - self.GS_dirs_x[:, 0]).view(-1, 1, 1, 1) # [N_src, 1, 1, 1]
         theta_y = (self.src_dirs_y.view(-1) - self.GS_dirs_y[:, 0]).view(-1, 1, 1, 1)
+        
         if not (theta_x.any() or theta_y.any()): # all sources on the guide star axis
             return torch.ones(1, 1, 1, device=self.device, dtype=self.dtype)
+        
         h = self.h_().view(self.N_obs, 1, 1, self.N_L)
         w = self.Cn2_weights.view(self.N_obs, 1, 1, self.N_L)
+        
         return (w * torch.exp(-2j*torch.pi * h * (theta_x*self.kx_AO.unsqueeze(-1) + theta_y*self.ky_AO.unsqueeze(-1)))).sum(dim=-1)
 
 
@@ -1669,67 +1690,36 @@ class TipTorch(torch.nn.Module):
         )
 
 
-    def _cleanup_dict_recursive(self, obj):
-        """Recursively clean up tensors in nested dictionaries"""
+    @staticmethod
+    def _holds_tensor(obj) -> bool:
+        if torch.is_tensor(obj):
+            return True
         if isinstance(obj, dict):
-            for key in list(obj.keys()):
-                self._cleanup_dict_recursive(obj[key])
-                del obj[key]
-        elif isinstance(obj, (list, tuple)):
-            for item in obj:
-                self._cleanup_dict_recursive(item)
-        elif isinstance(obj, torch.Tensor):
-            del obj
+            obj = obj.values()
+        elif not isinstance(obj, (list, tuple)):
+            return False
+        return any(TipTorch._holds_tensor(x) for x in obj)
 
 
     def cleanup(self):
         """Explicitly clean up GPU memory and release resources"""
-        # Clear cached tensors and computations
-        if hasattr(self, 'OTF_static'):
-            del self.OTF_static
-        if hasattr(self, 'OTF_static_default'):
-            del self.OTF_static_default
-        if hasattr(self, 'OTF'):
-            del self.OTF
-        if hasattr(self, 'PSDs'):
-            del self.PSDs
-        
-        # Clear pupil-related tensors
-        if hasattr(self, 'pupil'):
-            del self.pupil
-        if hasattr(self, 'apodizer'):
-            del self.apodizer
-        if hasattr(self, 'pupil_padder'):
-            del self.pupil_padder
-        
-        # Clear large attribute tensors
-        attrs_to_clear = [
-            'wvl', 'F', 'bg', 'dx', 'dy', 'Jx', 'Jy', 'Jxy','r0', 'L0', 'wind_speed', 'wind_dir',
-            'Cn2_weights', 'Cn2_heights', 'h', 'GS_dirs_x', 'GS_dirs_y', 'src_dirs_x', 'src_dirs_y',
-            'kx', 'ky', 'kx_AO', 'ky_AO', 'U', 'V', 'mask_corrected', 'mask_corrected_AO',
-            'P_beta_DM', 'piston_filter', 'PR'
-        ]
-        
-        for attr_name in attrs_to_clear:
-            if hasattr(self, attr_name):
-                delattr(self, attr_name)
-        
-        # Clean up config dictionary (contains nested tensors)
-        if hasattr(self, 'config'):
-            self._cleanup_dict_recursive(self.config)
-            del self.config
-        
-        # Clear any remaining nn.Module parameters and buffers
-        for name in list(self._parameters.keys()):
-            del self._parameters[name]
-        
-        for name in list(self._buffers.keys()):
-            del self._buffers[name]
-        
-        # Clear CUDA cache if using GPU
+        # Drop every public attribute holding tensors (directly or inside containers, e.g. config).
+        # References are dropped rather than cleared in-place, so caller-owned dicts stay intact
+        for name, value in list(vars(self).items()):
+            if not name.startswith('_') and self._holds_tensor(value):
+                delattr(self, name)
+
+        self._spectra_cache = {}
+        self._parameters.clear()
+        self._buffers.clear()
+        self._modules.clear() # pupil_padder, PSD_padder
+
         if self.device.type == 'cuda':
             torch.cuda.empty_cache()
             torch.cuda.synchronize()
+        elif self.device.type == 'mps':
+            torch.mps.empty_cache()
+            torch.mps.synchronize()
     
 
     def __del__(self):
