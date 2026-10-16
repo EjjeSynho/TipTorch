@@ -275,11 +275,16 @@ def load_and_fit_sample(id):
         elif isinstance(PSF_model.LO_basis, ZernikeBasis) or isinstance(PSF_model.LO_basis, ArbitraryBasis):
             LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * suppress_LO
             # Constraint to enforce first element of LO_coefs to be positive
-            phase_bump_positive   = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 0]) * w_bump * suppress_bump
+            phase_bump = PSF_model.inputs_manager['LO_coefs'][:, 0]
+            phase_bump_positive   = force_positive(phase_bump) * w_bump * suppress_bump
+            # PSFs without the "Non-point" flag: the phase bump is pulled to 0, not only kept positive. Otherwise the fit uses it to
+            # absorb other errors, and the fitted bump goes into the calibrator training (re-attached per sample) while the
+            # calibrator bundles predict 0 (bump 1 costs ~40 % of a typical fit loss: the fitted bumps of these PSFs end up < ~0.1)
+            phase_bump_penalty    = phase_bump.pow(2).mean() * w_bump * suppress_bump if suppress_bump_flag else 0.0
             # Force defocus to be positive to mitigate sign ambiguity
             first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_LO * suppress_LO
-            
-            LO_loss += phase_bump_positive + first_defocus_penalty
+
+            LO_loss += phase_bump_positive + phase_bump_penalty + first_defocus_penalty
         
         return LO_loss
 
@@ -370,8 +375,9 @@ def load_and_fit_sample(id):
     config_manager.Convert(config_dict, framework='numpy')
 
     save_data = {
-        'comments':    f'NFM fitting with re-normalized dn, {loss_type} PSF loss',
+        'comments':    f'NFM fitting with re-normalized dn, {loss_type} PSF loss, phase bump pulled to 0 unless flagged "Non-point"',
         'loss config': PSF_LOSS_CFG,
+        'bump suppressed': bool(suppress_bump_flag),
         'input_vec':   to_store(x0),
         'config':      config_dict,
         'OPD_map':     OPD_map,

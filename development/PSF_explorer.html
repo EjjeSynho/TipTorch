@@ -1,0 +1,324 @@
+<!doctype html>
+<!-- Page of the standalone PSF explorer, served by development/PSF_explorer.py (python development/PSF_explorer.py) -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PSF explorer</title>
+<style>
+  :root { --fg: #1d1f23; --muted: #6b7280; --line: #d6d9de; --panel: #f4f5f7; --accent: #2563eb; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 system-ui, sans-serif; color: var(--fg); background: #fff; }
+  #app { display: flex; gap: 12px; height: 100vh; padding: 10px; }
+  #left { flex: 1 1 auto; min-width: 600px; display: flex; flex-direction: column; gap: 6px; overflow-y: auto; }
+  #right { flex: 0 0 490px; overflow-y: auto; padding-left: 10px; border-left: 1px solid var(--line); }
+  #figure { width: 100%; height: auto; }
+  #figure:not([src]) { display: none; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 16px; margin: 4px 0; }
+  .row label { display: inline-flex; align-items: center; gap: 6px; }
+  .value { min-width: 4.5em; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 4px; overflow: hidden; }
+  .seg label { padding: 3px 10px; cursor: pointer; }
+  .seg input { display: none; }
+  .seg label:has(input:checked) { background: var(--accent); color: #fff; }
+  button { font: inherit; padding: 4px 12px; border: 1px solid var(--line); border-radius: 4px; background: var(--panel); cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: default; }
+  select { font: inherit; padding: 2px; max-width: 100%; }
+  #sample { width: 330px; }
+  #status { min-height: 1.4em; }
+  #busy { color: var(--muted); }
+  #log { margin: 0; max-height: 170px; overflow: auto; padding: 6px 8px; background: var(--panel); border-radius: 4px;
+         font: 12px/1.35 ui-monospace, monospace; white-space: pre-wrap; }
+  #log:empty { display: none; }
+  h4 { margin: 12px 0 4px; }
+  #psd { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px 8px; }
+  details { border: 1px solid var(--line); border-radius: 4px; margin: 6px 0; }
+  summary { padding: 5px 8px; background: var(--panel); cursor: pointer; font-weight: 600; }
+  .knob { display: grid; grid-template-columns: 150px 1fr 110px; gap: 8px; align-items: center; padding: 2px 8px; }
+  .knob span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .knob input[type=range] { width: 100%; }
+  .knob input[type=number] { width: 100%; font: inherit; }
+  input:invalid { box-shadow: none; }
+  .hint { color: var(--muted); }
+  #pad { display: block; width: 260px; height: 260px; margin: 8px auto 2px; touch-action: none; cursor: crosshair; user-select: none; }
+  #pad .bg { fill: #fafbfc; stroke: var(--line); stroke-width: 0.1; }
+  #pad .grid { stroke: #e6e8ec; stroke-width: 0.06; }
+  #pad .axis { stroke: #b9bec7; stroke-width: 0.08; }
+  #pad .fov { fill: rgba(37, 99, 235, 0.05); stroke: var(--muted); stroke-width: 0.1; stroke-dasharray: 0.4 0.3; }
+  #pad .lgs { fill: #f59e0b; stroke: #92400e; stroke-width: 0.12; }
+  #pad .label { font-size: 1.3px; fill: var(--muted); }
+  #pad-src { fill: var(--accent); stroke: #fff; stroke-width: 0.25; }
+  #pad-readout { text-align: center; color: var(--muted); font-variant-numeric: tabular-nums; margin-bottom: 4px; }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="left">
+    <img id="figure" alt="">
+    <div class="row">
+      <label>λ <input type="range" id="wvl" min="0" max="30" value="15"><span class="value" id="wvl_v"></span></label>
+      <label><input type="checkbox" id="white"> white</label>
+      <span class="seg" id="scale">
+        <label><input type="radio" name="scale" value="log" checked>log</label>
+        <label><input type="radio" name="scale" value="linear">linear</label>
+        <label><input type="radio" name="scale" value="anisotropy">anisotropy</label>
+      </span>
+      <label><input type="checkbox" id="show_data"> data &amp; residual</label>
+    </div>
+    <div class="row">
+      <label>half-size <input type="range" id="crop" min="5" max="99" value="40"><span class="value" id="crop_v"></span></label>
+      <label>log range <input type="range" id="decades" min="2" max="7" step="0.25" value="4.5"><span class="value" id="decades_v"></span></label>
+      <select id="cmap"><option>magma</option><option>gray</option><option>viridis</option><option>inferno</option><option value="RGB">RGB (λ as colours)</option></select>
+    </div>
+    <div id="status" class="hint">Pick a sample on the right and press Load.</div>
+    <pre id="log"></pre>
+  </div>
+  <div id="right">
+    <div class="row"><label>Flag <select id="flag"></select></label></div>
+    <div class="row"><label>Sample <select id="sample"></select></label><button id="load" class="primary">Load</button></div>
+    <div class="row"><button id="reset">Reset to fit</button><button id="print">Print values</button><span id="busy"></span></div>
+    <h4>PSD terms</h4>
+    <div id="psd"></div>
+    <div id="knobs"></div>
+  </div>
+</div>
+<script>
+const $ = id => document.getElementById(id);
+const knobInputs = new Map(); // 'key/idx' -> {slider, text}
+const fmt = v => +(+v).toPrecision(6); // shown in the text boxes, the server keeps the exact values
+let wvlNm = [];
+
+const view = () => ({
+  wvl: +$('wvl').value, white: $('white').checked, scale: document.querySelector('input[name=scale]:checked').value,
+  show_data: $('show_data').checked, crop: +$('crop').value, decades: +$('decades').value, cmap: $('cmap').value,
+});
+
+function log(text) {
+  $('log').textContent += ($('log').textContent ? '\n' : '') + text;
+  $('log').scrollTop = $('log').scrollHeight;
+}
+
+// One request to the server; shows the figure / status / log that come back
+async function call(path, body = {}) {
+  $('busy').textContent = 'computing…';
+  try {
+    const res = await fetch(path, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({...body, view: view()})});
+    const out = await res.json();
+    if (out.error) log(out.error);
+    if (out.image) $('figure').src = 'data:image/png;base64,' + out.image;
+    if (out.status) { $('status').innerHTML = out.status; $('status').className = ''; }
+    if (out.log) log(out.log);
+    if (out.values) showValues(out.values);
+    return out;
+  } catch (err) {
+    $('status').textContent = `Server not reachable (${err.message}): is PSF_explorer.py still running?`;
+    return {};
+  } finally {
+    $('busy').textContent = '';
+  }
+}
+
+// Requests run one after the other; knob / view changes made meanwhile are merged into the next update
+let chain = Promise.resolve(), queued = {knobs: new Map(), psd: false}, waiting = false;
+const serial = fn => (chain = chain.then(fn, fn));
+
+function update(knob, value) {
+  drawPad();
+  if (knob) queued.knobs.set(knob, value);
+  if (waiting) return;
+  waiting = true;
+  serial(async () => {
+    waiting = false;
+    const body = {knobs: [...queued.knobs].map(([k, v]) => [...k.split('/'), v])};
+    if (queued.psd) body.psd = psdState();
+    queued = {knobs: new Map(), psd: false};
+    await call('/api/update', body);
+  });
+}
+
+const psdState = () => Object.fromEntries([...$('psd').querySelectorAll('input')].map(b => [b.name, b.checked]));
+
+function setKnob(knob, value) { // typed values may leave the slider range
+  const {slider, text} = knobInputs.get(knob);
+  if (value < +slider.min) slider.min = value;
+  if (value > +slider.max) slider.max = value;
+  slider.value = value;
+  text.value = fmt(value);
+}
+
+// Values the server changed (all after a reset, the other Cn2 weights after one changed); a knob with a newer change queued keeps its value
+function showValues(values) {
+  for (const [key, vals] of Object.entries(values))
+    vals.forEach((v, idx) => {
+      const knob = `${key}/${idx}`;
+      if (knobInputs.has(knob) && !queued.knobs.has(knob)) setKnob(knob, v);
+    });
+  drawPad();
+}
+
+// Source pad: the science source dragged over the field, x up and y right as the anisoplanatism shows in the PSF images, with the LGS
+// asterism (radius and rotation knobs) and the NFM field
+let field = null; // {half, fov, lgs_az} from the server
+const knobValue = knob => knobInputs.has(knob) ? +knobInputs.get(knob).text.value : 0;
+
+function makePad() {
+  const H = field.half, F = field.fov / 2;
+  let grid = '';
+  for (let g = -Math.floor(H / 5) * 5; g <= H; g += 5)
+    if (g) grid += `<line class="grid" x1="${g}" y1="${-H}" x2="${g}" y2="${H}"/><line class="grid" x1="${-H}" y1="${g}" x2="${H}" y2="${g}"/>`;
+  const box = document.createElement('div');
+  box.innerHTML = `<svg id="pad" viewBox="${-H} ${-H} ${2*H} ${2*H}">
+      <rect class="bg" x="${-H}" y="${-H}" width="${2*H}" height="${2*H}"/>${grid}
+      <line class="axis" x1="${-H}" y1="0" x2="${H}" y2="0"/><line class="axis" x1="0" y1="${-H}" x2="0" y2="${H}"/>
+      <rect class="fov" x="${-F}" y="${-F}" width="${2*F}" height="${2*F}"/>
+      <text class="label" x="0.4" y="${-H + 1.5}">+x</text><text class="label" x="${H - 2.4}" y="-0.5">+y</text>
+      <text class="label" x="${-F}" y="${-F - 0.4}">NFM field</text>
+      <g id="pad-lgs"></g><circle id="pad-src" r="0.7"/>
+    </svg><div id="pad-readout"></div>`;
+  const svg = box.querySelector('svg');
+  let dragging = false;
+  const move = ev => { // screen -> field: right = +y, up = +x, snapped to 0.05"
+    const p = new DOMPoint(ev.clientX, ev.clientY).matrixTransform(svg.getScreenCTM().inverse());
+    const snap = v => Math.round(Math.max(-H, Math.min(H, v)) * 20) / 20;
+    setSource(snap(-p.y), snap(p.x));
+  };
+  svg.addEventListener('pointerdown', ev => {
+    dragging = true;
+    try { svg.setPointerCapture(ev.pointerId); } catch {} // keeps the drag when the pointer leaves the pad
+    move(ev);
+  });
+  svg.addEventListener('pointermove', ev => { if (dragging) move(ev); });
+  svg.addEventListener('pointerup', () => { dragging = false; });
+  svg.addEventListener('dblclick', () => setSource(0, 0));
+  return box;
+}
+
+function setSource(x, y) {
+  if (x === knobValue('src_x/0') && y === knobValue('src_y/0')) return;
+  setKnob('src_x/0', x);
+  setKnob('src_y/0', y);
+  update('src_x/0', x);
+  update('src_y/0', y);
+}
+
+function drawPad() {
+  if (!$('pad')) return;
+  const x = knobValue('src_x/0'), y = knobValue('src_y/0'), r = knobValue('LGS_radius/0'), rot = knobValue('LGS_rotation/0');
+  $('pad-src').setAttribute('cx', y);
+  $('pad-src').setAttribute('cy', -x);
+  $('pad-lgs').innerHTML = field.lgs_az.map(az => {
+    const a = (az + rot) * Math.PI / 180; // LGS at (x, y) = r (cos a, sin a)
+    return `<circle class="lgs" cx="${r * Math.sin(a)}" cy="${-r * Math.cos(a)}" r="0.6"><title>LGS</title></circle>`;
+  }).join('');
+  const airmass = 1 / Math.sin(knobValue('elevation/0') * Math.PI / 180);
+  $('pad-readout').textContent = `x ${x.toFixed(2)}″, y ${y.toFixed(2)}″: ${Math.hypot(x, y).toFixed(2)}″ off-axis · airmass ${airmass.toFixed(3)} · double-click: on-axis`;
+}
+
+function buildKnobs(sections) {
+  const box = $('knobs');
+  const open = new Set([...box.querySelectorAll('details[open]')].map(d => d.dataset.title));
+  box.innerHTML = '';
+  knobInputs.clear();
+  sections.forEach(([title, rows], i) => {
+    const sec = document.createElement('details');
+    sec.dataset.title = title;
+    sec.open = open.size ? open.has(title) : i < 2;
+    sec.appendChild(Object.assign(document.createElement('summary'), {textContent: title}));
+    if (field && rows.some(row => row[0] === 'src_x')) sec.appendChild(makePad());
+    for (const [key, idx, label, value, lo, hi, step] of rows) {
+      const knob   = `${key}/${idx}`;
+      const name   = Object.assign(document.createElement('span'), {textContent: label, title: label});
+      const slider = Object.assign(document.createElement('input'), {type: 'range', min: lo, max: hi, step: step, value: value});
+      const text   = Object.assign(document.createElement('input'), {type: 'number', step: step, value: fmt(value)});
+      slider.addEventListener('input', () => { text.value = slider.value; update(knob, +slider.value); });
+      text.addEventListener('change', () => {
+        const v = parseFloat(text.value);
+        if (Number.isFinite(v)) { setKnob(knob, v); update(knob, v); }
+      });
+      const row = document.createElement('div');
+      row.className = 'knob';
+      row.append(name, slider, text);
+      sec.appendChild(row);
+      knobInputs.set(knob, {slider, text});
+    }
+    box.appendChild(sec);
+  });
+  drawPad();
+}
+
+function showSample(out) {
+  if (!out.knobs) return;
+  field = out.field;
+  buildKnobs(out.knobs);
+  wvlNm = out.wvl_nm;
+  $('wvl').max = wvlNm.length - 1;
+  showViewValues();
+  $('sample').value = out.sample;
+  document.title = `PSF explorer: ${out.sample}`;
+}
+
+function fillSamples(samples) {
+  const sel = $('sample'), current = sel.value;
+  sel.innerHTML = '';
+  for (const [label, id] of samples) sel.add(new Option(label.split(/ {2,}/).filter(Boolean).join(' · '), id));
+  if ([...sel.options].some(o => o.value === current)) sel.value = current;
+}
+
+function showViewValues() {
+  const rgb = $('cmap').value === 'RGB' && view().scale !== 'anisotropy'; // all wavelengths as colours
+  $('wvl_v').textContent = rgb ? 'RGB, all λ' : $('white').checked ? 'white' : (wvlNm.length ? `${wvlNm[$('wvl').value]} nm` : $('wvl').value);
+  $('crop_v').textContent = `${$('crop').value} px`;
+  $('decades_v').textContent = `${$('decades').value} dex`;
+}
+
+// Display options: the slider labels follow while dragging, the figure is redrawn as fast as the server goes
+for (const id of ['wvl', 'crop', 'decades']) $(id).addEventListener('input', () => { showViewValues(); update(); });
+for (const id of ['white', 'show_data', 'cmap']) $(id).addEventListener('change', () => { showViewValues(); update(); });
+document.querySelectorAll('input[name=scale]').forEach(r => r.addEventListener('change', () => { showViewValues(); update(); }));
+
+$('flag').addEventListener('change', async () => {
+  const out = await call('/api/samples', {flag: $('flag').value});
+  if (out.samples) fillSamples(out.samples);
+});
+
+$('load').addEventListener('click', () => {
+  const id = $('sample').value;
+  if (!id) return;
+  $('load').disabled = true;
+  serial(async () => {
+    queued = {knobs: new Map(), psd: false}; // changes for the previous sample
+    $('status').textContent = `Loading sample ${id}…`;
+    $('log').textContent = '';
+    showSample(await call('/api/load', {id: +id}));
+    $('load').disabled = false;
+  });
+});
+
+$('reset').addEventListener('click', () => serial(async () => {
+  queued.knobs.clear();
+  await call('/api/reset');
+}));
+
+$('print').addEventListener('click', () => serial(() => call('/api/values')));
+
+// Start: sample list, PSD terms and, if the server has one loaded already, the sample with its current knob values
+showViewValues();
+serial(async () => {
+  const out = await call('/api/state');
+  if (!out.flags) return;
+  for (const f of out.flags) $('flag').add(new Option(f, f));
+  fillSamples(out.samples);
+  for (const [term, on] of Object.entries(out.psd)) {
+    const box = Object.assign(document.createElement('input'), {type: 'checkbox', name: term, checked: on});
+    box.addEventListener('change', () => { queued.psd = true; update(); });
+    const label = document.createElement('label');
+    label.append(box, ' ' + term);
+    $('psd').appendChild(label);
+  }
+  showSample(out);
+});
+</script>
+</body>
+</html>
