@@ -94,7 +94,7 @@ DEROTATE_PSF = False
 
 if not DEROTATE_PSF:
     candidates = muse_df[muse_df['Non-point'] & muse_df['Has streaks'] & muse_df['Good quality'] & ~muse_df['Corrupted'] & ~muse_df['Bad quality']]
-    ids = [462, 42, 14, 144, 344, 436] # pupil angles 7, 53, 95, 133, 230 (intense bump), 263 deg; 69 candidates in total
+    ids = [462, 144, 344, 109, 525]
     print(candidates.loc[ids, ['Pupil angle', 'Non-point', 'Has streaks', 'Good quality', 'Low AO errs']])
 
 ids_ = ids if isinstance(ids, list) else [ids]
