@@ -5,7 +5,7 @@ import numpy as np
 import scipy.special as spc
 import torchvision.transforms as transforms
 import torchvision.transforms.functional as TF
-from torch import fft, nn
+from torch import fft
 from torch.nn.functional import interpolate
 from astropy.io import fits
 from tiptorch.tools.utils import pdims, min_2d, to_little_endian
@@ -295,25 +295,39 @@ class TipTorch(torch.nn.Module):
         return tensor
 
 
-    def _convert_tensors_dtype(self, target_float: torch.dtype, target_complex: torch.dtype) -> None:
-        ''' Helper to convert all tensor attributes to specified dtypes '''
+    @staticmethod
+    def _map_tensors(obj, fn):
+        ''' Applies fn to every tensor in obj, rebuilding containers only if something has changed (keeps aliasing otherwise) '''
+        if torch.is_tensor(obj):
+            return fn(obj)
+        if isinstance(obj, dict):
+            new = {k: TipTorch._map_tensors(v, fn) for k, v in obj.items()}
+            changed = any(new[k] is not v for k, v in obj.items())
+        elif type(obj) in (list, tuple):
+            new = type(obj)(TipTorch._map_tensors(v, fn) for v in obj)
+            changed = any(a is not b for a, b in zip(new, obj))
+        else:
+            return obj
+        return new if changed else obj
+
+
+    def _convert_tensors(self, fn) -> None:
+        ''' Applies fn to all tensors held by the model: attributes (incl. nested ones, e.g. in config), parameters, buffers, and submodules '''
         self._spectra_cache = {}
-        for attr_name, attr in self.__dict__.items():
-            if torch.is_tensor(attr):
-                if torch.is_floating_point(attr):
-                    setattr(self, attr_name, attr.to(target_float))
-                elif torch.is_complex(attr):
-                    setattr(self, attr_name, attr.to(target_complex))
+        for name, attr in list(vars(self).items()):
+            if not name.startswith('_'):
+                new_attr = self._map_tensors(attr, fn)
+                if new_attr is not attr:
+                    setattr(self, name, new_attr)
+        self._apply(fn)
 
 
     def _to_double(self) -> None:
-        self.is_float = False
-        self._convert_tensors_dtype(torch.float64, torch.complex128)
+        self.to(torch.float64)
 
 
     def _to_float(self) -> None:
-        self.is_float = True
-        self._convert_tensors_dtype(torch.float32, torch.complex64)
+        self.to(torch.float32)
 
 
     def PistonFilter(self, f: torch.Tensor) -> torch.Tensor:
@@ -612,9 +626,6 @@ class TipTorch(torch.nn.Module):
         
         # Set the model parameters to the ones defined in the config file
         self.InitValues()
-
-        if self.is_float:
-            self._to_float()
         
         # Update grids used for computation of PSDs and OTFs. This is necessary when the sampling has changed.
         if grids:
@@ -641,8 +652,11 @@ class TipTorch(torch.nn.Module):
                 # TODO: comment
                 self.P_opt = torch.ones([self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, 1, self.N_L], dtype=torch.complex64, device=self.device)
             else:
-                self.OptimalDMProjector(inv_method=self.inversion_method)
+                self.OptimalDMProjector()
                 self.DMProjector()
+
+        # Some tensors are created in single precision regardless of the model precision
+        self.to(self.dtype)
 
 
     def _initialize_PSDs_settings(self, PSD_include: dict | None = None) -> None:
@@ -739,9 +753,6 @@ class TipTorch(torch.nn.Module):
         if    self.norm_regime == 'sum': self.normalizer = torch.sum
         elif  self.norm_regime == 'max': self.normalizer = torch.amax
         else: self.normalizer = lambda x, dim, keepdim: self.norm_scale # no normalization
-        
-        # Default inversion method for tomographic reconstruction
-        self.inversion_method = 'lstsq'
 
         # Number of wind directions sampled within the wind direction drift by the controller (0 = fixed wind direction)
         self.nTh = nTh
@@ -790,7 +801,7 @@ class TipTorch(torch.nn.Module):
         # TODO: support multiple DMs?
 
 
-    def OptimalDMProjector(self, inv_method='lstsq'):
+    def OptimalDMProjector(self):
         h_dm = self.h_DM.view(1, 1, 1, self.N_DM)
         h = self.h_().view(self.N_obs, 1, 1, 1, self.N_L)
         
@@ -813,14 +824,9 @@ class TipTorch(torch.nn.Module):
         mat1   = ((P_DM_t @ P_L)  * opt_w).sum(dim=3)  # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
         to_inv = ((P_DM_t @ P_DM) * opt_w).sum(dim=3)  # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_DM]
         
-        if inv_method == 'lstsq':
-            # Solve to_inv @ P_opt = mat1 directly for P_opt (equivalent to P_opt = pinv(to_inv) @ mat1),
-            # since to_inv is square [N_DM, N_DM] and mat1 is [N_DM, N_L], their sizes at dim -2 already match
-            self.P_opt = torch.linalg.lstsq(to_inv, mat1, rcond=1e-2).solution # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
-
-        elif inv_method == 'pinv':
-            mat2 = torch.linalg.pinv(to_inv, rcond=1e-2) # Last 2 dimensions are inverted
-            self.P_opt = mat2 @ mat1 # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
+        # to_inv is rank-deficient (e.g. more DMs than optimization directions resolve at low frequencies), so it must be
+        # regularized by truncation. lstsq is avoided: its rank cut-off is driver-dependent (gelsy on CPU, none at all on CUDA)
+        self.P_opt = torch.linalg.pinv(to_inv, rcond=1e-2) @ mat1 # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
 
 
     def TransferFunctions(self, freq: torch.Tensor, Ts: torch.Tensor, delay: torch.Tensor, loop_gain: torch.Tensor):
@@ -1213,7 +1219,7 @@ class TipTorch(torch.nn.Module):
         return sigma_noise_sqr
 
 
-    def TomographicReconstructors(self, WFS_noise_var, inv_method='lstsq'):
+    def TomographicReconstructors(self, WFS_noise_var):
         '''        
         Note that if all simulated sources use the same atmospheric profile, r0, L0, and noise variance,
         then it's possible to compute one tomographic reconstructor for all simulated sources.
@@ -1228,9 +1234,9 @@ class TipTorch(torch.nn.Module):
         
         diag_mask = lambda N: torch.eye(N, device=self.device).view(1,1,1,N,N).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, -1, -1)
         
-        M = 2j*torch.pi*self.k_AO * torch.sinc(self.WFS_d_sub*self.kx_AO) * torch.sinc(self.WFS_d_sub*self.ky_AO)
-        M = pdims(M, 2).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, self.N_GS, self.N_GS) * diag_mask(self.N_GS) # [N_obs, nOtf_y, nOtf_x, nGS, nGS]
-        P = torch.exp( 2j*torch.pi*h * (kx*GS_dirs_x + ky*GS_dirs_y) ) # [N_obs, nOtf_y, nOtf_x, nGS, nL]
+        M    = 2j*torch.pi*self.k_AO * torch.sinc(self.WFS_d_sub*self.kx_AO) * torch.sinc(self.WFS_d_sub*self.ky_AO)
+        M    = pdims(M, 2).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, self.N_GS, self.N_GS) * diag_mask(self.N_GS) # [N_obs, nOtf_y, nOtf_x, nGS, nGS]
+        P    = torch.exp( 2j*torch.pi*h * (kx*GS_dirs_x + ky*GS_dirs_y) ) # [N_obs, nOtf_y, nOtf_x, nGS, nL]
         MP   = torch.einsum('nwhik,nwhkj->nwhij', M, P)  # [N_obs, nOtf_y, nOtf_x, nGS, nL]
         MP_t = torch.conj(MP.permute(0,1,2,4,3))
 
@@ -1239,21 +1245,14 @@ class TipTorch(torch.nn.Module):
         # Note, that size of WFS_noise_var == N_obs
         WFS_noise_variance = WFS_noise_var.to(dtype=MP.dtype) # Convert to complex
         # As previosuly mentioned, if the same tomo reconstructor is used for all targets, then WFS_noise_variance also must be the same for all targets
-        self.C_b = expand_dims( WFS_noise_variance[:self.N_obs], self.N_GS )
-        kernel = self.VonKarmanSpectrum(self.r0_().to(dtype=MP.dtype), self.L0.abs(), self.k2_AO) * self.piston_filter
+        self.C_b   = expand_dims( WFS_noise_variance[:self.N_obs], self.N_GS )
+        kernel     = self.VonKarmanSpectrum(self.r0_().to(dtype=MP.dtype), self.L0.abs(), self.k2_AO) * self.piston_filter
         self.C_phi = pdims(kernel, 2) * expand_dims(self.Cn2_weights, self.N_L)
 
-        # Inversion happens relative to the last two dimensions of these tensors
-        if inv_method == 'pinv':
-            self.W_tomo = (self.C_phi @ MP_t) @ torch.linalg.pinv(MP @ self.C_phi @ MP_t + self.C_b, rcond=1e-3) #1e-4
-
-        elif inv_method == 'lstsq':
-            A = (MP @ self.C_phi @ MP_t + self.C_b).transpose(-2, -1)
-            B = (self.C_phi @ MP_t).transpose(-2, -1)
-            # Solve the least squares problem for W^T, since we deal with W*A = B
-            self.W_tomo = torch.linalg.lstsq(A, B, rcond=1e-2).solution.transpose(-2, -1)           
-        else:
-            raise ValueError('Unknown inversion method specified.') 
+        # MP·C_phi·MPᴴ + C_b is Hermitian positive definite (C_b > 0 due to shot noise), so solve W·A = B exactly,
+        # without truncation. Inversion happens relative to the last two dimensions of these tensors
+        A = MP @ self.C_phi @ MP_t + self.C_b
+        self.W_tomo = torch.linalg.solve(A, self.C_phi @ MP_t, left=False)
          
         self.W = self.P_opt @ self.W_tomo # [N_obs, nOtf_AO_y, nOtf_AO_x, N_GS, N_L]
         
@@ -1380,7 +1379,7 @@ class TipTorch(torch.nn.Module):
             self.ReconstructionFilter(WFS_noise_var)
             
             if self.tomography:
-                self.TomographicReconstructors(WFS_noise_var, inv_method=self.inversion_method)
+                self.TomographicReconstructors(WFS_noise_var)
                 
                 if not self.on_axis:
                     self.DMProjector()
@@ -1583,98 +1582,41 @@ class TipTorch(torch.nn.Module):
         self.Update(grids=True, pupils=False, tomography=True)
 
 
-    def _to_device_recursive(self, obj, device):
-        if isinstance(obj, torch.Tensor):
-            if obj.device != device:
-                if isinstance(obj, nn.Parameter):
-                    obj.data = obj.data.to(device)
-                    if obj.grad is not None:
-                        obj.grad = obj.grad.to(device)
-                else:
-                    obj = obj.to(device)
-                    
-        elif isinstance(obj, nn.Module):
-            obj.to(device)
-            
-        elif isinstance(obj, (list, tuple)):
-            for item in obj:
-                self._to_device_recursive(item, device)
-                
-        elif isinstance(obj, dict):
-            for item in obj.values():
-                self._to_device_recursive(item, device)
-                
-        return obj
-
-
     def to(self, *args, **kwargs):
         '''
-        Moves and/or casts the parameters and buffers (PyTorch-style).
-        
+        Moves and/or casts all tensors of the model, including the ones nested in containers such as config (PyTorch-style).
+
         Signature variations:
             to(device=None, dtype=None, non_blocking=False)
             to(dtype, non_blocking=False)
             to(tensor, non_blocking=False)
-            
-        Args:
-            device (torch.device or str): the desired device
-            dtype (torch.dtype): the desired floating point or complex dtype
-            tensor (torch.Tensor): Tensor whose dtype and device are the desired dtype and device
-            non_blocking (bool): if True and source is in pinned memory, the copy will be asynchronous
-            
+
+        Floating and complex tensors are cast to the matching precision, i.e. float32 <-> complex64 and float64 <-> complex128,
+        so either a real or a complex dtype can be passed. Integer and boolean tensors only change device.
+
         Returns:
             self
         '''
-        device = None
-        dtype = None
-        non_blocking = False
-        
-        # Parse positional arguments
-        if len(args) == 1:
-            arg = args[0]
-            if isinstance(arg, torch.Tensor):
-                # Extract device and dtype from tensor
-                device = arg.device
-                dtype = arg.dtype
-            elif isinstance(arg, (torch.device, str)):
-                device = arg
-            elif isinstance(arg, torch.dtype):
-                dtype = arg
-            elif isinstance(arg, dict):
-                # Handle dict with device/dtype keys
-                device = arg.get('device', device)
-                dtype = arg.get('dtype', dtype)
-                non_blocking = arg.get('non_blocking', non_blocking)
-        elif len(args) == 2:
-            device, dtype = args
-        elif len(args) > 2:
-            raise TypeError(f'to() received too many arguments ({len(args)})')
-        
-        # Parse keyword arguments (override positional if both provided)
-        device = kwargs.get('device', device)
-        dtype = kwargs.get('dtype', dtype)
-        non_blocking = kwargs.get('non_blocking', non_blocking)
-        
-        # Handle dtype conversion using our optimized methods
+        device, dtype, non_blocking, _ = torch._C._nn._parse_to(*args, **kwargs)
+
+        float_dtype, complex_dtype = None, None
         if dtype is not None:
-            if dtype in (torch.float32, torch.complex64):
-                self._to_float()
-            elif dtype in (torch.float64, torch.complex128):
-                self._to_double()
+            if   dtype in (torch.float32, torch.complex64):  float_dtype, complex_dtype = torch.float32, torch.complex64
+            elif dtype in (torch.float64, torch.complex128): float_dtype, complex_dtype = torch.float64, torch.complex128
             else:
                 raise TypeError(f'Unsupported dtype: {dtype}. Use float32, float64, complex64, or complex128.')
-        
-        # Handle device conversion
+            self.dtype, self.is_float = float_dtype, float_dtype == torch.float32
+
         if device is not None:
-            if isinstance(device, str):
-                device = torch.device(device)
-            if self.device != device:
-                self.device = device
-                for name, attr in self.__dict__.items():
-                    new_attr = self._to_device_recursive(attr, device)
-                    if new_attr is not attr:
-                        setattr(self, name, new_attr)
-        
+            if device.type == 'cuda' and device.index is None:
+                device = torch.device('cuda', torch.cuda.current_device())
+            self.device = device
+
+        def convert(t):
+            target = float_dtype if t.is_floating_point() else complex_dtype if t.is_complex() else None
+            return t.to(device=device, dtype=target, non_blocking=non_blocking)
+
+        self._convert_tensors(convert)
         return self
 
 

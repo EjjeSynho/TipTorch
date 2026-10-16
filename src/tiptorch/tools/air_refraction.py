@@ -17,10 +17,8 @@ class AirRefractiveIndexCalculator(nn.Module):
     def __init__(self, dtype=torch.float64, device=None):
         super().__init__()
 
-        self.default_dtype = dtype
         if device is None:
             device = torch.device("cpu")
-        self.default_device = torch.device(device)
 
         # Reference environmental parameters from Mathar (2006), Eq. 7
         self.register_buffer("T_ref", torch.tensor(273.15 + 17.5, dtype=dtype, device=device))
@@ -99,6 +97,16 @@ class AirRefractiveIndexCalculator(nn.Module):
 
         self.register_buffer("coeffs", coeffs)
         self.register_buffer("poly_powers", torch.arange(6, dtype=dtype, device=device)) # powers 0...5 for polynomial evaluation
+
+
+    # Derived from a buffer so that they follow .to() / .cuda() / .double() conversions
+    @property
+    def default_dtype(self):
+        return self.T_ref.dtype
+
+    @property
+    def default_device(self):
+        return self.T_ref.device
 
 
     def _as_tensor(self, x, *, dtype=None, device=None):
