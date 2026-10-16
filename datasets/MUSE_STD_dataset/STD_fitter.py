@@ -52,11 +52,17 @@ PSF_LOSS_CFG = {
     "match_background": False,
 }
 
+# Fit the derotated PSFs (config PupilAngle 0, the regime of the stored fits) or the raw frames, with the PSF model rotated to the header
+# pupil angle of the sample. The fitted dx / dy and the LO coefficients are in the frame of the fitted data (raw frames: dx / dy of the raw
+# image, LO coefficients in the rotated pupil frame), so keep the two regimes in separate output folders
+DEROTATE_PSF = True
+
 warnings.filterwarnings("ignore")
 
 device = default_device
 
 start_id, end_id = -1, -1
+kc_fraction_override = None # 'kc_fraction=<v>' argument: fit with the model k_c at v x the nominal one regardless of the 'k_c mismatch' label (experiments)
 
 # Flexible argument parsing
 input_args = sys.argv[1:]
@@ -71,6 +77,9 @@ for arg in input_args:
     elif arg.lstrip('-').isdigit(): # Simple check for integer IDs
         if start_id == -1:  start_id = int(arg)
         elif end_id == -1:  end_id   = int(arg)
+    elif arg.startswith('kc_fraction='):
+        kc_fraction_override = float(arg.split('=', 1)[1])
+        print(f"Model k_c forced to {100 * kc_fraction_override:.1f} % of the nominal one")
     else:
         # Assume it is a path
         MUSE_FITTING_FOLDER = Path(arg)
@@ -132,13 +141,16 @@ def load_and_fit_sample(id):
     # Load data
     PSF_0, norms, bgs, configs = LoadSTDStarCache(
         ids                 = [id],
-        derotate_PSF        = True,
+        derotate_PSF        = DEROTATE_PSF,
         normalize           = True,
         subtract_background = True,
         wvl_ids             = wvl_ids,
         ensure_odd_pixels   = True,
         device              = device
     )
+
+    if kc_fraction_override is not None: # the configs already carry the k_c fraction of the sample's label: rescale to the forced one
+        configs = [apply_kc_fraction(c, kc_fraction_override / kc_fraction_from_config(c)) for c in configs]
 
     # Initialize the model
     PSF_model = PSFModelNFM(
@@ -172,6 +184,15 @@ def load_and_fit_sample(id):
     # Retrieve flags from dataframe
     blurry_PSF_flag = psf_df.loc[id]['Bad quality'].item()
     non_point_flag  = psf_df.loc[id]['Non-point'].item()
+    # Samples recorded with fewer corrected DM modes: LoadSTDStarCache already scaled the DM pitch of the config, so the model's k_c is
+    # kc_fraction x the nominal one (see add_kc_mismatch_flag). Recorded in the output for the dataset cache / training
+    kc_fraction = float(psf_df.loc[id][KC_FRACTION_FEATURE]) if KC_FRACTION_FEATURE in psf_df.columns else 1.0
+    kc_group    = int(psf_df.loc[id][KC_GROUP_FEATURE])    if KC_GROUP_FEATURE    in psf_df.columns else 0
+    if kc_fraction_override is not None:
+        kc_fraction, kc_group = kc_fraction_override, -1 # -1: forced k_c, not a label group
+    if kc_group != 0:
+        print(f"Sample {id}: {'forced k_c' if kc_group == -1 else f'flagged k_c mismatch (group {kc_group})'}: model k_c = {100 * kc_fraction:.1f} % of the nominal, "
+              f"DM pitch {np.asarray(configs[0]['DM']['DmPitchs']).ravel()[0]:.4f} m, model k_c = {PSF_model.model.kc:.3f} 1/m")
 
     fit_wind_dir    = False
     fit_wind_speed  = True #False
@@ -378,6 +399,8 @@ def load_and_fit_sample(id):
         'comments':    f'NFM fitting with re-normalized dn, {loss_type} PSF loss, phase bump pulled to 0 unless flagged "Non-point"',
         'loss config': PSF_LOSS_CFG,
         'bump suppressed': bool(suppress_bump_flag),
+        'k_c fraction': kc_fraction, # model k_c relative to the nominal one (1.0 unless the sample is flagged 'k_c mismatch')
+        'k_c group':    kc_group,
         'input_vec':   to_store(x0),
         'config':      config_dict,
         'OPD_map':     OPD_map,

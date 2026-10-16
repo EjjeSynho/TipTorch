@@ -295,6 +295,32 @@ def pdims(x, ns):
 min_2d = lambda x: x if x.dim() == 2 else x.unsqueeze(1)
 
 
+def rotate_images(images: torch.Tensor, angles_deg, mode: str = 'bilinear') -> torch.Tensor:
+    '''
+    Rotates square images about their center, counter-clockwise on the image for positive angles (the sense of scipy.ndimage.rotate and of
+    torchvision.transforms.functional.rotate, which it reproduces), zero-padded. One batched grid_sample call, differentiable w.r.t. the images.
+
+    images:     [H, W], [N or 1, H, W] or [N or 1, C, H, W]
+    angles_deg: scalar or [N] (broadcast against the batch of images)
+    mode:       'bilinear' for smooth maps (OPDs, apodizers), 'nearest' for binary masks
+
+    Returns [N, H, W] for 2D / 3D inputs and [N, C, H, W] for 4D ones.
+    '''
+    angles = torch.as_tensor(angles_deg, device=images.device, dtype=images.dtype).flatten()
+    x = images.view(1, 1, *images.shape) if images.ndim == 2 else images.unsqueeze(1) if images.ndim == 3 else images
+    assert x.shape[-1] == x.shape[-2], 'rotate_images expects square images'
+
+    N = max(angles.numel(), x.shape[0])
+    x, angles = x.expand(N, *x.shape[1:]), angles.expand(N)
+
+    cos, sin, zero = torch.cos(torch.deg2rad(angles)), torch.sin(torch.deg2rad(angles)), torch.zeros_like(angles)
+    # affine_grid maps the output pixels to the input ones: a counter-clockwise rotation of the content samples the input at R(-angle)
+    theta = torch.stack([torch.stack([cos, -sin, zero], dim=-1), torch.stack([sin, cos, zero], dim=-1)], dim=-2) # [N, 2, 3]
+    grid  = torch.nn.functional.affine_grid(theta, x.shape, align_corners=False)
+    out   = torch.nn.functional.grid_sample(x, grid, mode=mode, padding_mode='zeros', align_corners=False)
+    return out if images.ndim == 4 else out.squeeze(1)
+
+
 def generate_random_colors(N, random_seed=42):
     # Generate random sources plot colors. Use palette colors first, then random colors after the palette is exhausted.
     palette = plt.rcParams['axes.prop_cycle'].by_key()['color']

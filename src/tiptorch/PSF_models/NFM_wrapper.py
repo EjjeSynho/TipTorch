@@ -11,6 +11,7 @@ from tiptorch.tools.normalizers import DataTransform, Uniform, Uniform0_1, Softm
 
 from warnings import warn
 from tiptorch._config import default_device
+import functools
 import gc
 
 
@@ -339,18 +340,17 @@ class PSFModelNFM:
         return model_config
 
 
+    @staticmethod
+    @functools.lru_cache(maxsize=2048)
+    def _VLT_pupil(angle_deg: float) -> torch.Tensor:
+        ''' Analytic UT4 pupil [320, 320] rotated counter-clockwise by angle_deg, cached per angle (the calibrator revisits the same observations) '''
+        return torch.tensor(PupilVLT(samples=320, rotation_angle=angle_deg), dtype=torch.float32)
+
+
     def _init_model(self, config):
-        pupil_angle = config['telescope']['PupilAngle']
-        
-        if hasattr(pupil_angle, '__len__') and pupil_angle.ndim > 0:
-            if len(pupil_angle) > 1:
-                if not torch.allclose(pupil_angle, pupil_angle[0]):
-                    warn('Different pupil angles for different observations are not supported yet.')
-            pupil_angle = pupil_angle[0]
-            
-            config['telescope']['PupilAngle'] = pupil_angle
-       
-        pupil = torch.tensor( PupilVLT(samples=320, rotation_angle=pupil_angle), device=self.device )
+        # The pupil is generated analytically for every pupil angle of the config: TipTorch calls the generator per observation
+        # (PupilAngle may hold one angle per observation, see the TipTorch class docstring for the rotation sense)
+        pupil = lambda angle: self._VLT_pupil(round(float(angle), 4))
 
         physics_on = self.model_type != 'psfao'
         PSD_include = {

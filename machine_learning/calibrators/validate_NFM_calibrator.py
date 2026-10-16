@@ -108,8 +108,9 @@ _split_path = Path(train_meta['split_path'])
 
 # ── Initialize trainer (when running standalone, outside a training session, or when the session's trainer is of another type) ──
 if 'trainer' not in dir() or trainer.calibrator_type != train_meta.get('calibrator_type', 'direct'):
-    dataset = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
-    logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W})")
+    # The regime the calibrator was trained in: derotated PSFs or raw frames (per-OB pupil rotation), see train_NFM_calibrator.py
+    dataset = NFMDataset(DATASET_CACHE / ('muse_STD_stars_dataset.pt' if cfg.get('derotated_PSFs', True) else 'muse_STD_stars_dataset_raw.pt'))
+    logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W}), {'derotated PSFs' if dataset.derotated else 'raw frames'}")
 
     PSF_model, calibrator, outputs_transformer, trainer = build_NFM_trainer(cfg, dataset, default_device, weights_dir=WEIGHTS_FOLDER / cfg['weights_subdir'])
     release_gpu_memory()

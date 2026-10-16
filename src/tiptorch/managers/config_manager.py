@@ -66,7 +66,7 @@ SINGLETON_VALUES = [
     ['telescope', 'ObscurationRatio'],
     ['telescope', 'PathApodizer'],
     ['telescope', 'PathPupil'],
-    ['telescope', 'PupilAngle'],
+    # PupilAngle is not a singleton: every merged config (observation) keeps its own pupil rotation angle
     ['telescope', 'PathStatModes'],
     ['telescope', 'PathStaticOff'],
     ['telescope', 'PathStaticOn'],
@@ -627,6 +627,7 @@ def MultipleTargetsInOneObservation(config_file, N_srcs, device=None):
     # The entries which are the same for all sources in the field
     shared_entries = [\
         ['telescope',  'ZenithAngle'],
+        ['telescope',  'PupilAngle'],
         ['atmosphere', 'L0'],
         ['atmosphere', 'Seeing'],
         ['atmosphere', 'Cn2Weights'],
@@ -654,9 +655,10 @@ def MultipleTargetsInOneObservation(config_file, N_srcs, device=None):
         ['atmosphere', 'L0'],
         ['sources_HO', 'Wavelength'],
         ['sources_science', 'Zenith'],
-        ['sources_science', 'Azimuth']
+        ['sources_science', 'Azimuth'],
+        ['telescope', 'PupilAngle']
     ]
-    
+
     # In theory, the only remaining per-source values, in this case, are sources_science Azimuth and Zenith.
     # All other entries must be shared among all sources. But just in case, the full merge of configs is done
     for section, entry in shared_entries:
@@ -675,6 +677,16 @@ def MultipleTargetsInDifferentObservations(configs, device=None):
        
     config_manager = ConfigManager()
     merged_config  = config_manager.Merge(configs)
+
+    # The DM pitch is a singleton entry (one k_c = 1 / (2 pitch) per model: the AO-corrected frequency grid is shared by the batch), so
+    # observations with different pitches, e.g. MUSE NFM samples flagged 'k_c mismatch', cannot be merged: batch them per k_c group
+    pitches = []
+    for config in configs:
+        pitch = config['DM']['DmPitchs']
+        pitches.append(np.round(np.asarray(pitch.detach().cpu().numpy() if isinstance(pitch, torch.Tensor) else pitch, dtype=float).ravel(), 6).tolist())
+    if any(p != pitches[0] for p in pitches[1:]):
+        raise ValueError(f"Cannot merge configs with different DM pitches (k_c) into one PSF model: DmPitchs = {sorted(set(map(tuple, pitches)))}. "
+                         "Group the observations by k_c (e.g. the 'k_c group' of the MUSE STD stars) and model each group separately.")
 
     # Check if any configs were provided
     if not configs:

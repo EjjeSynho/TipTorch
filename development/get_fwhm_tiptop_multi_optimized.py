@@ -37,10 +37,10 @@ PLOTS_FOLDER = ETC_FOLDER / 'plots'
 PSF_FOLDER   = SOURCES['tiptop']
 
 TC_TO_SEEING = {
-    10: 0.6,
-    20: 0.7,
-    30: 0.8,
-    50: 1.0,
+    10:  0.6,
+    20:  0.7,
+    30:  0.8,
+    50:  1.0,
     100: 1.4
 }
 

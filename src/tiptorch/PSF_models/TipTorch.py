@@ -4,55 +4,87 @@ import torch
 import numpy as np
 import scipy.special as spc
 import torchvision.transforms as transforms
-import torchvision.transforms.functional as TF
 from torch import fft
 from torch.nn.functional import interpolate
 from astropy.io import fits
-from tiptorch.tools.utils import pdims, min_2d, to_little_endian
+from tiptorch.tools.utils import pdims, min_2d, to_little_endian, rotate_images
 from tiptorch.tools.air_refraction import AirRefractiveIndexCalculator
 from pathlib import Path
 
 
 class TipTorch(torch.nn.Module):
+    '''
+    Frames and axes conventions.
+
+    The image frame is the frame of the simulated PSF [N_src, N_wvl, N_pix, N_pix]. The x axis of TipTorch is the image row axis (dim -2)
+    and the y axis is the column axis (dim -1): this holds for the PSF shifts dx, dy [pix], the jitter Jx, Jy, the science source and guide
+    star directions src_dirs_x/y, GS_dirs_x/y, the wind velocity vx, vy and the grids kx, ky, U, V (kx and U vary along the rows). An
+    azimuth of 0 deg in the config points along the rows, 90 deg along the columns.
+
+    [telescope] PupilAngle [deg] is the rotation of the pupil, and of the DM / WFS frame attached to it, with respect to the image frame:
+    counter-clockwise on the image for positive values, i.e. the PSF of a model with angle a is scipy.ndimage.rotate(PSF(0), a) (the sense
+    of torchvision's rotate and of PupilVLT). It may hold one value per observation ([N_obs]); a single value is shared by all of them.
+    The pupil, the apodizer, the static OPD maps (see tools.static_phase), the WFS sampling, the aliasing combs, the DM optimization
+    directions, the LGS asterism of tomographic systems and the Moffat PSD are expressed in the pupil frame and rotate with it, through
+    the pupil-frame grids returned by kxy_AO_(). The image-plane shifts and jitter, the science source directions, the wind and the single
+    guide star of SCAO / SLAO stay in the image frame. Without rotation (all angles 0) the stored grids and masks are used as they are.
+    '''
 
     def _load_pupil_and_apodizer(self):
-        # If not provided externally, TipTorch tries to load pupil and apodizer from the config file
-        pupil_loaded = self.pupil is None
-        if pupil_loaded:
-            pupil_path = Path(self.config['telescope']['PathPupil'])
-            self.pupil = self.make_tensor(to_little_endian(fits.getdata(pupil_path)))
+        # Reference (unrotated) pupil and apodizer [H, W]: loaded from the config files unless given to the constructor (a tensor in the
+        # reference orientation, or a generator of the pupil at a given angle). The phase bases are built on these reference masks
+        if self.pupil is None:
+            if self._pupil_generator is not None:
+                self.pupil = torch.as_tensor(self._pupil_generator(0.0), device=self.device, dtype=self.dtype)
+            else:
+                self.pupil = self.make_tensor(to_little_endian(fits.getdata(Path(self.config['telescope']['PathPupil']))))
 
-        apodizer_loaded = self.apodizer is None and self.config['telescope']['PathApodizer'] is not None
-        if apodizer_loaded:
-            apodizer_path = Path(self.config['telescope']['PathApodizer'])
-            self.apodizer = self.make_tensor(to_little_endian(fits.getdata(apodizer_path)))
+        if self.apodizer is None and self.config['telescope']['PathApodizer'] is not None:
+            self.apodizer = self.make_tensor(to_little_endian(fits.getdata(Path(self.config['telescope']['PathApodizer']))))
 
         if self.apodizer is not None:
             assert self.pupil.shape[-1] == self.apodizer.shape[-1], "Pupil and apodizer must have the same size"
 
-        # Externally provided pupil/apodizer are assumed to already be correctly oriented, so rotate only what was just loaded
-        if self.pupil_angle != 0.0 and pupil_loaded:
-            angle = self.pupil_angle.item() if torch.is_tensor(self.pupil_angle) else self.pupil_angle
-            # Pupil is a binary mask, so use nearest-neighbor to avoid introducing fractional edge values
-            self.pupil = TF.rotate(self.pupil.unsqueeze(0), -angle, interpolation=TF.InterpolationMode.NEAREST).squeeze(0)
+        self._orient_pupils()
 
-            if apodizer_loaded:
-                self.apodizer = TF.rotate(self.apodizer.unsqueeze(0), -angle, interpolation=TF.InterpolationMode.BILINEAR).squeeze(0)
-                
+
+    def _orient_pupils(self):
+        '''
+        Pupil and apodizer at the pupil angle(s): pupil_rot / apodizer_rot are [N_obs, H, W] with per-observation angles, [H, W] otherwise
+        (the reference masks themselves without rotation). The pupil is regenerated per angle by the generator when there is one, else the
+        binary mask is rotated with nearest-neighbour interpolation (no fractional edge values); the apodizer is rotated bilinearly.
+        '''
+        if self.rotate_pupil:
+            angles = self.pupil_angle.tolist()
+            if self._pupil_generator is not None:
+                self.pupil_rot = torch.stack([torch.as_tensor(self._pupil_generator(angle), device=self.device, dtype=self.dtype) for angle in angles])
+            else:
+                self.pupil_rot = rotate_images(self.pupil, self.pupil_angle, mode='nearest')
+
+            self.apodizer_rot = rotate_images(self.apodizer, self.pupil_angle, mode='bilinear') if self.apodizer is not None else None
+
+            if len(angles) == 1:
+                self.pupil_rot = self.pupil_rot.squeeze(0)
+                self.apodizer_rot = self.apodizer_rot.squeeze(0) if self.apodizer_rot is not None else None
+        else:
+            self.pupil_rot, self.apodizer_rot = self.pupil, self.apodizer
+
+        self._oriented_angles = self.pupil_angle.tolist() # the angles the masks are oriented at (a list, to survive device / dtype changes)
+
 
     def UpdateStaticOTF(self):
         """Recompute diffraction-limited static OTF for the current grid sampling."""
         if self.pupil is None:
             raise RuntimeError('Cannot update static OTF: pupil is not initialized. Call InitPupils() first.')
-        
+
         if not hasattr(self, 'sampling_min') or not hasattr(self, 'nOtf'):
             raise RuntimeError('Cannot update static OTF: grids are not initialized. Call InitGrids() first.')
 
         phase_size = self.pupil.shape[-1]
         self.pupil_padder = torch.nn.ZeroPad2d(int(round(phase_size * self.sampling_min / 2 - phase_size / 2)))
 
-        # Compute the diffraction-limited OTF from the pupil (and apodizer if present)
-        pupil_phase = self.pupil * self.apodizer if self.apodizer is not None else self.pupil
+        # Compute the diffraction-limited OTF from the oriented pupil(s) (and apodizer if present), [1 or N_obs, 1, nOtf, nOtf]
+        pupil_phase = self.pupil_rot * self.apodizer_rot if self.apodizer_rot is not None else self.pupil_rot
         self.OTF_static_default = self.Phase2OTF(pupil_phase)
         
         # Live OTF is reset to the diffraction-limited reference whenever sampling changes
@@ -76,8 +108,6 @@ class TipTorch(torch.nn.Module):
     def InitValues(self):
         # Reading parameters from the config file
         self.N_src = self.config['NumberSources'] # Make sure it is type(int) already in the config file
-        
-        self.pupil_angle = self.config['telescope']['PupilAngle'] if 'PupilAngle' in self.config['telescope'] else 0.0
 
         self.wvl = self.config['sources_science']['Wavelength'].view(1, -1) # must be [1, N_wvl]
         self.N_wvl = self.wvl.shape[-1]
@@ -125,8 +155,21 @@ class TipTorch(torch.nn.Module):
         # it must be equal to the number of simulated targets / pointings, since each target can be assigned to its own observational conditions
 
         self.N_obs = self.Cn2_heights.shape[0]
-        
+
         assert self.N_obs == 1 or self.N_obs == self.N_src
+
+        # Rotation of the pupil (and of the DM / WFS frame) on the image [deg], counter-clockwise for positive values (see the class
+        # docstring): one value shared by all observations [1], or one per observation [N_obs]
+        self.pupil_angle = torch.as_tensor(self.config['telescope'].get('PupilAngle', 0.0), device=self.device, dtype=self.dtype).flatten()
+
+        if self.pupil_angle.numel() > 1 and bool((self.pupil_angle == self.pupil_angle[0]).all()):
+            self.pupil_angle = self.pupil_angle[:1] # identical angles: a single rotated pupil and grid serve all observations
+
+        if self.pupil_angle.numel() not in (1, self.N_obs):
+            raise ValueError(f'PupilAngle must hold 1 or N_obs = {self.N_obs} values, got {self.pupil_angle.numel()}')
+
+        self.rotate_pupil = bool((self.pupil_angle != 0).any()) # without rotation, the stored grids and masks are used as they are
+        self._pupil_angle_key = tuple(self.pupil_angle.tolist()) # cache key of the pupil-frame grids (rebuilt only when the angles change)
 
         # Deformable mirror(s) parameters
         self.pitch = self.config['DM']['DmPitchs'].min() #[m], select the DM with the finest resolution 
@@ -466,16 +509,9 @@ class TipTorch(torch.nn.Module):
         self.nOtf  = self.nOtfs.max().item()
         self.dk    = 1.0 / self.D / self.sampling.min() # PSD spatial frequency step
                 
-        # Initialize PSD spatial frequencies
-        # This assumes that pupil rotation is the same for all simulated PSFs in the batch
-        if self.pupil_angle != 0.0:
-            kx, ky = self._gen_grid(self.nOtf)
-            rot_ang = torch.deg2rad(self.pupil_angle)
-            self.kx = kx * torch.cos(rot_ang) - ky * torch.sin(rot_ang)
-            self.ky = kx * torch.sin(rot_ang) + ky * torch.cos(rot_ang)
-        else:
-            self.kx, self.ky = self._gen_grid(self.nOtf)
-        
+        # Initialize PSD spatial frequencies in the image frame (the pupil-frame grids of the rotated pupil are derived from them on demand
+        # by kxy_AO_(), see the class docstring)
+        self.kx, self.ky = self._gen_grid(self.nOtf)
         self.kx, self.ky = self.kx * self.dk, self.ky * self.dk
         self.k2 = self.kx**2 + self.ky**2
         self.k = torch.sqrt(self.k2)
@@ -562,13 +598,16 @@ class TipTorch(torch.nn.Module):
             ids = np.array( [[i, j] for i in range(-n_times_y+1, n_times_y) for j in range(-n_times_x+1, n_times_x) if i != 0 or j != 0] )
             
             # The 0-th dimension is used to store the shifted spatial frequency
-            # This is thing is 4D: [N_combs, N_L, kx, ky]
+            # This is thing is 4D: [N_combs, N_obs or 1, kx, ky]
             m = self.make_tensor(ids[:,0])
             n = self.make_tensor(ids[:,1])
             self.N_combs = m.shape[0]
-            
-            self.km = self.kx_AO.repeat([self.N_combs,1,1,1]) - pdims(m/self.WFS_d_sub, 3)
-            self.kn = self.ky_AO.repeat([self.N_combs,1,1,1]) - pdims(n/self.WFS_d_sub, 3)
+
+            # Comb shifts along the WFS axes [N_combs, 1, 1, 1], applied to the pupil-frame grids by _aliasing_combs
+            self.comb_m = pdims(m/self.WFS_d_sub, 3)
+            self.comb_n = pdims(n/self.WFS_d_sub, 3)
+            self.km = self.kx_AO.unsqueeze(0) - self.comb_m
+            self.kn = self.ky_AO.unsqueeze(0) - self.comb_n
 
         # Initialize OTF frequencies
         UV_range = torch.linspace(-1, 1, self.nOtf, device=self.device)
@@ -591,19 +630,69 @@ class TipTorch(torch.nn.Module):
             self.PR = self.PistonFilter(torch.hypot(self.km, self.kn)) # piston filter for aliased spatial frequencies
 
 
+    def _pupil_rotation(self) -> tuple[torch.Tensor, torch.Tensor]:
+        ''' Cosine and sine of the pupil angle(s), [1 or N_obs, 1, 1] '''
+        angle = torch.deg2rad(self.pupil_angle).view(-1, 1, 1)
+        return torch.cos(angle), torch.sin(angle)
+
+
+    def kxy_AO_(self) -> tuple[torch.Tensor, torch.Tensor]:
+        '''
+        Spatial frequency components (kx, ky) of the AO half grid in the pupil / DM / WFS frame, [1 or N_obs, nOtf_AO_y, nOtf_AO_x]: the
+        image-frame grid rotated by -pupil_angle, so that the functions of the AO system defined in its own frame (WFS sampling, aliasing
+        combs, DM optimization directions, Moffat PSD) appear rotated by +pupil_angle (counter-clockwise) in the image. Without rotation
+        the stored image-frame grids are returned as they are; otherwise the rotated AO grids are built once per grid and set of angles
+        (the grid cache, reset by InitGrids and by the angles of a new config), only these small half grids are kept per observation.
+        k and k2 are rotation invariant and need no counterpart.
+        '''
+        if not self.rotate_pupil:
+            return self.kx_AO, self.ky_AO
+
+        def compute():
+            cos, sin = self._pupil_rotation()
+            return self.kx_AO*cos + self.ky_AO*sin, self.ky_AO*cos - self.kx_AO*sin
+
+        return self._cached(('kxy_AO', self._pupil_angle_key), compute)
+
+
+    def _Moffat_grids(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ''' (kx², kx·ky, ky²) of the AO half grid in the pupil frame for the Moffat PSD '''
+        if not self.rotate_pupil:
+            return self.kx2_AO, self.kxy_AO, self.ky2_AO
+
+        def compute():
+            kx, ky = self.kxy_AO_()
+            return kx*kx, kx*ky, ky*ky
+
+        return self._cached(('Moffat grids', self._pupil_angle_key), compute)
+
+
+    def _aliasing_combs(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        ''' Aliased spatial frequencies (km, kn) [N_combs, 1 or N_obs, nOtf_AO_y, nOtf_AO_x], shifted along the WFS axes, and their piston filter '''
+        if not self.rotate_pupil:
+            return self.km, self.kn, self.PR
+
+        def compute():
+            kx, ky = self.kxy_AO_()
+            km, kn = kx.unsqueeze(0) - self.comb_m, ky.unsqueeze(0) - self.comb_n
+            return km, kn, self.PistonFilter(torch.hypot(km, kn))
+
+        return self._cached(('aliasing combs', self._pupil_angle_key), compute)
+
+
     def Phase2OTF(self, phase: torch.Tensor | None) -> torch.Tensor:
         '''
-        Compute OTF from a phase screen.
+        Compute OTF from a phase screen [H, W], [N_obs, H, W] (one pupil per observation) or [N_src, N_wvl, H, W].
         All phase screens are sampled equally for all wavelengths (re-scaling happens later when PSFs are computed)
         However, phase screens might be different for each wavelength.
         '''
         phase_padded = self.pupil_padder(phase)
-            
+
         fl_even = self.nOtf % 2 == 0 and phase_padded.shape[-1] % 2 == 0 # TODO: what's the hell is this?
-        phase_padded = phase_padded[:-1, :-1] if fl_even else phase_padded # to center-align if number of pixels is even
+        phase_padded = phase_padded[..., :-1, :-1] if fl_even else phase_padded # to center-align if number of pixels is even
 
         OTF = self._FFTAutoCorr(phase_padded)
-        OTF = OTF.view(1, 1, *OTF.shape) if OTF.ndim == 2 else OTF
+        OTF = OTF.view(1, 1, *OTF.shape) if OTF.ndim == 2 else OTF.unsqueeze(1) if OTF.ndim == 3 else OTF
         
         # PyTorch doesn't support interpolation of complex tensors yet
         OTF_ = self.interp(OTF.real, self.sampling_min) + self.interp(OTF.imag, self.sampling_min)*1j
@@ -634,15 +723,21 @@ class TipTorch(torch.nn.Module):
         # Update pupil and apodizer masks
         if pupils:
             self.InitPupils()
-        elif grids and self.pupil is not None:
-            if update_static_OTF:
-                # Grid-dependent static OTF must be refreshed when pupil data did not change.
-                self.UpdateStaticOTF()
-            else:
-                # Caller will set OTF_static via ComputeStaticOTF(phase); skip the expensive
-                # pupil FFT but still refresh the pupil_padder which depends on sampling_min.
-                phase_size = self.pupil.shape[-1]
-                self.pupil_padder = torch.nn.ZeroPad2d( int(round(phase_size * self.sampling_min / 2 - phase_size / 2)) )
+        elif self.pupil is not None:
+            # The pupil angles of a new config re-orient the already loaded masks (e.g. a new batch of observations)
+            pupils_stale = self.pupil_angle.tolist() != self._oriented_angles
+            if pupils_stale:
+                self._orient_pupils()
+
+            if grids or pupils_stale:
+                if update_static_OTF:
+                    # Grid-dependent static OTF must be refreshed when pupil data did not change.
+                    self.UpdateStaticOTF()
+                else:
+                    # Caller will set OTF_static via ComputeStaticOTF(phase); skip the expensive
+                    # pupil FFT but still refresh the pupil_padder which depends on sampling_min.
+                    phase_size = self.pupil.shape[-1]
+                    self.pupil_padder = torch.nn.ZeroPad2d( int(round(phase_size * self.sampling_min / 2 - phase_size / 2)) )
         
         # If the number of sources have changed, reinitialize the tomography projector
         if (self.tomography and tomography) or (self.tomography and grids):
@@ -712,10 +807,14 @@ class TipTorch(torch.nn.Module):
                  nTh: int = 0):
         
         super().__init__()
-        
+
         self.device = device
         self.oversampling = oversampling
-        self.pupil = pupil
+        # The pupil is a [H, W] mask in the reference orientation (rotated by TipTorch when the pupil angle is not 0), or a generator
+        # angle_deg -> [H, W] mask called per observation angle (e.g. an analytic pupil, see PupilVLT)
+        self._pupil_generator = pupil if callable(pupil) else None
+        self.pupil = None if callable(pupil) else pupil
+        self._oriented_angles = None
         self.retain_PSDs = retain_PSDs
         self.dtype = dtype
         self.is_float = dtype in (torch.float32, torch.complex64)
@@ -810,7 +909,8 @@ class TipTorch(torch.nn.Module):
         theta_x = self.DM_opt_dir_x.view(self.N_obs, 1, 1, self.N_optdir)
         theta_y = self.DM_opt_dir_y.view(self.N_obs, 1, 1, self.N_optdir)
 
-        f = theta_x * pdims(self.kx_AO, 1) + theta_y * pdims(self.ky_AO, 1)
+        kx, ky = self.kxy_AO_() # the optimization directions are in the DM frame
+        f = theta_x * pdims(kx, 1) + theta_y * pdims(ky, 1)
         P_L = torch.exp( 2j*torch.pi*h * pdims(f,1) ).unsqueeze(-2) # [N_obs, nOtf_AO, nOtf_AO, N_optdir, 1, N_L]
         
         if self.AO_type == 'LTAO':
@@ -907,9 +1007,10 @@ class TipTorch(torch.nn.Module):
 
 
     def ReconstructionFilter(self, WFS_noise_var: torch.Tensor, MV: int = 0): # TODO: make MV switchable
-        Av = torch.sinc(self.WFS_d_sub*self.kx_AO) * torch.sinc(self.WFS_d_sub*self.ky_AO) * torch.exp(1j*torch.pi*self.WFS_d_sub*(self.kx_AO+self.ky_AO))
-        self.SxAv = ( 2j*torch.pi*self.kx_AO*self.WFS_d_sub*Av ).view(1, self.nOtf_AO_y, self.nOtf_AO_x) # Same for a given AO regime
-        self.SyAv = ( 2j*torch.pi*self.ky_AO*self.WFS_d_sub*Av ).view(1, self.nOtf_AO_y, self.nOtf_AO_x)
+        kx, ky = self.kxy_AO_() # the WFS samples the pupil frame
+        Av = torch.sinc(self.WFS_d_sub*kx) * torch.sinc(self.WFS_d_sub*ky) * torch.exp(1j*torch.pi*self.WFS_d_sub*(kx+ky))
+        self.SxAv = ( 2j*torch.pi*kx*self.WFS_d_sub*Av ).view(-1, self.nOtf_AO_y, self.nOtf_AO_x) # Same for a given AO regime
+        self.SyAv = ( 2j*torch.pi*ky*self.WFS_d_sub*Av ).view(-1, self.nOtf_AO_y, self.nOtf_AO_x)
         
         noise_variance = WFS_noise_var.view(self.N_obs, -1).mean(dim=-1) # last dimension is for GSs, 0th dim is reserved for the observations
         
@@ -994,19 +1095,21 @@ class TipTorch(torch.nn.Module):
         Rx1 = (2j*torch.pi*self.WFS_d_sub * self.Rx).unsqueeze(0)
         Ry1 = (2j*torch.pi*self.WFS_d_sub * self.Ry).unsqueeze(0)
 
+        km, kn, PR = self._aliasing_combs() # aliased frequencies in the pupil (WFS) frame
+
         # Compute von Karman spectrum for aliased spatial frequencies
-        W_mn = self.VonKarmanSpectrum(self.r0_().view(1, self.N_obs), self.L0.abs().view(1, self.N_obs), self.km**2 + self.kn**2) * self.PR
-        
-        Q = (Rx1*self.km + Ry1*self.kn) * torch.sinc(self.WFS_d_sub*self.km) * torch.sinc(self.WFS_d_sub*self.kn)
+        W_mn = self.VonKarmanSpectrum(self.r0_().view(1, self.N_obs), self.L0.abs().view(1, self.N_obs), km**2 + kn**2) * PR
+
+        Q = (Rx1*km + Ry1*kn) * torch.sinc(self.WFS_d_sub*km) * torch.sinc(self.WFS_d_sub*kn)
         tf = self.h1.unsqueeze(0).unsqueeze(-1) # [N_combs, N_src, nOtf_AO, n_Otf_AO, nL]
 
         # Add aliasing dimension and more
         vx = self.vx.view(1, self.N_obs, 1, 1, self.N_L)
         vy = self.vy.view(1, self.N_obs, 1, 1, self.N_L)
         Cn2_weights = self.Cn2_weights.view(1, self.N_obs, 1, 1, self.N_L)
-        
+
         # Adds  atmospheric layers dimension
-        km, kn = self.km.unsqueeze(-1), self.kn.unsqueeze(-1)
+        km, kn = km.unsqueeze(-1), kn.unsqueeze(-1)
         # TODO: do we really need an additional Cn2_weights multiplication here since it's already in h1 term?
         avr = (Cn2_weights * tf * torch.sinc(km*vx*T) * torch.sinc(kn*vy*T) * \
             torch.exp( 2j*torch.pi*td*(km*vx + kn*vy) )).sum(dim=-1) # sum along atmospheric layers
@@ -1226,15 +1329,17 @@ class TipTorch(torch.nn.Module):
         For example, this is the case when all objects are within one FoV and belong to one observation
         '''
         h = self.h_().view(self.N_obs, 1, 1, 1, self.N_L)
-        
-        kx = pdims(self.kx_AO, 2)
-        ky = pdims(self.ky_AO, 2)
+
+        # The LGS asterism is launched from the telescope and the WFSs sample the pupil: both live in the pupil frame
+        kx_p, ky_p = self.kxy_AO_()
+        kx = pdims(kx_p, 2)
+        ky = pdims(ky_p, 2)
         GS_dirs_x = self.GS_dirs_x.view(self.N_obs, 1, 1, self.N_GS, 1)
         GS_dirs_y = self.GS_dirs_y.view(self.N_obs, 1, 1, self.N_GS, 1)
-        
+
         diag_mask = lambda N: torch.eye(N, device=self.device).view(1,1,1,N,N).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, -1, -1)
-        
-        M    = 2j*torch.pi*self.k_AO * torch.sinc(self.WFS_d_sub*self.kx_AO) * torch.sinc(self.WFS_d_sub*self.ky_AO)
+
+        M    = 2j*torch.pi*self.k_AO * torch.sinc(self.WFS_d_sub*kx_p) * torch.sinc(self.WFS_d_sub*ky_p)
         M    = pdims(M, 2).expand(self.N_obs, self.nOtf_AO_y, self.nOtf_AO_x, self.N_GS, self.N_GS) * diag_mask(self.N_GS) # [N_obs, nOtf_y, nOtf_x, nGS, nGS]
         P    = torch.exp( 2j*torch.pi*h * (kx*GS_dirs_x + ky*GS_dirs_y) ) # [N_obs, nOtf_y, nOtf_x, nGS, nL]
         MP   = torch.einsum('nwhik,nwhkj->nwhij', M, P)  # [N_obs, nOtf_y, nOtf_x, nGS, nL]
@@ -1268,9 +1373,7 @@ class TipTorch(torch.nn.Module):
         ax = alpha * ratio
         ay = alpha / ratio
 
-        uxx = self.kx2_AO
-        uxy = self.kxy_AO
-        uyy = self.ky2_AO
+        uxx, uxy, uyy = self._Moffat_grids() # the Moffat absorbs AO residuals, so it is oriented in the pupil frame
 
         c  = torch.cos(theta)
         s  = torch.sin(theta)

@@ -135,6 +135,33 @@ def kfold_splits(dataset, base_indices, n_splits, random_state=42):
     return list(gkf.split(base_indices, groups=groups))
 
 
+class KcGroupBatchSampler(torch.utils.data.Sampler):
+    """
+    Batches of positions into a Subset such that every batch holds samples of a single k_c group (TipTorch holds one k_c per model,
+    see NFMDataset). The batches are formed within each group (the last batch of a group may be smaller) and, with shuffle, the samples
+    within the groups and the order of all batches are shuffled with torch's global RNG (seeded by the training script).
+    """
+    def __init__(self, groups, batch_size, shuffle):
+        self.groups     = np.asarray(groups, dtype=int) # [N_subset] k_c group of every position
+        self.batch_size = int(batch_size)
+        self.shuffle    = bool(shuffle)
+        self.n_batches  = int(sum(int(np.ceil(np.sum(self.groups == g) / self.batch_size)) for g in np.unique(self.groups)))
+
+    def __iter__(self):
+        batches = []
+        for g in np.unique(self.groups):
+            pos = np.flatnonzero(self.groups == g)
+            if self.shuffle:
+                pos = pos[torch.randperm(len(pos)).numpy()]
+            batches += [pos[i:i + self.batch_size].tolist() for i in range(0, len(pos), self.batch_size)]
+        if self.shuffle:
+            batches = [batches[i] for i in torch.randperm(len(batches)).tolist()]
+        return iter(batches)
+
+    def __len__(self):
+        return self.n_batches
+
+
 class NFMDataset(Dataset):
     """
     Dataset of MUSE NFM PSF cubes with paired telemetry and fitted parameter values.
@@ -150,10 +177,19 @@ class NFMDataset(Dataset):
         self.features    = list(data['telemetry'][0].keys())
         self.telemetry_preprocessor = data.get('telemetry_preprocessor') # TelemetryPreprocessor.state_dict(), absent in older caches
         self.Cn2_grid    = data.get('Cn2_grid') # Cn2Grid.state_dict() of the Cn2 features / configs, absent in the caches before 2026-10-13
+        # Derotated PSFs (configs with PupilAngle 0) or raw frames (configs with the per-sample pupil angle, rotated by the model);
+        # the caches before 2026-10-16 are derotated
+        self.derotated   = bool(data.get('derotated', True))
         # Train/val split grouped by acquisition time (positions into sample_ids), absent in older caches
         self.train_idx   = data.get('train_idx')
         self.val_idx     = data.get('val_idx')
         self.time_groups = data.get('time_groups')
+        # Samples flagged 'k_c mismatch' (fewer corrected DM modes, see datasets/MUSE_STD_dataset/detect_kc_mismatch.py): k_c relative to the
+        # nominal one and the k_c group (0 = nominal). Their configs carry the scaled DM pitch. The PSF model holds a single k_c per batch, so
+        # the loaders batch the samples per group (KcGroupBatchSampler) and run_model rebuilds the model grids when the k_c changes.
+        # Older caches have no such entries: the groups are then derived from the DM pitches of the configs
+        self.kc_fraction = data.get('kc_fraction')
+        self.kc_group    = data.get('kc_group')
 
         _rename = {p: p + '_ctrl' for p in ['J', 'F', 'bg', 'dx', 'dy']}
         for i in range(len(self.sample_ids)):
@@ -164,6 +200,22 @@ class NFMDataset(Dataset):
                     self.fitted_vals[i][new_k] = self.fitted_vals[i].pop(old_k)
 
         self.N, self.H, self.W, self.C = self.PSF_cubes.shape
+
+        if self.kc_group is None:
+            pitches = np.array([float(np.min(np.asarray(self._config_pitch(c), dtype=float))) for c in self.configs])
+            nominal = np.max(pitches) # the mismatched samples have a smaller k_c, i.e. a larger pitch... unless all are nominal
+            nominal = pitches[np.argmax(np.unique(pitches, return_counts=True)[1])] if len(np.unique(pitches)) > 1 else pitches[0]
+            uniq    = np.unique(np.round(pitches, 6))
+            uniq    = np.concatenate([[np.round(nominal, 6)], [u for u in uniq if not np.isclose(u, nominal)]])
+            self.kc_group    = np.array([int(np.argmin(np.abs(uniq - p))) for p in pitches], dtype=int)
+            self.kc_fraction = nominal / pitches
+        self.kc_group    = np.asarray(self.kc_group, dtype=int)
+        self.kc_fraction = np.asarray(self.kc_fraction, dtype=float)
+
+    @staticmethod
+    def _config_pitch(config):
+        pitch = config['DM']['DmPitchs']
+        return pitch.detach().cpu().numpy() if isinstance(pitch, torch.Tensor) else pitch
 
     def __len__(self):
         return self.N
@@ -181,9 +233,9 @@ class NFMDataset(Dataset):
         telemetry_vecs = torch.stack(telemetry_vecs, 0).to(device=device, non_blocking=True)
         idxs           = torch.tensor(idxs, dtype=torch.long, device=device)
         fitted_vals    = {k: torch.stack([fv[k] for fv in fitted_vals], 0).to(device=device, non_blocking=True) for k in fitted_vals[0]}
+        # The pupil angles stay per sample ([N_obs] in the merged config): 0 for derotated caches, the header angles for raw frames
         batch_config = MultipleTargetsInDifferentObservations(configs, device=device)
         batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
-        batch_config['telescope']['PupilAngle'] = 0.0
         batch_config['DM']['NumberReconstructedLayers'] = torch.tensor(batch_config['atmosphere']['Cn2Heights'].shape[-1], device=device)
         return PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs
 
@@ -493,7 +545,10 @@ def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 
     from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
     # The PSF model is initialized with a representative batch config, the actual configs are set per batch in run_model
-    batch  = tuple(dataset[i] for i in np.random.default_rng(seed).integers(0, len(dataset), size=cfg['batch_size']))
+    # (samples of a single k_c group, the configs of different k_c groups cannot be merged into one model)
+    groups = np.asarray(getattr(dataset, 'kc_group', np.zeros(len(dataset), dtype=int)))
+    pool   = np.flatnonzero(groups == np.bincount(groups).argmax())
+    batch  = tuple(dataset[int(i)] for i in np.random.default_rng(seed).choice(pool, size=min(cfg['batch_size'], len(pool)), replace=False))
     _, _, _, batch_config, _ = dataset.collate_batch(batch, device=device)
 
     with torch.no_grad():
@@ -710,7 +765,7 @@ class NFMCalibratorTrainer:
         self.optimizer, self.scheduler = self._make_optimizer()
 
         logger.info(
-            f"Trainer ready | dataset={len(dataset)} ({len(self.train_idx)} train / {len(self.val_idx)} val) | "
+            f"Trainer ready | dataset={len(dataset)} ({len(self.train_idx)} train / {len(self.val_idx)} val) | " + self._kc_groups_summary() + " | "
             f"N_features={self.N_features} | N_outputs={self.N_outputs} | "
             f"lambda_sets={len(self.lambda_id_sets)} x ~{len(self.lambda_id_sets[0])} wvl"
         )
@@ -728,6 +783,16 @@ class NFMCalibratorTrainer:
         return sets
 
 
+    def _kc_groups_summary(self):
+        groups = getattr(self.dataset, 'kc_group', None)
+        if groups is None or len(np.unique(groups)) == 1:
+            return 'k_c groups: none (single k_c)'
+        parts = []
+        for g in np.unique(groups):
+            frac = float(np.mean(np.asarray(self.dataset.kc_fraction)[np.asarray(groups) == g]))
+            parts.append(f"{g}: {int(np.sum(np.asarray(groups)[self.train_idx] == g))}+{int(np.sum(np.asarray(groups)[self.val_idx] == g))} @ k_c {100 * frac:.1f}%")
+        return 'k_c groups (train+val): ' + ', '.join(parts)
+
     def _make_loader(self, indices, shuffle):
         collate_fn = self.collate_fn
         if collate_fn is not None:
@@ -738,13 +803,17 @@ class NFMCalibratorTrainer:
         else:
             raise ValueError("NFMCalibratorTrainer requires a collate function. Pass collate_fn=... or define dataset.collate_batch(batch, device).")
 
+        indices = [int(i) for i in indices]
+        groups  = getattr(self.dataset, 'kc_group', None)
+        if groups is None: # datasets without k_c groups: plain batching
+            return DataLoader(dataset=Subset(self.dataset, indices), batch_size=self.batch_size, shuffle=shuffle, num_workers=0, collate_fn=collator, drop_last=False)
+
+        # One k_c group per batch (the PSF model holds a single k_c): the mismatched samples form their own, possibly smaller, batches
         return DataLoader(
-            dataset=Subset(self.dataset, [int(i) for i in indices]),
-            batch_size=self.batch_size,
-            shuffle=shuffle,
+            dataset=Subset(self.dataset, indices),
+            batch_sampler=KcGroupBatchSampler(np.asarray(groups)[indices], self.batch_size, shuffle),
             num_workers=0,
             collate_fn=collator,
-            drop_last=False,
         )
 
 
@@ -811,9 +880,17 @@ class NFMCalibratorTrainer:
         # of the PSF model state. But if it's only one wavelengths set, then trigger the update manually.
         # Grids don't need to be updated since they are defined at the full wavelength resolution, and the PSF model will slice them accordingly.
         # Pupils don't depend on wavelength, so no need to update them either.
+        # Batches of samples flagged 'k_c mismatch' carry a scaled DM pitch: a different k_c changes the AO-corrected frequency grid and
+        # the masks (InitGrids), the tomographic projector and the static OTF, so the model is rebuilt with grids=True when it changes
+        pitch_b    = config['DM']['DmPitchs']
+        pitch_b    = float(pitch_b.min()) if isinstance(pitch_b, torch.Tensor) else float(np.min(pitch_b))
+        kc_changed = abs(pitch_b - float(self.PSF_model.model.pitch)) > 1e-9
+
         if (len(self.lambda_id_sets) == 1):
-            self.PSF_model.model.Update(grids=False, pupils=False, tomography=True)
+            self.PSF_model.model.Update(grids=kc_changed, pupils=False, tomography=True)
         else:
+            if kc_changed: # SetWavelengths skips the update when the wavelengths did not change
+                self.PSF_model.model.Update(grids=True, pupils=False, tomography=True)
             self.PSF_model.SetWavelengths(wvl)
         
         # Do not update inputs_manager with graph-connected tensors to avoid cross-batch graph retention.

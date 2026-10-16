@@ -3,6 +3,7 @@
   "debug": false,
   "seed": 43,
   "batch_size": 16,
+  "derotated_PSFs": true,
   "continue_training": false,
   "reuse_pretrain": false,
   "run_kfold_difficulty": false,

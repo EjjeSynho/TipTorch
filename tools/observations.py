@@ -806,9 +806,10 @@ class MUSEObservation:
         sources_coords -= self.field_center
         sources_coords  = sources_coords * pixel_scale / rad2mas  # [pix] -> [rad]
 
-        # Convert to zenith and azimuth angles
+        # Convert to zenith and azimuth angles. TipTorch's x axis is the image row axis and its y axis the column axis (see the TipTorch
+        # class docstring), while (x_peak, y_peak) are (column, row): the azimuth is counted from the row axis towards the column axis
         sources_zenith  = np.arctan(np.sqrt(sources_coords[:,0]**2 + sources_coords[:,1]**2)) * rad2arc # [arcsec]
-        sources_azimuth = np.degrees(np.arctan2(sources_coords[:,1], sources_coords[:,0]))  # [deg]
+        sources_azimuth = np.degrees(np.arctan2(sources_coords[:,0], sources_coords[:,1]))  # [deg]
 
         # Update the model config with the sources coordinates
         self.model_config['sources_science']['Zenith']  = torch.tensor(sources_zenith,  device=self.device).unsqueeze(-1)

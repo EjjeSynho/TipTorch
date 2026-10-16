@@ -35,6 +35,7 @@ DEFAULT_CONFIG = {
     "debug":                True,
     "seed":                 43,
     "batch_size":           16,
+    "derotated_PSFs":       True,  # derotated STD-star cache (configs with PupilAngle 0) or the raw-frame cache (*_raw.pt, the PSF model rotates per OB)
     "continue_training":    False,
     "reuse_pretrain":       False,
     "run_kfold_difficulty": False,
@@ -190,9 +191,12 @@ logger.info(f"Seed: {cfg['seed']}")
 
 
 #%%
-dataset     = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
+# Derotated PSFs (the regime of the existing fits and weights) or raw frames with the per-sample pupil angles, see create_STD_dataset.py
+dataset     = NFMDataset(DATASET_CACHE / ('muse_STD_stars_dataset.pt' if cfg["derotated_PSFs"] else 'muse_STD_stars_dataset_raw.pt'))
 N_wvl_total = dataset.C
-logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W})")
+if dataset.derotated != cfg["derotated_PSFs"]:
+    raise ValueError(f"The dataset cache is {'derotated' if dataset.derotated else 'raw'} but the config asks for derotated_PSFs = {cfg['derotated_PSFs']}")
+logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W}), {'derotated PSFs' if dataset.derotated else 'raw frames (per-OB pupil rotation)'}")
 
 #%%
 # PSF model, calibrator network (direct or factor, see cfg["calibrator"]["type"]), outputs transformer and trainer
@@ -255,6 +259,7 @@ logger.info(f"Dataset split saved -> {_split_path}")
 #%% ===========================  Pretraining ==================================================
 # The pretraining does not depend on the PSF loss, so runs that compare losses can start from the same warm start (reuse_pretrain)
 pretrain_path = trainer.weights_dir / 'pretrain_weights.pth'
+
 if pretrain_path.exists() and (cfg["continue_training"] or cfg["reuse_pretrain"]):
     calibrator.load_state_dict(torch.load(pretrain_path, map_location=default_device))
     logger.info(f"Loaded pretrain weights from {pretrain_path}")

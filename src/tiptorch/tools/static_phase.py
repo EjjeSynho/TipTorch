@@ -4,7 +4,7 @@ import torchvision.transforms.functional as TF
 import numpy as np
 import torch
 from scipy.io import loadmat
-from tiptorch.tools.utils import mask_circle, rad2mas, pdims
+from tiptorch.tools.utils import mask_circle, rad2mas, pdims, rotate_images
 from tiptorch._config import default_torch_type, DATA_FOLDER
 
 decompose_WF = lambda WF, basis, pupil: WF[:, pupil > 0] @ basis[:, pupil > 0].T / pupil.sum()
@@ -200,6 +200,10 @@ class PhaseMap:
     Base class for any OPD -> complex-field mapping.
     Subclasses must implement compute_OPD(x) to return
     an OPD tensor in meters of shape (N_src, N_wvl, H, W).
+
+    The OPD maps (and the bases they are built from, on model.pupil) are in the reference orientation of the pupil; forward rotates them
+    to the pupil angle(s) of the model (per observation) and masks them with the pupil(s) oriented the same way, so the coefficients are
+    expressed in the pupil frame whatever the rotation.
     """
 
     def __init__(self, model, ignore_pupil=True):
@@ -209,6 +213,13 @@ class PhaseMap:
     def compute_OPD(self, x):
         raise NotImplementedError("Subclass must implement compute_OPD")
 
+    def rotate_OPD(self, OPD):
+        ''' OPD maps [N_src, N_wvl, H, W] of the reference orientation rotated to the pupil angle(s) of the model ([1] or [N_obs] = [N_src]) '''
+        if not self.model.rotate_pupil:
+            return OPD
+
+        return rotate_images(OPD, self.model.pupil_angle, mode='bilinear')
+
     def OPD2Phase(self, OPD):
         # Wave-number factor k = 2jπ / λ
         k = 2j * torch.pi / self.model.wvl.view(1, self.model.N_wvl, 1, 1) # same for all sources
@@ -216,19 +227,19 @@ class PhaseMap:
         # Phase term
         phase = torch.exp(k * OPD)
 
-        # Optionally multiply through by pupil × apodizer
+        # Optionally multiply through by pupil × apodizer, oriented as the OPD: [1 or N_obs, 1, H, W]
         if self.ignore_pupil:
             return phase
-        
-        pupil_apod = pdims(self.model.pupil * self.model.apodizer, -2) if self.model.apodizer is not None else pdims(self.model.pupil, -2)
-        return pupil_apod * phase
-    
+
+        pupil_apod = self.model.pupil_rot * self.model.apodizer_rot if self.model.apodizer_rot is not None else self.model.pupil_rot
+        return pupil_apod.reshape(-1, 1, *pupil_apod.shape[-2:]) * phase
+
     def forward(self, x):
         # Build OPD map in [m]
         OPD = self.compute_OPD(x)
         OPD = OPD.unsqueeze(1) if OPD.ndim == 3 else OPD # (N_src, 1, H, W) or (N_src, N_wvl, H, W)
 
-        return self.OPD2Phase(OPD)
+        return self.OPD2Phase(self.rotate_OPD(OPD))
 
     __call__ = forward
 
@@ -279,16 +290,14 @@ class ZernikeBasis(PhaseMap):
     def __init__(self, model, N_modes, ignore_pupil=True):
         super().__init__(model, ignore_pupil)
        
-        # build a Zernike basis
+        # build a Zernike basis on the reference (unrotated) pupil; the OPD maps are rotated to the pupil angle(s) in forward
         if ignore_pupil:
             pupil_mask = mask_circle(N=model.pupil.shape[-1], r=model.pupil.shape[-1] // 2)
         else:
             pupil_mask = model.pupil.squeeze().cpu().numpy()
 
-        pupil_angle_ = model.pupil_angle.item() if isinstance(model.pupil_angle, torch.Tensor) else model.pupil_angle
-
         Z = ZernikeModes(pupil_mask, N_modes)
-        Z.computeZernike(angle=pupil_angle_)
+        Z.computeZernike()
         # store as (N_modes, H, W)
         modes = torch.as_tensor(Z.modesFullRes, device=model.device, dtype=default_torch_type)
         self.basis = modes.permute(2, 0, 1)
@@ -318,9 +327,9 @@ class MUSEPhaseBump(PhaseMap):
             align_corners=False,
         ).squeeze()
 
-        # Rotate by 45 degrees to compensate for the derotator shift
-        angle = -model.pupil_angle.item() - 45.0 if isinstance(model.pupil_angle, torch.Tensor) else -model.pupil_angle - 45.0
-        self.OPD_map = TF.rotate(OPD_upsampled.unsqueeze(0), angle, interpolation=TF.InterpolationMode.BILINEAR).squeeze(0)
+        # Rotate by 45 degrees to compensate for the derotator shift: the map of the reference pupil orientation, rotated to the pupil
+        # angle(s) of the model in forward
+        self.OPD_map = TF.rotate(OPD_upsampled.unsqueeze(0), -45.0, interpolation=TF.InterpolationMode.BILINEAR).squeeze(0)
 
     def compute_OPD(self, coef):
         # coef: (N_src, N_wvl)

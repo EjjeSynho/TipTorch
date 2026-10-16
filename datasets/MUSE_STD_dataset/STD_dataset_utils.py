@@ -314,6 +314,8 @@ def LoadSTDStarCacheByID(id):
         data_sample, _ = pickle.load(handle)
     
     data_sample['All data']['Pupil angle'] = muse_df.loc[id]['Pupil angle']
+    # k_c of the sample relative to the nominal one (1.0 unless the sample is flagged 'k_c mismatch', see add_kc_mismatch_flag)
+    data_sample['All data'][KC_FRACTION_FEATURE] = float(muse_df.loc[id][KC_FRACTION_FEATURE]) if KC_FRACTION_FEATURE in muse_df.columns else 1.0
     return data_sample
 
 
@@ -367,6 +369,8 @@ def LoadSTDStarCache(
             norms = np.ones(PSF_data.shape[0])[:,None,None]
 
         config_dict = InitNFMConfig(sample, PSF_data, wvl_ids, convert_config=False, plotting=False)
+        # Samples recorded with fewer corrected DM modes ('k_c mismatch'): the DM pitch is scaled so that the model's k_c matches theirs
+        config_dict = apply_kc_fraction(config_dict, sample['All data'][KC_FRACTION_FEATURE] if KC_FRACTION_FEATURE in sample['All data'] else 1.0)
 
         if derotate_PSF:
             config_dict['telescope']['PupilAngle'] = 0.0 # Meaning, that the PSF is already derotated
@@ -564,6 +568,155 @@ def update_label_IDs():
     df.head()
 
 
+KC_MISMATCH_FLAG     = 'k_c mismatch'
+KC_FRACTION_FEATURE  = 'k_c fraction'
+
+def read_kc_mismatch_labels(labels_file=None):
+    """
+    Parses `STD_FOLDER / 'kc_mismatch_labels.txt'`: one sample per line,
+        <MUSE Filename>: k_c <percent> % (<source>), <class>, amp <ring amplitude>, <date>
+    ('#' lines are comments). <source> is 'ring' (ring position in the residuals, the detector's first estimate, the default) or 'fit'
+    (loss minimum of PSF fits scanning k_c, see scan_kc_fraction.py; never overwritten by the detector).
+    Returns {Filename: {'kc_percent', 'kc_source', 'ring_class', 'amp', 'date'}}; missing fields are None.
+    """
+    import re
+    labels_file = Path(labels_file) if labels_file is not None else STD_FOLDER / 'kc_mismatch_labels.txt'
+    labels = {}
+    with open(labels_file, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+            filename, _, tail = line.partition(':')
+            m_kc  = re.search(r'k_c\s*([\d.]+)\s*%\s*(?:\((ring|fit)\))?', tail)
+            m_amp = re.search(r'amp\s*(-?[\d.]+)', tail)
+            m_cls = re.search(r'\b(strong|weak|manual|none)\b', tail)
+            m_dat = re.search(r'(\d{4}-\d{2}-\d{2})', tail)
+            labels[filename.strip()] = {
+                'kc_percent': float(m_kc.group(1)) if m_kc else None,
+                'kc_source':  (m_kc.group(2) or 'ring') if m_kc else None,
+                'ring_class': m_cls.group(1) if m_cls else None,
+                'amp':        float(m_amp.group(1)) if m_amp else None,
+                'date':       m_dat.group(1) if m_dat else None,
+            }
+    return labels
+
+
+def write_kc_mismatch_labels(labels, labels_file=None):
+    """ Writes the labels dict (see read_kc_mismatch_labels) sorted by date; k_c percent is the ring position / nominal k_c. """
+    labels_file = Path(labels_file) if labels_file is not None else STD_FOLDER / 'kc_mismatch_labels.txt'
+    header = [
+        '# MUSE NFM STD stars recorded with a DM correction radius (k_c) different from the model one (k_c = 1 / (2 DmPitch)).',
+        '# Detected with datasets/MUSE_STD_dataset/detect_kc_mismatch.py: azimuthally coherent ring in the data - fit residuals.',
+        '# "k_c <p> % (ring)" is the ring position relative to the nominal correction radius (the detector estimate, biased high by a few %',
+        '# because the fit compensates part of the mismatch); "k_c <p> % (fit)" is the loss minimum of PSF fits scanning k_c (scan_kc_fraction.py),',
+        '# the value to trust. "amp" is the ring amplitude relative to the local PSF level. Classes: strong / weak (automatic), manual (added by hand,',
+        '# e.g. all samples of an affected observing period), none (checked by hand, NOT a mismatch: excluded from the flag and never re-added).',
+        '# Keyed by MUSE filename, not by sample ID. Entries are never removed automatically.',
+        '# Format:  <Filename>: k_c <percent> % (ring|fit), <class>, amp <value>, <date>',
+    ]
+    def fmt(v, spec):
+        return format(v, spec) if v is not None else 'nan'
+    with open(labels_file, 'w') as f:
+        f.write('\n'.join(header) + '\n')
+        for name, e in sorted(labels.items(), key=lambda kv: (kv[1].get('date') or '', kv[0])):
+            f.write(f"{name}: k_c {fmt(e.get('kc_percent'), '.1f')} % ({e.get('kc_source') or 'ring'}), {e.get('ring_class') or 'manual'}, amp {fmt(e.get('amp'), '.2f')}, {e.get('date') or ''}\n")
+
+
+KC_GROUP_FEATURE     = 'k_c group'
+KC_GROUP_TOLERANCE   = 0.03  # max |sample k_c - group k_c| (fraction of the nominal k_c) when grouping the mismatched samples (the ring position scatters by ~1-2 %)
+NOMINAL_DM_PITCH     = 0.22  # [m], the DmPitchs InitNFMConfig sets, k_c = 1 / (2 pitch)
+
+def group_kc_fractions(kc_fractions, tolerance=KC_GROUP_TOLERANCE):
+    """
+    Groups the measured k_c fractions of the mismatched samples by the closest averaged value: the smallest number of 1-D k-means
+    clusters such that every sample lies within `tolerance` of its cluster mean. The PSF model holds a single k_c per batch, so the
+    samples of one group share the group's averaged k_c (see build_dataset_cache / NFMCalibratorTrainer).
+    Returns (group ids [N] in 1..N_groups sorted by increasing k_c, group means [N_groups]).
+    """
+    x = np.asarray(kc_fractions, dtype=float)
+    if x.size == 0:
+        return np.zeros(0, dtype=int), np.zeros(0)
+    for k in range(1, x.size + 1):
+        centers = np.quantile(x, (np.arange(k) + 0.5) / k)
+        for _ in range(100):
+            assign = np.argmin(np.abs(x[:, None] - centers[None, :]), axis=1)
+            new_centers = np.array([x[assign == j].mean() if np.any(assign == j) else centers[j] for j in range(k)])
+            if np.allclose(new_centers, centers):
+                break
+            centers = new_centers
+        if np.all(np.abs(x - centers[assign]) <= tolerance):
+            break
+    order = np.argsort(centers)
+    rank  = np.empty_like(order); rank[order] = np.arange(k)
+    return rank[assign] + 1, centers[order]
+
+
+def apply_kc_fraction(config_dict, kc_fraction):
+    """
+    Sets the DM pitch of a (single-source, unconverted) PSF-model config so that the model's cut-off frequency k_c = 1 / (2 pitch)
+    becomes kc_fraction x the nominal one: the samples recorded with fewer corrected DM modes have a smaller correction radius.
+    """
+    kc_fraction = None if kc_fraction is None else float(np.asarray(kc_fraction, dtype=float).ravel()[0])
+    if kc_fraction is None or not np.isfinite(kc_fraction) or np.isclose(kc_fraction, 1.0):
+        return config_dict
+    pitch = np.asarray(config_dict['DM']['DmPitchs'], dtype=float)
+    config_dict['DM']['DmPitchs'] = (pitch / float(kc_fraction)).reshape(pitch.shape).tolist() if isinstance(config_dict['DM']['DmPitchs'], list) else pitch / float(kc_fraction)
+    return config_dict
+
+
+def kc_fraction_from_config(config_dict, nominal_pitch=NOMINAL_DM_PITCH):
+    """ k_c of a config relative to the nominal MUSE NFM one (the inverse of apply_kc_fraction) """
+    pitch = config_dict['DM']['DmPitchs']
+    pitch = float(pitch.min()) if hasattr(pitch, 'min') and not isinstance(pitch, list) else float(np.min(np.asarray(pitch, dtype=float)))
+    return nominal_pitch / pitch
+
+
+def add_kc_mismatch_flag(muse_df, labels_file=None, verbose=True):
+    """
+    Adds the boolean 'k_c mismatch' label and the 'k_c fraction' feature (real / model k_c, 1.0 when not flagged or unknown)
+    to the STD-stars dataframe.
+
+    The flagged samples were recorded with fewer DM modes corrected, so their real correction radius differs from the
+    single k_c = 1 / (2 DmPitch) used by the PSF model. They were identified with `detect_kc_mismatch.py` (azimuthally
+    coherent ring at ~0.9 r_c in the data - fit residuals) and are listed by MUSE filename in
+    `STD_FOLDER / 'kc_mismatch_labels.txt'` (see read_kc_mismatch_labels), so the label survives re-indexing of the samples.
+    If the file does not exist yet (fits not done), all samples get False / 1.0 and the file is created by
+    `update_kc_mismatch_labels` later in the dataset preparation.
+    """
+    labels_file = Path(labels_file) if labels_file is not None else STD_FOLDER / 'kc_mismatch_labels.txt'
+    labels = read_kc_mismatch_labels(labels_file) if labels_file.exists() else {}
+    if not labels_file.exists() and verbose:
+        print(f'k_c mismatch labels file not found ({labels_file}): all samples are set to False / 1.0')
+
+    labels = {name: e for name, e in labels.items() if e.get('ring_class') != 'none'} # 'none' = vetoed by hand
+    # The mismatched samples are grouped by the closest averaged k_c (the PSF model holds one k_c per batch): every flagged sample gets
+    # the averaged k_c of its group, the group id (1..N_groups by increasing k_c) and the nominal samples k_c fraction 1.0 / group 0
+    names    = [n for n in labels if labels[n].get('kc_percent') is not None]
+    measured = np.array([labels[n]['kc_percent'] / 100.0 for n in names])
+    group_ids, group_means = group_kc_fractions(measured)
+    kc_frac  = {n: float(group_means[g - 1]) for n, g in zip(names, group_ids)}
+    kc_group = {n: int(g) for n, g in zip(names, group_ids)}
+
+    muse_df[KC_MISMATCH_FLAG]    = muse_df['Filename'].isin(labels)
+    muse_df[KC_FRACTION_FEATURE] = muse_df['Filename'].map(kc_frac).astype(float)
+    muse_df[KC_GROUP_FEATURE]    = muse_df['Filename'].map(kc_group).fillna(0).astype(int)
+    muse_df.loc[~muse_df[KC_MISMATCH_FLAG], KC_FRACTION_FEATURE] = 1.0
+    muse_df.loc[~muse_df[KC_MISMATCH_FLAG], KC_GROUP_FEATURE]    = 0
+    muse_df[KC_FRACTION_FEATURE] = muse_df[KC_FRACTION_FEATURE].fillna(1.0) # listed without a k_c measurement: flagged, nominal k_c
+
+    if verbose:
+        n_found = muse_df[KC_MISMATCH_FLAG].sum()
+        missing = set(labels) - set(muse_df['Filename'])
+        print(f'k_c mismatch flag: {n_found} / {len(labels)} listed samples found in the dataframe')
+        for g, m in enumerate(group_means, start=1):
+            n_g = int((muse_df[KC_GROUP_FEATURE] == g).sum())
+            print(f'  k_c group {g}: {n_g} samples, k_c = {100 * m:.1f} % of the nominal one (range {100 * measured[group_ids == g].min():.1f} - {100 * measured[group_ids == g].max():.1f} %)')
+        if missing:
+            print(f'  Listed but not in the dataframe: {sorted(missing)}')
+    return muse_df
+
+
 def AOF_Cn2_profiles_stats(STD_stars_df, store=False):
     # Compute median Cn2 profile for MUSE NFM
     all_Cn2_alts, all_Cn2_fracs = [], []
@@ -678,24 +831,25 @@ def fit_telemetry_preprocessor(muse_df, Cn2_binning=None, random_state=3, max_it
     return muse_df_pruned, muse_df_pruned_scaled, muse_df_pruned_scaled_imputed, muse_df_pruned_imputed, telemetry_preprocessor
 
 
-def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_preprocessor_state, out_path, Cn2_grid_state=None, verbose=True):
+def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_preprocessor_state, out_path, Cn2_grid_state=None, verbose=True, derotate_PSF=True):
     """
-    Dataset cache of the NFM calibrator: derotated, normalized, background-subtracted PSF cubes [N, H, W, N_wvl] of the good samples
+    Dataset cache of the NFM calibrator: normalized, background-subtracted PSF cubes [N, H, W, N_wvl] of the good samples
     with the standardized imputed telemetry, the per-sample PSF-model configs (InitNFMConfig, incl. the binned Cn2 profile), the fitted
     parameters, the time-grouped train / val split and the telemetry preprocessor / Cn2 grid states (copied into the calibrator bundles).
-    Returns (good_ids, bad_ids).
+    With derotate_PSF the cubes are derotated and the configs get PupilAngle 0; otherwise the raw frames are stored with the header pupil
+    angle in their configs, and the PSF model rotates its pupil / AO frame per sample instead (the fitted dx / dy of a derotated fit do not
+    apply to the raw frames). Returns (good_ids, bad_ids).
     """
     muse_df = muse_df[(muse_df['Corrupted'] == False) & (muse_df['Bad quality'] == False)]
     muse_df = muse_df.loc[muse_fitted_df.index.values] # the same samples in the same order as the fitted parameters
     good_samples = muse_df.index.values
 
     PSF_cubes, configs, telemetry_records, fitted_values, good_ids, bad_ids = [], [], [], [], [], []
-    # TODO: consider storing rotated and derotated PSFs
     for id in tqdm(good_samples, disable=not verbose):
         try:
             PSF_data, _, _, model_config = LoadSTDStarCache(
                 ids = id,
-                derotate_PSF = True,
+                derotate_PSF = derotate_PSF,
                 normalize = True,
                 subtract_background = True,
                 ensure_odd_pixels = True,
@@ -729,6 +883,11 @@ def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_pr
         'train_idx':           train_idx, # positions into sample_ids
         'val_idx':             val_idx,
         'time_groups':         time_groups, # [N_samples], samples with the same label are close in acquisition time
+        'derotated':           derotate_PSF, # False: raw frames, the configs carry the per-sample pupil angles
+        # Samples flagged 'k_c mismatch' (fewer corrected DM modes): k_c relative to the nominal one (their configs carry the scaled DM
+        # pitch) and the k_c group (0 = nominal); the trainer batches the samples per group, since the PSF model holds one k_c per batch
+        'kc_fraction':         muse_df.loc[good_ids, KC_FRACTION_FEATURE].to_numpy(float) if KC_FRACTION_FEATURE in muse_df.columns else np.ones(len(good_ids)),
+        'kc_group':            muse_df.loc[good_ids, KC_GROUP_FEATURE].to_numpy(int) if KC_GROUP_FEATURE in muse_df.columns else np.zeros(len(good_ids), dtype=int),
         'telemetry_preprocessor': telemetry_preprocessor_state, # TelemetryPreprocessor.state_dict(), copied into calibrator bundles
         'Cn2_grid':            Cn2_grid_state, # Cn2Grid.state_dict() of the Cn2 features / configs, copied into calibrator bundles
     }, out_path)

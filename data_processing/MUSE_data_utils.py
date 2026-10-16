@@ -2416,6 +2416,9 @@ def reduce_dataframe(df, Cn2_binning=None, Cn2_grid=None):
         'Medium quality',
         'Tomography error',
         'Non-point',
+        'k_c mismatch',
+        'k_c fraction',
+        'k_c group',
     ]
 
     # Remove columns with specific names
@@ -2452,6 +2455,9 @@ def create_normalizing_transforms(df):
         ('Non-point',    []),
         ('Science target', []),
         ('Medium quality', []),
+        ('k_c mismatch',   []),
+        ('k_c fraction',   []),
+        ('k_c group',      []),
 
         ('MASS_TURB',        [Logify, Gauss]),
         ('LGS_FWHM_GAIN',    [YeoJohnson, Gauss]),

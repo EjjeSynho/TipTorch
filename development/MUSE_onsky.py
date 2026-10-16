@@ -15,7 +15,7 @@ import matplotlib as mpl
 from torchmin import minimize
 from matplotlib.colors import LogNorm
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
-from datasets.MUSE_STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache
+from datasets.MUSE_STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache, KC_MISMATCH_FLAG, KC_FRACTION_FEATURE, KC_GROUP_FEATURE
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch._config import default_device, project_settings
 
@@ -56,6 +56,7 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 428 # good one, no DM mismathc yet
 # ids = 434 # good one, no DM mismathc yet
 
+# The 'DM correction mismatch' samples below are flagged 'k_c mismatch' in muse_df (k_c ~93 % of the nominal); their configs get the scaled DM pitch automatically
 # ids = 440 # good one, but DM correction mismatch
 # ids = 449 # good one, but DM correction mismatch
 # ids = 446 # good one, but DM correction mismatch
@@ -85,9 +86,29 @@ ids = 455 # good one, slight sausage
 # ids = 456 # large tomographic error
 # ids = 125
 
+# Several OBs stacked without derotation: the data stay in the raw frame and the model rotates its pupil (spider streaks), its DM / WFS
+# frame (tomography, AO cut-off) and its static phase (phase bump, NCPAs) per OB by the header pupil angle of the config. The samples
+# are phase-bump stars ('Non-point' in muse_df) with visible streaks and good quality, spread over the pupil angle, so that the rotation
+# of the bump and of the tomographic residual relative to the streaks can be checked in the plots below (see the rotation check cell)
+DEROTATE_PSF = False
+
+if not DEROTATE_PSF:
+    candidates = muse_df[muse_df['Non-point'] & muse_df['Has streaks'] & muse_df['Good quality'] & ~muse_df['Corrupted'] & ~muse_df['Bad quality']]
+    ids = [462, 42, 14, 144, 344, 436] # pupil angles 7, 53, 95, 133, 230 (intense bump), 263 deg; 69 candidates in total
+    print(candidates.loc[ids, ['Pupil angle', 'Non-point', 'Has streaks', 'Good quality', 'Low AO errs']])
+
+ids_ = ids if isinstance(ids, list) else [ids]
+
+# Samples recorded with fewer corrected DM modes are flagged 'k_c mismatch' (see datasets/MUSE_STD_dataset/detect_kc_mismatch.py):
+# LoadSTDStarCache scales the DM pitch of their configs so that the model's k_c = 'k_c fraction' x nominal. One model holds a single k_c,
+# so all the ids of one model must belong to the same 'k_c group' (0 = nominal)
+print(muse_df.loc[ids_, [KC_MISMATCH_FLAG, KC_FRACTION_FEATURE, KC_GROUP_FEATURE, 'Pupil angle']])
+if muse_df.loc[ids_, KC_GROUP_FEATURE].nunique() > 1:
+    raise ValueError(f"The ids {ids_} belong to different k_c groups {muse_df.loc[ids_, KC_GROUP_FEATURE].tolist()}: fit them in separate models")
+
 PSF_0, norms, bgs, configs = LoadSTDStarCache(
     ids                 = ids,
-    derotate_PSF        = True,
+    derotate_PSF        = DEROTATE_PSF,
     normalize           = True,
     subtract_background = True,
     wvl_ids             = wvl_ids,
@@ -138,7 +159,7 @@ for j in range(N_src):
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 from tiptorch.tools.utils import BalancedPSFLoss
 
-blurry_PSF_flag = muse_df.loc[ids]['Bad quality'].item()
+blurry_PSF_flag = bool(muse_df.loc[ids_, 'Bad quality'].any())
 
 fit_wind_dir    = True
 fit_wind_speed  = False
@@ -151,7 +172,7 @@ if N_src > 1:
     
 else:
     # Supress fiting of these entries in the case of very blurry PSFs, as it may overfit
-    suppress_bump_flag = blurry_PSF_flag | (not muse_df.loc[ids]['Non-point'].item())
+    suppress_bump_flag = blurry_PSF_flag | (not bool(muse_df.loc[ids_[0], 'Non-point']))
     suppress_LO_flag   = blurry_PSF_flag
     fit_wind_speed     = (not blurry_PSF_flag)
     fit_outerscale     = (not blurry_PSF_flag)
@@ -347,8 +368,6 @@ if not success:
 #%%
 from tools.plotting import plot_radial_PSF_profiles
 
-ids_ = ids if isinstance(ids, list) else [ids]
-
 for id_src, dataset_index in enumerate(ids_):
     
     if PSF_model.model.N_src > 1:
@@ -388,6 +407,39 @@ for id_src, dataset_index in enumerate(ids_):
         plt.imshow(OPD_map[id_src,...]*1e9)
         plt.colorbar()
         plt.show()
+
+#%%
+# Rotation check per OB (raw frames): the data and the model at the red end, where the streaks are the most visible, the model's
+# oriented pupil and the fitted static OPD (phase bump + NCPAs) rotated to the image frame as the model applies it. The streaks of the
+# model must follow the data's, and the bump, attached to the DM frame, must turn with the pupil: a bump amplitude (first LO
+# coefficient) fitted positive and comparable across OBs means the rotated bump matches the data
+if PSF_model.LO_NCPAs:
+    m = PSF_model.model
+    angles  = m.pupil_angle.expand(N_src).cpu().numpy()
+    pupils  = m.pupil_rot.expand(N_src, -1, -1).cpu().numpy()
+    OPD_rot = PSF_model.LO_basis.rotate_OPD(PSF_model.OPD_func(PSF_model.inputs_manager['LO_coefs']).unsqueeze(1))[:, 0].detach().cpu().numpy() * 1e9 # [N_src, H, W] nm
+    bump    = PSF_model.inputs_manager['LO_coefs'][:, 0].detach().cpu().numpy()
+
+    fig, ax = plt.subplots(N_src, 4, figsize=(15, 3.6*N_src), squeeze=False)
+    for j in range(N_src):
+        D, M = PSF_0[j, -1].cpu().numpy(), PSF_1[j, -1].detach().cpu().numpy()
+        norm = LogNorm(vmin=np.percentile(D[D > 0], 10), vmax=D.max())
+        ax[j, 0].imshow(D, cmap=cmap, norm=norm)
+        ax[j, 0].set_title(f'ID {ids_[j]}: data, {wavelengths.flatten()[-1].item()*1e9:.0f} nm, pupil angle {angles[j]:.1f}°', fontsize=9)
+        ax[j, 1].imshow(M, cmap=cmap, norm=norm)
+        ax[j, 1].set_title('model', fontsize=9)
+        ax[j, 2].imshow(pupils[j], cmap='gray')
+        ax[j, 2].set_title('oriented pupil of the model', fontsize=9)
+        lim = np.abs(OPD_rot[j]).max()
+        ax[j, 3].imshow(OPD_rot[j] * (pupils[j] > 0), cmap='RdBu_r', vmin=-lim, vmax=lim)
+        ax[j, 3].set_title(f'static OPD [nm] (bump coef. {bump[j]:.1f})', fontsize=9)
+        for a in ax[j]:
+            a.axis('off')
+    plt.tight_layout()
+    plt.show()
+
+    print('Pupil angles [deg]:', *[f'{a:.1f}' for a in angles])
+    print('Phase bump coefs.: ', *[f'{b:.1f}' for b in bump])
 
 #%
 # print('λ: ', *[f"{x:.0f}" for x in wavelengths.detach().cpu().numpy().flatten()*1e9])

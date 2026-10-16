@@ -236,6 +236,7 @@ if not os.path.exists(STD_FOLDER / 'muse_df.pickle'):
     muse_df.set_index('ID', inplace=True)
     muse_df.sort_index(inplace=True)
     muse_df = muse_df.join(labels_df)
+    muse_df = add_kc_mismatch_flag(muse_df) # samples recorded with a different DM correction radius (k_c)
 
     with open(STD_FOLDER / 'muse_df.pickle', 'wb') as handle:
         pickle.dump(muse_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -332,16 +333,30 @@ with open(STD_FOLDER / 'muse_STD_stars_telemetry.pickle', 'rb') as handle:
 with open(STD_FOLDER / 'muse_fitted_df.pickle', 'rb') as handle:
     muse_fitted_df = pickle.load(handle)['fitted_values']
 
+# Detect the samples recorded with a different DM correction radius (k_c): scans only the fits not scored yet, appends the new
+# detections (with their k_c percentage) to STD_FOLDER / 'kc_mismatch_labels.txt' and refreshes the 'k_c mismatch' / 'k_c fraction'
+# columns of muse_df. See detect_kc_mismatch.py; run it with --force to re-scan everything after re-fitting.
+from detect_kc_mismatch import update_kc_mismatch_labels
+_ = update_kc_mismatch_labels(muse_df)
+muse_df = add_kc_mismatch_flag(muse_df)
+with open(STD_FOLDER / 'muse_df.pickle', 'wb') as handle:
+    pickle.dump(muse_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
 DATASET_CACHE = STD_FOLDER / 'dataset_cache'
+
+# Derotated PSFs (the regime of the existing fits and calibrator weights) or raw frames with the per-sample pupil angle in the configs,
+# rotated by the PSF model (see build_dataset_cache). The raw-frame cache gets the '_raw' suffix
+DEROTATE_PSF = True
 
 #%%
 # Pack all data into the coherent dataset, where reduced telemetry is associated with spectral cubes and fitted PSF model parameters
-# for each sample (see build_dataset_cache: good samples only, derotated normalized PSFs, time-grouped train / val split)
+# for each sample (see build_dataset_cache: good samples only, normalized PSFs, time-grouped train / val split)
 good_ids, bad_ids = build_dataset_cache(
     muse_df, reduced_telemetry, muse_fitted_df, telemetry_preprocessor_state,
-    out_path       = DATASET_CACHE / 'muse_STD_stars_dataset.pt',
+    out_path       = DATASET_CACHE / ('muse_STD_stars_dataset.pt' if DEROTATE_PSF else 'muse_STD_stars_dataset_raw.pt'),
     Cn2_grid_state = Cn2_grid_state,
-    verbose        = True
+    verbose        = True,
+    derotate_PSF   = DEROTATE_PSF
 )
 
 if len(bad_ids) > 0:
