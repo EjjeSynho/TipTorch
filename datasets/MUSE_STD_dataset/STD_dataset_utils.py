@@ -576,7 +576,7 @@ def read_kc_mismatch_labels(labels_file=None):
     Parses `STD_FOLDER / 'kc_mismatch_labels.txt'`: one sample per line,
         <MUSE Filename>: k_c <percent> % (<source>), <class>, amp <ring amplitude>, <date>
     ('#' lines are comments). <source> is 'ring' (ring position in the residuals, the detector's first estimate, the default) or 'fit'
-    (loss minimum of PSF fits scanning k_c, see scan_kc_fraction.py; never overwritten by the detector).
+    (loss minimum of PSF fits scanning k_c, see kc_mismatch.py (--scan); never overwritten by the detector).
     Returns {Filename: {'kc_percent', 'kc_source', 'ring_class', 'amp', 'date'}}; missing fields are None.
     """
     import re
@@ -607,9 +607,9 @@ def write_kc_mismatch_labels(labels, labels_file=None):
     labels_file = Path(labels_file) if labels_file is not None else STD_FOLDER / 'kc_mismatch_labels.txt'
     header = [
         '# MUSE NFM STD stars recorded with a DM correction radius (k_c) different from the model one (k_c = 1 / (2 DmPitch)).',
-        '# Detected with datasets/MUSE_STD_dataset/detect_kc_mismatch.py: azimuthally coherent ring in the data - fit residuals.',
+        '# Detected with datasets/MUSE_STD_dataset/kc_mismatch.py: azimuthally coherent ring in the data - fit residuals.',
         '# "k_c <p> % (ring)" is the ring position relative to the nominal correction radius (the detector estimate, biased high by a few %',
-        '# because the fit compensates part of the mismatch); "k_c <p> % (fit)" is the loss minimum of PSF fits scanning k_c (scan_kc_fraction.py),',
+        '# because the fit compensates part of the mismatch); "k_c <p> % (fit)" is the loss minimum of PSF fits scanning k_c (kc_mismatch.py (--scan)),',
         '# the value to trust. "amp" is the ring amplitude relative to the local PSF level. Classes: strong / weak (automatic), manual (added by hand,',
         '# e.g. all samples of an affected observing period), none (checked by hand, NOT a mismatch: excluded from the flag and never re-added).',
         '# Keyed by MUSE filename, not by sample ID. Entries are never removed automatically.',
@@ -678,7 +678,7 @@ def add_kc_mismatch_flag(muse_df, labels_file=None, verbose=True):
     to the STD-stars dataframe.
 
     The flagged samples were recorded with fewer DM modes corrected, so their real correction radius differs from the
-    single k_c = 1 / (2 DmPitch) used by the PSF model. They were identified with `detect_kc_mismatch.py` (azimuthally
+    single k_c = 1 / (2 DmPitch) used by the PSF model. They were identified with `kc_mismatch.py` (azimuthally
     coherent ring at ~0.9 r_c in the data - fit residuals) and are listed by MUSE filename in
     `STD_FOLDER / 'kc_mismatch_labels.txt'` (see read_kc_mismatch_labels), so the label survives re-indexing of the samples.
     If the file does not exist yet (fits not done), all samples get False / 1.0 and the file is created by

@@ -567,7 +567,8 @@ class MUSEObservation:
 
     def _detect_bad_exposures(self, overexposure_threshold=1500, low_SNR_threshold=25):
         """
-        This function detects overexposed and underexposed spectral regions per source.
+        This function detects bright pixels which appear to flicker across spectral slices.
+        This may mean that the source is affected by charge overflow of cosmic rays.
         """
         radius = 16
 

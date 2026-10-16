@@ -335,8 +335,8 @@ with open(STD_FOLDER / 'muse_fitted_df.pickle', 'rb') as handle:
 
 # Detect the samples recorded with a different DM correction radius (k_c): scans only the fits not scored yet, appends the new
 # detections (with their k_c percentage) to STD_FOLDER / 'kc_mismatch_labels.txt' and refreshes the 'k_c mismatch' / 'k_c fraction'
-# columns of muse_df. See detect_kc_mismatch.py; run it with --force to re-scan everything after re-fitting.
-from detect_kc_mismatch import update_kc_mismatch_labels
+# columns of muse_df. See kc_mismatch.py; --force re-scores everything after re-fitting, --scan refines the k_c of the labeled samples by fits.
+from kc_mismatch import update_kc_mismatch_labels
 _ = update_kc_mismatch_labels(muse_df)
 muse_df = add_kc_mismatch_flag(muse_df)
 with open(STD_FOLDER / 'muse_df.pickle', 'wb') as handle:

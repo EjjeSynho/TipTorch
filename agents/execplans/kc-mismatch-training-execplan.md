@@ -19,7 +19,7 @@ for all wavelength bins. The user wants to keep these PSFs in the training set (
 
 Observable outcomes:
 
-- `python datasets/MUSE_STD_dataset/detect_kc_mismatch.py [--force]` writes `STD_FOLDER/kc_ring_scores.csv`, appends new detections to
+- `python datasets/MUSE_STD_dataset/kc_mismatch.py [--force]` writes `STD_FOLDER/kc_ring_scores.csv`, appends new detections to
   `STD_FOLDER/kc_mismatch_labels.txt` and refreshes the three columns of `muse_df.pickle`; it is called from `create_STD_dataset.py`.
 - `python tests/test_kc_mismatch_groups.py` (14 checks) and `python tests/test_kc_group_training_smoke.py` (8 checks on the real cache) pass.
 - A model updated to a scaled-pitch config with `Update(grids=True)` reproduces a model built from that config exactly.
@@ -38,7 +38,7 @@ Observable outcomes:
 
 ## Target Behavior
 
-1. Detection (`datasets/MUSE_STD_dataset/detect_kc_mismatch.py`): relative residual (data - fit) / <fit>(r) per wavelength, azimuthal
+1. Detection (`datasets/MUSE_STD_dataset/kc_mismatch.py`): relative residual (data - fit) / <fit>(r) per wavelength, azimuthal
    median in bins of u = r / r_c(λ) (suppresses streaks / the tomographic cross), median over wavelength, bump above baseline in
    u ∈ [0.76, 1.08], angular coherence (16 sectors), wavelength consistency, sub-bin peak position = k_c fraction. Classes strong / weak /
    none (thresholds set by eye on the 2026-10 galleries). `update_kc_mismatch_labels(muse_df)` scans only fits absent from the scores CSV.
@@ -55,7 +55,7 @@ Observable outcomes:
    batch from one group.
 7. `STD_fitter.py` prints the flag, stores `'k_c fraction'` / `'k_c group'` in the fit pickle and accepts `kc_fraction=<v>` to force a k_c
    (experiments / scans). `MUSE_onsky.py` prints the label of the selected ids and refuses ids of different groups in one model.
-8. `scan_kc_fraction.py`: refines the k_c of the labeled samples by fitting with the k_c forced to ring estimate x {0.86, 0.90, 0.94, 0.98}
+8. `kc_mismatch.py --scan`: refines the k_c of the labeled samples by fitting with the k_c forced to ring estimate x {0.86, 0.90, 0.94, 0.98}
    (parallel `STD_fitter.py` subprocesses), takes the parabolic loss minimum, writes `(fit)` values to the labels and refreshes `muse_df`.
 
 ## Non-Goals
@@ -76,7 +76,7 @@ Observable outcomes:
       fitter / onsky reactions, `tests/test_kc_mismatch_groups.py` (14/14), `tests/test_kc_group_training_smoke.py` (8/8, GPU 1).
 - [x] (2026-10-16) Validation fit of id 19 with k_c forced to 100 / 90.2 / 87 / 84 / 80 %: loss 0.214 / 0.189 / 0.179 / 0.172 / 0.174,
       ring amplitude 0.49 / 0.31 / 0.21 / 0.11 / 0.01 -> the ring estimate (89 %) is biased high, the real k_c is ~83 %.
-- [x] (2026-10-16) `scan_kc_fraction.py` over all 42 labeled samples (factors 0.86-0.98 of the ring estimate, then 0.98-1.06 for the
+- [x] (2026-10-16) `kc_mismatch.py --scan` over all 42 labeled samples (factors 0.86-0.98 of the ring estimate, then 0.98-1.06 for the
       25 samples at the upper edge; ~1.5 h on cuda:0 with 6 jobs). Fitted k_c -> labels `(fit)`; 6, 34, 51 fit best at >= 99 % of the
       nominal k_c and were set to the `none` class (not a mismatch by the fit criterion). Final labels: 39 mismatched samples in 4 groups
       (3 % tolerance): 82.5 % (6), 85.9 % (9), 90.6 % (15), 95.1 % (9). Period A spans 80-91 %, period B 89-94 %, the 2018-19 ones 91-97 %.
@@ -93,7 +93,7 @@ Observable outcomes:
   amplitude test; the azimuthal median + coherence + `ring_u >= 0.90` for the weak class reject them.
 - The ring position is not the real k_c: for id 19 the fit loss minimum is at ~83 % while the ring sits at 89 % (the fitted r0 / dn
   absorb part of the mismatch: dn 22.6 -> 16.2 between 100 % and 80 %). A model-vs-model test (no re-fit) shows no bias (89.6 % for
-  90.2 %), so the bias comes from the re-optimization. Hence the fit-based refinement (`scan_kc_fraction.py`).
+  90.2 %), so the bias comes from the re-optimization. Hence the fit-based refinement (`kc_mismatch.py --scan`).
 - `DmPitchs` is a singleton in `ConfigManager.Merge`: a mixed batch would silently take the first sample's k_c (now an error).
 - `SetWavelengths` (multi-wavelength-set training) already rebuilds the grids on every batch, so only the single-set path needed the
   explicit `grids=True` on a k_c change.
@@ -109,19 +109,20 @@ Observable outcomes:
   to the PSD math, a few grid rebuilds per epoch (~0.1 s each), smaller batches for the groups (LayerNorm, no BatchNorm, so fine).
 - Decision: the k_c of the labels is refined by fits (`(fit)` source) and the ring estimate is kept only as the first guess; the detector
   never overwrites a fitted value.
-- Decision: `scan_kc_fraction.py` reuses `STD_fitter.py` as subprocesses (the production fitting routine, incl. the balanced loss and
+- Decision: `kc_mismatch.py --scan` reuses `STD_fitter.py` as subprocesses (the production fitting routine, incl. the balanced loss and
   the flag handling) rather than a separate fitting loop.
 
 ## Plan of Work / Concrete Steps
 
-1. `datasets/MUSE_STD_dataset/detect_kc_mismatch.py`: detector, `update_kc_mismatch_labels`, gallery.
+1. `datasets/MUSE_STD_dataset/kc_mismatch.py` (one `#%%`-cell module, merged from the former detect / scan scripts on
+   2026-10-16): ring diagnostics, `update_kc_mismatch_labels`, gallery, `scan_kc_by_fits` (`--scan`).
 2. `datasets/MUSE_STD_dataset/STD_dataset_utils.py`: labels parser / writer, `group_kc_fractions`, `apply_kc_fraction`,
    `kc_fraction_from_config`, `add_kc_mismatch_flag`, `LoadSTDStarCacheByID` / `LoadSTDStarCache` / `build_dataset_cache` changes.
 3. `data_processing/MUSE_data_utils.py`: register the three columns. `src/tiptorch/managers/config_manager.py`: merge guard.
 4. `machine_learning/calibrators/NFM_calibrator.py`: `NFMDataset.kc_group / kc_fraction`, `KcGroupBatchSampler`, `_make_loader`,
    `run_model`, `build_NFM_trainer`, `_kc_groups_summary`.
 5. `datasets/MUSE_STD_dataset/STD_fitter.py`, `development/MUSE_onsky.py`, `create_STD_dataset.py` hooks.
-6. `scan_kc_fraction.py`; tests.
+6. `kc_mismatch.py --scan`; tests.
 
 ## Validation and Acceptance
 
@@ -132,9 +133,9 @@ Observable outcomes:
 
 ## Idempotence and Recovery
 
-- `detect_kc_mismatch.py` is incremental (scores CSV keyed by filename); `--force` rescans. Labels are never removed automatically;
+- `kc_mismatch.py` is incremental (scores CSV keyed by filename); `--force` rescans. Labels are never removed automatically;
   hand classes (`manual`, `none`) and `(fit)` values are preserved.
-- `scan_kc_fraction.py` reuses existing fits in the scan folder (resume after an interruption); `--no_apply` leaves the labels alone.
+- `kc_mismatch.py --scan` reuses existing fits in the scan folder (resume after an interruption); `--no_apply` leaves the labels alone.
 - Backup of the dataframe before the labels: `STD_FOLDER/muse_df_backup_2026-10-16.pickle`.
 
 ## Interfaces and Dependencies

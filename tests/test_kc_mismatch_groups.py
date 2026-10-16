@@ -1,6 +1,6 @@
 """
 Checks of the k_c-mismatch handling of the MUSE NFM STD stars (samples recorded with fewer corrected DM modes, flagged 'k_c mismatch'
-in muse_df.pickle by datasets/MUSE_STD_dataset/detect_kc_mismatch.py):
+in muse_df.pickle by datasets/MUSE_STD_dataset/kc_mismatch.py):
 
   1. group_kc_fractions groups the measured k_c fractions by the closest averaged value within the tolerance;
   2. LoadSTDStarCache scales the DM pitch of a flagged sample's config (k_c fraction round trip), nominal samples are untouched;
@@ -48,7 +48,7 @@ check('group_kc_fractions: single sample -> one group', len(m1) == 1 and g1.toli
 # 2. Config scaling -------------------------------------------------------------------------------------------------------------
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as f:
     muse_df = pickle.load(f)
-assert KC_FRACTION_FEATURE in muse_df.columns, 'muse_df.pickle has no k_c columns, run datasets/MUSE_STD_dataset/detect_kc_mismatch.py first'
+assert KC_FRACTION_FEATURE in muse_df.columns, 'muse_df.pickle has no k_c columns, run datasets/MUSE_STD_dataset/kc_mismatch.py first'
 
 flagged = muse_df.index[muse_df[KC_GROUP_FEATURE] > 0]
 id_mis  = int(flagged[np.argmin(muse_df.loc[flagged, KC_FRACTION_FEATURE].values)]) # the strongest mismatch
@@ -112,9 +112,9 @@ check('Update(grids=True) reproduces the model built from the scaled config', re
 chg = ((PSF_after - PSF_before).abs().amax() / PSF_before.abs().amax()).item()
 check('the k_c change modifies the PSF', chg > 1e-3, f'max |diff| / peak = {chg:.2e}')
 
-# the ring diagnostic of detect_kc_mismatch applied to (scaled model as the "data") - (nominal model as the "fit"), the situation of the
+# the ring diagnostic of kc_mismatch applied to (scaled model as the "data") - (nominal model as the "fit"), the situation of the
 # flagged on-sky samples: the ring must sit at frac_expected x the nominal correction radius
-from detect_kc_mismatch import ring_profiles, ring_score
+from kc_mismatch import ring_profiles, ring_score
 prof, coh, _ = ring_profiles(PSF_after[0].cpu().numpy(), PSF_before[0].cpu().numpy(), model_upd.λ_sim.cpu().numpy())
 sc = ring_score(prof, coh)
 check('nominal-vs-scaled model residual shows the ring at the scaled k_c', abs(sc['kc_fraction'] - frac_expected) < 0.03 and sc['coherence'] > 0.9,

@@ -184,7 +184,7 @@ class NFMDataset(Dataset):
         self.train_idx   = data.get('train_idx')
         self.val_idx     = data.get('val_idx')
         self.time_groups = data.get('time_groups')
-        # Samples flagged 'k_c mismatch' (fewer corrected DM modes, see datasets/MUSE_STD_dataset/detect_kc_mismatch.py): k_c relative to the
+        # Samples flagged 'k_c mismatch' (fewer corrected DM modes, see datasets/MUSE_STD_dataset/kc_mismatch.py): k_c relative to the
         # nominal one and the k_c group (0 = nominal). Their configs carry the scaled DM pitch. The PSF model holds a single k_c per batch, so
         # the loaders batch the samples per group (KcGroupBatchSampler) and run_model rebuilds the model grids when the k_c changes.
         # Older caches have no such entries: the groups are then derived from the DM pitches of the configs

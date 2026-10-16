@@ -99,7 +99,7 @@ if not DEROTATE_PSF:
 
 ids_ = ids if isinstance(ids, list) else [ids]
 
-# Samples recorded with fewer corrected DM modes are flagged 'k_c mismatch' (see datasets/MUSE_STD_dataset/detect_kc_mismatch.py):
+# Samples recorded with fewer corrected DM modes are flagged 'k_c mismatch' (see datasets/MUSE_STD_dataset/kc_mismatch.py):
 # LoadSTDStarCache scales the DM pitch of their configs so that the model's k_c = 'k_c fraction' x nominal. One model holds a single k_c,
 # so all the ids of one model must belong to the same 'k_c group' (0 = nominal)
 print(muse_df.loc[ids_, [KC_MISMATCH_FLAG, KC_FRACTION_FEATURE, KC_GROUP_FEATURE, 'Pupil angle']])
