@@ -53,8 +53,9 @@ Observable outcomes:
    `KcGroupBatchSampler` makes single-group batches (smaller last batches per group, batch order shuffled with torch's RNG);
    `run_model` calls `Update(grids=True)` when the batch pitch differs from the model's; `build_NFM_trainer` picks its representative
    batch from one group.
-7. `STD_fitter.py` prints the flag, stores `'k_c fraction'` / `'k_c group'` in the fit pickle and accepts `kc_fraction=<v>` to force a k_c
-   (experiments / scans). `MUSE_onsky.py` prints the label of the selected ids and refuses ids of different groups in one model.
+7. `STD_fitter.py`: the module flag `APPLY_KC_CORRECTION` (next to `DEROTATE_PSF`) decides whether the flagged samples are fitted with
+   their label k_c or the nominal one; the flag and the group go into the fit pickle. `load_and_fit_sample(id, device, kc_fraction=None)` is
+   importable (no module-level fit loop), a `kc_fraction` value forces the k_c (used by the scan). The CLI takes device / ids / folder only. `MUSE_onsky.py` prints the label of the selected ids and refuses ids of different groups in one model.
 8. `kc_mismatch.py --scan`: refines the k_c of the labeled samples by fitting with the k_c forced to ring estimate x {0.86, 0.90, 0.94, 0.98}
    (parallel `STD_fitter.py` subprocesses), takes the parabolic loss minimum, writes `(fit)` values to the labels and refreshes `muse_df`.
 
@@ -128,7 +129,8 @@ Observable outcomes:
 
 - `source ~/miniforge3/etc/profile.d/conda.sh && conda activate TipTorch && python tests/test_kc_mismatch_groups.py cuda:0` -> 14/14.
 - `python tests/test_kc_group_training_smoke.py cuda:1` -> 8/8 (loads the 3.6 GB cache, ~3 min).
-- `cd datasets/MUSE_STD_dataset && python STD_fitter.py cuda:0 19 19 kc_fraction=0.84 <out>` -> fit with the forced k_c.
+- `cd datasets/MUSE_STD_dataset && python STD_fitter.py cuda:0 19 19 <out>` -> fit with the label k_c (`APPLY_KC_CORRECTION = True`);
+  `python kc_mismatch.py --scan --ids 19 --factors 0.91 --no_apply` -> one forced-k_c fit through the scan path.
 - Galleries: `STD_FOLDER/plots/kc_ring_gallery.png`, scan plots in the session scratchpad (`fit_kc/kc_scan_19.png`).
 
 ## Idempotence and Recovery
@@ -141,7 +143,7 @@ Observable outcomes:
 ## Interfaces and Dependencies
 
 - `muse_df` columns: `'k_c mismatch'` bool, `'k_c fraction'` float (group mean, 1.0 nominal), `'k_c group'` int (0 nominal).
-- Fit pickles: `'k_c fraction'`, `'k_c group'` (-1 when forced with `kc_fraction=`).
+- Fit pickles: `'k_c fraction'`, `'k_c group'` (-1 when the k_c was forced via `load_and_fit_sample(..., kc_fraction=v)`).
 - Dataset cache: `'kc_fraction'` [N], `'kc_group'` [N]; configs with the scaled `DmPitchs`.
 - `NFMDataset.kc_group / kc_fraction`; `KcGroupBatchSampler(groups, batch_size, shuffle)`.
 

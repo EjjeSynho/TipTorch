@@ -15,7 +15,7 @@ import matplotlib as mpl
 from torchmin import minimize
 from matplotlib.colors import LogNorm
 from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chromatic_PSF_slice
-from datasets.MUSE_STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache, KC_MISMATCH_FLAG, KC_FRACTION_FEATURE, KC_GROUP_FEATURE
+from datasets.MUSE_STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache, KC_MISMATCH_FLAG, KC_FRACTION_FEATURE, KC_GROUP_FEATURE, apply_kc_fraction, kc_fraction_from_config
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch._config import default_device, project_settings
 
@@ -74,7 +74,8 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1
 # ids = 475 # good one, mb DM correction radius mismatch
 # ids = 468 # good one
 # ids = 462 # good one
-ids = 455 # good one, slight sausage
+# ids = 455 # good one, slight sausage
+ids = 438 # good one, slight sausage
 
 # ids = 359 # good one
 # ids = 368 # kinda bad in blue
@@ -92,18 +93,23 @@ ids = 455 # good one, slight sausage
 # of the bump and of the tomographic residual relative to the streaks can be checked in the plots below (see the rotation check cell)
 DEROTATE_PSF = False
 
-if not DEROTATE_PSF:
-    candidates = muse_df[muse_df['Non-point'] & muse_df['Has streaks'] & muse_df['Good quality'] & ~muse_df['Corrupted'] & ~muse_df['Bad quality']]
-    ids = [462, 144, 344, 109, 525]
-    print(candidates.loc[ids, ['Pupil angle', 'Non-point', 'Has streaks', 'Good quality', 'Low AO errs']])
+# if not DEROTATE_PSF:
+#     candidates = muse_df[muse_df['Non-point'] & muse_df['Has streaks'] & muse_df['Good quality'] & ~muse_df['Corrupted'] & ~muse_df['Bad quality']]
+#     ids = [462, 144, 344, 109, 525]
+#     print(candidates.loc[ids, ['Pupil angle', 'Non-point', 'Has streaks', 'Good quality', 'Low AO errs']])
 
 ids_ = ids if isinstance(ids, list) else [ids]
 
 # Samples recorded with fewer corrected DM modes are flagged 'k_c mismatch' (see datasets/MUSE_STD_dataset/kc_mismatch.py):
-# LoadSTDStarCache scales the DM pitch of their configs so that the model's k_c = 'k_c fraction' x nominal. One model holds a single k_c,
-# so all the ids of one model must belong to the same 'k_c group' (0 = nominal)
+# LoadSTDStarCache scales the DM pitch of their configs so that the model's k_c = 'k_c fraction' x nominal. With APPLY_KC_CORRECTION = False
+# every sample is fitted with the nominal k_c = 1 / (2 x 0.22 m) instead (same flag as in STD_fitter.py). KC_FRACTION forces the model k_c
+# (relative to the nominal one) for all the ids, overriding both. One model holds a single k_c, so without a forced value all the ids
+# of one model must belong to the same 'k_c group' (0 = nominal)
+APPLY_KC_CORRECTION = True
+KC_FRACTION = None
+
 print(muse_df.loc[ids_, [KC_MISMATCH_FLAG, KC_FRACTION_FEATURE, KC_GROUP_FEATURE, 'Pupil angle']])
-if muse_df.loc[ids_, KC_GROUP_FEATURE].nunique() > 1:
+if APPLY_KC_CORRECTION and KC_FRACTION is None and muse_df.loc[ids_, KC_GROUP_FEATURE].nunique() > 1:
     raise ValueError(f"The ids {ids_} belong to different k_c groups {muse_df.loc[ids_, KC_GROUP_FEATURE].tolist()}: fit them in separate models")
 
 PSF_0, norms, bgs, configs = LoadSTDStarCache(
@@ -115,6 +121,11 @@ PSF_0, norms, bgs, configs = LoadSTDStarCache(
     ensure_odd_pixels   = True,
     device              = default_device
 )
+
+# The configs carry the k_c of the samples' labels (scaled DM pitch): rescale them to the nominal / forced k_c when asked
+kc_fraction = KC_FRACTION if KC_FRACTION is not None else (None if APPLY_KC_CORRECTION else 1.0)
+if kc_fraction is not None:
+    configs = [apply_kc_fraction(c, kc_fraction / kc_fraction_from_config(c)) for c in configs]
 
 #%%
 PSF_model = PSFModelNFM(
@@ -130,6 +141,9 @@ PSF_model = PSFModelNFM(
 
 func = lambda x_: PSF_model( PSF_model.inputs_manager.unstack(x_, include_all=False, update=True) )
 PSF_1 = func(x0 := PSF_model.inputs_manager.stack() )
+
+kc_fraction = kc_fraction_from_config(configs[0])
+print(f"Model k_c = {100 * kc_fraction:.1f} % of the nominal ({PSF_model.model.kc:.3f} 1/m, DM pitch {np.asarray(configs[0]['DM']['DmPitchs']).ravel()[0]:.4f} m)")
 
 N_wvl = PSF_0.shape[1]
 N_src = PSF_0.shape[0]
@@ -159,7 +173,10 @@ for j in range(N_src):
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
 from tiptorch.tools.utils import BalancedPSFLoss
 
-blurry_PSF_flag = bool(muse_df.loc[ids_, 'Bad quality'].any())
+blurry_PSF_flag = bool((
+     muse_df.loc[ids_, 'Bad quality'].astype(bool) | \
+    (muse_df.loc[ids_, 'Medium quality'].astype(bool) & ~muse_df.loc[ids_, 'Good quality'].astype(bool))
+).any())
 
 fit_wind_dir    = True
 fit_wind_speed  = False
@@ -191,27 +208,37 @@ else:
     wvl_weights = 1.0
 
 # PSF loss: 'balanced' (dynamic-range-balanced, see BalancedPSFLoss; same config as in STD_fitter.py) or 'legacy' (linear MSE + MAE)
-PSF_loss_type = 'balanced'
-
 PSF_LOSS_CFG = {
+    # "type":             "balanced",
+    "type":             "legacy",
+    # BalancedPSFLoss parameters ('balanced' only)
     "radial_power":     2.0,
     "r_max":            40.0,
     "asinh_k":          3.0,
     "huber_delta":      0.1,
     "scale":            3.0,
     "match_background": False,
+    # Weights of the MSE and MAE terms ('legacy' only)
+    "w_MSE":            900.0,
+    "w_MAE":            1.6,
+    # Regularization weights of the LO NCPAs (both loss types): phase bump (1st LO coefficient) and the LO coefficients' amplitude / defocus sign
+    "w_bump":           5e-5,
+    "w_LO":             1e-7,
 }
 
-if PSF_loss_type == 'balanced':
-    PSF_loss_balanced = BalancedPSFLoss(PSF_0.shape[-2], PSF_0.shape[-1], default_device, **PSF_LOSS_CFG)
-    
-elif PSF_loss_type == 'legacy':
+loss_cfg  = dict(PSF_LOSS_CFG)
+loss_type = loss_cfg.pop('type')
+w_MSE, w_MAE, w_bump, w_LO = (loss_cfg.pop(key) for key in ('w_MSE', 'w_MAE', 'w_bump', 'w_LO'))
+
+if loss_type == 'balanced':
+    PSF_loss_balanced = BalancedPSFLoss(PSF_0.shape[-2], PSF_0.shape[-1], default_device, **loss_cfg)
+elif loss_type == 'legacy':
     PSF_loss_balanced = None
 else:
-    raise ValueError(f"Unknown PSF loss type '{PSF_loss_type}', expected 'balanced' or 'legacy'")
+    raise ValueError(f"Unknown PSF loss type '{loss_type}', expected 'balanced' or 'legacy'")
 
 
-def loss_PSF(PSF_data, PSF_model, w_MSE, w_MAE):
+def loss_PSF(PSF_data, PSF_model):
     if PSF_loss_balanced is not None:
         return PSF_loss_balanced(PSF_data, PSF_model).mean()
 
@@ -229,7 +256,7 @@ w_suppress_LO   = 1e3 if suppress_LO_flag   else 1
 
 force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
 
-def loss_LO(w_bump, w_LO):
+def loss_LO():
     if isinstance(PSF_model.LO_basis, PixelmapBasis):
         raise NotImplementedError("Gradient loss for PixelmapBasis is not implemented.")
         
@@ -237,11 +264,14 @@ def loss_LO(w_bump, w_LO):
         # L2 regularization on all LO coefficients
         LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * w_suppress_LO
         # Constraint to enforce first element of LO_coefs to be positive
-        phase_bump_positive = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 0]) * w_bump * w_suppress_bump
+        phase_bump = PSF_model.inputs_manager['LO_coefs'][:, 0]
+        phase_bump_positive = force_positive(phase_bump) * w_bump * w_suppress_bump
+        # PSFs without the "Non-point" flag: the phase bump is pulled to 0, not only kept positive, so that the fit doesn't use it to absorb other errors
+        phase_bump_penalty = phase_bump.pow(2).mean() * w_bump * w_suppress_bump if suppress_bump_flag else 0.0
         # Force defocus to be positive to mitigate sign ambiguity
         first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_LO * w_suppress_LO #NOTE: won't work with the chromatic defocus
         
-        LO_loss += phase_bump_positive + first_defocus_penalty
+        LO_loss += phase_bump_positive + phase_bump_penalty + first_defocus_penalty
         
     return LO_loss
 
@@ -284,8 +314,8 @@ def loss_MAP():
 
 def loss_fn(x_):
     PSF_ = func(x_)
-    PSF_loss = loss_PSF(PSF_0, PSF_, w_MSE=900.0, w_MAE=1.6)
-    LO_loss  = loss_LO(w_bump=5e-5, w_LO=1e-7) if PSF_model.LO_NCPAs else 0.0
+    PSF_loss = loss_PSF(PSF_0, PSF_)
+    LO_loss  = loss_LO()  if PSF_model.LO_NCPAs else 0.0
     MAP_loss = loss_MAP() if MAP_regularization else 0.0
     return PSF_loss + LO_loss + MAP_loss
 
@@ -419,6 +449,7 @@ if PSF_model.LO_NCPAs:
     pupils  = m.pupil_rot.expand(N_src, -1, -1).cpu().numpy()
     OPD_rot = PSF_model.LO_basis.rotate_OPD(PSF_model.OPD_func(PSF_model.inputs_manager['LO_coefs']).unsqueeze(1))[:, 0].detach().cpu().numpy() * 1e9 # [N_src, H, W] nm
     bump    = PSF_model.inputs_manager['LO_coefs'][:, 0].detach().cpu().numpy()
+    lim     = np.abs(OPD_rot[j]).max()
 
     fig, ax = plt.subplots(N_src, 4, figsize=(15, 3.6*N_src), squeeze=False)
     for j in range(N_src):
@@ -430,11 +461,12 @@ if PSF_model.LO_NCPAs:
         ax[j, 1].set_title('model', fontsize=9)
         ax[j, 2].imshow(pupils[j], cmap='gray')
         ax[j, 2].set_title('oriented pupil of the model', fontsize=9)
-        lim = np.abs(OPD_rot[j]).max()
         ax[j, 3].imshow(OPD_rot[j] * (pupils[j] > 0), cmap='RdBu_r', vmin=-lim, vmax=lim)
         ax[j, 3].set_title(f'static OPD [nm] (bump coef. {bump[j]:.1f})', fontsize=9)
+        
         for a in ax[j]:
             a.axis('off')
+            
     plt.tight_layout()
     plt.show()
 

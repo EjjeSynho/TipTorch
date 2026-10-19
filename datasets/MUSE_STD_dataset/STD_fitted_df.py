@@ -64,7 +64,7 @@ else:
 
 
 #%%
-experiment_folder = 'fitted'
+experiment_folder = 'fitted_balanced'
 
 fitted_samples_folder = STD_FOLDER / experiment_folder
 
@@ -425,7 +425,7 @@ plt.show()
 from tools.plotting import wavelength_to_RGB
 import seaborn as sns
 
-SR_err_df   = (SR_fit_df - SR_data_df).abs() / SR_data_df * 100
+SR_err_df   = (SR_fit_df   - SR_data_df  ).abs() / SR_data_df   * 100
 FWHM_err_df = (FWHM_fit_df - FWHM_data_df).abs() / FWHM_data_df * 100
 
 wvl_normed = np.linspace(381, 750, len(wavelength)) # Approximate visible spectrum range to normalize to for better plotting
@@ -445,7 +445,6 @@ plt.title(f'Strehl Ratio Relative Error Distribution ({experiment_folder})')
 plt.legend(title='Wavelength, [nm]')
 plt.xticks(np.arange(0, 45, 5), [str(x) if x < 40 else '>40' for x in np.arange(0, 45, 5)])
 plt.show()
-
 
 #%%
 # Plot spectrally averaged SR error distribution

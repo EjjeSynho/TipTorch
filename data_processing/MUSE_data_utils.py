@@ -8,6 +8,7 @@ import os
 import datetime
 import requests
 import torch
+import torch.nn.functional as F
 import json
 import pandas as pd
 import numpy as np
@@ -759,6 +760,366 @@ def GetSpectrum(data, point, radius=1, mask_type='square', debug_show_ROI=False)
 
         return array_module.nanmean(masked_ROI, axis=(-2, -1))
     
+
+# ----------------------------------------------------------------------------------------------------------------------------------------------
+# Spectral quality control of bright pixels. Shared by tools/observations.py (MUSEObservation: on-sky fields with many sources) and the
+# STD-star dataset tools in datasets/MUSE_STD_dataset/ (one star per cube).
+# ----------------------------------------------------------------------------------------------------------------------------------------------
+NA_GAP_SLICES = (824, 1041) # full-spectrum slice indices [start, end) of the Na-notch filter region of MUSE NFM cubes
+
+
+def heal_and_smooth_spectrum(data, gap=NA_GAP_SLICES, pool_kernel=16, smooth_kernel=10):
+    """
+    Heal the Na-notch gap, bin and smooth sequential spectral data.
+
+    Args:
+        data (Tensor): Spectral data, shape [N_src, N_wvl] or [N_wvl].
+        gap (tuple): (start, end) slice indices of the gap to heal by linear interpolation.
+        pool_kernel (int): Kernel size for max pooling (binning).
+        smooth_kernel (int): Kernel size for average pooling (smoothing).
+
+    Returns:
+        healed (Tensor): Healed spectrum, shape [N_src, N_wvl] or [N_wvl].
+        pooled (Tensor): Binned spectrum, shape [N_src, N_wvl//pool_kernel] or [N_wvl//pool_kernel].
+        smoothed (Tensor): Smoothed binned spectrum, same shape as pooled.
+    """
+    gap_start, gap_end = gap
+    squeeze = data.ndim == 1
+    if squeeze:
+        data = data.unsqueeze(0)
+
+    # Linearly interpolate the gap region for each source
+    healed = data.clone()
+    v0 = data[:, gap_start-1]
+    v1 = data[:, gap_end]
+    healed[:, gap_start:gap_end] = torch.stack([torch.linspace(v0[i], v1[i], gap_end - gap_start) for i in range(v0.shape[0])], dim=0)
+
+    # Pool the healed spectrum using max pooling to reduce noise and remove the flux jumps due to noise or over exposure
+    pooled = torch.nn.functional.max_pool1d(healed.unsqueeze(1), kernel_size=pool_kernel, stride=pool_kernel, padding=0).squeeze(1)
+
+    # Smooth for further stability
+    smoothed = torch.nn.functional.avg_pool1d(
+        torch.nn.functional.pad(pooled.unsqueeze(1), (smooth_kernel // 2, smooth_kernel // 2), mode='replicate'),
+        kernel_size=smooth_kernel,
+        stride=1
+    ).squeeze(1)
+
+    if squeeze:
+        return healed.squeeze(0), pooled.squeeze(0), smoothed.squeeze(0)
+
+    return healed, pooled, smoothed
+
+
+def approx_peak_SNR(peaks, ROIs, roi_coords=None, source_table=None, border=3, src_mask=None):
+    """
+    Compute SNR per spectral slice for each source from the ROI border noise, masking out other sources within the ROI.
+
+    Args:
+        peaks        (Tensor): Peak flux per spectral slice, shape [N_src, N_wvl].
+        ROIs         (Tensor): ROI image cubes, shape [N_src, N_wvl, H, W].
+        roi_coords   (list):   ROI coordinates ((y_min, y_max), (x_min, x_max)) per source, as returned by extract_ROIs.
+                               With source_table, they are used to exclude other sources from the noise estimate. None: no exclusion.
+        source_table (DataFrame): Source table with x_peak and y_peak positions. None: no exclusion.
+        border       (int):    Width (in pixels) of the ROI border used to estimate the background noise.
+        src_mask     (Tensor): Optional boolean mask [N_src, N_src] where True means the source is excluded from masking. If None, diagonal mask.
+
+    Returns:
+        snr (Tensor): SNR per spectral slice, shape [N_src, N_wvl]. Slices where the background std is zero are set to NaN.
+    """
+    H, W  = ROIs.shape[-2], ROIs.shape[-1]
+    N_src = ROIs.shape[0]
+
+    if src_mask is None:
+        src_mask = torch.eye(N_src, dtype=torch.bool, device=ROIs.device)
+
+    # Build a boolean border mask (True = background pixel)
+    mask = torch.ones(H, W, dtype=torch.bool, device=ROIs.device)
+    mask[border:H-border, border:W-border] = False
+
+    # Initialize background mask for each source: [N_src, H, W]
+    bg_mask = mask.unsqueeze(0).expand(N_src, -1, -1).clone()
+
+    if roi_coords is not None and source_table is not None:
+        yy, xx = torch.meshgrid(torch.arange(H, device=ROIs.device), torch.arange(W, device=ROIs.device), indexing='ij')
+
+        # Pre-compute ROI boundaries
+        roi_boundaries = []
+        for i in range(N_src):
+            y_range, x_range = roi_coords[i]
+            roi_boundaries.append((y_range[0], y_range[1], x_range[0], x_range[1]))
+
+        # Mask out other sources that appear within each ROI
+        for i in range(N_src):
+            y_min, y_max, x_min, x_max = roi_boundaries[i]
+            # Check which other sources fall within this ROI
+            for j in range(N_src):
+                if i != j and src_mask[i, j]:
+                    src_j_x = source_table['x_peak'].iloc[j]
+                    src_j_y = source_table['y_peak'].iloc[j]
+
+                    # Check if source j is within ROI i's boundaries
+                    if (x_min <= src_j_x < x_max and y_min <= src_j_y < y_max):
+                        src_j_x_roi = int(src_j_x - x_min)
+                        src_j_y_roi = int(src_j_y - y_min)
+                        r2_j = (xx - src_j_x_roi)**2 + (yy - src_j_y_roi)**2
+                        bg_mask[i] = bg_mask[i] & (~ (r2_j <= 4.0))
+
+    # Gather background pixels and compute SNR
+    bg_mask_expanded = bg_mask.unsqueeze(1).expand(-1, ROIs.shape[1], -1, -1)
+    bg_pixels = ROIs[bg_mask_expanded].view(N_src, ROIs.shape[1], -1)
+    bg_std = bg_pixels.std(dim=-1)
+
+    snr = peaks / bg_std
+    snr = snr.masked_fill(bg_std == 0, float('nan'))
+    return snr
+
+
+def detect_flickering_peaks(
+    ROIs,
+    centers,
+    overexposure_threshold = 1500,
+    low_SNR_threshold = 25,
+    roi_coords = None,
+    source_table = None,
+    border = 3,
+    gap = NA_GAP_SLICES,
+    pool_kernel = 16,
+    smooth_kernel = 10,
+    return_diagnostics = False
+):
+    """
+    Detect bright central pixels which appear to flicker across spectral slices (charge overflow of over-exposed pixels, cosmic rays).
+
+    For each source, the ratio of the mean of the 8 pixels around the peak to the peak itself is tracked along the spectrum. A slice
+    is flagged as anomalous when (1) the smoothed peak flux is in the over-exposed regime, (2) the centered ring/peak ratio exceeds an
+    adaptive (per-source) quantile threshold and (3) the slice is in the good-SNR region outside the Na gap.
+
+    Args:
+        ROIs    (Tensor): ROI cubes around the sources, shape [N_src, N_wvl, H, W] (full spectral resolution).
+        centers (Tensor): (y, x) ROI-local coordinates of the peak pixel per source, shape [N_src, 2] (int).
+        overexposure_threshold (float): smoothed peak flux above which a slice counts as over-exposed (DATA units).
+        low_SNR_threshold (float): smoothed peak SNR below which a slice counts as low-SNR.
+        roi_coords, source_table: forwarded to approx_peak_SNR to exclude the other sources from the noise estimate (optional).
+        border (int): ROI border width used for the noise estimate.
+        gap (tuple): (start, end) slice indices of the Na-notch region, always masked.
+        pool_kernel, smooth_kernel (int): binning / smoothing of the peak and SNR spectra (see heal_and_smooth_spectrum).
+        return_diagnostics (bool): also return a dict with the centered ring/peak ratio, the thresholds and the smoothed spectra.
+
+    Returns:
+        anomalous_slices, overexposure_mask, low_SNR_mask, Na_mask: boolean tensors [N_src, N_wvl] (+ diagnostics dict if requested).
+    """
+    N_src, N_wvl = ROIs.shape[0], ROIs.shape[1]
+    cps = torch.as_tensor(centers, dtype=torch.long)
+
+    # Extract peak values for each source
+    peaks = ROIs[torch.arange(N_src), :, cps[:,0], cps[:,1]]  # [N_src, N_wvl]
+
+    SNR = approx_peak_SNR(peaks, ROIs, roi_coords, source_table, border=border)  # [N_src, N_wvl]
+
+    _, _, peaks_smooth = heal_and_smooth_spectrum(peaks, gap=gap, pool_kernel=pool_kernel, smooth_kernel=smooth_kernel)
+    _, _, SNR_smooth   = heal_and_smooth_spectrum(SNR,   gap=gap, pool_kernel=pool_kernel, smooth_kernel=smooth_kernel)
+
+    overexposure_mask = peaks_smooth > overexposure_threshold
+    low_SNR_mask = SNR_smooth < low_SNR_threshold
+
+    # Scale masks to match the original shape
+    overexposure_mask_full = torch.nn.functional.interpolate(overexposure_mask.unsqueeze(1).float(), size=N_wvl, mode='nearest').squeeze(1).bool()
+    low_SNR_mask_full      = torch.nn.functional.interpolate(low_SNR_mask.unsqueeze(1).float(), size=N_wvl, mode='nearest').squeeze(1).bool()
+
+    # Mask the Na-filter region
+    Na_mask_full = torch.zeros_like(peaks, dtype=torch.bool)
+    Na_mask_full[:, gap[0]:gap[1]] = True
+
+    # Compute good IDs per source (not globally)
+    good_SNR_ids_per_src = []
+    for i in range(N_src):
+        good_ids = torch.where(~low_SNR_mask_full[i] & ~Na_mask_full[i])[0].sort().values
+        good_SNR_ids_per_src.append(good_ids)
+
+    # "Ring" is a region around the central pixel. If the central pixel is overexposed, the ring will dominate
+    ring = torch.stack([ROIs[i, :, cps[i,0]-1:cps[i,0]+2, cps[i,1]-1:cps[i,1]+2] for i in range(N_src)])  # [N_src, N_wvl, 3, 3]
+    ring[..., 1, 1] = 0.0
+    ring_mean = ring.sum(dim=(-2, -1)) / 8.0  # [N_src, N_wvl]
+
+    # Compute ring-to-peak ratio
+    ratio = ring_mean.clamp(min=1e-12) / peaks
+    ratio = ratio.nan_to_num(nan=2.0, posinf=2.0, neginf=2.0)
+
+    # Center ratio by subtracting the baseline median (per source)
+    baseline = torch.stack([ratio[i, good_SNR_ids_per_src[i]].median() for i in range(N_src)]).unsqueeze(1)
+    ratio_centered = ratio - baseline
+
+    # Adaptive threshold per source
+    Ps = torch.arange(50, 100, 1)
+    quantiles = Ps.float() / 100.0
+
+    threshs = torch.stack([torch.quantile(ratio_centered[i, good_SNR_ids_per_src[i]], quantiles) for i in range(N_src)])  # [N_src, len(Ps)]
+    d_threshs = threshs.diff(dim=1).abs()
+    best_pct = (Ps[1:][d_threshs.argmax(dim=1)]) / 100.0  # [N_src]
+
+    thresh_vals = torch.stack([torch.quantile(ratio_centered[i, good_SNR_ids_per_src[i]], best_pct[i]) for i in range(N_src)])  # [N_src]
+
+    # Flag slices with potential overexposure. A slice is flagged as bad only if it:
+    # 1. In the overexposed region
+    # 2. It exceeds the adaptive threshold for peak to non-peak ratio
+    # 3. It's in the good SNR region, so it must be an overexposure then
+    anomalous_slices = torch.zeros_like(ratio, dtype=torch.bool)
+    for i in range(N_src):
+        in_overexposure = overexposure_mask_full[i]
+        in_good_region = torch.isin(torch.arange(N_wvl), good_SNR_ids_per_src[i])
+        exceeds_threshold = ratio_centered[i] > thresh_vals[i]
+        anomalous_slices[i] = in_overexposure & exceeds_threshold & in_good_region
+
+    if return_diagnostics:
+        diagnostics = {
+            'peaks': peaks, 'ring_mean': ring_mean, 'SNR': SNR, 'peaks_smooth': peaks_smooth, 'SNR_smooth': SNR_smooth,
+            'ratio_centered': ratio_centered, 'thresholds': thresh_vals, 'best_pct': best_pct, 'good_ids': good_SNR_ids_per_src,
+        }
+        return anomalous_slices, overexposure_mask_full, low_SNR_mask_full, Na_mask_full, diagnostics
+
+    return anomalous_slices, overexposure_mask_full, low_SNR_mask_full, Na_mask_full
+
+
+def spectral_outlier_scores(
+    spectra,
+    variance,
+    half_window = 11,
+    exclude_radius = 1,
+    support_z_threshold = 2.0,
+    variance_floor = 0.0,
+    variance_scale = 1.0
+):
+    """
+    Spectral scores of narrow (hot-pixel-like) features in pixel spectra: the spectral part of MUSEObservation.FilterHotPixels.
+
+    For each spectrum, a leave-one-out running median (excluding the candidate channel and `exclude_radius` neighbours on each side)
+    is the baseline; the positive residual is whitened with the variance, the three-point spectral curvature is variance-normalized,
+    and the spectral support / compactness of the residual are measured in the window.
+
+    Args:
+        spectra  (Tensor): [N_position, N_wvl] pixel spectra (DATA units).
+        variance (Tensor): [N_position, N_wvl] per-voxel variance (the MUSE STAT cube), same units squared.
+        half_window (int): channels on each side used for the baseline and the support measurement.
+        exclude_radius (int): channels around the candidate excluded from its baseline.
+        support_z_threshold (float): z above which a channel counts towards the spectral support.
+        variance_floor: additional empirical standard-deviation floor (scalar or broadcastable), DATA units.
+        variance_scale (float): multiplicative correction of the pipeline standard deviations.
+
+    Returns:
+        dict with 'baseline', 'residual', 'z_residual', 'z_curvature', 'support' (int), 'compactness', all [N_position, N_wvl],
+        and 'valid_range' [N_wvl] (False in the first/last half_window channels, where the baseline is padded).
+    """
+    if half_window < 2:
+        raise ValueError("half_window must be at least 2.")
+    if exclude_radius < 0 or exclude_radius >= half_window:
+        raise ValueError("exclude_radius must satisfy 0 <= exclude_radius < half_window.")
+    if variance_scale <= 0:
+        raise ValueError("variance_scale must be positive.")
+
+    n_wvl = spectra.shape[-1]
+    if n_wvl <= 2 * half_window:
+        raise ValueError(f"The spectra must contain more than {2 * half_window} wavelength channels for the requested window.")
+
+    # [N_position, N_wavelength, 2*m+1]. Replicate padding is used only to keep array shapes simple.
+    # Candidates in the first/last m channels are marked invalid in 'valid_range'.
+    m = half_window
+    spectra_padded = F.pad(spectra.unsqueeze(1), (m, m), mode="replicate").squeeze(1)
+    windows = spectra_padded.unfold(dimension=1, size=2 * m + 1, step=1)
+    offsets = torch.arange(-m, m + 1)
+    baseline_neighbors = offsets.abs() > exclude_radius
+    baseline = torch.quantile(windows[..., baseline_neighbors], 0.5, dim=-1)
+    residual = spectra - baseline
+
+    try:
+        floor = torch.as_tensor(variance_floor, dtype=variance.dtype)
+        effective_variance = variance_scale ** 2 * variance + floor.square()
+    except RuntimeError as exc:
+        raise ValueError(f"variance_floor must be scalar or broadcastable to {tuple(variance.shape)}.") from exc
+
+    sigma       = torch.sqrt(effective_variance.clamp_min(0))
+    z_residual  = torch.full_like(residual, torch.nan)
+    valid_sigma = torch.isfinite(sigma) & (sigma > 0)
+    z_residual[valid_sigma] = residual[valid_sigma] / sigma[valid_sigma]
+
+    curvature_z = torch.full_like(spectra, torch.nan)
+    curvature = 2.0 * spectra[:, 1:-1] - spectra[:, :-2] - spectra[:, 2:]
+    curvature_variance = (
+        4.0 * effective_variance[:, 1:-1]
+        + effective_variance[:, :-2]
+        + effective_variance[:, 2:]
+    )
+    curvature_sigma = torch.sqrt(curvature_variance.clamp_min(0))
+    valid_curvature = torch.isfinite(curvature_sigma) & (curvature_sigma > 0)
+    curvature_values = torch.full_like(curvature, torch.nan)
+    curvature_values[valid_curvature] = ( curvature[valid_curvature] / curvature_sigma[valid_curvature] )
+    curvature_z[:, 1:-1] = curvature_values
+
+    support_kernel = torch.ones(1, 1, 2 * m + 1, dtype=spectra.dtype, device=spectra.device)
+    spectral_support = F.conv1d(
+        (z_residual > support_z_threshold).to(spectra.dtype).unsqueeze(1),
+        support_kernel,
+        padding=m,
+    ).squeeze(1).to(torch.int64)
+
+    residual_positive = residual.clamp_min(0)
+    positive_sum = F.conv1d(residual_positive.unsqueeze(1), support_kernel, padding=m).squeeze(1)
+
+    spectral_compactness = torch.zeros_like(residual)
+    has_positive_support = positive_sum > 0
+    spectral_compactness[has_positive_support] = residual_positive[has_positive_support] / positive_sum[has_positive_support]
+
+    valid_spectral_range = torch.zeros(n_wvl, dtype=torch.bool)
+    valid_spectral_range[m:n_wvl-m] = True
+
+    return {
+        'baseline':    baseline,
+        'residual':    residual,
+        'z_residual':  z_residual,
+        'z_curvature': curvature_z,
+        'support':     spectral_support,
+        'compactness': spectral_compactness,
+        'valid_range': valid_spectral_range,
+    }
+
+
+def peak_variability_excess(cube_binned, std_binned, n_slices, center=None, search_radius=3):
+    """
+    Spectral-variability excess of the peak pixel from the binned STD-star cache (no full cube needed).
+
+    The cache stores, per spectral bin, the sum over the slices ('cube') and their standard deviation ('std'). The coefficient of
+    variation (std / mean per slice) of a well-behaved PSF is set by the spectrum and the chromatic PSF change and is therefore nearly
+    the same for the peak pixel and its neighbours; a peak pixel that flickers between slices stands out as an excess.
+
+    Args:
+        cube_binned (ndarray): [N_bins, H, W] sum over the slices of each bin.
+        std_binned  (ndarray): [N_bins, H, W] standard deviation over the slices of each bin.
+        n_slices    (ndarray): [N_bins] number of slices in each bin.
+        center (tuple): (y, x) around which the peak is searched; None: image centre.
+        search_radius (int): half-size of the search box for the peak.
+
+    Returns:
+        dict with 'cv_peak', 'cv_ring' (median over the 8 neighbours), 'excess' = cv_peak / cv_ring, 'peak_y', 'peak_x': all [N_bins].
+    """
+    cube_binned = np.asarray(cube_binned, dtype=float)
+    std_binned  = np.asarray(std_binned,  dtype=float)
+    n_slices    = np.asarray(n_slices,    dtype=float).reshape(-1, 1, 1)
+    N_bins, H, W = cube_binned.shape
+    cy, cx = (H // 2, W // 2) if center is None else center
+
+    mean = cube_binned / n_slices
+    cv   = std_binned / np.abs(mean).clip(1e-12)
+
+    r = search_radius
+    crop = mean[:, cy-r:cy+r+1, cx-r:cx+r+1].reshape(N_bins, -1)
+    iy, ix = np.unravel_index(crop.argmax(-1), (2*r+1, 2*r+1))
+    iy, ix = iy + cy - r, ix + cx - r
+
+    cv_peak = cv[np.arange(N_bins), iy, ix]
+    cv_ring = np.median(np.stack([cv[np.arange(N_bins), iy + dy, ix + dx] for dy in (-1, 0, 1) for dx in (-1, 0, 1) if (dy, dx) != (0, 0)], -1), -1)
+
+    return {'cv_peak': cv_peak, 'cv_ring': cv_ring, 'excess': cv_peak / cv_ring.clip(1e-12), 'peak_y': iy, 'peak_x': ix}
+
+
 
 def range_overlap(v_min, v_max, h_min, h_max):
     start_of_overlap, end_of_overlap = max(v_min, h_min), min(v_max, h_max)

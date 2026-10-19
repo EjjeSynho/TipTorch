@@ -9,6 +9,7 @@ Jobs are round-robin assigned to the specified devices. Each job gets a contiguo
 slice of sample IDs. All jobs run concurrently as subprocesses.
 """
 
+import os
 import sys
 import argparse
 import pickle
@@ -40,16 +41,17 @@ def main():
     parser.add_argument('--output_folder', type=str, default=None, help='Optional output folder for fitted parameters')
     args = parser.parse_args()
 
-    good_ids = get_good_ids()
+    good_ids  = get_good_ids()
     n_samples = len(good_ids)
-    n_jobs = min(args.n_jobs, n_samples)
+    n_jobs    = min(args.n_jobs, n_samples)
 
     # Split IDs into n_jobs contiguous chunks
     chunk_size = n_samples // n_jobs
-    remainder  = n_samples % n_jobs
+    remainder  = n_samples %  n_jobs
 
     chunks = []
     offset = 0
+    
     for i in range(n_jobs):
         size = chunk_size + (1 if i < remainder else 0)
         chunks.append(good_ids[offset:offset + size])
@@ -59,7 +61,6 @@ def main():
     fitter_script = str(SCRIPT_DIR / 'STD_fitter.py')
     processes = []
 
-    import os
     env = os.environ.copy()
     project_root = str(SCRIPT_DIR.parent.parent)
     extra_paths = os.pathsep.join([str(SCRIPT_DIR), project_root])
@@ -84,6 +85,7 @@ def main():
 
     # Wait for all jobs and report exit codes
     failures = []
+    
     for i, proc in processes:
         proc.wait()
         if proc.returncode != 0:

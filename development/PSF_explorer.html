@@ -209,7 +209,7 @@ function drawPad() {
   $('pad-src').setAttribute('cx', y);
   $('pad-src').setAttribute('cy', -x);
   $('pad-lgs').innerHTML = field.lgs_az.map(az => {
-    const a = (az + rot) * Math.PI / 180; // LGS at (x, y) = r (cos a, sin a)
+    const a = (az + rot + field.pupil_angle) * Math.PI / 180; // the asterism turns with the pupil: LGS at (x, y) = r (cos a, sin a) on the image
     return `<circle class="lgs" cx="${r * Math.sin(a)}" cy="${-r * Math.cos(a)}" r="0.6"><title>LGS</title></circle>`;
   }).join('');
   const airmass = 1 / Math.sin(knobValue('elevation/0') * Math.PI / 180);

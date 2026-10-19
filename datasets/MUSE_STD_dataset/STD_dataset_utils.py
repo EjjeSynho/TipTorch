@@ -1,3 +1,11 @@
+import sys
+from pathlib import Path
+
+# Make the project root importable when this module is used from datasets/MUSE_STD_dataset/
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 from data_processing.MUSE_data_utils import *
 
 
@@ -617,6 +625,7 @@ def write_kc_mismatch_labels(labels, labels_file=None):
     ]
     def fmt(v, spec):
         return format(v, spec) if v is not None else 'nan'
+   
     with open(labels_file, 'w') as f:
         f.write('\n'.join(header) + '\n')
         for name, e in sorted(labels.items(), key=lambda kv: (kv[1].get('date') or '', kv[0])):
@@ -649,6 +658,7 @@ def group_kc_fractions(kc_fractions, tolerance=KC_GROUP_TOLERANCE):
             break
     order = np.argsort(centers)
     rank  = np.empty_like(order); rank[order] = np.arange(k)
+   
     return rank[assign] + 1, centers[order]
 
 
@@ -662,6 +672,7 @@ def apply_kc_fraction(config_dict, kc_fraction):
         return config_dict
     pitch = np.asarray(config_dict['DM']['DmPitchs'], dtype=float)
     config_dict['DM']['DmPitchs'] = (pitch / float(kc_fraction)).reshape(pitch.shape).tolist() if isinstance(config_dict['DM']['DmPitchs'], list) else pitch / float(kc_fraction)
+    
     return config_dict
 
 
@@ -669,6 +680,7 @@ def kc_fraction_from_config(config_dict, nominal_pitch=NOMINAL_DM_PITCH):
     """ k_c of a config relative to the nominal MUSE NFM one (the inverse of apply_kc_fraction) """
     pitch = config_dict['DM']['DmPitchs']
     pitch = float(pitch.min()) if hasattr(pitch, 'min') and not isinstance(pitch, list) else float(np.min(np.asarray(pitch, dtype=float)))
+    
     return nominal_pitch / pitch
 
 
@@ -709,11 +721,14 @@ def add_kc_mismatch_flag(muse_df, labels_file=None, verbose=True):
         n_found = muse_df[KC_MISMATCH_FLAG].sum()
         missing = set(labels) - set(muse_df['Filename'])
         print(f'k_c mismatch flag: {n_found} / {len(labels)} listed samples found in the dataframe')
+        
         for g, m in enumerate(group_means, start=1):
             n_g = int((muse_df[KC_GROUP_FEATURE] == g).sum())
             print(f'  k_c group {g}: {n_g} samples, k_c = {100 * m:.1f} % of the nominal one (range {100 * measured[group_ids == g].min():.1f} - {100 * measured[group_ids == g].max():.1f} %)')
+       
         if missing:
             print(f'  Listed but not in the dataframe: {sorted(missing)}')
+    
     return muse_df
 
 
@@ -771,16 +786,22 @@ def store_Cn2_grid(STD_stars_df, boundaries_km=None, pin_ground_layer=None, stor
 
     grid_path = DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_Cn2_grid.json'
     stored = Cn2Grid.load(grid_path) if grid_path.exists() else None
+    
     if boundaries_km is None:
         boundaries_km = stored.boundaries if stored is not None else DEFAULT_CN2_BOUNDARIES_KM
+    
     if pin_ground_layer is None:
         pin_ground_layer = stored.pin_ground_layer if stored is not None else True
+   
     grid = fit_Cn2_grid(STD_stars_df[ALT_COLS].to_numpy(float), STD_stars_df[FRAC_COLS].to_numpy(float), boundaries_km, pin_ground_layer=pin_ground_layer)
+    
     if verbose:
         w, h = grid.default_layers()
         print(f'{grid} | median grid profile {np.round(grid.median_fracs, 3).tolist()} | median layers: weights {np.round(w, 3).tolist()}, heights {np.round(h, 2).tolist()} km')
+    
     if store:
         grid.save(grid_path)
+   
     return grid
 
 
@@ -815,11 +836,14 @@ def fit_telemetry_preprocessor(muse_df, Cn2_binning=None, random_state=3, max_it
     )
     imputed_data = iterative_imputer.fit_transform(muse_df_pruned_scaled[numeric_cols])
     muse_df_pruned_scaled_imputed = pd.DataFrame(imputed_data, index=muse_df_pruned_scaled.index, columns=numeric_cols)
+   
     muse_df_pruned_imputed = pd.DataFrame(
-        telemetry_scaler.inverse_transform(muse_df_pruned_scaled_imputed[numeric_cols]), index=muse_df_pruned.index, columns=numeric_cols
+        telemetry_scaler.inverse_transform(muse_df_pruned_scaled_imputed[numeric_cols]),
+        index = muse_df_pruned.index,
+        columns = numeric_cols
     )
-
     telemetry_preprocessor = TelemetryPreprocessor.from_sklearn(telemetry_scaler, iterative_imputer)
+    
     assert np.allclose(
         telemetry_preprocessor.transform(muse_df_pruned[numeric_cols]),
         iterative_imputer.transform(muse_df_pruned_scaled[numeric_cols]), atol=1e-10
@@ -845,6 +869,7 @@ def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_pr
     good_samples = muse_df.index.values
 
     PSF_cubes, configs, telemetry_records, fitted_values, good_ids, bad_ids = [], [], [], [], [], []
+    
     for id in tqdm(good_samples, disable=not verbose):
         try:
             PSF_data, _, _, model_config = LoadSTDStarCache(
@@ -860,6 +885,7 @@ def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_pr
             good_ids.append(id)
             PSF_cubes.append(np.moveaxis(PSF_data.squeeze(0).numpy(), 0, -1)) # [1 x N_wvl x H x W]  -->  [H x W x N_wvl]
             configs.append(model_config)
+            
         except Exception as e:
             print(f'Error with id {id}: {e}')
             bad_ids.append(id)
@@ -891,6 +917,8 @@ def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_pr
         'telemetry_preprocessor': telemetry_preprocessor_state, # TelemetryPreprocessor.state_dict(), copied into calibrator bundles
         'Cn2_grid':            Cn2_grid_state, # Cn2Grid.state_dict() of the Cn2 features / configs, copied into calibrator bundles
     }, out_path)
+   
     if verbose:
         print(f'Dataset cache saved -> {out_path} ({len(good_ids)} samples, {len(bad_ids)} failed)')
+   
     return good_ids, bad_ids

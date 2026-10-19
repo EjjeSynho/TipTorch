@@ -3,7 +3,6 @@
 # %autoreload 2
 
 import sys
-import os
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -21,19 +20,24 @@ from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import ConfigManager
 from tiptorch.tools.utils import SR, GradientLoss, FWHM_fitter, BalancedPSFLoss
 from tiptorch.tools.static_phase import ArbitraryBasis, PixelmapBasis, ZernikeBasis
+from tiptorch.tools.utils import r0 as r0_
+
 
 from tiptorch._config import project_settings, default_device
 
 import warnings
 
 """
-    Does the fitting of the PSF model parameters for MUSE_NFM STD stars dataset and stores the fitted values
-    Arguments are be passed as:
-    - Device specification: e.g., "cuda:N" or "cpu"
-    - Start and end IDs for fitting a subset of the dataset: e.g., "50 150"
-    - Output folder path for saving fitted parameters: e.g., "F:/ESO/Data/MUSE
+Does the fitting of the PSF model parameters for MUSE_NFM STD stars dataset and stores the fitted values
+Arguments are be passed as:
+- Device specification: e.g., "cuda:N" or "cpu"
+- Start and end IDs for fitting a subset of the dataset: e.g., "50 150"
+- Output folder path for saving fitted parameters: e.g., "F:/ESO/Data/MUSE
 
-    Example usage: python STD_fitter.py cuda:0 50 150
+Example usage: python STD_fitter.py cuda:0 50 150
+
+The fitting regime is set by the flags below (DEROTATE_PSF, APPLY_KC_CORRECTION), not by arguments. `load_and_fit_sample` can also be
+imported and called directly (kc_mismatch.py does so to scan the k_c of the flagged samples).
 """
 
 # Default output folder for fitted parameters, can be overridden by passing a path as an argument
@@ -44,55 +48,40 @@ MUSE_FITTING_FOLDER = Path(project_settings['MUSE_fitted_STD_folder'])
 # values are consistent with the calibrator's objective. 'legacy' is the linear MSE + MAE loss used for the previous fits.
 PSF_LOSS_CFG = {
     "type":             "balanced",
+    # "type":             "legacy",
+    # BalancedPSFLoss parameters ('balanced' only)
     "radial_power":     2.0,
     "r_max":            40.0,
     "asinh_k":          3.0,
     "huber_delta":      0.1,
     "scale":            3.0,
     "match_background": False,
+    # Linear MSE term added to the balanced loss (BalancedPSFLoss.mse_weight, 'balanced' only; the calibrator loss config takes the same key).
+    # The balanced loss compares the pixels in log space, so the peak pixel weighs as much as any other core pixel and the fits trade a
+    # 4-6 % too faint / too wide core for the halo; the linear MSE is dominated by the brightest pixels and restores the peak. 1.8e7 is the
+    # legacy MSE term (w_MSE x 2e4): 30-sample test, 2026-10-19: median |peak err| 5.7 % -> 4.3 % with the halo errors unchanged (legacy
+    # alone 3.7 %). Not the full legacy loss: its MAE part is dominated by the wing pixels and pulls the halo to the legacy solution. 0 = off.
+    # Changed from 0 to 1.8e7 on 2026-10-19: the fits in fitted_balanced / fitted_legacy predate it
+    "mse_weight":       1.8e7,
+    # Weights of the MSE and MAE terms ('legacy' only)
+    "w_MSE":            900.0,
+    "w_MAE":            1.6,
+    # Regularization weights of the LO NCPAs (both loss types): phase bump (1st LO coefficient) and the LO coefficients' amplitude / defocus sign
+    "w_bump":           5e-5,
+    "w_LO":             1e-7,
 }
 
 # Fit the derotated PSFs (config PupilAngle 0, the regime of the stored fits) or the raw frames, with the PSF model rotated to the header
 # pupil angle of the sample. The fitted dx / dy and the LO coefficients are in the frame of the fitted data (raw frames: dx / dy of the raw
 # image, LO coefficients in the rotated pupil frame), so keep the two regimes in separate output folders
-DEROTATE_PSF = True
+DEROTATE_PSF = False
+
+# Samples flagged 'k_c mismatch' in muse_df (recorded with fewer corrected DM modes, see kc_mismatch.py) are fitted with the model k_c of
+# their label group: LoadSTDStarCache scales the DM pitch of their configs by 1 / 'k_c fraction'. With False every sample is fitted with
+# the nominal k_c = 1 / (2 x 0.22 m) instead
+APPLY_KC_CORRECTION = True
 
 warnings.filterwarnings("ignore")
-
-device = default_device
-
-start_id, end_id = -1, -1
-kc_fraction_override = None # 'kc_fraction=<v>' argument: fit with the model k_c at v x the nominal one regardless of the 'k_c mismatch' label (experiments)
-
-# Flexible argument parsing
-input_args = sys.argv[1:]
-device_specified = False
-
-for arg in input_args:
-    if arg.startswith("cuda") or arg.startswith("cpu"):
-        device = torch.device(arg)
-        print(f"Using device: {arg}")
-        device_specified = True
-        
-    elif arg.lstrip('-').isdigit(): # Simple check for integer IDs
-        if start_id == -1:  start_id = int(arg)
-        elif end_id == -1:  end_id   = int(arg)
-    elif arg.startswith('kc_fraction='):
-        kc_fraction_override = float(arg.split('=', 1)[1])
-        print(f"Model k_c forced to {100 * kc_fraction_override:.1f} % of the nominal one")
-    else:
-        # Assume it is a path
-        MUSE_FITTING_FOLDER = Path(arg)
-        print(f"Output folder set to: {MUSE_FITTING_FOLDER}")
-
-if not device_specified:
-    print("No device specified, using default device.")
-
-if not MUSE_FITTING_FOLDER.exists():
-    try:
-        MUSE_FITTING_FOLDER.mkdir(parents=True, exist_ok=True)
-    except Exception as e:
-        print(f"Warning: Could not create directory {MUSE_FITTING_FOLDER}: {e}")
 
 #% Initialize data sample
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
@@ -103,25 +92,13 @@ psf_df = psf_df[psf_df['Bad quality'] == False]
 
 good_ids = psf_df.index.values.tolist()
 
-# If no start or end ID is specified, use the first and last good IDs
-if start_id == -1:
-    start_id = good_ids[0]
-else:
-    start_id = min(good_ids, key=lambda x:abs(x-start_id))
-
-if end_id == -1:
-    end_id = good_ids[-1]
-else:
-    end_id = min(good_ids, key=lambda x:abs(x-end_id))
-
-good_ids = good_ids[good_ids.index(start_id):good_ids.index(end_id)+1]
-
-print(
-    f"Device:   {device}\n"
-    f"Start ID: {start_id}\n"
-    f"End ID:   {end_id}"
-)
-
+# Prior STDs of the MAP term, taken as the spread over the dataset of the telemetry values the model is initialized with (see
+# MUSE_data_utils: r0 from 'Seeing (header)' at the 500 nm of muse_ltao.ini, L0 from 'L0Tot', wind speed from 'Wind speed (header)')
+PRIOR_STD = {
+    'r0':                float(np.nanstd(r0_(psf_df['Seeing (header)'], 500e-9).replace(0, np.nan))) * 3, # let's crack it up a bit
+    'L0':                float(np.nanstd(psf_df['L0Tot'])),
+    'wind_speed_single': float(np.nanstd(psf_df['Wind speed (header)'])),
+}
 
 def to_store(x):
     if x is None:
@@ -133,11 +110,15 @@ def to_store(x):
     else:
         return x
 
-
 wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1)
 
 #%%
-def load_and_fit_sample(id):
+def load_and_fit_sample(id, device=default_device, kc_fraction=None):
+    """
+    Fits one STD star and returns the dictionary stored in the fit pickle.
+    kc_fraction: model k_c relative to the nominal one. None (default): the k_c of the sample's 'k_c mismatch' label when
+    APPLY_KC_CORRECTION, the nominal one otherwise; a value forces that k_c (used by kc_mismatch.py to scan the k_c of a sample).
+    """
     # Load data
     PSF_0, norms, bgs, configs = LoadSTDStarCache(
         ids                 = [id],
@@ -149,8 +130,11 @@ def load_and_fit_sample(id):
         device              = device
     )
 
-    if kc_fraction_override is not None: # the configs already carry the k_c fraction of the sample's label: rescale to the forced one
-        configs = [apply_kc_fraction(c, kc_fraction_override / kc_fraction_from_config(c)) for c in configs]
+    # The configs carry the k_c of the sample's label (scaled DM pitch): rescale them to the nominal / forced k_c when asked
+    if kc_fraction is None and not APPLY_KC_CORRECTION:
+        kc_fraction = 1.0
+    if kc_fraction is not None:
+        configs = [apply_kc_fraction(c, kc_fraction / kc_fraction_from_config(c)) for c in configs]
 
     # Initialize the model
     PSF_model = PSFModelNFM(
@@ -168,12 +152,13 @@ def load_and_fit_sample(id):
     func = lambda x_: PSF_model( PSF_model.inputs_manager.unstack(x_) )
     PSF_1 = func(x0 := PSF_model.inputs_manager.stack() )
 
-    N_wvl = PSF_0.shape[1]
     N_src = PSF_0.shape[0]
     wavelengths = PSF_model.λ_sim
 
     loss_cfg  = dict(PSF_LOSS_CFG)
     loss_type = loss_cfg.pop('type')
+    w_MSE, w_MAE, w_bump, w_LO = (loss_cfg.pop(key) for key in ('w_MSE', 'w_MAE', 'w_bump', 'w_LO'))
+    
     if loss_type == 'balanced':
         PSF_loss_balanced = BalancedPSFLoss(PSF_0.shape[-2], PSF_0.shape[-1], device, **loss_cfg)
     elif loss_type == 'legacy':
@@ -182,21 +167,24 @@ def load_and_fit_sample(id):
         raise ValueError(f"Unknown PSF loss type '{loss_type}', expected 'balanced' or 'legacy'")
 
     # Retrieve flags from dataframe
-    blurry_PSF_flag = psf_df.loc[id]['Bad quality'].item()
+    blurry_PSF_flag = \
+         bool(psf_df.loc[id]['Bad quality']) or \
+        (bool(psf_df.loc[id]['Medium quality']) and not \
+         bool(psf_df.loc[id]['Good quality']))
+        
     non_point_flag  = psf_df.loc[id]['Non-point'].item()
-    # Samples recorded with fewer corrected DM modes: LoadSTDStarCache already scaled the DM pitch of the config, so the model's k_c is
-    # kc_fraction x the nominal one (see add_kc_mismatch_flag). Recorded in the output for the dataset cache / training
-    kc_fraction = float(psf_df.loc[id][KC_FRACTION_FEATURE]) if KC_FRACTION_FEATURE in psf_df.columns else 1.0
-    kc_group    = int(psf_df.loc[id][KC_GROUP_FEATURE])    if KC_GROUP_FEATURE    in psf_df.columns else 0
-    if kc_fraction_override is not None:
-        kc_fraction, kc_group = kc_fraction_override, -1 # -1: forced k_c, not a label group
-    if kc_group != 0:
-        print(f"Sample {id}: {'forced k_c' if kc_group == -1 else f'flagged k_c mismatch (group {kc_group})'}: model k_c = {100 * kc_fraction:.1f} % of the nominal, "
-              f"DM pitch {np.asarray(configs[0]['DM']['DmPitchs']).ravel()[0]:.4f} m, model k_c = {PSF_model.model.kc:.3f} 1/m")
+    # Model k_c relative to the nominal one, recorded in the output for the dataset cache / training: the label group's value for the
+    # samples flagged 'k_c mismatch' (group 1..N), 1.0 for the others (group 0), or a forced value (group -1)
+    kc_fraction = kc_fraction_from_config(configs[0])
+    label_fraction = float(psf_df.loc[id][KC_FRACTION_FEATURE]) if KC_FRACTION_FEATURE in psf_df.columns else 1.0
+    kc_group = int(psf_df.loc[id][KC_GROUP_FEATURE]) if KC_GROUP_FEATURE in psf_df.columns and np.isclose(kc_fraction, label_fraction) else (0 if np.isclose(kc_fraction, 1.0) else -1)
+    if not np.isclose(kc_fraction, 1.0):
+        print(f"Sample {id}: {f'flagged k_c mismatch (group {kc_group})' if kc_group > 0 else 'forced k_c'}: model k_c = {100 * kc_fraction:.1f} % of the nominal "
+              f"({PSF_model.model.kc:.3f} 1/m, DM pitch {np.asarray(configs[0]['DM']['DmPitchs']).ravel()[0]:.4f} m)")
 
     fit_wind_dir    = False
-    fit_wind_speed  = True #False
-    fit_outerscale  = True #False
+    fit_wind_speed  = False #True
+    fit_outerscale  = False #True
     fit_Cn2_profile = True
 
     if N_src > 1:
@@ -219,14 +207,10 @@ def load_and_fit_sample(id):
     force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
 
     # Priors initialization
+    # Should be comming from the config which comes from the reduced telemetry
     prior_mean = { param: PSF_model.inputs_manager[param].detach().clone() for param in ['r0', 'L0', 'wind_speed_single'] }
-
-    # Pre-defined STDs
-    prior_STD = {
-        'r0': 0.2,
-        'L0': 25,
-        'wind_speed_single': 5.0
-    }
+    # Shoud be coming from the reduced telemetry directly
+    prior_STD  = PRIOR_STD
 
 
     def compute_MAP_err(param: str):
@@ -252,16 +236,17 @@ def load_and_fit_sample(id):
         return loss * w
 
 
-    def loss_fn(x_, w_MSE, w_MAE, w_bump, w_LO):
+    def loss_fn(x_):
         PSF_pred = func(x_)
+        
         if PSF_loss_balanced is not None:
-            PSF_loss = PSF_loss_balanced(PSF_0, PSF_pred).mean()
+            PSF_loss = PSF_loss_balanced(PSF_0, PSF_pred).mean()     
         else:
             diff = PSF_pred - PSF_0 #* wvl_weights
             w = 2e4
             PSF_loss = (diff.pow(2).mean() * w_MSE + diff.abs().mean() * w_MAE) * w
 
-        LO_loss  = loss_LO_fn(w_bump, w_LO) if PSF_model.LO_NCPAs else 0.0
+        LO_loss     = loss_LO_fn()     if PSF_model.LO_NCPAs   else 0.0
         Moffat_loss = Moffat_loss_fn() if PSF_model.use_Moffat else 0.0
         MAP_loss    = loss_MAP()
 
@@ -289,7 +274,7 @@ def load_and_fit_sample(id):
         return amp_penalty #+ b_penalty + beta_penalty + alpha_penalty
 
 
-    def loss_LO_fn(w_bump, w_LO):
+    def loss_LO_fn():
         if isinstance(PSF_model.LO_basis, PixelmapBasis):
             LO_loss = grad_loss_fn(PSF_model.OPD_func.unsqueeze(1)) * 5e-5
             
@@ -309,9 +294,6 @@ def load_and_fit_sample(id):
         
         return LO_loss
 
-
-    # w_MSE / w_MAE only apply to the legacy PSF loss
-    loss_fn1 = lambda x_: loss_fn(x_, w_MSE=900.0, w_MAE=1.6, w_bump=5e-5, w_LO=1e-7)
 
     # Minimization function
     def minimize_params(loss_fn, include_list, exclude_list, max_iter, verbose=True, force_BFGS=False):
@@ -374,16 +356,16 @@ def load_and_fit_sample(id):
     include_general, exclude_general = set(include_general), set(exclude_general)
 
     # Perform fitting
-    x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, include_general, exclude_general, 200, verbose=False)
+    x0, PSF_1, OPD_map, success = minimize_params(loss_fn, include_general, exclude_general, 200, verbose=False)
 
     if not success:
         print("Retrying minimization without Cn2 profile fitting...")
         PSF_model.reset_parameters()
         
         include_updated = include_general - set(['Cn2_weights', 'L0', 'wind_speed_single', 'wind_dir_single'])
-        x0, PSF_1, OPD_map, success = minimize_params(loss_fn1, include_updated, exclude_general, 300, verbose=False, force_BFGS=True)
+        x0, PSF_1, OPD_map, success = minimize_params(loss_fn, include_updated, exclude_general, 300, verbose=False, force_BFGS=True)
 
-    loss_val = loss_fn1(x0).item()
+    loss_val = loss_fn(x0).item()
 
     fitted_values = to_store(PSF_model.inputs_manager.unstack(x0, include_all=True, update=True))
 
@@ -435,20 +417,42 @@ def load_and_fit_sample(id):
 
 
 #%%
-for id in good_ids:
-    try:
-        filename = MUSE_FITTING_FOLDER / f'{id}.pickle'
-        print(f'>>>>>>>>>>>> Fitting sample {id}')
-        save_data = load_and_fit_sample(id)
-        if save_data is not None:
-            with open(filename, 'wb') as handle:
-                pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
-            print(f'Successfully saved {filename}')
+if __name__ == '__main__':
+    # Arguments: device ("cuda:N" / "cpu"), start and end IDs, output folder (any order, all optional)
+    device = default_device
+    start_id, end_id = -1, -1
+    for arg in sys.argv[1:]:
+        if arg.startswith("cuda") or arg.startswith("cpu"):
+            device = torch.device(arg)
+        elif arg.lstrip('-').isdigit():
+            if start_id == -1:  start_id = int(arg)
+            elif end_id == -1:  end_id   = int(arg)
+        else:
+            MUSE_FITTING_FOLDER = Path(arg)
+    MUSE_FITTING_FOLDER.mkdir(parents=True, exist_ok=True)
 
-    except Exception as e:
-        print(f' ============= Error fitting sample {id} ===========')
-        print(e)
-        import traceback
-        traceback.print_exc()
+    # Fit the samples between the closest good IDs (the whole dataset by default)
+    start_id = good_ids[0]  if start_id == -1 else min(good_ids, key=lambda x: abs(x - start_id))
+    end_id   = good_ids[-1] if end_id   == -1 else min(good_ids, key=lambda x: abs(x - end_id))
+    ids = good_ids[good_ids.index(start_id):good_ids.index(end_id) + 1]
+
+    print(f"Device: {device} | IDs {start_id}..{end_id} ({len(ids)} samples) | output: {MUSE_FITTING_FOLDER} | "
+          f"derotated PSFs: {DEROTATE_PSF} | k_c correction of the flagged samples: {APPLY_KC_CORRECTION}")
+
+    for id in ids:
+        try:
+            filename = MUSE_FITTING_FOLDER / f'{id}.pickle'
+            print(f'>>>>>>>>>>>> Fitting sample {id}')
+            save_data = load_and_fit_sample(id, device)
+            if save_data is not None:
+                with open(filename, 'wb') as handle:
+                    pickle.dump(save_data, handle, protocol=pickle.HIGHEST_PROTOCOL)
+                print(f'Successfully saved {filename}')
+
+        except Exception as e:
+            print(f' ============= Error fitting sample {id} ===========')
+            print(e)
+            import traceback
+            traceback.print_exc()
 
 # %%

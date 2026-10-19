@@ -111,3 +111,53 @@ Same split (427 / 107), seed 43, same pretrain weights, early stopping on the ru
   meta, shared `pretrain_weights.pth`), evaluation script `eval_runs.py` in the session scratchpad.
 - Lesson: a training run needs ~50 GB of GPU memory and `resolve_device` silently falls back to the CPU (or to `cuda:0`
   under `CUDA_VISIBLE_DEVICES`), check the device table in the log after launching.
+
+## Re-balancing for the peak (2026-10-19, STD-star fits)
+
+**Observation (user):** the full refits of the dataset with the balanced loss (`fitted_balanced`) fit the peaks worse than the legacy
+MSE + MAE loss (`fitted_legacy`), while the legacy fits are only marginally worse on the overall shape. Both sets are raw-frame fits with
+identical regularizers; only the PSF loss differs.
+
+**Diagnosis** (`datasets/MUSE_STD_dataset/compare_fit_losses.py`, outputs `data/analysis/NFM_STD_loss/`): over 534 stars the balanced
+fits have a median |peak err| of 6.3 % (signed +4.4 %: model too faint) and a FWHM error of 7.5 % (model 6 % too wide), the legacy fits 3.8 %
+and 4.2 %; the balanced fits are better in the halo (10-40 px flux error 1.0-1.8 % vs 3.4-4.2 %) and in the 0-1.5 px and 10-40 px shape errors.
+The degradation grows with Strehl (SR quartiles: -0.1, +1.6, +2.8, +4.6 % signed peak error) and towards the red (846-900 nm: 10-11 % vs 5-6 %).
+Cause: the balanced loss compares every pixel in log space, so the peak pixel weighs as much as any other core pixel (the central 9 px hold
+16 % of the loss, the peak alone ~4 %) and a 5-10 % peak error costs ~1-5 % of the loss; in return the fit matches the faint pixels flanking the
+core, where the legacy fit is 25-80 % off in log terms (46 % of the balanced-loss advantage of the balanced fit over the legacy fit is earned
+inside r < 1.5 px). The balanced fit buys this with a blurred core (higher jitter / dn).
+
+**Variants refitted on a 30-sample subset** (every 18th ID, `data/analysis/NFM_STD_loss/loss_variants_30_samples.csv`, medians of the
+per-sample medians, |peak err| / red-bin |peak err| / FWHM err / reference balanced loss / 10-20 px shape err):
+
+| variant | |peak| % | red bins % | FWHM % | balanced loss | shape 10-20 px % |
+|---|---|---|---|---|---|
+| balanced (as is) | 5.7 | 11.9 | 7.3 | 0.12 | 5.4 |
+| legacy | 3.7 | 6.3 | 2.3 | 0.17 | 6.6 |
+| huber_delta 0.3 / 1.0 | 6.6 / 6.1 | 11.9 / 12.0 | 7.0 / 7.6 | 0.12 / 0.13 | 5.4 / 5.6 |
+| radial_power 3 | 5.2 | 10.2 | 4.2 | 0.14 | 6.3 |
+| core weights x5 (r <= 1.5 px) | 5.6 | 11.1 | 4.8 | 0.14 | 5.7 |
+| balanced + 0.3 x legacy MSE | 5.5 | 8.9 | 6.0 | 0.12 | 5.4 |
+| balanced + 1 x legacy MSE | 4.3 | 6.8 | 4.6 | 0.12 | 5.4 |
+| balanced + 3 x legacy MSE | 4.7 | 6.6 | 4.1 | 0.13 | 5.6 |
+| balanced + 10 x legacy MSE | 4.4 | 6.5 | 2.9 | 0.15 | 5.7 |
+
+Re-weighting inside the balanced loss (Huber delta, radial power, core boost) does not recover the peak: in log space the single peak pixel
+can never dominate. Adding the linear legacy term (dominated by the brightest pixels) does: with weight 1 the peak error drops from 5.7 % to
+4.3 % (red bins 11.9 % -> 6.8 %), the balanced loss value and the halo errors stay exactly at the balanced fit's, and only 1 of 30 samples gets
+worse by > 1 %. Weights 3-10 move the fits towards the legacy ones (balanced loss 0.13-0.15, halo bias grows) for no further peak gain.
+
+**Implemented:** `BalancedPSFLoss(mse_weight=...)` in `src/tiptorch/tools/utils.py` (default 0.0 = unchanged): a linear term
+`mse_weight * mean((model - data)^2)` per wavelength added to the asinh loss; `PSF_LOSS_CFG["mse_weight"]` in `STD_fitter.py` and the same key in
+the calibrator loss config (forwarded to the class with the other parameters). 1.8e7 = `w_MSE` x 2e4, the MSE term of the legacy loss.
+A first implementation as `legacy_weight` (the full legacy MSE + MAE term, mirroring the calibrator's existing knob) was tested through the
+real fitter path and rejected: with the MAE part the halo goes back to the legacy solution (10-20 px shape error 6.6 %, 20-40 px bias -4.0 %,
+legacy loss value 0.14) for a smaller peak gain (5.3 %); the MAE is dominated by the ~40 000 wing pixels. Confirmation run of the final code
+path (`mse_weight = 1.8e7`, same 30 samples): median |peak err| 4.3 % (balanced 5.7 %, legacy 3.7 %), red bins 6.9 % (11.9 / 6.3 %), FWHM
+error 5.0 % (7.3 / 2.3 %), balanced loss 0.12 (= balanced fit), 10-20 px shape error 5.4 % (5.4 / 6.6 %), 20-40 px halo bias -2.0 %
+(-1.8 / -4.2 %), 1 of 30 samples worse than the balanced fit by > 1 %. Identical to the prototype within 0.1 %.
+
+**Decision (user, 2026-10-19):** adopted. `mse_weight = 1.8e7` is now the default of `PSF_LOSS_CFG` in `STD_fitter.py` and of the loss section of
+`NFM_calibrator_config.json` / `NFM_factor_calibrator_config.json` (the ETC config was left at 0: untested in that regime). The existing calibrator
+`legacy_weight` (MSE + MAE) is not the same thing and stays 0. The fit sets `fitted_balanced` / `fitted_legacy` predate the change; the cached cubes
+are unaffected, only a refit (and a dataset-cache rebuild if the training should use the new fits) follows from it.

@@ -73,6 +73,7 @@
     "huber_delta": 0.1,
     "scale": 3.0,
     "match_background": false,
+    "mse_weight": 18000000.0,
     "legacy_weight": 0.0,
     "LO_sign_penalty": false,
     "shrink_weight": 0.0,

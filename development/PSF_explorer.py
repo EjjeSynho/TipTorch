@@ -7,7 +7,9 @@ Interactive PSF shape explorer for the MUSE NFM STD stars: a page in the browser
 Jupyter).
 
 Pick a sample on the right and press "Load": the PSF model (PSFModelNFM, set up as in datasets/MUSE_STD_dataset/STD_fitter.py) starts
-from the per-sample fit (<MUSE_fitted_STD_folder>/<id>.pickle) and every fitted input gets a slider + a text box. The left side shows the
+from the per-sample fit (<MUSE_fitted_STD_folder>/<id>.pickle), in the regime of that fit (derotated cube for a config PupilAngle of 0,
+else the raw frame with the model at the fit's pupil angle; the DM pitch, i.e. the k_c, of the fit), and every fitted input gets a slider
++ a text box. The LGS asterism knobs act in the pupil frame; the source pad draws the asterism turned by the pupil angle, on the image. The left side shows the
 model PSF at one wavelength or the white (λ-averaged) PSF in log / linear scale, or its anisotropy (asinh image minus its azimuthal mean
 about the model's optical axis, where the tomographic cross and the spider spikes stand out); the "RGB" colour map shows all wavelengths
 as colours, as tools/observations.py (DisplayField). "Data & residual" adds the data, the residual (the asinh residual of the balanced
@@ -17,7 +19,8 @@ also by dragging it on a 2D pad of the field, with the LGS asterism and the NFM 
 telescope elevation (airmass: r0 along the line of sight, layer and LGS distances, differential refraction), the
 "Cn2 profile" knobs set the weight (kept normalized to a sum of 1) and the altitude of every layer, the "LGS asterism" knobs its radius,
 rotation and altitude, and the "PSD terms" checkboxes switch the PSD contributions on and off. A knob change only reruns the model stages it affects (STAGES), e.g. F and bg none, dx, dy and J only the OTF -> PSF step.
-Note the TipTorch convention: dx shifts the PSF along the image rows, dy along the columns.
+Note the TipTorch convention: dx shifts the PSF along the image rows, dy along the columns; the images show the rows (x) increasing upwards
+and the columns (y) to the right, the pupil OPD too, as the source pad.
 
 Needs the cached cubes and muse_df.pickle of the STD folder and the fits.
 Standalone:
@@ -105,15 +108,16 @@ RANGES = {
     'src_y':             (-15., 15.,  0.05),
     'elevation':         (20.0, 90.0, 0.1),    # [deg], telescope elevation: airmass 1 / sin(elevation)
 }
-# Source pad of the page: x up, y right, as the anisoplanatic elongation and the LGS cross appear in the PSF images (a source at (x, y)
-# elongates the PSF towards the screen direction (right, up) = (y, x)). The dx / dy shifts use the mirrored frame: +dx moves the PSF down
+# Source pad of the page: x up, y right, as the images show the field. TipTorch's x is the image row axis for dx and the source / LGS
+# directions alike (y the columns), and the images are drawn with the rows increasing upwards: an off-axis source elongates the PSF core
+# towards its own direction on the pad, +dx moves the PSF up
 FIELD_HALF = 15.0 # [arcsec], half-size of the pad
 NFM_FOV    = 7.5  # [arcsec], side of the MUSE NFM field, drawn on the pad
 
 GROUPS = [ # accordion sections: (title, knob keys)
     ('Pointing',           ['src_x', 'src_y', 'elevation']), # the source position also on a 2D pad on the page
     ('Atmosphere & AO',    ['r0', 'L0', 'dn', 'wind_speed_single', 'wind_dir_single']),
-    ('Cn2 profile',        ['Cn2_weights', 'h_km']), # per layer: weight and altitude (the ground layer stays at 0)
+    ('Cn2 profile',        ['Cn2_weights', 'h_km']), # the layer weights, then their altitudes (the ground layer stays at 0)
     ('LGS asterism',       ['LGS_radius', 'LGS_rotation', 'LGS_altitude']),
     ('TT jitter',          ['J_ctrl']),
     ('NCPAs & phase bump', ['LO_coefs']),
@@ -199,15 +203,16 @@ class PSFSession:
 
         with open(FIT_FOLDER / f'{sample_id}.pickle', 'rb') as f:
             self.fit = pickle.load(f)
-        PSF_data, _, _, configs = LoadSTDStarCache(ids=[sample_id], derotate_PSF=True, normalize=True, subtract_background=True,
+        # The regime of the fit (STD_fitter.DEROTATE_PSF): derotated cube with the config PupilAngle 0, or raw frame with the model rotated to
+        # the header pupil angle (dx / dy in the raw image, LO coefficients in the rotated pupil frame)
+        self.pupil_angle = float(np.ravel(self.fit['config']['telescope'].get('PupilAngle', 0.0))[0]) # [deg]
+        PSF_data, _, _, configs = LoadSTDStarCache(ids=[sample_id], derotate_PSF=self.pupil_angle == 0, normalize=True, subtract_background=True,
                                                     wvl_ids=None, ensure_odd_pixels=True, device=self.device)
-        # The atmosphere / guide-star sections of the fit's own config (the Cn2 altitudes of the cache may have changed since), the
-        # wavelengths of the full cube
-        for section in ('atmosphere', 'sources_HO', 'telescope'):
+        # The atmosphere / guide-star / telescope / DM sections of the fit's own config (the Cn2 altitudes of the cache may have changed since,
+        # the DM pitch carries the k_c of the fit, the telescope section its pupil angle), the wavelengths of the full cube
+        for section in ('atmosphere', 'sources_HO', 'telescope', 'DM'):
             if section in self.fit['config']:
                 configs[0][section] = {**configs[0][section], **{k: v for k, v in self.fit['config'][section].items() if k != 'PathPupil'}}
-
-        configs[0]['telescope']['PupilAngle'] = 0.0 # derotated
 
         with torch.no_grad():
             self.model = PSFModelNFM(configs, multiple_obs=True, LO_NCPAs=True, chrom_defocus=False, use_Moffat=False,
@@ -251,7 +256,7 @@ class PSFSession:
         self.state   = {k: v.copy() for k, v in self.fitted.items()} # knob values
         pitch, pixel = float(np.ravel(cfg['DM']['DmPitchs'])[0]), float(np.ravel(cfg['sensor_science']['PixelScale'])[0]) # [m], [mas]
         self.r_AO    = self.λ_nm * 1e-9 / (2 * pitch) * 206264.8e3 / pixel # AO cut-off radius [px]
-        self.pupil   = m.pupil.cpu().numpy() > 0
+        self.pupil   = m.pupil_rot.cpu().numpy() > 0 # at the pupil angle, as the OPD shown
         self._x0     = {k: v.detach().clone() for k, v in self.model.inputs_manager.to_dict().items()} # shapes and dtypes of the inputs
         # The splines are linear in their node values: x(λ) = x_ctrl @ basis, [N_ctrl, N_λ] (no spline evaluation per knob change)
         self._basis  = self.model.evaluate_splines(torch.eye(self.model.N_wvl_ctrl, device=self.device), self.model.λ_sim_normed).float().cpu().numpy()
@@ -265,8 +270,10 @@ class PSFSession:
 
         fit_img = np.asarray(self.fit['Img. fit'])[0]
         repro   = np.abs(self.PSF[FIT_WVL_IDS] - fit_img).max() / fit_img.max() if fit_img.shape[0] == len(FIT_WVL_IDS) else np.nan
-        return (f'Sample {sample_id} loaded in {time.time() - t0:.1f} s; the fitted inputs reproduce the stored fit to {repro:.1e} of the peak'
-                + (f'; not loaded (shape mismatch): {missing}' if missing else ''))
+        regime  = 'derotated' if self.pupil_angle == 0 else f'raw frame, pupil angle {self.pupil_angle:.1f}°'
+        kc      = float(self.fit.get('k_c fraction', 1.0))
+        return (f'Sample {sample_id} loaded in {time.time() - t0:.1f} s ({regime}' + (f', k_c {100 * kc:.1f} % of the nominal' if kc != 1 else '')
+                + f'); the fitted inputs reproduce the stored fit to {repro:.1e} of the peak' + (f'; not loaded (shape mismatch): {missing}' if missing else ''))
 
 
     def knobs(self):
@@ -300,8 +307,6 @@ class PSFSession:
                     v_lo, v_hi = (lo, hi) if key == 'Cn2_weights' else (min(lo, v - abs(v) * 0.2 - step), max(hi, v + abs(v) * 0.2 + step)) # weights stay in [0, 1]
                     rows.append((key, idx, labels[key][idx] if idx < len(labels[key]) else f'{key}[{idx}]', v, v_lo, v_hi, step))
 
-            if title == 'Cn2 profile':
-                rows.sort(key=lambda row: row[1]) # layer by layer: weight, altitude
             sections.append((title, rows))
         return sections
 
@@ -426,7 +431,7 @@ class PSFSession:
         if 'static' in dirty:
             LO = torch.as_tensor(self.state['LO_coefs'], dtype=torch.float32, device=self.device).view_as(self._x0['LO_coefs'])
             self._OTF_static = m.ComputeStaticOTF(self.model.phase_func(LO, None))
-            self.OPD = (self.model.OPD_func(LO)[0] * 1e9).cpu().numpy() # [nm]
+            self.OPD = (self.model.LO_basis.rotate_OPD(self.model.OPD_func(LO))[0] * 1e9).cpu().numpy() # [nm], at the pupil angle
 
         if dirty & MODEL_STAGES:
             F, bg = m.F, m.bg
@@ -482,13 +487,13 @@ class PSFSession:
         outer = np.hypot(yy, xx) >= 3 # colour limits of the anisotropy maps without the core
 
         fig = Figure(figsize=(13.5, 8.6 if show_data else 4.3))
-        gs  = fig.add_gridspec(2 if show_data else 1, 3, left=0.04, right=0.95, top=0.93 if show_data else 0.9, bottom=0.08 if show_data else 0.15, wspace=0.35, hspace=0.25)
-        extent = [-h - 0.5, h + 0.5, h + 0.5, -h - 0.5] # [px] from the centre, default imshow orientation
+        gs  = fig.add_gridspec(2 if show_data else 1, 3, left=0.05, right=0.95, top=0.93 if show_data else 0.9, bottom=0.08 if show_data else 0.15, wspace=0.35, hspace=0.25)
+        extent = [-h - 0.5, h + 0.5, -h - 0.5, h + 0.5] # [px] from the centre, rows (x) upwards as on the source pad: origin='lower'
         cbar_ax = lambda ax: make_axes_locatable(ax).append_axes('right', size='4%', pad=0.05)
 
         def image(ax, im, title, norm, cmap, cbar_label=None, centred=True):
             cm = self._cmap(cmap)
-            artist = ax.imshow(np.ma.masked_invalid(im), extent=extent if centred else None, norm=norm, cmap=cm, interpolation='nearest')
+            artist = ax.imshow(np.ma.masked_invalid(im), extent=extent if centred else None, origin='lower', norm=norm, cmap=cm, interpolation='nearest')
             ax.set_title(title, fontsize=10)
             fig.colorbar(artist, cax=cbar_ax(ax), label=cbar_label)
 
@@ -509,7 +514,7 @@ class PSFSession:
                 lim = np.percentile(np.abs(a[outer]), 99)
                 image(ax, a, f'{name}: anisotropy', Normalize(-lim, lim), 'RdBu_r', 'asinh - azimuthal mean')
             elif rgb:
-                ax.imshow(rgb_img[name], extent=extent, interpolation='nearest')
+                ax.imshow(rgb_img[name], extent=extent, origin='lower', interpolation='nearest')
                 ax.set_title(f'{name}: RGB, {scale}', fontsize=10)
                 fig.colorbar(ScalarMappable(Normalize(self.λ_nm[0], self.λ_nm[-1]), self._spectrum), cax=cbar_ax(ax), label='λ [nm]')
             elif scale == 'log':
@@ -517,6 +522,9 @@ class PSFSession:
                 image(ax, im, name, LogNorm(vmin=peak * 10**-decades, vmax=peak), cmap)
             else:
                 image(ax, img[name], name, Normalize(vmin=0, vmax=peak), cmap)
+            if k == 0:
+                ax.set_xlabel('y = columns [px]', fontsize=8)
+                ax.set_ylabel('x = rows [px]', fontsize=8)
 
         if show_data:
             ax = fig.add_subplot(gs[0, 2])
@@ -757,7 +765,7 @@ def _api(session, path, req):
     if session.model is not None:
         if path in ('/api/state', '/api/load'):
             out.update(sample=session.sample_id, knobs=session.knobs(), wvl_nm=session.λ_nm.round().astype(int).tolist(),
-                       field=dict(half=FIELD_HALF, fov=NFM_FOV, lgs_az=session.LGS_az.tolist())) # geometry of the source pad
+                       field=dict(half=FIELD_HALF, fov=NFM_FOV, lgs_az=session.LGS_az.tolist(), pupil_angle=session.pupil_angle)) # source pad geometry
         view = {k: type(VIEW[k])(v) for k, v in req.get('view', {}).items() if k in VIEW}
         png, out['status'] = session.render(**view)
         out['image'] = base64.b64encode(png).decode()
