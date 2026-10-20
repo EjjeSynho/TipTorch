@@ -64,7 +64,7 @@ else:
 
 
 #%%
-experiment_folder = 'fitted_balanced'
+experiment_folder = 'fitted'
 
 fitted_samples_folder = STD_FOLDER / experiment_folder
 
@@ -492,10 +492,9 @@ plt.show()
 
 #%%
 # Spectrally averaged profile
-fig = plt.figure(figsize=(10, 6))
-plt.title('Polychromatic PSFs profile')
+fig, ax = plt.subplots(figsize=(10, 6))
 PSF_avg = lambda x: np.mean(x, axis=1)
-plot_radial_PSF_profiles( PSF_avg(data_cube), PSF_avg(fitted_cube), 'Data', 'TipTorch', cutoff=40, ax=fig.add_subplot(111) )
+plot_radial_PSF_profiles( PSF_avg(data_cube), PSF_avg(fitted_cube), 'Data', 'TipTorch', title='Polychromatic PSFs profile', cutoff=40, ax=ax )
 plt.show()
 
 # %%

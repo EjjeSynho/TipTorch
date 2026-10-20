@@ -173,11 +173,14 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
          bool(psf_df.loc[id]['Good quality']))
         
     non_point_flag  = psf_df.loc[id]['Non-point'].item()
-    # Model k_c relative to the nominal one, recorded in the output for the dataset cache / training: the label group's value for the
-    # samples flagged 'k_c mismatch' (group 1..N), 1.0 for the others (group 0), or a forced value (group -1)
+    
+    # Model k_c relative to the nominal one, recorded during dataset cache generation before fitting
+    # During training: samples with k_c mismatch are grouped based on their fraction (group 1..N), 1.0 for the others (group 0), or a forced value (group -1)
+    
     kc_fraction = kc_fraction_from_config(configs[0])
     label_fraction = float(psf_df.loc[id][KC_FRACTION_FEATURE]) if KC_FRACTION_FEATURE in psf_df.columns else 1.0
     kc_group = int(psf_df.loc[id][KC_GROUP_FEATURE]) if KC_GROUP_FEATURE in psf_df.columns and np.isclose(kc_fraction, label_fraction) else (0 if np.isclose(kc_fraction, 1.0) else -1)
+    
     if not np.isclose(kc_fraction, 1.0):
         print(f"Sample {id}: {f'flagged k_c mismatch (group {kc_group})' if kc_group > 0 else 'forced k_c'}: model k_c = {100 * kc_fraction:.1f} % of the nominal "
               f"({PSF_model.model.kc:.3f} 1/m, DM pitch {np.asarray(configs[0]['DM']['DmPitchs']).ravel()[0]:.4f} m)")
