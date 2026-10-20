@@ -218,3 +218,66 @@ Check on two blurry subset stars (350, 491): priors reproduced, loss 0.148 / 0.1
   +1.2 %. 30-sample subset (`eval_peakw.csv`): median |peak err| 3.68 -> 2.78 (weight 1) -> 2.50 % (weight 3), bluest four bins 4.2 -> 1.7 %,
   worst bin 12.4 -> 9.4 %, FWHM error 3.3 -> 1.6 %, halo shape errors unchanged (6.0 / 7.3 / 5.2 / 6.9 % at 1.5-40 px), reference asinh + MSE
   loss +1.4 % (19 / 30 stars worse by > 1 %).
+
+## Elliptical wing: transverse width (2026-10-20, user's request)
+
+**Problem.** With the 1 px Lorentzian line the model showed a razor-thin bright streak through the core along the columns in the reddest bins
+(f up to 0.2-0.35 at 935 nm): visible in the model images and as a thin model-minus-data line in the residuals of the sharp red PSFs. The data's
+excess over the no-wing model is a *band*: transverse HWHM 3-4 px (17 % of the local halo on the axis, 7 % at 4-6 px off it, |x| 6-30 px),
+flat along the axis (12-15 % of the local halo from 5 to 30 px, dropping beyond the control radius). Widening the 1D line along its axis makes the
+streak brighter, not fainter (the Lorentzian tail scales with f·w; the width scan 0.5-3 px overshot the data's band more at 8-15 px).
+
+**Change.** `TipTorch.WingKernel(frac, width, angle, width_t)`: MTF `(1 - f) + f exp(-(2π sqrt((w ν_a)² + (w_t ν_t)²))^p)`; `width_t = 0`
+reproduces the 1D line, `width_t > 0` is an elliptical Moffat (β = 1.5 for p = 1) halo. New model attribute / wrapper input `wing_width_t`
+(achromatic, shared, non-optimizable by default, 0 for old pickles). Flags `WING_WIDTH_T_PX`, `FIT_WING_WIDTH_T`, `WING_FRAC_MAX` (penalty cap,
+1.0 = off) in `STD_fitter.py` and `development/MUSE_onsky.py`; `STD_fitted_df.py` carries `wing_width_t`. Note that in 2D the along-axis tail
+falls as r⁻³ instead of the line's r⁻², so the along-axis width must exceed the transverse one for the wing to stay elongated along the columns.
+
+**Scan (30-star subset, current fitter: peak term, flip convention; `scratchpad/lossvar/wreg_*`, `eval_wreg.py`).** Medians; "line" = on-axis
+row minus the rows 4-6 px off the axis at |x| 8-25 px in % of the local ring, reddest 4 bins (data 14.9 %); overshoot = model - data per star.
+
+| wing (w × w_t px) | loss | peak err | quad 3-8 [% peak] | line model | overshoot p50 / p90 / max | f (935 nm) | halo bias 40-60 px |
+|---|---|---|---|---|---|---|---|
+| 1 × 0 (line) | 0.121 | 2.46 % | 0.057 | 16.3 | +3.3 / +17.6 / +28 % | 0.185 | +25 % |
+| 1 × 3 | 0.136 | 2.41 | 0.21 | 7.0 | −9.3 / −1.3 / +1.4 | 0.027 | +28 |
+| 3 × 3 | 0.132 | 2.19 | 0.19 | 7.4 | −9.0 / −0.9 / +1.7 | 0.091 | +23 |
+| **5 × 1.5** | **0.122** | **2.48** | **0.045** | **13.3** | **−2.3 / +4.4 / +6.9** | **0.100** | **+22** |
+| 5 × 3 | 0.124 | 2.41 | 0.09 | 9.3 | −6.7 / +0.6 / +3.4 | 0.129 | +17 |
+| 5 × 5 | 0.134 | 2.22 | 0.19 | 7.5 | −8.8 / −0.9 / +1.7 | 0.083 | +22 |
+| 10 × 3 | 0.125 | 2.40 | 0.10 | 13.8 | −1.5 / +5.0 / +10 | 0.080 | +22 |
+| free (→ 1.6 × 0.5) | 0.117 | 2.47 | 0.036 | 12.5 | −0.7 / +4.1 / +6.8 | 0.184 | +22 |
+
+No wing: quad 3-8 = 0.20 % of the peak. Round (w_t ≥ w) wings lose the quadrupole suppression (0.2 % again) and 4-7 % of loss; 5 × 1.5 px keeps
+the loss and peak error of the line within 1 %, keeps the quadrupole suppressed, never overshoots the data's band by more than 7 % of the local
+halo (28 % for the line), halves the wing flux and reduces the far-halo deficit. Free widths return to a thin line (the loss weighting barely sees
+the streak), so the widths stay fixed. No amplitude cap is needed (`WING_FRAC_MAX = 1.0`): the fraction drops by itself with the 2D shape.
+
+**Adopted defaults:** `WING_WIDTH_PX = 5.0`, `WING_WIDTH_T_PX = 1.5`, widths fixed, fraction free per star. Wing-fraction prior
+(`WING_FRAC_PRIOR_DEFAULT` and `fitted_priors.pickle`) refreshed to the 5 × 1.5 px medians [0.046, 0.055, 0.066, 0.065, 0.098]. Calibrator: the
+shared wing is now two fixed widths + the chromatic fraction. Figures: `scratchpad/lossvar/streak_look.png` (line), `wreg_look.png` (variants),
+`streak_shape.png` (data's band profile).
+
+## Fitter building blocks, two-start fit in the fitter, dev script on top of them (2026-10-20, user's request)
+
+**STD_fitter.py** is now a set of module-level functions that `load_and_fit_sample` composes, so the dev script can reuse them instead of
+mirroring them: `sample_fit_flags(ids)` (blurry / bump / fit-L0-wind-Cn2 regime from muse_df, several OBs = nothing suppressed),
+`build_PSF_model(configs, device)` (model flags, fixed wing widths and power, backup state), `build_loss(PSF_model, PSF_0, flags, device)`
+→ `(func, loss_fn)` (PSF loss, LO regularization with the dataset priors, MAP terms, wing bounds), `make_minimizer(PSF_model, func, loss_fn)`
+→ `minimize_params(include, exclude, max_iter, ...)`, `parameter_sets(PSF_model, flags)` → `(include, exclude)`, `peak_error(...)` and
+`multistart_fit(...)`. The dev script's two-start fit is the fitter's default: `DEFOCUS_STARTS = (20.0, -20.0)` [nm], `SELECT_BY = 'peak'`
+(least median |peak error|; 'loss' = lowest loss), `FLIP_TOL = 0.005`; `DEFOCUS_INIT_NM` is gone (the starts replace it, and they apply to
+the phase-bump stars too, which started at 0 before). The pickles record `defocus starts`, `selected by`, `start`, `start results`
+({start: (loss, peak error, defocus, flipped, converged)}) and `peak error`.
+
+**Check (30-star subset):** the refactored fitter with a single +20 nm start reproduces the previous fits (loss within 0.05 % for 25/30 stars;
+the 5 others differ by 1-4 % and are the phase-bump stars, which now start at +20 nm instead of 0, not a regression of the code). The two-start
+default keeps the same loss (median ratio 1.000) and peak error (2.23 % vs 2.24 %) on this subset; it matters for the bistable stars (477:
+blue peak error 0.6-13 % between branches). Cost: the fit time doubles (~30 s per star on one GPU).
+
+**development/MUSE_onsky.py** keeps only what the dev session needs: the sample / wavelength / derotation / k_c choices, the model built with
+`fitter.build_PSF_model`, the objective and parameter sets from `fitter.sample_fit_flags / build_loss / make_minimizer / parameter_sets`,
+`fitter.multistart_fit(verbose=True)` and the plots. A regime change is an override of a fitter flag before building the model
+(`fitter.WING_WIDTH_T_PX = 3.0`, `fitter.DEFOCUS_STARTS = (20.0,)`, ...). The headless run on 477 matches the previous standalone flow.
+
+**STD_fitted_df.py** stores the fit priors explicitly (`compute_fit_priors(..., out_path=FIT_PRIORS_FILE, store=True)`); the priors now include
+`wing_width` / `wing_width_t`, and the fitter warns at import when the priors come from fits with another wing shape.

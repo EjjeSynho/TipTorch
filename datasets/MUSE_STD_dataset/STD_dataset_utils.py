@@ -929,7 +929,7 @@ def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_pr
 # blurry stars pull these towards the medians of the sharp stars instead of fitting them freely (the phase bump is pulled to 0 instead).
 # ----------------------------------------------------------------------------------------------------------------------------------------------
 FIT_PRIORS_FILE = STD_FOLDER / 'fitted_priors.pickle'
-FIT_PRIOR_KEYS  = ['LO_coefs', 'wing_frac_ctrl', 'Jx_ctrl', 'Jy_ctrl', 'J_ctrl', 'J_angle']
+FIT_PRIOR_KEYS  = ['LO_coefs', 'wing_frac_ctrl', 'wing_width', 'wing_width_t', 'Jx_ctrl', 'Jy_ctrl', 'J_ctrl', 'J_angle'] # the widths record the wing shape of the fits
 
 def blurry_PSF_mask(muse_df):
     """ The 'blurry' class of STD_fitter.py: bad quality, or medium quality without the good-quality flag. """
@@ -946,6 +946,7 @@ def compute_fit_priors(fit_folder, muse_df, out_path=FIT_PRIORS_FILE, keys=FIT_P
     blurry = blurry_PSF_mask(muse_df)
     values = {k: [] for k in keys}
     N = 0
+    
     for f in sorted(fit_folder.glob('*.pickle'), key=lambda p: int(p.stem)):
         id = int(f.stem)
         if id not in muse_df.index or bool(blurry.loc[id]) or bool(muse_df.loc[id, 'Corrupted']):
@@ -956,11 +957,15 @@ def compute_fit_priors(fit_folder, muse_df, out_path=FIT_PRIORS_FILE, keys=FIT_P
             if k in d:
                 values[k].append(np.asarray(d[k], dtype=float).ravel())
         N += 1
+    
     priors = {k: np.median(np.stack(v), axis=0) for k, v in values.items() if len(v)}
+    
     if 'LO_coefs' in priors:
         priors['LO_coefs'][0] = 0.0
+        
     priors['source'] = str(fit_folder)
     priors['N'] = N
+   
     if verbose:
         print(f"Fit priors from {N} sharp stars of {fit_folder}: " + ', '.join(f'{k} {np.round(v, 3).tolist()}' for k, v in priors.items() if isinstance(v, np.ndarray)))
     if store:
@@ -968,6 +973,7 @@ def compute_fit_priors(fit_folder, muse_df, out_path=FIT_PRIORS_FILE, keys=FIT_P
             pickle.dump(priors, handle)
         if verbose:
             print(f'Stored at {out_path}')
+            
     return priors
 
 

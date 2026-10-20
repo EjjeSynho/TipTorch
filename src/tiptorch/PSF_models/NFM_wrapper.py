@@ -33,7 +33,7 @@ class PSFModelNFM:
         dtype          = torch.float32,
         model_type     = None,    # 'physics-based' | 'psfao' | 'hybrid'
         anisotropic_jitter = False, # Jx, Jy and the kernel angle J_angle (image frame) instead of one isotropic J
-        wing_kernel        = False, # one-dimensional image-frame wing of the PSF (TipTorch.WingKernel): wing_frac (chromatic), wing_width, wing_angle
+        wing_kernel        = False, # image-frame wing of the PSF (TipTorch.WingKernel): wing_frac (chromatic), wing_width, wing_width_t, wing_angle
         *, # MUSE NFM spectral data
         λ_min        = 475.e-9,
         λ_max        = 935.e-9,
@@ -58,9 +58,10 @@ class PSFModelNFM:
         # keeps Jx / Jy aligned with the image axes whatever the derotator state). Achromatic with chrom_defocus, chromatic (splines) otherwise.
         # Axis convention of TipTorch: x is the first image axis (rows), like dx; Jx blurs along the rows, Jy along the columns.
         self.anisotropic_jitter = anisotropic_jitter
-        # One-dimensional wing of the PSF along the image columns (rotated by wing_angle), fixed in the image frame: the detector-frame
+        # Elongated wing of the PSF along the image columns (rotated by wing_angle), fixed in the image frame: the detector-frame
         # halo excess of the MUSE NFM data (slicer / spectrograph spread) that neither the pupil-frame PSDs nor a jitter can represent.
-        # Inputs: wing_frac (flux fraction, chromatic), wing_width [px] and wing_angle [deg] (achromatic, the angle fixed at 0 by default)
+        # Inputs: wing_frac (flux fraction, chromatic), wing_width [px] along the axis, wing_width_t [px] across it (0 = a one-dimensional
+        # line, the default) and wing_angle [deg]; the widths and the angle are achromatic, the angle is fixed at 0 by default
         self.wing_kernel = wing_kernel
         self.__config_raw  = config # Input config dictionary, defined in TipTop-style
         self.device        = torch.device(device)
@@ -522,14 +523,16 @@ class PSFModelNFM:
             add_input('Jxy', torch.tensor([0.0]), norm_J, optimizable=False, is_shared=True) # essentially, this disables the TT jitter anisotropy
 
         if self.wing_kernel:
-            # Flux fraction of the wing per wavelength (spline), its half-width [px] and axis angle [deg, from the image columns]; the angle is
-            # fixed by default (the wing of the MUSE NFM data lies along the columns), enable it with inputs_manager.set_optimizable
+            # Flux fraction of the wing per wavelength (spline), its half-widths along and across the axis [px] and the axis angle [deg, from
+            # the image columns]; the transverse width and the angle are fixed by default (a line along the columns, as the wing of the MUSE
+            # NFM data), enable them with inputs_manager.set_optimizable
             if self.use_splines:
                 add_input('wing_frac_ctrl', torch.tensor([[0.005,]*self.N_wvl_ctrl]*N_obs), norm_wing_frac, is_shared=True)
             else:
                 add_input('wing_frac', torch.tensor([[0.005,]*N_wvl]*N_obs), norm_wing_frac, is_shared=True)
-            add_input('wing_width', torch.tensor([5.0]*N_obs), norm_wing_width, is_shared=True)
-            add_input('wing_angle', torch.tensor([0.0]*N_obs), norm_J_angle, optimizable=False, is_shared=True)
+            add_input('wing_width',   torch.tensor([5.0]*N_obs), norm_wing_width, is_shared=True)
+            add_input('wing_width_t', torch.tensor([0.0]*N_obs), norm_wing_width, optimizable=False, is_shared=True)
+            add_input('wing_angle',   torch.tensor([0.0]*N_obs), norm_J_angle,    optimizable=False, is_shared=True)
         
         # Von Kármán turbulence parameters
         add_input('r0', self.model.r0.detach().clone(), norm_r0, is_shared=True)

@@ -7,6 +7,7 @@ import pickle
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import seaborn as sns
 from tqdm import tqdm
 from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
 from tiptorch.tools.normalizers import Uniform0_1
@@ -78,7 +79,7 @@ with open(fitted_samples_folder / files[0], 'rb') as handle:
 df_relevant_entries = [
     'F', 'J', 'dx', 'dy', 'bg', 'chrom_defocus',
     'Jx', 'Jy', 'J_angle', # anisotropic achromatic jitter (STD_fitter.py ANISOTROPIC_JITTER with CHROM_DEFOCUS), or isotropic achromatic 'J'
-    'wing_frac', 'wing_width', 'wing_angle', # image-frame wing (STD_fitter.py WING_KERNEL)
+    'wing_frac', 'wing_width', 'wing_width_t', 'wing_angle', # image-frame wing (STD_fitter.py WING_KERNEL)
     'bg_ctrl', 'F_ctrl', 'dx_ctrl', 'dy_ctrl', 'J_ctrl', 'Jx_ctrl', 'Jy_ctrl', 'chrom_defocus_ctrl', 'wing_frac_ctrl',
     'LO_coefs',
     'Cn2_weights',
@@ -146,11 +147,13 @@ singular_dict = {}
 singular_entries = list( set([
     'r0', 'dn', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta', 'L0', 'wind_speed_single',
     'J', 'Jx', 'Jy', 'J_angle', # achromatic jitter of the chromatic-defocus fits ('J' is absent from the chromatic-jitter fits, which store J_ctrl)
-    'wing_width', 'wing_angle'
+    'wing_width', 'wing_width_t', 'wing_angle'
 ]).intersection( df_relevant_entries) )
 
 for key in singular_entries:
-    singular_dict[key] = np.squeeze(np.array(fitted_dict_raw[key])).tolist()    
+    # Flatten per sample: the fitted parameters are squeezed to (1,) by the inputs manager, while the pinned ones (e.g. wind_speed_single
+    # of the blurry fits, kept at the config value) retain their (1, 1) init shape, so the samples cannot be stacked as they are
+    singular_dict[key] = np.squeeze(np.stack([np.asarray(v, dtype=float).ravel() for v in fitted_dict_raw[key]])).tolist()
 
 spline_entries = [entry for entry in df_relevant_entries if entry.endswith('_ctrl')]
 
@@ -273,7 +276,7 @@ FWHM_data_df = FWHM_data_df.apply(np.sqrt)
 for _df in (J_df, Jx_df, Jy_df):
     if _df is not None:
         _df[:] = _df.abs()
-for _col in ('J', 'Jx', 'Jy', 'wing_width'):
+for _col in ('J', 'Jx', 'Jy', 'wing_width', 'wing_width_t'):
     if _col in singular_df.columns:
         singular_df[_col] = singular_df[_col].abs()
 if wing_df is not None:
@@ -303,10 +306,14 @@ to_collapse = [
 fitted_values_df = pd.concat([collapse_dataframe_to_lists(df, name) for df, name in to_collapse] + [singular_df], axis=1)
 
 
-# Dataset-level priors of the poorly constrained parameters (medians over the sharp stars), used by STD_fitter.py for the blurry PSFs
-from STD_dataset_utils import compute_fit_priors
+#%%
+# Fit priors: medians over the sharp stars of the fitted LO coefficients (bump set to 0), wing fraction / widths and jitter, stored as
+# FIT_PRIORS_FILE (STD folder) and read by STD_fitter.py (load_fit_priors) to pin these parameters for the blurry PSFs. Refreshed from the
+# fits of `fitted_samples_folder` every time this script runs, so a refit of the dataset updates the priors for the next one
+from STD_dataset_utils import compute_fit_priors, FIT_PRIORS_FILE
+
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
-    _ = compute_fit_priors(fitted_samples_folder, pickle.load(handle))
+    fit_priors = compute_fit_priors(fitted_samples_folder, pickle.load(handle), out_path=FIT_PRIORS_FILE, store=True)
 
 # Store dataframes
 with open(STD_FOLDER / 'muse_fitted_df.pickle', 'wb') as handle:
@@ -447,7 +454,6 @@ plt.show()
 
 #%%
 from tools.plotting import wavelength_to_RGB
-import seaborn as sns
 
 SR_err_df   = (SR_fit_df   - SR_data_df  ).abs() / SR_data_df   * 100
 FWHM_err_df = (FWHM_fit_df - FWHM_data_df).abs() / FWHM_data_df * 100
