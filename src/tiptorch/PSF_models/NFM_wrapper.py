@@ -32,6 +32,8 @@ class PSFModelNFM:
         device         = default_device,
         dtype          = torch.float32,
         model_type     = None,    # 'physics-based' | 'psfao' | 'hybrid'
+        anisotropic_jitter = False, # Jx, Jy and the kernel angle J_angle (image frame) instead of one isotropic J
+        wing_kernel        = False, # one-dimensional image-frame wing of the PSF (TipTorch.WingKernel): wing_frac (chromatic), wing_width, wing_angle
         *, # MUSE NFM spectral data
         λ_min        = 475.e-9,
         λ_max        = 935.e-9,
@@ -51,6 +53,15 @@ class PSFModelNFM:
         self.model_type    = model_type
         self.use_Moffat    = model_type in ('hybrid',)   # kept for backward compat
         self.chrom_defocus = chrom_defocus and LO_NCPAs
+        # Anisotropic TT jitter kernel: Jx, Jy [mas] along the kernel axes and J_angle [deg], the rotation of the kernel in the IMAGE frame
+        # (TipTorch.JitterKernel is built on the image-frame frequency grid, so the kernel does not turn with the pupil angle: J_angle = 0
+        # keeps Jx / Jy aligned with the image axes whatever the derotator state). Achromatic with chrom_defocus, chromatic (splines) otherwise.
+        # Axis convention of TipTorch: x is the first image axis (rows), like dx; Jx blurs along the rows, Jy along the columns.
+        self.anisotropic_jitter = anisotropic_jitter
+        # One-dimensional wing of the PSF along the image columns (rotated by wing_angle), fixed in the image frame: the detector-frame
+        # halo excess of the MUSE NFM data (slicer / spectrograph spread) that neither the pupil-frame PSDs nor a jitter can represent.
+        # Inputs: wing_frac (flux fraction, chromatic), wing_width [px] and wing_angle [deg] (achromatic, the angle fixed at 0 by default)
+        self.wing_kernel = wing_kernel
         self.__config_raw  = config # Input config dictionary, defined in TipTop-style
         self.device        = torch.device(device)
         self.dtype         = dtype
@@ -78,11 +89,15 @@ class PSFModelNFM:
         
         # Initialize the TipTorch model
         self._init_model(_config)
+        self.model.use_wing = self.wing_kernel
         # Initialize LO NCPAs
         if LO_NCPAs:
             self._init_NCPAs()
         
-        self.polychromatic_params = ['F', 'dx', 'dy', 'bg', 'F_norm_λ'] + (['chrom_defocus'] if self.chrom_defocus else ['J'])
+        # Chromatic blur: either the chromatic defocus (jitter achromatic) or the chromatic jitter itself (isotropic J or the pair Jx, Jy)
+        self.jitter_params = ['Jx', 'Jy'] if self.anisotropic_jitter else ['J']
+        self.polychromatic_params = ['F', 'dx', 'dy', 'bg', 'F_norm_λ'] + (['chrom_defocus'] if self.chrom_defocus else self.jitter_params) + \
+                                    (['wing_frac'] if self.wing_kernel else [])
 
         if self.use_splines:
             # If splines are used, the chromatic parameters are represented by their values at a few control wavelengths and interpolated at the simulated
@@ -137,6 +152,8 @@ class PSFModelNFM:
             'multiple_obs':   self.multiple_obs,
             'LO_NCPAs':       self.LO_NCPAs,
             'chrom_defocus':  self.chrom_defocus,
+            'anisotropic_jitter': self.anisotropic_jitter,
+            'wing_kernel':    self.wing_kernel,
             'model_type':     self.model_type,
             'use_Moffat':     self.use_Moffat,   # kept for backward compat readers
             'retain_PSDs':    self.retain_PSDs,
@@ -191,8 +208,12 @@ class PSFModelNFM:
             return out
         
         def _restore_config(config, device):
+            # Raw configs (a list of per-observation configs, or a single one without 'NumberSources') are merged and converted by
+            # _init_configs itself; only a pre-processed config (tensors) is moved to the requested device here
+            if isinstance(config, (list, tuple)) or 'NumberSources' not in config:
+                return config
             sample_value = config['atmosphere']['Seeing']
-            if sample_value.device != device:
+            if not (torch.is_tensor(sample_value) and sample_value.device == device):
                 from tiptorch.managers.config_manager import ConfigManager
                 config_manager = ConfigManager()
                 config_manager.Convert(config, framework='pytorch', device=device)
@@ -213,6 +234,8 @@ class PSFModelNFM:
             multiple_obs   = store_data.get('multiple_obs', store_data.get('multiple_OBs', False)),
             LO_NCPAs       = store_data.get('LO_NCPAs', True),
             chrom_defocus  = store_data.get('chrom_defocus', False),
+            anisotropic_jitter = store_data.get('anisotropic_jitter', False),
+            wing_kernel    = store_data.get('wing_kernel', False),
             model_type     = store_data.get('model_type', 'hybrid' if store_data.get('use_Moffat', False) else 'physics-based'),
             retain_PSDs    = store_data.get('retain_PSDs', False),
             Z_mode_max     = store_data.get('Z_mode_max', 9),
@@ -279,6 +302,8 @@ class PSFModelNFM:
             multiple_obs    = self.multiple_obs,
             LO_NCPAs        = self.LO_NCPAs,
             chrom_defocus   = self.chrom_defocus,
+            anisotropic_jitter = self.anisotropic_jitter,
+            wing_kernel     = self.wing_kernel,
             N_spline_nodes  = self.N_wvl_ctrl,
             model_type      = self.model_type,
             Z_mode_max      = self.Z_mode_max,
@@ -442,6 +467,9 @@ class PSFModelNFM:
         norm_L0          = Uniform(a=6,     b=34)
         norm_dxy         = Uniform(a=-1,    b=1)
         norm_J           = Uniform(a=0,     b=30)
+        norm_J_angle     = Uniform(a=-45,   b=45)
+        norm_wing_frac   = Uniform(a=0,     b=0.05)
+        norm_wing_width  = Uniform(a=1,     b=30)
         norm_dn          = Uniform(a=25,    b=50)
         norm_amp         = Uniform(a=0,     b=10)
         norm_b           = Uniform(a=0,     b=0.1)
@@ -478,15 +506,30 @@ class PSFModelNFM:
             add_input('F_norm_λ', torch.tensor([[1.0,]*N_wvl]*N_obs), norm=norm_F_λ_norm, optimizable=False, is_shared=True)
 
         # Enabling chromatic defocus means that chromatic PSF bluriness is attributed to chromatic defocus aberration only.
-        # Thus, TT jitter is considered monochromatic in this case. Otherwise, this bluriness is "absorbed" by the chromatic jitter parameters Jx and Jy
-        if self.chrom_defocus:
-            add_input('J', torch.tensor([[25.0]]*N_obs), norm_J, is_shared=True) # If chromatic defocus is enabled, jitter is monochromatic
-        else:
-            if self.use_splines:
-                add_input('J_ctrl', torch.tensor([[25.0,]*self.N_wvl_ctrl]*N_obs), norm_J, is_shared=True)
+        # Thus, TT jitter is considered monochromatic in this case. Otherwise, this bluriness is "absorbed" by the chromatic jitter parameters.
+        # The jitter is one isotropic J, or the pair Jx / Jy along the axes of the kernel plus its angle J_angle in the image frame
+        for name in self.jitter_params:
+            if self.chrom_defocus:
+                add_input(name, torch.tensor([[25.0]]*N_obs), norm_J, is_shared=True) # If chromatic defocus is enabled, jitter is monochromatic
+            elif self.use_splines:
+                add_input(name+'_ctrl', torch.tensor([[25.0,]*self.N_wvl_ctrl]*N_obs), norm_J, is_shared=True)
             else:
-                add_input('J', torch.tensor([[25.0]*N_wvl]*N_obs), norm_J, is_shared=True)
-        add_input('Jxy', torch.tensor([0.0]), norm_J, optimizable=False, is_shared=True) # essentially, this disables the TT jitter anisotropy
+                add_input(name, torch.tensor([[25.0]*N_wvl]*N_obs), norm_J, is_shared=True)
+        if self.anisotropic_jitter:
+            # [deg], counter-clockwise rotation of the (Jx, Jy) kernel axes with respect to the image axes; achromatic
+            add_input('J_angle', torch.tensor([0.0]*N_obs), norm_J_angle, is_shared=True)
+        else:
+            add_input('Jxy', torch.tensor([0.0]), norm_J, optimizable=False, is_shared=True) # essentially, this disables the TT jitter anisotropy
+
+        if self.wing_kernel:
+            # Flux fraction of the wing per wavelength (spline), its half-width [px] and axis angle [deg, from the image columns]; the angle is
+            # fixed by default (the wing of the MUSE NFM data lies along the columns), enable it with inputs_manager.set_optimizable
+            if self.use_splines:
+                add_input('wing_frac_ctrl', torch.tensor([[0.005,]*self.N_wvl_ctrl]*N_obs), norm_wing_frac, is_shared=True)
+            else:
+                add_input('wing_frac', torch.tensor([[0.005,]*N_wvl]*N_obs), norm_wing_frac, is_shared=True)
+            add_input('wing_width', torch.tensor([5.0]*N_obs), norm_wing_width, is_shared=True)
+            add_input('wing_angle', torch.tensor([0.0]*N_obs), norm_J_angle, optimizable=False, is_shared=True)
         
         # Von Kármán turbulence parameters
         add_input('r0', self.model.r0.detach().clone(), norm_r0, is_shared=True)
@@ -544,9 +587,11 @@ class PSFModelNFM:
                         add_input('chrom_defocus', torch.tensor([[0.0,]*N_wvl]*self.model.N_obs), norm_LO, optimizable=self.chrom_defocus, is_shared=True)
 
                     def phase_func(x, y):
+                        # y: chromatic defocus [N_obs, n_λ] of whatever wavelength grid is being simulated (sparse grid, or a batch of the full one)
                         defocus_mode_id = 1 # the index of defocus mode given that 0 is the "phase bump" mode coefficient
-                        coefs_chromatic = x.view(self.model.N_obs, self.LO_N_params).unsqueeze(1).repeat(1, N_wvl, 1) # Add a λ dimension
-                        coefs_chromatic[:, :, defocus_mode_id] += y.view(self.model.N_obs, N_wvl) # add chromatic defocus
+                        n_λ = y.shape[-1]
+                        coefs_chromatic = x.view(self.model.N_obs, self.LO_N_params).unsqueeze(1).repeat(1, n_λ, 1) # Add a λ dimension
+                        coefs_chromatic[:, :, defocus_mode_id] += y.view(self.model.N_obs, n_λ) # add chromatic defocus
                         return self.LO_basis(coefs_chromatic)
                     
                     self.phase_func = phase_func
@@ -597,6 +642,16 @@ class PSFModelNFM:
         return spline.evaluate(λ_grid).T
 
 
+    def _resolve_jitter(self, x_dict):
+        """ Map the wrapper's jitter inputs onto TipTorch's Jx, Jy, Jxy (in place): the isotropic J is cloned to both axes, the kernel angle
+        J_angle of the anisotropic kernel becomes Jxy. The kernel is built on the image-frame grid, so Jx / Jy stay along the image axes. """
+        if self.anisotropic_jitter:
+            x_dict['Jxy'] = x_dict['J_angle']
+        else:
+            x_dict['Jx'] = x_dict['J']
+            x_dict['Jy'] = x_dict['J']
+
+
     def forward(self, x_dict=None, src_ids=None, include_list=None, update_params=True):
         # TODO: add logic to limit the maximum number of simulated sources
         # TODO: pad individual inputs when simulating less sources than model.N_src
@@ -624,9 +679,7 @@ class PSFModelNFM:
                 if entry+'_ctrl' in x_dict:
                     x_dict[entry] = self.evaluate_splines(x_dict[entry+'_ctrl'], self.λ_sim_normed)
 
-        # Clone J entry to Jx and Jy
-        x_dict['Jx'] = x_dict['J']
-        x_dict['Jy'] = x_dict['J']
+        self._resolve_jitter(x_dict)
         
         # Create a per-layer wind profile assuming there is no wind outside the ground layer
         if 'wind_speed_single' in x_dict:
@@ -743,15 +796,22 @@ class PSFModelNFM:
         # ── 3. Build the fully-evaluated model inputs dict ─────────────────────────────
         x_dict = self.inputs_manager.to_dict()
         x_dict_λ_full = {}
+        # Chromatic defocus of the sparse grid, to restore the static OTF of the sparse grid at the end
+        chrom_defocus_sparse = self.evaluate_splines(x_dict['chrom_defocus_ctrl'], self.λ_sim_normed) if (self.chrom_defocus and 'chrom_defocus_ctrl' in x_dict) \
+                               else (x_dict.get('chrom_defocus') if self.chrom_defocus else None)
 
         for entry in self.polychromatic_params:
             if entry + '_ctrl' in x_dict:
                 x_dict_λ_full[entry] = self.evaluate_splines(x_dict[entry + '_ctrl'], self.λ_full_normed)
                 x_dict.pop(entry + '_ctrl')
 
-        x_dict_λ_full['Jx'] = x_dict_λ_full['J']
-        x_dict_λ_full['Jy'] = x_dict_λ_full['J']
-        x_dict_λ_full.pop('J')
+        # Jitter: chromatic entries live in x_dict_λ_full (evaluated on the full grid), achromatic ones (chrom_defocus regime) in x_dict
+        if self.anisotropic_jitter:
+            x_dict['Jxy'] = x_dict.pop('J_angle')
+        else:
+            J_holder = x_dict_λ_full if 'J' in x_dict_λ_full else x_dict
+            J_holder['Jx'] = J_holder['J']
+            J_holder['Jy'] = J_holder.pop('J')
 
         if 'wind_speed_single' in x_dict:
             x_dict['wind_speed'] = torch.nn.functional.pad(x_dict['wind_speed_single'].view(-1, 1), (0, self.model.N_L - 1))
@@ -761,8 +821,8 @@ class PSFModelNFM:
             x_dict['wind_dir'] = torch.nn.functional.pad(x_dict['wind_dir_single'].view(-1, 1), (0, self.model.N_L - 1))
             x_dict.pop('wind_dir_single')
 
-        chrom_defocus = x_dict['chrom_defocus'] if self.chrom_defocus else None
-        phase_        = self.phase_func(x_dict['LO_coefs'], chrom_defocus) if self.LO_NCPAs else None
+        # Static phase of the SPARSE grid (restored at the end); the full-grid batches get their own phase in the loop below
+        phase_ = self.phase_func(x_dict['LO_coefs'], chrom_defocus_sparse) if self.LO_NCPAs else None
 
         x_dict.update(x_dict_λ_full)
 

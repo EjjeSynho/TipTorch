@@ -1145,6 +1145,9 @@ class BalancedPSFLoss:
     touching the halo (STD-star fits: mse_weight = 1.8e7, the MSE term of the legacy loss, cuts the median |peak error|
     from 5.7 % to 4.3 % with the balanced loss value unchanged). A linear MAE term does not do this: it is dominated by
     the thousands of wing pixels and pulls the halo towards the legacy solution.
+
+    peak_weight adds peak_weight * ((max(model) / max(data) - 1)^2) per wavelength (within the central peak_box px): the peak pixel of a
+    seeing-dominated (blue) PSF is otherwise a flat direction of the loss (fits of equal loss differ by 10-20 % there).
     """
     def __init__(
         self,
@@ -1159,6 +1162,8 @@ class BalancedPSFLoss:
         match_background = True,
         bg_annulus       = (93.0, 98.0),
         mse_weight       = 0.0,
+        peak_weight      = 0.0,
+        peak_box         = 7,
     ):
         yy, xx = torch.meshgrid(torch.arange(H, device=device, dtype=torch.float32), torch.arange(W, device=device, dtype=torch.float32), indexing='ij')
         r = torch.hypot(yy - H // 2, xx - W // 2)
@@ -1173,6 +1178,8 @@ class BalancedPSFLoss:
         self.scale       = scale
         self.match_background = match_background
         self.mse_weight  = mse_weight
+        self.peak_weight = peak_weight
+        self.peak_box    = peak_box
 
 
     @torch.no_grad()
@@ -1202,6 +1209,9 @@ class BalancedPSFLoss:
         loss = self.pixel_map(PSF_data, PSF_pred).sum(dim=(-2, -1)) # [B, N_λ]
         if self.mse_weight > 0:
             loss = loss + self.mse_weight * (PSF_pred - PSF_data).pow(2).mean(dim=(-2, -1))
+        if self.peak_weight > 0:
+            H, W = PSF_data.shape[-2:]; h = self.peak_box // 2; s = np.s_[..., H // 2 - h: H // 2 + h + 1, W // 2 - h: W // 2 + h + 1]
+            loss = loss + self.peak_weight * (PSF_pred[s].amax(dim=(-2, -1)) / PSF_data[s].amax(dim=(-2, -1)) - 1).pow(2)
         return loss.mean(dim=-1) # [B]
 
 '''

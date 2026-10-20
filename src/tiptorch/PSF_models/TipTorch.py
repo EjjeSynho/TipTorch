@@ -228,6 +228,14 @@ class TipTorch(torch.nn.Module):
         self.Jx  = torch.ones (self.N_src, device=self.device)
         self.Jy  = torch.ones (self.N_src, device=self.device)
         self.Jxy = torch.zeros(self.N_src, device=self.device)
+
+        # One-dimensional wing of the PSF in the IMAGE frame (see WingKernel): applied by PSD2PSF only when use_wing is set. This block is
+        # re-run on grid / wavelength updates, so the switch and the exponent are kept once set (the values are re-set by every forward call)
+        self.use_wing   = getattr(self, 'use_wing', False)
+        self.wing_power = getattr(self, 'wing_power', 1.0)                        # exponent of the wing MTF: 1 = Lorentzian wing
+        self.wing_frac  = torch.zeros(self.N_src, self.N_wvl, device=self.device) # flux fraction in the wing, per wavelength
+        self.wing_width = torch.ones (self.N_src, device=self.device) * 5.0       # half-width of the wing [detector px], achromatic
+        self.wing_angle = torch.zeros(self.N_src, device=self.device)             # [deg], rotation of the wing axis from the image columns
         
         if self.PSD_include['Moffat']:
             self.amp   = torch.ones (self.N_src, device=self.device)*0.01 # Moffat amplitude [rad²]
@@ -1229,6 +1237,24 @@ class TipTorch(torch.nn.Module):
         return torch.exp(-0.5 * Djitter) #TODO: cover the Nyquist sampled case? But check maybe it is automatic, already?
     
 
+    def WingKernel(self, frac: torch.Tensor, width: torch.Tensor, angle: torch.Tensor):
+        """
+        MTF of a one-dimensional wing of the PSF along one image axis: (1 - f) + f * exp(-(2 pi w |nu|)^p), with nu the spatial frequency
+        [cycles / detector px] along the wing axis, f the flux fraction in the wing (per wavelength), w its half-width [px] and p the exponent
+        (p = 1: Lorentzian wing of HWHM w; p = 2: Gaussian). The axis is the image columns (the second image axis, V), rotated by `angle` [deg]
+        in the sense of JitterKernel. Like the jitter, it is built on the image-frame grid, so it does not turn with the pupil angle.
+        It models an instrument-frame spread (slicer / spectrograph) which an isotropic halo or a jitter cannot represent.
+        """
+        cos_theta = torch.cos( torch.deg2rad(angle) )
+        sin_theta = torch.sin( torch.deg2rad(angle) )
+        V_prime = -self.U * sin_theta + self.V * cos_theta
+        # U, V span [-1, 1] up to the Nyquist frequency sqrt(u_max) [cycles/mas]; x psInMas gives [cycles / detector px]
+        nu_px = V_prime.abs() * pdims(torch.sqrt(self.u_max) * self.psInMas, 2)
+        f = pdims(min_2d(frac), 2)
+        w = pdims(min_2d(width), 2)
+        return (1.0 - f) + f * torch.exp( -(2 * torch.pi * w * nu_px) ** self.wing_power )
+
+
     def NoiseVariance(self):
         """
         Compute WFS noise variance with fully vectorized implementation.
@@ -1440,16 +1466,17 @@ class TipTorch(torch.nn.Module):
             self.PSF_open_loop = self.PSD2PSF(PSD, OTF_static)
             return self.PSF_open_loop
         
-        # Otherwise, jitter must be muted since PSD2PSF always applies JitterKernel()
-        Jx_old, Jy_old, Jxy_old = self.Jx.clone(), self.Jy.clone(), self.Jxy.clone()
+        # Otherwise, jitter must be muted since PSD2PSF always applies JitterKernel() (the image-frame wing is muted with it)
+        Jx_old, Jy_old, Jxy_old, use_wing_old = self.Jx.clone(), self.Jy.clone(), self.Jxy.clone(), self.use_wing
 
         self.Jx  = torch.zeros_like(Jx_old)
         self.Jy  = torch.zeros_like(Jy_old)
         self.Jxy = torch.zeros_like(Jxy_old)
+        self.use_wing = False
 
         self.PSF_open_loop = self.PSD2PSF(PSD, OTF_static)
 
-        self.Jx, self.Jy, self.Jxy = Jx_old, Jy_old, Jxy_old
+        self.Jx, self.Jy, self.Jxy, self.use_wing = Jx_old, Jy_old, Jxy_old, use_wing_old
 
         return self.PSF_open_loop # [N_obs, N_wvl, N_pix, N_pix]
 
@@ -1610,6 +1637,8 @@ class TipTorch(torch.nn.Module):
         
         # Resulting combined OTF
         self.OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
+        if self.use_wing: # one-dimensional image-frame wing (unity at zero frequency, so the normalization below is unaffected)
+            self.OTF = self.OTF * self.WingKernel(self.wing_frac.abs(), self.wing_width.abs(), pdims(self.wing_angle, 2))
         # self.OTF = OTF_static
         # Index before abs(): the gradient of abs() is z/|z|, NaN where the OTF underflows to exactly zero (far wings at low r0),
         # and 0 * NaN from the indexing then poisons the whole batch in the backward pass

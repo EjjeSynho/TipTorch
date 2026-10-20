@@ -63,12 +63,21 @@ PSF_LOSS_CFG = {
     # alone 3.7 %). Not the full legacy loss: its MAE part is dominated by the wing pixels and pulls the halo to the legacy solution. 0 = off.
     # Changed from 0 to 1.8e7 on 2026-10-19: the fits in fitted_balanced / fitted_legacy predate it
     "mse_weight":       1.8e7,
+    # Per-wavelength peak term of the balanced loss (BalancedPSFLoss.peak_weight): the peak of a seeing-dominated blue PSF is a flat direction
+    # of the loss otherwise (equal-loss fits differ by 10-20 % there). 30-sample test, 2026-10-20: weight 3 halves the peak error (3.7 -> 2.5 %,
+    # bluest bins 4.2 -> 1.7 %, FWHM error 3.3 -> 1.6 %) for +1.4 % of the asinh + MSE loss, halo errors unchanged. 0 = off
+    "peak_weight":      3.0,
     # Weights of the MSE and MAE terms ('legacy' only)
     "w_MSE":            900.0,
     "w_MAE":            1.6,
     # Regularization weights of the LO NCPAs (both loss types): phase bump (1st LO coefficient) and the LO coefficients' amplitude / defocus sign
     "w_bump":           5e-5,
     "w_LO":             1e-7,
+    # Pull of the LO coefficients and of the wing fraction towards the dataset priors (medians over the sharp stars, fitted_priors.pickle made by
+    # STD_fitted_df.py / compute_fit_priors). Scaled by 1e3 for blurry PSFs, where these are not constrained by the data (see the blurry branch
+    # below): the pull then dominates and the values stay at the priors. Sharp PSFs feel only the base weights (0 = free)
+    "w_LO_prior":       0.0,
+    "w_wing_prior":     1e-2,
 }
 
 # Fit the derotated PSFs (config PupilAngle 0, the regime of the stored fits) or the raw frames, with the PSF model rotated to the header
@@ -81,11 +90,56 @@ DEROTATE_PSF = False
 # the nominal k_c = 1 / (2 x 0.22 m) instead
 APPLY_KC_CORRECTION = True
 
+# Chromatic blur and TT jitter kernel of the model (PSFModelNFM flags). CHROM_DEFOCUS: the chromatic part of the core blur is a chromatic
+# defocus term (spline over λ, added to the defocus coefficient of the LO NCPAs) and the jitter kernel is achromatic; otherwise the jitter
+# itself is chromatic (spline). ANISOTROPIC_JITTER: the kernel is (Jx, Jy) along its own axes rotated by J_angle [deg] in the IMAGE frame
+# (the kernel does not turn with the pupil angle), instead of one isotropic J. Introduced on 2026-10-20 for the detector-frame quadrupole
+# of the median fit residual (the data cores are elongated along the image x axis, which an isotropic kernel cannot follow); the fits before
+# that date are isotropic and chromatic-jitter fits (CHROM_DEFOCUS = ANISOTROPIC_JITTER = False).
+# 30-sample test (agents/execplans/anisotropic-jitter-execplan.md): the anisotropic kernel lowers the loss by ~10 % (Jy 18 mas along the columns
+# vs Jx 13 mas, J_angle ~0) at +0.5 % peak error, but does not remove the 3-8 px detector-frame quadrupole of the residual; the chromatic
+# defocus stays ~0 nm and costs 0.6-1.5 % of peak error vs the chromatic jitter. Both False = the isotropic chromatic jitter (J_ctrl) of the
+# fits before 2026-10-20. Adopted regime (user, 2026-10-20): anisotropic chromatic jitter (Jx_ctrl, Jy_ctrl, J_angle) without chromatic
+# defocus, together with the image-frame wing below (30-sample subset: loss 0.109 vs 0.150, |peak err| 3.9 % vs 4.4 %)
+CHROM_DEFOCUS      = False
+ANISOTROPIC_JITTER = True
+
+# One-dimensional wing of the PSF along the image columns (PSFModelNFM wing_kernel, TipTorch.WingKernel): the detector-frame halo excess of the
+# data (5-25 % brighter along the columns than along the rows from 3 to 35 px, growing to the red), which neither the pupil-frame PSDs nor a
+# jitter represent. Fitted: wing_frac (spline over λ) and wing_width [px]; the axis angle stays at 0 unless FIT_WING_ANGLE
+WING_KERNEL    = True
+FIT_WING_ANGLE = False
+# The wing fraction and width are degenerate along a valley (a ~1 px wing holding 10-40 % of the flux fits as well as a 30-50 px wing holding
+# a few %, and f > 1 gives an unphysical kernel): the fraction is kept in [0, 1] and the width in WING_WIDTH_BOUNDS by penalties, and the width
+# can be fixed at WING_WIDTH_PX (its initial value) with FIT_WING_WIDTH = False. The width is fixed by default (a dataset-wide wing, as it
+# will be in the calibrator): only the chromatic fraction is fitted per star, which removes the degeneracy
+FIT_WING_WIDTH    = False
+WING_WIDTH_PX     = 1.0    # initial (or fixed) half-width of the wing [px]
+WING_WIDTH_BOUNDS = (0.5, 20.0)
+
+# Sign convention of the static aberrations when the phase bump is suppressed. A PSF is invariant under the joint sign flip of all the EVEN
+# Zernike modes (defocus, astigmatisms; the odd ones, comas and trefoils, keep their sign), so without the bump (which breaks the symmetry
+# and makes the sign observable) the fit lands on either branch, and a penalty on defocus alone only pushes defocus to 0 and moves the content
+# into the astigmatisms. 'flip': after the fit, if defocus is negative, the even modes are reflected and the fit is re-run from there (the
+# mirror branch, same loss), 'penalty': a strong positivity penalty on defocus (bump weight), 'free': the weak w_LO penalty only.
+# Phase-bump stars (bump fitted) are never flipped: the data select the branch (the dataset shows both signs, 56 % positive).
+# DEFOCUS_INIT_NM: starting defocus of the bump-suppressed stars, on the positive side of the symmetric point 0 (30-sample test, 2026-10-20:
+# same loss as a start at 0 or -20 nm, fewest reflections and the best peak error, 3.7 % vs 4.0-4.1 %)
+DEFOCUS_SIGN    = 'flip'
+DEFOCUS_INIT_NM = 20.0
+
 warnings.filterwarnings("ignore")
 
 #% Initialize data sample
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
     psf_df = pickle.load(handle)
+
+# Dataset priors for the blurry PSFs (None: LO coefficients pulled to 0 and the wing fraction to its bootstrap curve, with a warning)
+FIT_PRIORS = load_fit_priors()
+if FIT_PRIORS is None:
+    warnings.warn(f'{FIT_PRIORS_FILE} not found: the blurry PSFs are fitted with LO coefficients pulled to 0 and the wing fraction to the built-in curve; '
+                  'run STD_fitted_df.py (compute_fit_priors) after a fit of the sharp stars to create it')
+WING_FRAC_PRIOR_DEFAULT = np.array([0.036, 0.068, 0.095, 0.129, 0.184]) # 2026-10-20, 25 sharp stars of the 30-sample subset, 1 px width, 5 nodes 475-935 nm
 
 psf_df = psf_df[psf_df['Corrupted']   == False]
 psf_df = psf_df[psf_df['Bad quality'] == False]
@@ -141,13 +195,23 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
         configs,
         multiple_obs    = True,
         LO_NCPAs        = True,
-        chrom_defocus   = False,
+        chrom_defocus   = CHROM_DEFOCUS,
+        anisotropic_jitter = ANISOTROPIC_JITTER,
+        wing_kernel     = WING_KERNEL,
         use_Moffat      = False,
         retain_PSDs     = True,
         Z_mode_max      = 9,
         N_spline_nodes  = 5,
         device          = device
     )
+
+    if WING_KERNEL:
+        PSF_model.inputs_manager['wing_width'][:] = WING_WIDTH_PX
+    # The blurry / Non-point flags are needed for the defocus start; they are also read again below for the regularization
+    _bump_suppressed_init = bool(psf_df.loc[id]['Bad quality']) or (bool(psf_df.loc[id]['Medium quality']) and not bool(psf_df.loc[id]['Good quality'])) or not bool(psf_df.loc[id]['Non-point'])
+    if PSF_model.LO_NCPAs and DEFOCUS_SIGN == 'flip' and _bump_suppressed_init:
+        PSF_model.inputs_manager['LO_coefs'][:, 1] = DEFOCUS_INIT_NM # start on the positive-defocus branch (see DEFOCUS_SIGN)
+    PSF_model.backup_manager = PSF_model.inputs_manager.copy()
 
     func = lambda x_: PSF_model( PSF_model.inputs_manager.unstack(x_) )
     PSF_1 = func(x0 := PSF_model.inputs_manager.stack() )
@@ -158,6 +222,7 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
     loss_cfg  = dict(PSF_LOSS_CFG)
     loss_type = loss_cfg.pop('type')
     w_MSE, w_MAE, w_bump, w_LO = (loss_cfg.pop(key) for key in ('w_MSE', 'w_MAE', 'w_bump', 'w_LO'))
+    w_LO_prior, w_wing_prior   = loss_cfg.pop('w_LO_prior', 0.0), loss_cfg.pop('w_wing_prior', 0.0)
     
     if loss_type == 'balanced':
         PSF_loss_balanced = BalancedPSFLoss(PSF_0.shape[-2], PSF_0.shape[-1], device, **loss_cfg)
@@ -205,6 +270,16 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
     suppress_bump = 1e3 if suppress_bump_flag else 1
     suppress_LO   = 1e3 if suppress_LO_flag   else 1
 
+    # Dataset priors of the parameters a blurry PSF does not constrain: the LO coefficients (not the bump, which is suppressed) and the wing
+    # fraction are pulled towards the medians of the sharp stars; the other poorly constrained ones (L0, wind speed, Cn2 profile) are not
+    # fitted at all for blurry PSFs and stay at the reduced-telemetry values of the config (see the include / exclude lists below)
+    def _prior(key, default):
+        if FIT_PRIORS is not None and key in FIT_PRIORS:
+            return torch.tensor(np.asarray(FIT_PRIORS[key], dtype=np.float32), device=device)
+        return None if default is None else torch.tensor(np.asarray(default, dtype=np.float32), device=device)
+    LO_prior   = _prior('LO_coefs', None) if PSF_model.LO_NCPAs else None
+    wing_prior = _prior('wing_frac_ctrl', WING_FRAC_PRIOR_DEFAULT) if PSF_model.wing_kernel else None
+
     grad_loss_fn = GradientLoss(p=1, reduction='mean')
     
     force_positive = lambda x: torch.clamp(-x, min=0).pow(2).mean()
@@ -230,6 +305,14 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
         
         # Also, force L0, r0, and wind speed to be positive to avoid unphysical values
         loss += force_positive(PSF_model.inputs_manager['r0'])
+        if PSF_model.wing_kernel: # keep the wing fraction in [0, 1] and the width within its bounds (see WING_WIDTH_BOUNDS)
+            wf = PSF_model.inputs_manager['wing_frac_ctrl' if PSF_model.use_splines else 'wing_frac']
+            ww = PSF_model.inputs_manager['wing_width']
+            loss += force_positive(wf) + force_positive(1.0 - wf) * 1e2
+            loss += (force_positive(ww - WING_WIDTH_BOUNDS[0]) + force_positive(WING_WIDTH_BOUNDS[1] - ww)) * 1e2
+            # Pull towards the dataset prior curve, dominant for blurry PSFs (the division by w undoes the overall weight below)
+            if wing_prior is not None and wf.shape[-1] == wing_prior.shape[-1]:
+                loss += (wf - wing_prior).pow(2).mean() * w_wing_prior * suppress_LO / 0.025
         if fit_outerscale:
             loss += force_positive(PSF_model.inputs_manager['L0'])
         if fit_wind_speed:
@@ -282,7 +365,14 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
             LO_loss = grad_loss_fn(PSF_model.OPD_func.unsqueeze(1)) * 5e-5
             
         elif isinstance(PSF_model.LO_basis, ZernikeBasis) or isinstance(PSF_model.LO_basis, ArbitraryBasis):
-            LO_loss = PSF_model.inputs_manager['LO_coefs'].pow(2).sum(-1).mean() * w_LO * suppress_LO
+            LO_coefs = PSF_model.inputs_manager['LO_coefs']
+            if suppress_LO_flag and LO_prior is not None and LO_coefs.shape[-1] == LO_prior.shape[-1]:
+                # Blurry PSF: the LO coefficients (bump excluded, see below) are pulled towards the dataset medians instead of 0
+                LO_loss = (LO_coefs[:, 1:] - LO_prior[1:]).pow(2).sum(-1).mean() * (w_LO * suppress_LO + w_LO_prior * suppress_LO)
+            else:
+                LO_loss = LO_coefs.pow(2).sum(-1).mean() * w_LO * suppress_LO
+                if LO_prior is not None and w_LO_prior > 0 and LO_coefs.shape[-1] == LO_prior.shape[-1]:
+                    LO_loss += (LO_coefs[:, 1:] - LO_prior[1:]).pow(2).sum(-1).mean() * w_LO_prior
             # Constraint to enforce first element of LO_coefs to be positive
             phase_bump = PSF_model.inputs_manager['LO_coefs'][:, 0]
             phase_bump_positive   = force_positive(phase_bump) * w_bump * suppress_bump
@@ -290,8 +380,12 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
             # absorb other errors, and the fitted bump goes into the calibrator training (re-attached per sample) while the
             # calibrator bundles predict 0 (bump 1 costs ~40 % of a typical fit loss: the fitted bumps of these PSFs end up < ~0.1)
             phase_bump_penalty    = phase_bump.pow(2).mean() * w_bump * suppress_bump if suppress_bump_flag else 0.0
-            # Force defocus to be positive to mitigate sign ambiguity
-            first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 2]) * w_LO * suppress_LO
+            # Force defocus to be positive to mitigate sign ambiguity. The composite LO basis is [phase bump, defocus, astig, astig, coma, ...]
+            # (ZernikeBasis starts at Noll 2 and the wrapper takes its modes from index 2 on), so defocus is index 1; until 2026-10-20 the
+            # penalty acted on index 2 (astigmatism) and the defocus sign was free. With the phase bump suppressed the sign of defocus is a
+            # pure convention (the PSF is symmetric under the flip), so the penalty gets the bump weight to actually select the positive branch
+            # (w_LO alone, 1e-7, lets -70 nm survive at a cost of 5e-4); with a fitted bump the sign is identifiable and the pull stays weak
+            first_defocus_penalty = force_positive(PSF_model.inputs_manager['LO_coefs'][:, 1]) * ((w_bump if DEFOCUS_SIGN == 'penalty' else w_LO) if suppress_bump_flag else w_LO) * suppress_LO
 
             LO_loss += phase_bump_positive + phase_bump_penalty + first_defocus_penalty
         
@@ -345,7 +439,12 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
 
         return result.x, func(result.x), OPD_map, success
 
-    include_general = ['r0', 'dn'] + \
+    # Achromatic jitter entries (the chromatic ones, J_ctrl / Jx_ctrl / Jy_ctrl / chrom_defocus_ctrl, come with the polychromatic parameters)
+    jitter_achromatic = (PSF_model.jitter_params if PSF_model.chrom_defocus else []) + (['J_angle'] if PSF_model.anisotropic_jitter else [])
+    # Achromatic wing entries (wing_frac_ctrl comes with the polychromatic parameters)
+    wing_achromatic = ((['wing_width'] if FIT_WING_WIDTH else []) + (['wing_angle'] if FIT_WING_ANGLE else [])) if PSF_model.wing_kernel else []
+
+    include_general = ['r0', 'dn'] + jitter_achromatic + wing_achromatic + \
                       (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
                       ([x+'_ctrl' for x in PSF_model.polychromatic_params if x != 'F_norm_λ'] if PSF_model.use_splines else [x for x in PSF_model.polychromatic_params if x != 'F_norm_λ']) + \
                       (['L0'] if fit_outerscale else []) + \
@@ -354,7 +453,13 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
                       (['Cn2_weights'] if fit_Cn2_profile else []) + \
                       (['amp', 'alpha', 'b'] if PSF_model.use_Moffat else [])
 
-    exclude_general = ['ratio', 'theta', 'beta'] if PSF_model.use_Moffat else []
+    # NOTE: set_optimizable only touches the listed names, so an input created optimizable (wing_width, L0, wind_speed_single) stays fitted unless
+    # it is excluded explicitly
+    # Blurry PSFs: L0 and the wind speed are not fitted and stay at the reduced-telemetry values of the config (they are created optimizable, so
+    # leaving them out of include_general is not enough)
+    exclude_general = (['ratio', 'theta', 'beta'] if PSF_model.use_Moffat else []) + \
+                      (['wing_width'] if (PSF_model.wing_kernel and not FIT_WING_WIDTH) else []) + \
+                      ([] if fit_outerscale else ['L0']) + ([] if fit_wind_speed else ['wind_speed_single'])
 
     include_general, exclude_general = set(include_general), set(exclude_general)
 
@@ -370,6 +475,21 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
 
     loss_val = loss_fn(x0).item()
 
+    # Sign convention of the even static modes (see DEFOCUS_SIGN): reflect the even group and re-fit when defocus came out negative
+    even_flip = False
+    if DEFOCUS_SIGN == 'flip' and suppress_bump_flag and PSF_model.LO_NCPAs and float(PSF_model.inputs_manager['LO_coefs'][0, 1]) < 0:
+        even_ids = even_zernike_composite_ids(PSF_model.Z_mode_max)
+        LO_orig  = PSF_model.inputs_manager['LO_coefs'].detach().clone()
+        PSF_model.inputs_manager['LO_coefs'][:, even_ids] = -LO_orig[:, even_ids]
+        x_flip, PSF_flip, OPD_flip, _ = minimize_params(loss_fn, include_general, exclude_general, 100, verbose=False)
+        loss_flip = loss_fn(x_flip).item()
+        if loss_flip <= loss_val * 1.005: # the mirror branch (equal loss up to the asymmetries of the pupil / kernels)
+            x0, PSF_1, OPD_map, loss_val, even_flip = x_flip, PSF_flip, OPD_flip, loss_flip, True
+        else:
+            print(f"Sample {id}: the reflected even modes cost {100 * (loss_flip / loss_val - 1):.1f} % of loss, keeping the negative-defocus branch")
+            PSF_model.inputs_manager['LO_coefs'][:] = LO_orig
+            _ = PSF_model.inputs_manager.unstack(x0, include_all=True, update=True)
+
     fitted_values = to_store(PSF_model.inputs_manager.unstack(x0, include_all=True, update=True))
 
     # Compute diffraction-limited PSF for SR calculation
@@ -381,8 +501,18 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None):
     config_manager.Convert(config_dict, framework='numpy')
 
     save_data = {
-        'comments':    f'NFM fitting with re-normalized dn, {loss_type} PSF loss, phase bump pulled to 0 unless flagged "Non-point"',
+        'comments':    f'NFM fitting with re-normalized dn, {loss_type} PSF loss, phase bump pulled to 0 unless flagged "Non-point", '
+                       f'{"chromatic defocus + achromatic" if CHROM_DEFOCUS else "chromatic"} {"anisotropic (Jx, Jy, J_angle)" if ANISOTROPIC_JITTER else "isotropic"} jitter'
+                       f'{", image-frame wing (wing_frac, wing_width)" if WING_KERNEL else ""}',
         'loss config': PSF_LOSS_CFG,
+        'chrom_defocus':      bool(CHROM_DEFOCUS),
+        'anisotropic_jitter': bool(ANISOTROPIC_JITTER),
+        'wing_kernel':        bool(WING_KERNEL),
+        'wing width fitted':  bool(FIT_WING_WIDTH),
+        'blurry':             bool(blurry_PSF_flag), # LO coefficients and wing fraction pulled to the dataset priors, L0 / wind speed / Cn2 at the config values
+        'defocus sign':       DEFOCUS_SIGN,
+        'even modes flipped': bool(even_flip),
+        'priors':             None if FIT_PRIORS is None else {k: (np.asarray(v).tolist() if isinstance(v, np.ndarray) else v) for k, v in FIT_PRIORS.items()},
         'bump suppressed': bool(suppress_bump_flag),
         'k_c fraction': kc_fraction, # model k_c relative to the nominal one (1.0 unless the sample is flagged 'k_c mismatch')
         'k_c group':    kc_group,
@@ -440,7 +570,8 @@ if __name__ == '__main__':
     ids = good_ids[good_ids.index(start_id):good_ids.index(end_id) + 1]
 
     print(f"Device: {device} | IDs {start_id}..{end_id} ({len(ids)} samples) | output: {MUSE_FITTING_FOLDER} | "
-          f"derotated PSFs: {DEROTATE_PSF} | k_c correction of the flagged samples: {APPLY_KC_CORRECTION}")
+          f"derotated PSFs: {DEROTATE_PSF} | k_c correction of the flagged samples: {APPLY_KC_CORRECTION} | "
+          f"chromatic defocus: {CHROM_DEFOCUS} | anisotropic jitter: {ANISOTROPIC_JITTER} | wing kernel: {WING_KERNEL}")
 
     for id in ids:
         try:

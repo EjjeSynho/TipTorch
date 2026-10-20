@@ -922,3 +922,72 @@ def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_pr
         print(f'Dataset cache saved -> {out_path} ({len(good_ids)} samples, {len(bad_ids)} failed)')
    
     return good_ids, bad_ids
+
+
+# ----------------------------------------------------------------------------------------------------------------------------------------------
+# Dataset-level priors of the fitted parameters that are poorly constrained by a blurry PSF (see STD_fitter.py): the per-sample fits of the
+# blurry stars pull these towards the medians of the sharp stars instead of fitting them freely (the phase bump is pulled to 0 instead).
+# ----------------------------------------------------------------------------------------------------------------------------------------------
+FIT_PRIORS_FILE = STD_FOLDER / 'fitted_priors.pickle'
+FIT_PRIOR_KEYS  = ['LO_coefs', 'wing_frac_ctrl', 'Jx_ctrl', 'Jy_ctrl', 'J_ctrl', 'J_angle']
+
+def blurry_PSF_mask(muse_df):
+    """ The 'blurry' class of STD_fitter.py: bad quality, or medium quality without the good-quality flag. """
+    return muse_df['Bad quality'].astype(bool) | (muse_df['Medium quality'].astype(bool) & ~muse_df['Good quality'].astype(bool))
+
+
+def compute_fit_priors(fit_folder, muse_df, out_path=FIT_PRIORS_FILE, keys=FIT_PRIOR_KEYS, store=True, verbose=True):
+    """
+    Medians over the SHARP stars (not blurry, not corrupted) of the fitted values `keys` found in the pickles of `fit_folder`.
+    The phase bump (LO_coefs[0]) is set to 0: it is suppressed, not pinned. Returns the dict {key: median array, 'source': ..., 'N': ...}
+    and stores it as `out_path` (read by STD_fitter.py through load_fit_priors).
+    """
+    fit_folder = Path(fit_folder)
+    blurry = blurry_PSF_mask(muse_df)
+    values = {k: [] for k in keys}
+    N = 0
+    for f in sorted(fit_folder.glob('*.pickle'), key=lambda p: int(p.stem)):
+        id = int(f.stem)
+        if id not in muse_df.index or bool(blurry.loc[id]) or bool(muse_df.loc[id, 'Corrupted']):
+            continue
+        with open(f, 'rb') as handle:
+            d = pickle.load(handle)
+        for k in keys:
+            if k in d:
+                values[k].append(np.asarray(d[k], dtype=float).ravel())
+        N += 1
+    priors = {k: np.median(np.stack(v), axis=0) for k, v in values.items() if len(v)}
+    if 'LO_coefs' in priors:
+        priors['LO_coefs'][0] = 0.0
+    priors['source'] = str(fit_folder)
+    priors['N'] = N
+    if verbose:
+        print(f"Fit priors from {N} sharp stars of {fit_folder}: " + ', '.join(f'{k} {np.round(v, 3).tolist()}' for k, v in priors.items() if isinstance(v, np.ndarray)))
+    if store:
+        with open(out_path, 'wb') as handle:
+            pickle.dump(priors, handle)
+        if verbose:
+            print(f'Stored at {out_path}')
+    return priors
+
+
+def load_fit_priors(path=FIT_PRIORS_FILE):
+    """ The priors stored by compute_fit_priors, or None when the file does not exist. """
+    path = Path(path)
+    if not path.exists():
+        return None
+    with open(path, 'rb') as handle:
+        return pickle.load(handle)
+
+
+def even_zernike_composite_ids(Z_mode_max):
+    """
+    Indices, in the composite LO basis [bump, Noll 4, Noll 5, ..., Noll Z_mode_max + 1], of the modes with an even radial order n (defocus,
+    astigmatisms, spherical, ...): the ones whose joint sign flip leaves the PSF invariant (OPD(x) -> -OPD(-x) symmetry of a centro-symmetric pupil).
+    """
+    ids = []
+    for k, j in enumerate(range(4, Z_mode_max + 2), start=1): # composite index k holds Noll index j
+        n = int(np.ceil((-3 + np.sqrt(9 + 8 * (j - 1))) / 2)) # radial order of Noll index j
+        if n % 2 == 0:
+            ids.append(k)
+    return ids

@@ -1159,7 +1159,8 @@ class MUSEObservation:
         # Constraint to enforce first element of LO_coefs to be positive
         phase_bump_positive = self.force_positive_coef(self.PSF_model.inputs_manager['LO_coefs'][:, 0]) * fit_weights.phase_bump
         # Force defocus to be positive to mitigate sign ambiguity
-        first_defocus_penalty = self.force_positive_coef(self.PSF_model.inputs_manager['LO_coefs'][:, 2]) * fit_weights.LO  #NOTE: won't work with the chromatic defocus
+        # Defocus is index 1 of the composite LO basis [bump, defocus, astig, ...] (index 2, astigmatism, was penalized until 2026-10-20)
+        first_defocus_penalty = self.force_positive_coef(self.PSF_model.inputs_manager['LO_coefs'][:, 1]) * fit_weights.LO  #NOTE: won't work with the chromatic defocus
         # Final composite loss
         return LO_loss + phase_bump_positive + first_defocus_penalty
 

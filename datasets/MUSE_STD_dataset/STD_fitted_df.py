@@ -77,7 +77,9 @@ with open(fitted_samples_folder / files[0], 'rb') as handle:
 
 df_relevant_entries = [
     'F', 'J', 'dx', 'dy', 'bg', 'chrom_defocus',
-    'bg_ctrl', 'F_ctrl', 'dx_ctrl', 'dy_ctrl', 'J_ctrl', 'chrom_defocus_ctrl',
+    'Jx', 'Jy', 'J_angle', # anisotropic achromatic jitter (STD_fitter.py ANISOTROPIC_JITTER with CHROM_DEFOCUS), or isotropic achromatic 'J'
+    'wing_frac', 'wing_width', 'wing_angle', # image-frame wing (STD_fitter.py WING_KERNEL)
+    'bg_ctrl', 'F_ctrl', 'dx_ctrl', 'dy_ctrl', 'J_ctrl', 'Jx_ctrl', 'Jy_ctrl', 'chrom_defocus_ctrl', 'wing_frac_ctrl',
     'LO_coefs',
     'Cn2_weights',
     'r0', 'dn', 'wind_speed_single', 'L0',
@@ -142,7 +144,9 @@ with open(fsave := (STD_FOLDER / 'MUSE_fitted_images_data.pickle'), 'wb') as han
 #%%
 singular_dict = {}
 singular_entries = list( set([
-    'r0', 'dn', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta', 'L0', 'wind_speed_single'
+    'r0', 'dn', 'Jxy', 'amp', 'b', 'alpha', 'beta', 'ratio', 'theta', 'L0', 'wind_speed_single',
+    'J', 'Jx', 'Jy', 'J_angle', # achromatic jitter of the chromatic-defocus fits ('J' is absent from the chromatic-jitter fits, which store J_ctrl)
+    'wing_width', 'wing_angle'
 ]).intersection( df_relevant_entries) )
 
 for key in singular_entries:
@@ -150,7 +154,7 @@ for key in singular_entries:
 
 spline_entries = [entry for entry in df_relevant_entries if entry.endswith('_ctrl')]
 
-N_wvl_ctrl = fitted_dict_raw['J_ctrl'][0].shape[-1] # number of spline points
+N_wvl_ctrl = fitted_dict_raw['F_ctrl'][0].shape[-1] # number of spline points
 λ_ctrl = np.linspace(0, 1, N_wvl_ctrl) # normalized wavelenths space ∈ [0, 1]
 
 wavelengths_nodes = norm_wvl.inverse(λ_ctrl)*1e9 # wavelengths at the spline control points in [nm]
@@ -234,7 +238,12 @@ def make_Cn2_weights_dataset(data):
 #%
 singular_df = make_singulars_dataset(singular_dict)
 
-J_df  = make_polychrome_dataset_spline(fitted_dict_raw, 'J')
+# Chromatic jitter (J_ctrl) or chromatic defocus (chrom_defocus_ctrl): whichever the fits hold; the achromatic jitter entries are singulars
+J_df    = make_polychrome_dataset_spline(fitted_dict_raw, 'J')             if 'J_ctrl'             in spline_entries else None
+Jx_df   = make_polychrome_dataset_spline(fitted_dict_raw, 'Jx')            if 'Jx_ctrl'            in spline_entries else None
+Jy_df   = make_polychrome_dataset_spline(fitted_dict_raw, 'Jy')            if 'Jy_ctrl'            in spline_entries else None
+cdef_df = make_polychrome_dataset_spline(fitted_dict_raw, 'chrom_defocus') if 'chrom_defocus_ctrl' in spline_entries else None
+wing_df = make_polychrome_dataset_spline(fitted_dict_raw, 'wing_frac')     if 'wing_frac_ctrl'     in spline_entries else None
 dx_df = make_polychrome_dataset_spline(fitted_dict_raw, 'dx')
 dy_df = make_polychrome_dataset_spline(fitted_dict_raw, 'dy')
 bg_df = make_polychrome_dataset_spline(fitted_dict_raw, 'bg')
@@ -261,7 +270,14 @@ FWHM_fit_df  = FWHM_fit_df.apply(np.sqrt)
 FWHM_data_df = FWHM_data_df.apply(np.sqrt)
 
 # Postprocess some values
-J_df = J_df.abs()
+for _df in (J_df, Jx_df, Jy_df):
+    if _df is not None:
+        _df[:] = _df.abs()
+for _col in ('J', 'Jx', 'Jy', 'wing_width'):
+    if _col in singular_df.columns:
+        singular_df[_col] = singular_df[_col].abs()
+if wing_df is not None:
+    wing_df[:] = wing_df.abs()
 if 'alpha' in singular_df.columns:
     singular_df['alpha'] = singular_df['alpha'].apply(lambda x: np.abs(x))
 
@@ -278,15 +294,19 @@ def collapse_dataframe_to_lists(df, name):
 
 to_collapse = [
     (F_df,  'F'),
-    (J_df,  'J'),
     (dx_df, 'dx'),
     (dy_df, 'dy'),
     (LO_df, 'LO_coefs'),
     (bg_df, 'bg'),
     (Cn2_w_df, 'Cn2_weights')
-]
+] + [(df_, name) for df_, name in [(J_df, 'J'), (Jx_df, 'Jx'), (Jy_df, 'Jy'), (cdef_df, 'chrom_defocus'), (wing_df, 'wing_frac')] if df_ is not None]
 fitted_values_df = pd.concat([collapse_dataframe_to_lists(df, name) for df, name in to_collapse] + [singular_df], axis=1)
 
+
+# Dataset-level priors of the poorly constrained parameters (medians over the sharp stars), used by STD_fitter.py for the blurry PSFs
+from STD_dataset_utils import compute_fit_priors
+with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
+    _ = compute_fit_priors(fitted_samples_folder, pickle.load(handle))
 
 # Store dataframes
 with open(STD_FOLDER / 'muse_fitted_df.pickle', 'wb') as handle:
@@ -356,13 +376,17 @@ def plot_spline_param_distribution(df, wavelengths, title=''):
 
 
 #%%
-plot_param_histograms_wvls(J_df, 'J')
+for _df, _name in [(J_df, 'J'), (Jx_df, 'Jx'), (Jy_df, 'Jy'), (cdef_df, 'chromatic defocus'), (wing_df, 'wing fraction')]:
+    if _df is not None:
+        plot_param_histograms_wvls(_df, _name)
 #%%
 plot_param_histograms_wvls(LO_df, 'LO_coefs')
 #%%
 plot_param_histograms_singular(singular_df)
 #%%
-plot_spline_param_distribution(J_df, norm_wvl.inverse(λ_ctrl)*1e9, title='J distribution')
+for _df, _name in [(J_df, 'J'), (Jx_df, 'Jx'), (Jy_df, 'Jy'), (cdef_df, 'chromatic defocus'), (wing_df, 'wing fraction')]:
+    if _df is not None:
+        plot_spline_param_distribution(_df, norm_wvl.inverse(λ_ctrl)*1e9, title=f'{_name} distribution')
 #%%
 print("LO NCPAs coefs stats:")
 print(LO_df.describe().T)
