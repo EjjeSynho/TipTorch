@@ -33,7 +33,10 @@
     "use_Moffat": false,
     "retain_PSDs": false,
     "N_spline_nodes": 5,
-    "Z_mode_max": 9
+    "Z_mode_max": 9,
+    "fixed_from_fits": [
+      "J_angle"
+    ]
   },
   "calibrator": {
     "type": "direct",

@@ -51,7 +51,7 @@ for p in (REPO_ROOT, REPO_ROOT / 'machine_learning', REPO_ROOT / 'development'):
 from tiptorch._config import DATA_FOLDER, WEIGHTS_FOLDER, default_device, project_settings
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
-from calibrators.NFM_calibrator import NFMCalibrator, release_gpu_memory
+from calibrators.NFM_calibrator import NFMCalibrator, release_gpu_memory, load_NFM_calibrator
 from calibrators.ETC_calibrator import ETCCalibrator, PREDICTORS, etc_table_from_stars
 
 from tools import tiptop_env  # noqa: F401
@@ -278,7 +278,7 @@ if __name__ == '__main__':
         sys.exit(0)
 
     cfg, meta, bundle_path = load_calibrator_setup(args.config)
-    calibrator = NFMCalibrator(bundle_path, device=default_device)
+    calibrator = load_NFM_calibrator(bundle_path, device=default_device)
     configs, telemetry_scaled, sample_ids = load_dataset_templates()
     if list(telemetry_scaled.columns) != list(calibrator.features):
         raise ValueError('Dataset telemetry features do not match the calibrator bundle.')

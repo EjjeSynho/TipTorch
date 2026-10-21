@@ -297,6 +297,8 @@ def release_gpu_memory(sync=False):
 
 
 class NFMCalibrator():
+    bundle_type = 'direct' # the calibrator_type of the bundles this class loads (see load_NFM_calibrator)
+
     def __init__(
         self,
         checkpoint_path,
@@ -331,10 +333,17 @@ class NFMCalibrator():
         self.Cn2_grid    = Cn2Grid.from_state_dict(state['Cn2_grid']) if state.get('Cn2_grid') is not None else None
         self.Cn2_binning = state.get('Cn2_binning', 'grid' if self.Cn2_grid is not None else 'kmeans')
 
+        # A factor bundle loaded with the base class would return the neutral values of the normalization for every parameter (its
+        # network outputs are corrections, see NFMFactorCalibrator): use load_NFM_calibrator, which picks the class from the bundle
+        if state.get('calibrator_type', 'direct') != self.bundle_type:
+            raise TypeError(f"{type(self).__name__} cannot load a '{state.get('calibrator_type')}' calibrator bundle ({Path(checkpoint_path).name}): "
+                            "use load_NFM_calibrator(bundle_path, device), which selects NFMCalibrator / NFMFactorCalibrator from the bundle")
+
         # Aux params
         self.LO_modes_max   = state.get('LO_modes_max', None)
         self.N_spline_nodes = state.get('N_spline_nodes', None)
         self.model_flags    = state.get('model_flags', None) # None: bundle from before the anisotropic jitter / wing kernel (both False then)
+        self.fixed_inputs   = state.get('fixed_inputs', {})  # {key: tensor [1, ...]}, see fixed_inputs()
 
     @staticmethod
     def _tree_to_cpu(obj):
@@ -428,6 +437,13 @@ class NFMCalibrator():
     def _apply_calibration(self, x_dict_pred: dict, PSF_model) -> None:
         """Adapt a calibrator prediction and apply it to a PSF model."""
         x_dict_adapted = self._adapt_to_PSF_model(x_dict_pred, PSF_model)
+        # The kept fixed inputs of the training (J_angle, wing widths / angle) are dataset-wide values: set them in the PSF model as well
+        names = PSF_model.inputs_manager.get_names(optimizable_only=False)
+        for key, val in self.fixed_inputs.items():
+            if key in names:
+                cur = PSF_model.inputs_manager[key]
+                v   = torch.as_tensor(val, dtype=cur.dtype, device=cur.device).reshape(1, -1)
+                x_dict_adapted[key] = (v.reshape(-1)[:1].expand(cur.shape[0]) if cur.dim() == 1 else v.expand(cur.shape[0], -1).reshape(cur.shape)).clone()
         PSF_model.update_manager_params(x_dict_adapted)
         _ = PSF_model()
 
@@ -600,6 +616,14 @@ def model_flags(PSF_model) -> dict:
     return flags
 
 
+def fixed_inputs(PSF_model) -> dict:
+    """ Values of the kept fixed inputs (FIXED_INPUTS_KEPT, one value per key: they are dataset-wide) of a PSFModelNFM, as {key: tensor [1, ...]}.
+    Stored in the calibrator bundles and re-applied by NFMCalibrator to the PSF models it calibrates (e.g. J_angle set to the fitted median). """
+    names = PSF_model.inputs_manager.get_names(optimizable_only=False)
+    return {k: PSF_model.inputs_manager[k][:1].detach().cpu().clone() for k in FIXED_INPUTS_KEPT
+            if k in names and not PSF_model.inputs_manager.is_optimizable(k)}
+
+
 def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 0, **trainer_overrides):
     """
     PSF model, calibrator network, outputs transformer and trainer from a training config (the "model", "calibrator", "trainer",
@@ -632,6 +656,27 @@ def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 
                 PSF_model.inputs_manager.delete(key)
         except Exception:
             pass
+
+    # Kept fixed inputs set to the training-set median of the fits ("fixed_from_fits" of the model section, e.g. J_angle: the fitter fits the
+    # angle of the jitter kernel per star, the calibrator holds one dataset-wide value, 0 otherwise). The value goes into the bundle (fixed_inputs)
+    train_idx = trainer_overrides.get('train_idx')
+    train_idx = default_split(dataset)[0] if train_idx is None else np.asarray(train_idx, dtype=int)
+    names     = PSF_model.inputs_manager.get_names(optimizable_only=False)
+    for key in cfg['model'].get('fixed_from_fits', []):
+        if key not in FIXED_INPUTS_KEPT or key not in cfg['fixed_params']:
+            raise ValueError(f"fixed_from_fits: '{key}' must be one of the kept fixed inputs {FIXED_INPUTS_KEPT} and listed in fixed_params")
+        if key not in names:
+            logger.warning(f"fixed_from_fits: the PSF model has no input '{key}' in this regime, skipped")
+            continue
+        fits = [dataset.fitted_vals[int(i)] for i in train_idx if key in dataset.fitted_vals[int(i)]]
+        if not fits:
+            logger.warning(f"fixed_from_fits: the fits carry no '{key}', the model keeps its default value")
+            continue
+        median = torch.stack([torch.as_tensor(np.asarray(f[key], dtype=np.float32)).reshape(-1) for f in fits]).median(dim=0).values
+        cur    = PSF_model.inputs_manager[key]
+        with torch.no_grad():
+            cur[:] = (median[0] if median.numel() == 1 else median.view(1, -1).expand(cur.shape[0], -1).reshape(cur.shape)).to(device=cur.device, dtype=cur.dtype)
+        logger.info(f"fixed_from_fits: {key} = {np.round(median.numpy(), 3).tolist()} (median of {len(fits)} training fits)")
 
     if PSF_model.use_Moffat:
         PSF_model.inputs_manager.delete('theta')
@@ -1621,6 +1666,7 @@ class NFMCalibratorTrainer:
             'LO_modes_max':         self.PSF_model.Z_mode_max,
             'N_spline_nodes':       getattr(self.PSF_model, 'N_wvl_ctrl', None),
             'model_flags':          model_flags(self.PSF_model), # jitter / wing regime of the PSF model the calibrator was trained with
+            'fixed_inputs':         fixed_inputs(self.PSF_model), # kept fixed inputs (J_angle, wing widths / angle), re-applied at calibration
             'predict_phase_bump':   False,
             'loss_cfg':             self.loss_cfg,
             'calibrator_type':      self.calibrator_type,
@@ -1802,6 +1848,7 @@ class FactorParameterization:
 
 class NFMFactorCalibrator(NFMCalibrator):
     """NFMCalibrator for a factor-calibrator bundle: the network outputs are corrections, see FactorParameterization."""
+    bundle_type = 'factor'
     def __init__(self, checkpoint_path, device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
         super().__init__(checkpoint_path, device)
         state = self._bundle_state

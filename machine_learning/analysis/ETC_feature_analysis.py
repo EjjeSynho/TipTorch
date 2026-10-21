@@ -39,7 +39,7 @@ for p in (REPO_ROOT, REPO_ROOT / 'machine_learning', REPO_ROOT / 'development'):
     sys.path.insert(0, str(p))
 
 from tiptorch._config import WEIGHTS_FOLDER, default_device
-from calibrators.NFM_calibrator import NFMDataset, NFMCalibrator
+from calibrators.NFM_calibrator import NFMDataset, NFMCalibrator, load_NFM_calibrator
 from calibrators.ETC_calibrator import ETC_INPUTS, PUPIL_PATH
 from calibrators import ETC_validation_utils as V
 
@@ -60,7 +60,7 @@ def psfr_calibrator():
     with open(REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'NFM_calibrator_config.json') as f:
         cfg = json.load(f)
     with open(WEIGHTS_FOLDER / cfg['weights_subdir'] / f'{cfg["name"]}_meta.json') as f:
-        return NFMCalibrator(json.load(f)['bundle_path'], device=default_device)
+        return load_NFM_calibrator(json.load(f)['bundle_path'], device=default_device)
 
 
 def predictability(Z, features, groups_cv):
