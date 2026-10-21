@@ -35,11 +35,10 @@ from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gp
 #   name, weights_subdir      run name and weights folder (WEIGHTS_FOLDER / weights_subdir / name_*): checkpoint, split, meta, bundle
 #   derotated_PSFs            derotated STD-star cache (configs with PupilAngle 0) or the raw-frame cache (*_raw.pt, the PSF model rotates per OB);
 #                             must match the regime of the fits (STD_fitter.py DEROTATE_PSF) and of the dataset cache (create_STD_dataset.py)
-#   model                     PSF model (build_PSF_model). The jitter / wing regime must be the one of the fits the pretraining targets come from
-#                             (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL, WING_WIDTH_PX, WING_WIDTH_T_PX, WING_POWER): since 2026-10-20 the
-#                             fits use the anisotropic chromatic jitter (Jx_ctrl, Jy_ctrl, J_angle) and the image-frame wing (wing_frac_ctrl per
-#                             star, dataset-wide wing_width_px x wing_width_t_px widths, wing_power exponent of the wing MTF). fixed_from_fits:
-#                             kept fixed inputs (see fixed_params) set to the training-set median of the fits instead of their defaults (J_angle)
+#   model                     PSF model (build_PSF_model). The jitter regime must be the one of the fits the pretraining targets come from
+#                             (STD_fitter.py: ANISOTROPIC_JITTER): since 2026-10-20 the fits use the anisotropic chromatic jitter (Jx_ctrl,
+#                             Jy_ctrl, J_angle). fixed_from_fits: kept fixed inputs (see fixed_params) set to the training-set median of the
+#                             fits instead of their defaults (J_angle)
 #   calibrator                "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors: factor_keys predicted as
 #                             log-factors on the priors, const_keys dataset-level constants, the rest predicted directly; Cn2_mix / Cn2_targets /
 #                             Cn2_offset for the grid Cn2 features), hidden_dim, dropout_rate
@@ -50,8 +49,8 @@ from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gp
 #                             25-35 % fainter than the data (ratio 0.74 at 40-60 px, 0.64 at 60-85 px) and fitting it there degrades the AO-corrected
 #                             halo and the core (analysis/analyze_halo_deficit.py, 2026-10-14). "legacy" is the linear MSE + MAE loss used before.
 #                             fit_reg_weight: parameter-space distance to the per-sample fits; shrink_weight (factor only): shrinkage to the prior
-#   fixed_params              not predicted. J_angle and the wing widths / angle are kept in the model at their initial values (FIXED_INPUTS_KEPT in
-#                             NFM_calibrator.py), the others are removed from the model inputs
+#   fixed_params              not predicted. J_angle is kept in the model at its initial value (FIXED_INPUTS_KEPT in NFM_calibrator.py), the
+#                             others are removed from the model inputs
 
 #   tune, kfold*, difficulty* optional fine-tuning of a few parameters and the k-fold difficulty weighting; max_train_samples: data ablation
 

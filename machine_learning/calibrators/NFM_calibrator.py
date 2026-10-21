@@ -196,9 +196,9 @@ class NFMDataset(Dataset):
         self.kc_fraction = data.get('kc_fraction')
         self.kc_group    = data.get('kc_group')
 
-        # The fitted table stores the spline control values without the '_ctrl' suffix: J (isotropic jitter), Jx / Jy (anisotropic jitter)
-        # and wing_frac (image-frame wing) are the chromatic parameters of STD_fitter.py's regimes, see PSFModelNFM.polychromatic_params
-        _rename = {p: p + '_ctrl' for p in ['J', 'Jx', 'Jy', 'wing_frac', 'F', 'bg', 'dx', 'dy']}
+        # The fitted table stores the spline control values without the '_ctrl' suffix: J (isotropic jitter) or Jx / Jy (anisotropic
+        # jitter) are the chromatic parameters of STD_fitter.py's regimes, see PSFModelNFM.polychromatic_params
+        _rename = {p: p + '_ctrl' for p in ['J', 'Jx', 'Jy', 'F', 'bg', 'dx', 'dy']}
         for i in range(len(self.sample_ids)):
             if isinstance(self.configs[i], list):
                 self.configs[i] = self.configs[i][0]
@@ -347,7 +347,7 @@ class NFMCalibrator():
         # Aux params
         self.LO_modes_max   = state.get('LO_modes_max', None)
         self.N_spline_nodes = state.get('N_spline_nodes', None)
-        self.model_flags    = state.get('model_flags', None) # None: bundle from before the anisotropic jitter / wing kernel (both False then)
+        self.model_flags    = state.get('model_flags', None) # None: bundle from before the anisotropic jitter (isotropic J then)
         self.fixed_inputs   = state.get('fixed_inputs', {})  # {key: tensor [1, ...]}, see fixed_inputs()
         self.training_config = state.get('training_config', None) # the resolved training config of the run (bundles since 2026-10-21)
 
@@ -443,7 +443,7 @@ class NFMCalibrator():
     def _apply_calibration(self, x_dict_pred: dict, PSF_model) -> None:
         """Adapt a calibrator prediction and apply it to a PSF model."""
         x_dict_adapted = self._adapt_to_PSF_model(x_dict_pred, PSF_model)
-        # The kept fixed inputs of the training (J_angle, wing widths / angle) are dataset-wide values: set them in the PSF model as well
+        # The kept fixed inputs of the training (J_angle) are dataset-wide values: set them in the PSF model as well
         names = PSF_model.inputs_manager.get_names(optimizable_only=False)
         for key, val in self.fixed_inputs.items():
             if key in names:
@@ -505,21 +505,18 @@ class NFMCalibrator():
                     f"control points, PSF model has {n_model}. Will re-sample via cubic spline."
                 )
 
-        # Jitter / wing regime: the predictions of a regime the PSF model does not have are ignored, and the model's inputs of a regime the
-        # calibrator does not predict stay at their defaults (e.g. J for a calibrator trained with Jx / Jy, wing_frac for one trained without wing)
-        flags = self.model_flags if self.model_flags is not None else {'anisotropic_jitter': False, 'wing_kernel': False}
-        for flag in ('anisotropic_jitter', 'wing_kernel'):
-            f_calib, f_model = bool(flags.get(flag, False)), bool(getattr(PSF_model, flag, False))
-            if f_calib != f_model:
-                issues[flag] = (f_calib, f_model)
-                warnings.warn(f"NFMCalibrator: {flag} mismatch — the calibrator was trained with {flag} = {f_calib}, the PSF model has {f_model}: "
-                              "the predictions of the missing regime are ignored and the model's inputs stay at their defaults.")
-        if flags.get('wing_kernel', False) and getattr(PSF_model, 'wing_kernel', False):
-            for key, name in (('wing_width_px', 'wing_width'), ('wing_width_t_px', 'wing_width_t')):
-                if key in flags and abs(float(PSF_model.inputs_manager[name].ravel()[0]) - flags[key]) > 1e-6:
-                    issues[key] = (flags[key], float(PSF_model.inputs_manager[name].ravel()[0]))
-                    warnings.warn(f"NFMCalibrator: {name} mismatch — trained with {flags[key]:g} px, the PSF model has "
-                                  f"{float(PSF_model.inputs_manager[name].ravel()[0]):g} px (the wing widths are dataset-wide constants).")
+        # Jitter regime: the predictions of a regime the PSF model does not have are ignored, and the model's inputs of a regime the
+        # calibrator does not predict stay at their defaults (e.g. J for a calibrator trained with Jx / Jy)
+        flags = self.model_flags or {}
+        f_calib, f_model = bool(flags.get('anisotropic_jitter', False)), bool(PSF_model.anisotropic_jitter)
+        if f_calib != f_model:
+            issues['anisotropic_jitter'] = (f_calib, f_model)
+            warnings.warn(f"NFMCalibrator: anisotropic_jitter mismatch — the calibrator was trained with {f_calib}, the PSF model has {f_model}: "
+                          "the predictions of the missing regime are ignored and the model's inputs stay at their defaults.")
+        if flags.get('wing_kernel', False): # bundles of 2026-10-20/21 trained with the image-frame wing kernel, removed on 2026-10-21
+            issues['wing_kernel'] = (True, False)
+            warnings.warn("NFMCalibrator: the calibrator was trained with the image-frame wing kernel, which the PSF model no longer has: "
+                          "its wing_frac_ctrl predictions are ignored, retrain the calibrator.")
 
         return issues
 
@@ -575,51 +572,39 @@ class NFMCalibrator():
 
 
 # Inputs of the PSF model that stay in the model at their initial values when listed in "fixed_params": the wrapper needs them in the input
-# dictionary at every forward (J_angle -> Jxy of the anisotropic jitter kernel, the wing widths and angle -> TipTorch.WingKernel), so they are
-# made non-optimizable (not predicted, not in the outputs transformer) instead of deleted like the other fixed inputs
-FIXED_INPUTS_KEPT = ('J_angle', 'wing_width', 'wing_width_t', 'wing_angle')
+# dictionary at every forward (J_angle -> Jxy of the anisotropic jitter kernel), so they are made non-optimizable (not predicted, not in the
+# outputs transformer) instead of deleted like the other fixed inputs
+FIXED_INPUTS_KEPT = ('J_angle',)
 
 
 def build_PSF_model(config, model_cfg: dict, device):
     """
     PSFModelNFM from the "model" section of a training config, as the trainer and the validation build it. anisotropic_jitter (Jx, Jy,
-    J_angle instead of one J) and wing_kernel (image-frame wing: wing_frac, wing_width, wing_width_t, wing_angle), both False by default,
-    select the regime of the fits (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL). With the wing, the widths are set to the dataset-wide
-    values wing_width_px x wing_width_t_px [px] (the fitter's WING_WIDTH_PX / WING_WIDTH_T_PX, 5 x 1.5 by default) and the exponent of the
-    wing MTF to wing_power (WING_POWER, 1 = Lorentzian wing); they are kept fixed through "fixed_params" (see FIXED_INPUTS_KEPT).
+    J_angle instead of one J; False by default) selects the jitter regime of the fits (STD_fitter.py: ANISOTROPIC_JITTER); J_angle is kept
+    fixed through "fixed_params" (see FIXED_INPUTS_KEPT).
     """
     from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
-    PSF_model = PSFModelNFM(
+    if model_cfg.get('wing_kernel', False): # configs / bundles of 2026-10-20/21: the image-frame wing kernel was removed on 2026-10-21
+        warnings.warn('The "model" section asks for the image-frame wing kernel (wing_kernel), which the PSF model no longer has: built without it')
+
+    return PSFModelNFM(
         config,
         multiple_obs       = True,
         LO_NCPAs           = model_cfg['LO_NCPAs'],
         chrom_defocus      = model_cfg['chrom_defocus'],
         anisotropic_jitter = model_cfg.get('anisotropic_jitter', False),
-        wing_kernel        = model_cfg.get('wing_kernel', False),
         use_Moffat         = model_cfg['use_Moffat'],
         retain_PSDs        = model_cfg['retain_PSDs'],
         N_spline_nodes     = model_cfg['N_spline_nodes'],
         Z_mode_max         = model_cfg['Z_mode_max'],
         device             = device,
     )
-    if PSF_model.wing_kernel:
-        PSF_model.inputs_manager['wing_width'][:]   = float(model_cfg.get('wing_width_px',   5.0))
-        PSF_model.inputs_manager['wing_width_t'][:] = float(model_cfg.get('wing_width_t_px', 1.5))
-        PSF_model.model.wing_power = float(model_cfg.get('wing_power', 1.0))
-    return PSF_model
 
 
 def model_flags(PSF_model) -> dict:
-    """ The jitter / wing regime of a PSFModelNFM (stored in the calibrator bundles, checked by NFMCalibrator.check_compatibility). """
-    flags = {k: bool(getattr(PSF_model, k, False)) for k in ('anisotropic_jitter', 'wing_kernel', 'chrom_defocus')}
-    if flags['wing_kernel']:
-        flags |= {
-            'wing_width_px':   float(PSF_model.inputs_manager['wing_width'].ravel()[0]),
-            'wing_width_t_px': float(PSF_model.inputs_manager['wing_width_t'].ravel()[0]),
-            'wing_power':      float(getattr(PSF_model.model, 'wing_power', 1.0)),
-        }
-    return flags
+    """ The jitter regime of a PSFModelNFM (stored in the calibrator bundles, checked by NFMCalibrator.check_compatibility). """
+    return {k: bool(getattr(PSF_model, k, False)) for k in ('anisotropic_jitter', 'chrom_defocus')}
 
 
 def fixed_inputs(PSF_model) -> dict:
@@ -987,7 +972,7 @@ class NFMCalibratorTrainer:
         x_dict = self.PSF_model.inputs_manager.to_dict()
         # Update only parameters predicted by the calibrator and keep the rest from manager defaults.
         x_dict.update({k: v for k, v in x_dict_NN.items() if k in x_dict})
-        # The non-predicted inputs kept in the model (FIXED_INPUTS_KEPT: J_angle, wing widths / angle) are dataset-wide constants stored
+        # The non-predicted inputs kept in the model (FIXED_INPUTS_KEPT: J_angle) are dataset-wide constants stored
         # with the N_obs the model was built with: broadcast them to the batch (the last batch and the k_c-group batches are smaller)
        
         for k in FIXED_INPUTS_KEPT:
@@ -1687,8 +1672,8 @@ class NFMCalibratorTrainer:
             'predict_Cn2_profile':  self.predict_Cn2_profile,
             'LO_modes_max':         self.PSF_model.Z_mode_max,
             'N_spline_nodes':       getattr(self.PSF_model, 'N_wvl_ctrl', None),
-            'model_flags':          model_flags(self.PSF_model), # jitter / wing regime of the PSF model the calibrator was trained with
-            'fixed_inputs':         fixed_inputs(self.PSF_model), # kept fixed inputs (J_angle, wing widths / angle), re-applied at calibration
+            'model_flags':          model_flags(self.PSF_model), # jitter regime of the PSF model the calibrator was trained with
+            'fixed_inputs':         fixed_inputs(self.PSF_model), # kept fixed inputs (J_angle), re-applied at calibration
             'training_config':      getattr(self, 'training_config', None), # the resolved training config (build_NFM_trainer): validate_NFM_calibrator.py rebuilds the trainer from it
             'predict_phase_bump':   False,
             'loss_cfg':             self.loss_cfg,

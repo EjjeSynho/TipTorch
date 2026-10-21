@@ -281,3 +281,14 @@ blue peak error 0.6-13 % between branches). Cost: the fit time doubles (~30 s pe
 
 **STD_fitted_df.py** stores the fit priors explicitly (`compute_fit_priors(..., out_path=FIT_PRIORS_FILE, store=True)`); the priors now include
 `wing_width` / `wing_width_t`, and the fitter warns at import when the priors come from fits with another wing shape.
+
+## Wing kernel removed (2026-10-21, user's decision)
+
+The image-frame wing (`TipTorch.WingKernel`, `PSFModelNFM(wing_kernel=...)`, the `WING_*` flags of `STD_fitter.py`, the `wing_*` entries of
+the calibrator configs and of `FIXED_INPUTS_KEPT`, `w_wing_prior`, the wing priors) is gone from the model, the wrappers, the fitter, the dev
+script, the NFM / ETC calibrators and their configs, to keep the model simple: the streak it absorbed is real (sections above), but it is not
+worth a four-input kernel with fixed, hand-picked widths. The kept regime is the anisotropic chromatic jitter alone (`Jx_ctrl`, `Jy_ctrl`,
+`J_angle`; `FIXED_INPUTS_KEPT = ('J_angle',)`). Compatibility: fit pickles and dataset caches of 2026-10-20/21 still carry `wing_frac`
+entries, which the fitter / dataset ignore; `build_PSF_model` warns on a `wing_kernel` config key and builds without it; a calibrator bundle
+trained with the wing warns in `check_compatibility` and its `wing_frac_ctrl` predictions are dropped by the inputs manager. Refit the
+dataset (STD_fitter.py) and retrain the calibrators in the jitter-only regime before using them.

@@ -932,7 +932,7 @@ def build_dataset_cache(muse_df, reduced_telemetry, muse_fitted_df, telemetry_pr
 # blurry stars pull these towards the medians of the sharp stars instead of fitting them freely (the phase bump is pulled to 0 instead).
 # ----------------------------------------------------------------------------------------------------------------------------------------------
 FIT_PRIORS_FILE = STD_FOLDER / 'fitted_priors.pickle'
-FIT_PRIOR_KEYS  = ['LO_coefs', 'wing_frac_ctrl', 'wing_width', 'wing_width_t', 'Jx_ctrl', 'Jy_ctrl', 'J_ctrl', 'J_angle'] # the widths record the wing shape of the fits
+FIT_PRIOR_KEYS  = ['LO_coefs', 'Jx_ctrl', 'Jy_ctrl', 'J_ctrl', 'J_angle']
 
 def blurry_PSF_mask(muse_df):
     """ The 'blurry' class of STD_fitter.py: bad quality, or medium quality without the good-quality flag. """
