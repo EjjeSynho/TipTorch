@@ -52,7 +52,7 @@ from tiptorch._config import DATA_FOLDER, WEIGHTS_FOLDER, default_device, projec
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 from calibrators.NFM_calibrator import NFMCalibrator, release_gpu_memory, load_NFM_calibrator
-from calibrators.ETC_calibrator import ETCCalibrator, PREDICTORS, etc_table_from_stars
+from calibrators.ETC_calibrator import ETCCalibrator, PREDICTORS, ETC_table_from_stars
 
 from tools import tiptop_env  # noqa: F401
 import run_tiptop_random_carlo as rc
@@ -222,7 +222,7 @@ def simulate_with_predictor(stars, predictor_name, out_dir, bundle_path=None, ba
     etc_cal = ETCCalibrator(bundle_path or etc_bundle_path(), device=default_device)
     predictor = etc_cal.predictor(predictor_name)
     renderer  = etc_cal.renderer(rc.WAVELENGTHS, batch_size=batch_size)
-    etc = etc_table_from_stars(stars)
+    etc = ETC_table_from_stars(stars)
     names = [rc.sample_name(row, row['index']) for row in stars]
     todo  = [i for i, n in enumerate(names) if overwrite or not all((out_dir / f'{w}nm' / f'{n}.fits').exists() for w in rc.WAVELENGTHS)]
     print(f'{predictor.name}: {len(todo)} samples to simulate ({len(names) - len(todo)} already present) -> {out_dir}')

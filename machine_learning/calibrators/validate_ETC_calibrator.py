@@ -9,11 +9,16 @@ within 50 mas). The same metrics are measured on the on-sky PSFs of the same obs
 configuration) run for the same conditions. The shared code is in `calibrators/ETC_validation_utils.py`.
 
 The slow parts (on-sky metrics, TIPTOP, predictor PSFs) are cached in `data/Enrico_ETC/ETC_calibrator/params_<source>.csv` and only
-computed when the cache is missing or listed in RECOMPUTE / --recompute. Run cell by cell (IPython / VS Code) or as a script:
+computed when the cache is missing, listed in RECOMPUTE / --recompute, or stale: the on-sky table when older than the dataset cache of
+the bundle, the predictor tables when older than the bundle. The TIPTOP table only depends on the validation conditions: it is kept,
+with a warning if they changed (recompute it with the TIPTOP checkout at v1.4.3, Enrico's tuning). The on-sky PSFs are the ones of the
+bundle's dataset cache (raw frames since 2026-10-21; derotated before). With --kc-nominal-only, the samples flagged 'k_c mismatch' (the
+ETC renders the nominal k_c) are left out of the comparison, whose outputs get the '_kc_nominal' suffix.
+Run cell by cell (IPython / VS Code) or as a script:
 
-    python machine_learning/calibrators/validate_ETC_calibrator.py [--recompute onsky tiptop donor direct-net] [--draws 3] [--no-psfao] [--processes 32]
+    python machine_learning/calibrators/validate_ETC_calibrator.py [--recompute onsky tiptop donor direct-net] [--draws 3] [--no-psfao] [--processes 32] [--kc-nominal-only]
 
-Requirements: the ETC bundle, the dataset cache, a CUDA device, the astro-tiptop checkouts (`tools/tiptop_env.py`); ~15 min
+Requirements: the ETC bundle, its dataset cache, a CUDA device, the astro-tiptop checkouts (`tools/tiptop_env.py`); ~15 min
 when nothing is cached. Tables -> `data/Enrico_ETC/ETC_calibrator/`, figures -> `data/Enrico_ETC/plots/ETC_calibrator/`.
 """
 try:
@@ -55,6 +60,7 @@ _parser.add_argument('--processes',  type=int, default=min(32, os.cpu_count() or
 _parser.add_argument('--batch-size', type=int, default=16)
 _parser.add_argument('--seed',       type=int, default=0)
 _parser.add_argument('--tag',        default='', help='suffix of the comparison outputs')
+_parser.add_argument('--kc-nominal-only', action='store_true', help="leave the 'k_c mismatch' samples out of the comparison")
 try:
     args = _parser.parse_args()
 except SystemExit:
@@ -64,11 +70,12 @@ SOURCES   = ['tiptop'] + list(args.predictors)  # compared with the on-sky PSFs
 BEST      = args.predictors[0]                  # the predictor shown next to TIPTOP in the distribution figures
 RECOMPUTE = set(args.recompute)
 PSFAO     = not args.no_psfao
+TAG       = args.tag + ('_kc_nominal' if args.kc_nominal_only else '') # suffix of the comparison outputs (tables, report, figures)
 
 #%%
 # ── Bundle, dataset, validation conditions ────────────────────────────────────
 etc_cal = ETC_utils.load_bundle(args.bundle)
-dataset = NFMDataset(ETC_utils.DATASET_CACHE)
+dataset = NFMDataset(etc_cal.dataset_cache)
 etc     = ETC_utils.load_validation(etc_cal, dataset)
 bins, waves_nm  = ETC_utils.nearest_bins(np.array(dataset.configs[0]['sources_science']['Wavelength']) * 1e9)
 renderer, pupil = etc_cal.renderer(waves_nm, batch_size=args.batch_size), ETC_utils.load_pupil()
@@ -76,20 +83,38 @@ renderer, pupil = etc_cal.renderer(waves_nm, batch_size=args.batch_size), ETC_ut
 ETC_utils.OUT_DIR.mkdir(parents=True, exist_ok=True)
 ETC_utils.PLOTS_DIR.mkdir(parents=True, exist_ok=True)
 etc.to_csv(ETC_utils.OUT_DIR / 'validation_conditions.csv', index=False)
-print(f'ETC bundle {etc_cal.path.name}; validation: {len(etc)} observations, per TC ' + ', '.join(f'{tc}%: {(etc.tc == tc).sum()}' for tc in TC_LIST))
+print(f'ETC bundle {etc_cal.path.name} ({etc_cal.dataset_cache.name}); validation: {len(etc)} observations '
+      f"({(etc.kc_group > 0).sum()} 'k_c mismatch'), per TC " + ', '.join(f'{tc}%: {(etc.tc == tc).sum()}' for tc in TC_LIST))
 print(f'wavelength bins {np.round(waves_nm, 1).tolist()} nm')
 
 #%%
 # ── Tables: on-sky reference, TIPTOP and the TipTorch predictors (cached or recomputed) ──
+def is_stale(cache, name):
+    """ The on-sky table depends on the dataset cache, the predictor tables on the bundle; the TIPTOP one on the conditions only """
+    reference = etc_cal.dataset_cache if name == 'onsky' else etc_cal.path if name in PREDICTORS else None
+    return reference is not None and reference.exists() and cache.stat().st_mtime < reference.stat().st_mtime
+
+
 # The pool is forked (not spawned): spawned workers would re-execute this cell file; the workers only use numpy / scipy
 tables = {}
 with mp.get_context('fork').Pool(args.processes) as pool:
     for name in ['onsky'] + SOURCES:
         cache = ETC_utils.OUT_DIR / f'params_{name}.csv'
-        
-        if cache.exists() and name not in RECOMPUTE:
+        stale = cache.exists() and is_stale(cache, name)
+        if stale and name not in RECOMPUTE:
+            print(f'{name}: {cache.name} is older than {"the dataset cache" if name == "onsky" else "the bundle"}, recomputed')
+
+        if cache.exists() and name not in RECOMPUTE and not stale:
             tables[name] = pd.read_csv(cache)
             print(f'{name}: loaded {cache.name}')
+
+            if name == 'tiptop': # simulated for the conditions of an earlier run: check that they are the current ones
+                first = tables[name].drop_duplicates('sample').sort_values('sample')
+                same  = len(first) == len(etc) and np.array_equal(first['sample_id'].to_numpy(), etc['sample_id'].to_numpy()) and \
+                        all(np.allclose(first[c].to_numpy(float), etc[c].to_numpy(float)) for c in ('seeing', 'tau0', 'airmass', 'ngs_mag'))
+                if not same:
+                    print(f"WARNING: {cache.name} was simulated for other validation conditions: pass --recompute tiptop "
+                          f"(with the TIPTOP checkout at {ETC_utils.TIPTOP_TAG})")
         elif name == 'onsky':
             tables[name] = ETC_utils.compute_onsky(dataset, etc, bins, waves_nm, pupil, pool, PSFAO)
             
@@ -103,6 +128,13 @@ onsky[onsky.wave == 700][['fwhm', 'strehl', 'strehl_tt', 'ensquared_tt']].descri
 
 #%%
 # ── Comparison: distribution and per-sample accuracy, tables and report ──
+if args.kc_nominal_only: # the tables keep their full-split 'sample' positions: the subsets are selected by sample id
+    keep   = set(etc.loc[etc.kc_group == 0, 'sample_id'])
+    etc    = etc[etc.sample_id.isin(keep)]
+    onsky  = onsky[onsky.sample_id.isin(keep)]
+    tables = {name: table[table.sample_id.isin(keep)] for name, table in tables.items()}
+    print(f"nominal k_c only: {len(etc)} validation observations")
+
 summary = ETC_utils.distribution_summary(onsky, tables)
 acc     = ETC_utils.accuracy_metrics(onsky, tables)
 acc_sum = ETC_utils.accuracy_summary(acc)
@@ -110,8 +142,8 @@ ps      = ETC_utils.per_sample_metrics(onsky, tables)
 ps_sum  = ETC_utils.per_sample_summary(ps)
 
 for df, name in ((summary, 'distribution_summary'), (acc, 'accuracy_metrics'), (acc_sum, 'accuracy_summary'), (ps, 'per_sample_metrics'), (ps_sum, 'per_sample_summary')):
-    df.to_csv(ETC_utils.OUT_DIR / f'{name}{args.tag}.csv', index=name.endswith('summary'))
-lines = ETC_utils.write_report(etc, summary, acc_sum, ps_sum, ETC_utils.OUT_DIR / f'comparison_summary{args.tag}.md')
+    df.to_csv(ETC_utils.OUT_DIR / f'{name}{TAG}.csv', index=name.endswith('summary'))
+lines = ETC_utils.write_report(etc, summary, acc_sum, ps_sum, ETC_utils.OUT_DIR / f'comparison_summary{TAG}.md')
 print('\n'.join(lines[4:10]))
 
 print(acc.pivot_table(index=['param', 'wave'], columns='source', values='W1_over_IQR').round(2))
@@ -119,20 +151,20 @@ print(ps[ps.wave == 700].round(3).to_string(index=False))
 
 #%%
 # ── Figures: accuracy per cell, per-sample scatter, medians per TC ──
-ETC_utils.plot_accuracy(acc, ETC_utils.PLOTS_DIR / f'ETC_accuracy{args.tag}.png')
-ETC_utils.plot_per_sample(onsky, tables, ps, out_path=ETC_utils.PLOTS_DIR / f'ETC_per_sample{args.tag}.png')
-ETC_utils.plot_summary_medians(summary, ETC_utils.PLOTS_DIR / f'summary_medians{args.tag}.png')
+ETC_utils.plot_accuracy(acc, ETC_utils.PLOTS_DIR / f'ETC_accuracy{TAG}.png')
+ETC_utils.plot_per_sample(onsky, tables, ps, out_path=ETC_utils.PLOTS_DIR / f'ETC_per_sample{TAG}.png')
+ETC_utils.plot_summary_medians(summary, ETC_utils.PLOTS_DIR / f'summary_medians{TAG}.png')
 plt.show()
 
 #%%
 # ── Distributions per wavelength (all TCs, then one figure per TC) and the pooled presentation figure ──
 series = [('onsky', onsky), ('tiptop', tables['tiptop']), (BEST, tables[BEST])]
-ETC_utils.plot_distributions(series, out_path=ETC_utils.PLOTS_DIR / f'ETC_distributions_{BEST}_vs_TIPTOP{args.tag}.png')
+ETC_utils.plot_distributions(series, out_path=ETC_utils.PLOTS_DIR / f'ETC_distributions_{BEST}_vs_TIPTOP{TAG}.png')
 
 for tc in TC_LIST:
-    ETC_utils.plot_distributions(series, tc=tc, out_path=ETC_utils.PLOTS_DIR / f'ETC_distributions_{BEST}_vs_TIPTOP_TC{tc}{args.tag}.png')
+    ETC_utils.plot_distributions(series, tc=tc, out_path=ETC_utils.PLOTS_DIR / f'ETC_distributions_{BEST}_vs_TIPTOP_TC{tc}{TAG}.png')
     plt.close()
     
-ETC_utils.plot_pooled_distributions(series, out_path=ETC_utils.PLOTS_DIR / f'ETC_pooled_FWHM_EE_{BEST}_vs_TIPTOP{args.tag}.png')
+ETC_utils.plot_pooled_distributions(series, out_path=ETC_utils.PLOTS_DIR / f'ETC_pooled_FWHM_EE_{BEST}_vs_TIPTOP{TAG}.png')
 plt.show()
 print(f'tables -> {ETC_utils.OUT_DIR}, figures -> {ETC_utils.PLOTS_DIR}')

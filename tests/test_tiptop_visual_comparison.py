@@ -1,7 +1,7 @@
 #%%
 """
 Visual comparison of TIPTOP PSFs computed with the P3 backend (`tiptop.baseSimulation`) and with the TipTorch backend
-(`tiptop.TipTop_integration`): both are run on the same `perfTest` configuration and rendered side by side, with the
+(`tiptop.TipTorchSimulation`): both are run on the same `perfTest` configuration and rendered side by side, with the
 normalized difference and the radial profiles. One figure per test:
 
     SCAO  - ERIS.ini      VLT 8 m, 1.65 um, 14 mas pixels, no LO loop
@@ -9,13 +9,14 @@ normalized difference and the radial profiles. One figure per test:
     ELT   - METIS.ini     ELT 38.5 m SCAO, 3.7 um, 4 mas pixels, ELT pupil FITS, M1 static map, wind shake, extra error, 6 mas jitter
     SLAO  - ERIS_LGS.ini  VLT 8 m, one LGS at 90 km (cone effect), one NGS for the LO loop, 1.65 um, 14 mas pixels
 
-Requirements: the `TipTop` conda env (P3, MASTSEL, TIPTOP, TipTorch), the TIPTOP repository next to the TipTorch one or
-`TIPTOP_PATH` pointing to it (its `tiptop/data` FITS files are needed for METIS), and optionally a CUDA device.
+Requirements: the `TipTop` conda env (P3, MASTSEL, TIPTOP, TipTorch), the astro-tiptop checkouts at `TipTop_path` of
+project_config.json (its `TIPTOP/tiptop/data` FITS files are needed for METIS), and optionally a CUDA device.
 Runtime about one minute in total, dominated by P3 (MAVIStest ~15 s, METIS ~10 s). Figures go to tests/runs/visual_comparison/.
 Run: python tests/test_tiptop_visual_comparison.py  (the TipTop env has no pytest).
 """
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -26,9 +27,16 @@ from matplotlib.colors import LogNorm
 import numpy as np
 import torch
 
+from tiptorch._config import project_settings
 from tiptorch.tools.tiptop_integration import PSF_radial_profile
 
-TIPTOP_ROOT = Path(os.environ.get('TIPTOP_PATH', Path(__file__).resolve().parents[2] / 'TIPTOP'))
+ASTRO_TIPTOP = Path(project_settings['TipTop_path'])
+for repo in ('TIPTOP', 'P3', 'MASTSEL', 'SYMAO', 'SEEING'): # the astro-tiptop checkouts, importable without installing them
+    if str(ASTRO_TIPTOP / repo) not in sys.path:
+        sys.path.insert(0, str(ASTRO_TIPTOP / repo))
+
+TIPTOP_ROOT = ASTRO_TIPTOP / 'TIPTOP'
+
 PERF_TEST = TIPTOP_ROOT / 'tiptop' / 'perfTest'
 OUTPUT = Path(__file__).resolve().parent / 'runs' / 'visual_comparison'
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
@@ -60,6 +68,7 @@ def _run_both(config):
     results = {}
     cwd = Path.cwd()
     os.chdir(TIPTOP_ROOT) # the configs reference tiptop/data relative to the TIPTOP root
+    
     try:
         for name, Simulation, kwargs in (('P3', P3Simulation, {}), ('TipTorch', TipTorchSimulation, {'tiptorch_device': DEVICE})):
             t0 = time.time()
@@ -166,3 +175,5 @@ if __name__ == '__main__':
     for test in (test_visual_SCAO_ERIS, test_visual_MCAO_MAVIS, test_visual_ELT_METIS, test_visual_SLAO_ERIS_LGS):
         test()
     print('visual comparison figures written to', OUTPUT)
+
+# %%

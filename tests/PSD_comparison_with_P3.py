@@ -18,7 +18,7 @@ TipTorch's oversampling is tuned so that its odd PSD grid has the same frequency
 the same pixel (nOtf = 1153 vs 1152 here); TipTorch maps are compared after dropping their last row and column.
 
 Requirements: the `TipTop` conda env (P3 installed with CuPy), the MUSE LTAO parameter file and the VLT pupil calibration
-in the TipTorch data folder, and the TIPTOP repository (`TIPTOP_folder` in project_config.json) for the wind-shake
+in the TipTorch data folder, and the astro-tiptop checkouts (`TipTop_path` in project_config.json) for the wind-shake
 temporal PSD FITS and the perfTest configurations. Runtime about one minute on a GPU.
 
 Run `python tests/PSD_comparison_with_P3.py` for the checks and the figures (saved to tests/runs/PSD_comparison/, shown
@@ -42,9 +42,14 @@ from tiptorch.PSF_models.TipTorch import TipTorch
 from tiptorch.managers.config_manager import ConfigManager
 from tiptorch.tools.tiptop_integration import circular_pupil
 
+ASTRO_TIPTOP = Path(project_settings['TipTop_path'])
+for repo in ('TIPTOP', 'P3', 'MASTSEL', 'SYMAO', 'SEEING'): # the astro-tiptop checkouts, importable without installing them
+    if str(ASTRO_TIPTOP / repo) not in sys.path:
+        sys.path.insert(0, str(ASTRO_TIPTOP / repo))
+
 PATH_INI      = DATA_FOLDER / 'parameter_files' / 'muse_ltao.ini'
-WIND_PSD_FILE = Path(project_settings['TIPTOP_folder']) / 'TIPTOP' / 'tiptop' / 'data' / 'morfeo_windshake8ms_psd_2022_1k.fits'
-PERF_TEST     = Path(project_settings['TIPTOP_folder']) / 'TIPTOP' / 'tiptop' / 'perfTest'
+WIND_PSD_FILE = ASTRO_TIPTOP / 'TIPTOP' / 'tiptop' / 'data' / 'morfeo_windshake8ms_psd_2022_1k.fits'
+PERF_TEST     = ASTRO_TIPTOP / 'TIPTOP' / 'tiptop' / 'perfTest'
 OUTPUT        = (Path(__file__).resolve().parent if '__file__' in globals() else Path.cwd()) / 'runs' / 'PSD_comparison'
 SHOW_PLOTS    = '--no-plots' not in sys.argv
 

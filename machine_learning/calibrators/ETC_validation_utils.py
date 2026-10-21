@@ -21,16 +21,20 @@ for _p in (REPO_ROOT, REPO_ROOT / 'machine_learning', REPO_ROOT / 'development')
     if str(_p) not in sys.path:
         sys.path.insert(0, str(_p))
 
-from tiptorch._config import WEIGHTS_FOLDER, default_device, project_settings
-from calibrators.ETC_calibrator import ETCCalibrator, ETC_table_from_telemetry, ETC_INPUTS, PREDICTORS, TC_LIST
+from tiptorch._config import WEIGHTS_FOLDER, default_device
+from calibrators.ETC_calibrator import ETCCalibrator, ETC_table_from_telemetry, ETC_INPUTS, PREDICTORS, TC_LIST, dataset_cache_path
 from tools import tiptop_env  # noqa: F401, the astro-tiptop checkouts
 from tools.ETC_tools import compute_FWHM, compute_strehl_psfao, tiptop_metrics, load_pupil, crop_center, normalize_psf, read_psf_file, PIXEL_SCALE_MAS
 
 ETC_FOLDER    = REPO_ROOT / 'data' / 'Enrico_ETC'
 OUT_DIR       = ETC_FOLDER / 'ETC_calibrator'
 PLOTS_DIR     = ETC_FOLDER / 'plots' / 'ETC_calibrator'
-DATASET_CACHE = Path(project_settings['MUSE_STD_data_folder']) / 'dataset_cache' / 'muse_STD_stars_dataset.pt'
 ETC_CONFIG    = REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'ETC_calibrator_config.json' # the config the ETC bundle was trained with
+TIPTOP_TAG    = 'v1.4.3' # the TIPTOP release of Enrico's tuning (see tools/tiptop_env.py)
+
+with open(ETC_CONFIG) as _f:
+    # The dataset cache of the config (raw frames or derotated PSFs); a bundle carries its own (ETCCalibrator.dataset_cache)
+    DATASET_CACHE = dataset_cache_path(json.load(_f).get('derotated_PSFs', True))
 
 NOMINAL_WAVES = [500, 600, 700, 800, 900] # [nm], the dataset bins nearest to them are used
 PARAMS = { # parameter -> (label, scale, histogram bins)
@@ -66,16 +70,27 @@ def nearest_bins(wavelengths_nm, nominal=NOMINAL_WAVES):
 
 
 def load_validation(etc_cal, dataset):
-    """Validation split as an ETC table of replayed real conditions, with sample ids, dataset indices and dates."""
+    """
+    Validation split as an ETC table of replayed real conditions, with sample ids, dataset indices, dates and the k_c group
+    (`kc_group`, 0 = nominal; the ETC predictors render the nominal k_c). `dataset` is the one of the bundle (etc_cal.dataset_cache).
+    """
     val_idx = np.asarray(dataset.val_idx, int)
     feat    = [dataset.features.index(f) for f in ETC_INPUTS]
     scaled  = np.array([list(dataset.telemetry[i].values()) for i in val_idx], dtype=np.float64)[:, feat]
     etc     = ETC_table_from_telemetry(pd.DataFrame(scaled * etc_cal.scale + etc_cal.mean, columns=ETC_INPUTS))
     etc.insert(0, 'sample_id', np.asarray(dataset.sample_ids)[val_idx])
     etc.insert(1, 'dataset_idx', val_idx)
-    dates = torch.load(DATASET_CACHE, weights_only=False, mmap=True)['acquisition_times'] # not kept by NFMDataset
+    dates = torch.load(etc_cal.dataset_cache, weights_only=False, mmap=True)['acquisition_times'] # not kept by NFMDataset
     etc['date'] = pd.to_datetime(np.asarray(dates)[val_idx], utc=True, format='ISO8601').strftime('%Y-%m-%dT%H:%M:%S')
+    etc['kc_group'] = np.asarray(dataset.kc_group, int)[val_idx]
     return etc
+
+
+def tiptop_checkout_tag():
+    """The release tag the TIPTOP checkout is at (None when it is on another commit, e.g. a branch)."""
+    import subprocess
+    out = subprocess.run(['git', '-C', str(tiptop_env.ASTRO_TIPTOP / 'TIPTOP'), 'describe', '--tags', '--exact-match'], capture_output=True, text=True)
+    return out.stdout.strip() or None
 
 
 # ----------------------------------------------------------- measuring -----------------------------------------------------------
@@ -154,6 +169,10 @@ def compute_onsky(dataset, etc, bins, waves_nm, pupil, pool=None, do_psfao=True)
 def compute_tiptop(etc, waves_nm, pupil, pool=None, do_psfao=True, workers=4, overwrite=False):
     """TIPTOP (Enrico's tuned configuration) for the validation conditions, simulated at the dataset bin wavelengths."""
     import run_tiptop_random_carlo as rc
+    tag = tiptop_checkout_tag()
+    if tag != TIPTOP_TAG:
+        print(f"WARNING: the TIPTOP checkout is at {tag or 'a non-release commit'}, not {TIPTOP_TAG}: Enrico's tuning is not reproduced "
+              f"(git -C {tiptop_env.ASTRO_TIPTOP / 'TIPTOP'} checkout {TIPTOP_TAG})")
     stars = Table([np.arange(len(etc)), etc['seeing'].to_numpy(), etc['tau0'].to_numpy() * 1e3, etc['ngs_mag'].to_numpy(), etc['airmass'].to_numpy(),
                    etc['tc'].to_numpy(), etc['ngs_flux'].to_numpy()], names=['index', 'seeing', 'tau', 'ngs', 'airmass', 'tc', 'ngs_flux'])
     root = OUT_DIR / 'tiptop_validation'

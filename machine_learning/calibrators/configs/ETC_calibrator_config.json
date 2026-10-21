@@ -1,24 +1,46 @@
 {
   "name": "ETC_calibrator",
   "weights_subdir": "ETC_calibrator",
+  "seed": 43,
   "batch_size": 16,
-  "direct_net": {
-    "hidden_dim": 32,
-    "dropout_rate": 0.1,
-    "lr": 0.01,
-    "num_epochs": 300,
-    "patience": 25,
-    "pretrain_epochs": 150,
-    "pretrain_patience": 20,
-    "random_state": 43
-  },
+  "derotated_PSFs": false,
   "model": {
     "LO_NCPAs": true,
     "chrom_defocus": false,
+    "anisotropic_jitter": true,
+    "wing_kernel": true,
+    "wing_width_px": 5.0,
+    "wing_width_t_px": 1.5,
+    "wing_power": 1.0,
     "use_Moffat": false,
     "retain_PSDs": false,
     "N_spline_nodes": 5,
-    "Z_mode_max": 9
+    "Z_mode_max": 9,
+    "fixed_from_fits": [
+      "J_angle"
+    ]
+  },
+  "calibrator": {
+    "type": "direct",
+    "hidden_dim": 32,
+    "dropout_rate": 0.1
+  },
+  "trainer": {
+    "lr": 0.01,
+    "lambda_step": 1,
+    "predict_LO_NCPAs": true,
+    "predict_Cn2_profile": true,
+    "predict_wind_speed": true,
+    "pre_init_astrometry": true,
+    "optimize_astrometry": false,
+    "random_state": 43,
+    "num_epochs": 300,
+    "patience": 25,
+    "nan_recovery": true,
+    "max_nan_recoveries": 10,
+    "pretrain_epochs": 150,
+    "pretrain_patience": 20,
+    "pretrain_standardize": true
   },
   "loss": {
     "type": "balanced",
@@ -28,6 +50,8 @@
     "huber_delta": 0.1,
     "scale": 3.0,
     "match_background": false,
+    "mse_weight": 18000000.0,
+    "peak_weight": 3.0,
     "legacy_weight": 0.0,
     "LO_sign_penalty": false
   },
@@ -41,6 +65,10 @@
     "src_dirs_x",
     "src_dirs_y",
     "wind_dir_single",
-    "F_norm_\u03bb_ctrl"
+    "F_norm_λ_ctrl",
+    "J_angle",
+    "wing_width",
+    "wing_width_t",
+    "wing_angle"
   ]
 }

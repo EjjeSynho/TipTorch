@@ -74,6 +74,7 @@ DM:
 - OptimizationZenith
 - OptimizationAzimuth
 - OptimizationWeight
+- OptimizationConditioning
 - NumberReconstructedLayers
 
 RTC:

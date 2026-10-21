@@ -289,7 +289,8 @@ ax.plot(val_losses, label='Val')
 ax.set(xlabel='Epoch', ylabel='Loss', title='Training Losses')
 ax.legend()
 ax.grid(True)
-plt.tight_layout(); plt.show()
+plt.tight_layout()
+plt.show()
 
 #%%
 # Optional fine-tuning — controlled by cfg["tune"]["enabled"]

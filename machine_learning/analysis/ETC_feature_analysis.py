@@ -92,15 +92,18 @@ def render_psfr(cal, renderer, dataset, etc, tel_scaled, phase_bump, batch_size=
         x = cal.forward_prepared(torch.as_tensor(tel_scaled[ids], device=cal.device))
         x['LO_coefs'] = torch.cat([torch.full((len(ids), 1), phase_bump, device=cal.device), x['LO_coefs'][:, 1:]], 1)
         configs = []
+       
         for i in etc['dataset_idx'].to_numpy()[ids]:
             c = deepcopy(dataset.configs[i])
             c['sources_science']['Wavelength'] = [w * 1e-9 for w in renderer.wavelengths_nm]
             c['telescope']['PathPupil'], c['telescope']['PupilAngle'] = str(PUPIL_PATH), 0.0
             configs.append(c)
+      
         model = renderer.make_model(configs)
         model.update_manager_params(x)
         PSFs.append(model().detach().cpu())
         model.cleanup()
+    
     return torch.cat(PSFs, 0)
 
 
@@ -145,21 +148,26 @@ if __name__ == '__main__':
     share = imp.T.groupby(feat_group).sum().T.groupby(out_groups).mean()
     share = share.div(share.sum(1), axis=0)
     glob = imp.sum(0).sort_values(ascending=False)
+   
     lines += ['', '## Share of the calibrator gradient importance per feature group (rows: predicted parameters)', '', share.round(2).to_markdown(),
               '', '## Global gradient importance per input feature', '', pd.DataFrame({'feature': glob.index, 'group': [feat_group[f] for f in glob.index], 'importance': glob.values}).round(3).to_markdown(index=False)]
+    
     fig, axes = plt.subplots(1, 2, figsize=(16, 5), gridspec_kw={'width_ratios': [2.2, 1]})
     axes[0].bar(range(len(glob)), glob.values, color=[GROUP_COLORS[feat_group[f]] for f in glob.index])
     axes[0].set_xticks(range(len(glob)))
     axes[0].set_xticklabels(glob.index, rotation=60, ha='right', fontsize=8)
     axes[0].set_title('PSF-R calibrator: gradient importance of the input features (validation set)')
+    
     im = axes[1].imshow(share.values, cmap='Blues', vmin=0, vmax=1, aspect='auto')
     axes[1].set_xticks(range(share.shape[1]))
     axes[1].set_xticklabels(share.columns, rotation=30, ha='right')
     axes[1].set_yticks(range(share.shape[0]))
     axes[1].set_yticklabels(share.index)
+    
     for r in range(share.shape[0]):
         for c in range(share.shape[1]):
             axes[1].text(c, r, f'{share.values[r, c]:.2f}', ha='center', va='center', fontsize=8, color='white' if share.values[r, c] > 0.6 else '#1a1a19')
+    
     axes[1].set_title('Importance share per feature group')
     fig.colorbar(im, ax=axes[1], fraction=0.04)
     plt.tight_layout()

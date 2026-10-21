@@ -33,9 +33,9 @@ def test_constants_match_enrico():
 
 
 def test_etc_table():
-    t = E.etc_table([0.5, 1.2], [0.006, 0.002], [1.0, 1.6], [9.0, 13.0])
+    t = E.ETC_table([0.5, 1.2], [0.006, 0.002], [1.0, 1.6], [9.0, 13.0])
     assert list(t['tc']) == [10, 100] and t['zenith_deg'].iloc[0] == 0.0 and (t['ngs_flux'] > 0).all()
-    assert E.etc_inputs(t).shape == (2, len(E.ETC_INPUTS))
+    assert E.ETC_inputs(t).shape == (2, len(E.ETC_INPUTS))
 
 
 def test_predictors():
@@ -43,7 +43,7 @@ def test_predictors():
         cfg = json.load(f)
     with open(WEIGHTS_FOLDER / cfg['weights_subdir'] / f'{cfg["name"]}_meta.json') as f:
         etc_cal = E.ETCCalibrator(json.load(f)['bundle_path'])
-    etc = E.etc_table([0.5, 0.9, 1.3], [0.006, 0.004, 0.002], [1.1, 1.4, 1.8], [9.5, 12.0, 15.0])
+    etc = E.ETC_table([0.5, 0.9, 1.3], [0.006, 0.004, 0.002], [1.1, 1.4, 1.8], [9.5, 12.0, 15.0])
     rng = np.random.default_rng(0)
     renderer = etc_cal.renderer([500.0, 700.0, 900.0], batch_size=3)
     for name in E.PREDICTORS:

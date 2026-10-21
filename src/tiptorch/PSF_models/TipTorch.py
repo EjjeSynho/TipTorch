@@ -186,6 +186,8 @@ class TipTorch(torch.nn.Module):
         self.DM_opt_dir_x  = torch.tan(self.DM_opt_angle) * torch.cos(self.DM_opt_azimuth) # [N_obs, N_optdir]
         self.DM_opt_dir_y  = torch.tan(self.DM_opt_angle) * torch.sin(self.DM_opt_azimuth) # [N_obs, N_optdir]
         self.DM_rec_layers = self.config['DM']['NumberReconstructedLayers'] # [N_rec_layers]
+        # Maximum condition number of the optimal DM projector inversion (P3's opt_cond, 100 by default)
+        self.DM_opt_cond = float(torch.as_tensor(self.config['DM'].get('OptimizationConditioning', 100.0)).flatten()[0])
 
         # HO WFS(s) parameters
         self.WFS_d_sub = self.config['sensor_HO']['SizeLenslets']
@@ -934,8 +936,10 @@ class TipTorch(torch.nn.Module):
         to_inv = ((P_DM_t @ P_DM) * opt_w).sum(dim=3)  # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_DM]
         
         # to_inv is rank-deficient (e.g. more DMs than optimization directions resolve at low frequencies), so it must be
-        # regularized by truncation. lstsq is avoided: its rank cut-off is driver-dependent (gelsy on CPU, none at all on CUDA)
-        self.P_opt = torch.linalg.pinv(to_inv, rcond=1e-2) @ mat1 # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
+        # regularized by truncation. lstsq is avoided: its rank cut-off is driver-dependent (gelsy on CPU, none at all on CUDA).
+        # The cut-off is 1 / OptimizationConditioning as in P3: a fixed 1e-2 over-regularizes configs asking for more (MAVIStest
+        # uses 1e6 and lost 12-25 % of SR against P3 with it)
+        self.P_opt = torch.linalg.pinv(to_inv, rcond=1.0/self.DM_opt_cond) @ mat1 # [N_obs, nOtf_AO, nOtf_AO, N_DM, N_L]
 
 
     def TransferFunctions(self, freq: torch.Tensor, Ts: torch.Tensor, delay: torch.Tensor, loop_gain: torch.Tensor):

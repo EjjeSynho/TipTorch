@@ -15,6 +15,10 @@ these ETC inputs alone, with two predictors sharing the interface `predict(etc, 
 `ETCPSFRenderer` renders the predicted parameters with `PSFModelNFM`; `ETCCalibrator` loads the bundle (donor pool, network,
 template config) written by `train_ETC_calibrator.py`; `ETCDataset` is the dataset view used to train the network.
 
+The PSF model is the one of the STD-star fits and of the NFM calibrator (`build_PSF_model`, the "model" section of the training config):
+anisotropic jitter (Jx, Jy, J_angle) and the image-frame wing (wing_frac, fixed widths) since 2026-10-21. The kept fixed inputs of the
+training (J_angle at the training median of the fits, the wing widths) are stored in the bundle (`fixed_inputs`) and set by the renderer.
+
 Conventions: ETC tables are pandas DataFrames with one row per observation (`etc_table`); `x_dict` holds the PSF-model parameters
 as tensors [N, ...] on the device; rendered PSFs are [N, N_wvl, H, W] on the CPU.
 """
@@ -29,13 +33,25 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from tiptorch._config import DATA_FOLDER, default_device
-from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
+from tiptorch._config import DATA_FOLDER, default_device, project_settings
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 from tiptorch.managers.input_manager import InputsTransformer
-from calibrators.NFM_calibrator import SmallCalibratorNet, release_gpu_memory
+from calibrators.NFM_calibrator import SmallCalibratorNet, build_PSF_model, release_gpu_memory
 
 PUPIL_PATH = DATA_FOLDER / 'calibrations' / 'VLT_CALIBRATION' / 'VLT_PUPIL' / 'ut4pupil320.fits'
+STD_DATASET_CACHE = Path(project_settings['MUSE_STD_data_folder']) / 'dataset_cache'
+
+
+def dataset_cache_path(derotated: bool) -> Path:
+    """ STD-star dataset cache of the calibrators: derotated PSFs (configs with PupilAngle 0) or raw frames (per-sample pupil angles) """
+    return STD_DATASET_CACHE / ('muse_STD_stars_dataset.pt' if derotated else 'muse_STD_stars_dataset_raw.pt')
+
+
+def donor_keys(model_cfg: dict) -> list:
+    """ PSF-model inputs a donor passes on (the keys of the fits), in the jitter / wing regime of the "model" section `model_cfg` """
+    jitter = ['Jx_ctrl', 'Jy_ctrl', 'J_angle'] if model_cfg.get('anisotropic_jitter', False) else ['J_ctrl']
+    wing   = ['wing_frac_ctrl'] if model_cfg.get('wing_kernel', False) else []
+    return ['F_ctrl', *jitter, *wing, 'r0', 'L0', 'dn', 'wind_speed_single', 'Cn2_weights', 'LO_coefs']
 
 # The calibrator telemetry features an ETC can provide (the IRLOS regime follows from the NGS magnitude, see `IRLOS_frequency`)
 ETC_INPUTS = ['Seeing (header)', 'Tau0 (header)', 'Tel. altitude', 'NGS mag (from ph.)', 'IRLOS frequency', 'IRLOS gain']
@@ -119,11 +135,12 @@ def ETC_inputs(etc: pd.DataFrame):
 class DonorPredictor:
     """
     Fitted PSF-model parameters of a nearest-neighbour training observation. `pool` holds, per training observation, the ETC
-    inputs (`etc_inputs` [N, 6], physical units), the fitted parameters (`fitted`: F, J, r0, L0, dn, wind_speed_single,
-    Cn2_weights [N, 2] without the ground layer, LO_coefs [N, 8] with the phase bump first) and the Cn2 layer heights (`heights`
-    [N, 3]). Queries are matched in the standardized input space (`mean`, `scale`); one of the `k` nearest donors is drawn at random
-    (`nearest=True`: always the nearest). With `rescale`, r0 follows the requested seeing (r0 ~ 1/seeing, both at zenith) and the
-    ground-layer wind the requested tau0 (v ~ r0/tau0, ratio clipped to [0.5, 2]).
+    inputs (`etc_inputs` [N, 6], physical units), the fitted parameters (`fitted`, keyed by the PSF-model inputs, see `donor_keys`:
+    F_ctrl, Jx_ctrl / Jy_ctrl / J_angle (or J_ctrl), wing_frac_ctrl, r0, L0, dn, wind_speed_single, Cn2_weights [N, 2] without the
+    ground layer, LO_coefs [N, 8] with the phase bump first) and the Cn2 layer heights (`heights` [N, 3]). The donor's own jitter
+    angle and wing fraction are passed on with the rest of its fit. Queries are matched in the standardized input space (`mean`,
+    `scale`); one of the `k` nearest donors is drawn at random (`nearest=True`: always the nearest). With `rescale`, r0 follows the
+    requested seeing (r0 ~ 1/seeing, both at zenith) and the ground-layer wind the requested tau0 (v ~ r0/tau0, ratio clipped to [0.5, 2]).
     """
     def __init__(self, pool: dict, mean, scale, k=10, nearest=False, rescale=True, device=default_device):
         self.pool, self.k, self.nearest, self.rescale, self.device = pool, int(k), nearest, rescale, device
@@ -147,8 +164,9 @@ class DonorPredictor:
         t = lambda key: torch.as_tensor(np.asarray(f[key])[d], dtype=torch.float32, device=self.device)
         cn2 = np.clip(np.asarray(f['Cn2_weights'])[d], 0.0, None)
         gl  = np.clip(1.0 - cn2.sum(-1, keepdims=True), 1e-3, None)
-        x = {'F_ctrl': t('F'), 'J_ctrl': t('J'), 'r0': t('r0'), 'L0': t('L0'), 'dn': t('dn'), 'wind_speed_single': t('wind_speed_single').view(-1, 1),
-             'Cn2_weights': torch.as_tensor(np.hstack([gl, cn2]), dtype=torch.float32, device=self.device), 'LO_coefs': t('LO_coefs')}
+        x = {key: t(key) for key in f if key != 'Cn2_weights'}
+        x['wind_speed_single'] = x['wind_speed_single'].view(-1, 1)
+        x['Cn2_weights'] = torch.as_tensor(np.hstack([gl, cn2]), dtype=torch.float32, device=self.device)
         if self.rescale:
             donor_inputs = np.asarray(self.pool['etc_inputs'])[d]
             r0_ratio = donor_inputs[:, 0] / etc['seeing'].to_numpy(float)
@@ -181,7 +199,8 @@ def build_ETC_config(template: dict, row, wavelengths_m, heights):
     """
     TipTorch config (lists layout) of one ETC row: the template with the ETC atmosphere (seeing, TC outer scale / ground-layer
     fraction / ASM wind, `heights` [3] in m), zenith angle, LGS flux, NGS flux and IRLOS regime, science wavelengths [m].
-    The atmosphere entries only matter where the predictors do not override them (layer heights, wind direction).
+    The atmosphere entries only matter where the predictors do not override them (layer heights, wind direction). The pupil is
+    not rotated: the ETC metrics are radial, and the jitter and the wing are defined in the image frame whatever the pupil angle.
     """
     tc, glf = int(row['tc']), TC_GLF[int(row['tc'])]
     cfg = deepcopy(template)
@@ -220,10 +239,13 @@ def flatten_x_dict(x_dict):
 class ETCPSFRenderer:
     """
     Renders the PSFs of an ETC table for a predictor with `PSFModelNFM`: configs built from `template_config` (layer heights of
-    the donor when the predictor provides them, `median_heights` otherwise), predicted parameters applied, PSFs [N, N_wvl, H, W].
+    the donor when the predictor provides them, `median_heights` otherwise), the model of the "model" section `model_cfg`
+    (`build_PSF_model`) with the kept fixed inputs `fixed_inputs` ({key: tensor [1, ...]}, e.g. J_angle; a prediction of the same
+    input overrides them), predicted parameters applied, PSFs [N, N_wvl, H, W].
     """
-    def __init__(self, template_config: dict, model_cfg: dict, wavelengths_nm, median_heights, batch_size=16, device=default_device):
+    def __init__(self, template_config: dict, model_cfg: dict, wavelengths_nm, median_heights, batch_size=16, device=default_device, fixed_inputs=None):
         self.template, self.model_cfg, self.batch_size, self.device = template_config, dict(model_cfg), batch_size, device
+        self.fixed_inputs   = dict(fixed_inputs or {})
         self.wavelengths_nm = [float(w) for w in wavelengths_nm]
         self.median_heights = [float(h) for h in median_heights]
 
@@ -231,7 +253,16 @@ class ETCPSFRenderer:
     def make_model(self, configs):
         config = MultipleTargetsInDifferentObservations(configs, device=self.device)
         config['DM']['NumberReconstructedLayers'] = torch.tensor(config['atmosphere']['Cn2Heights'].shape[-1], device=self.device)
-        return PSFModelNFM(config, multiple_obs=True, device=self.device, **self.model_cfg)
+        model = build_PSF_model(config, self.model_cfg, self.device)
+        names = model.inputs_manager.get_names(optimizable_only=False)
+
+        with torch.no_grad():
+            for key, val in self.fixed_inputs.items():
+                if key in names:
+                    cur = model.inputs_manager[key]
+                    cur[:] = torch.as_tensor(val, dtype=cur.dtype, device=cur.device).reshape(1, *cur.shape[1:])
+
+        return model
 
 
     @torch.no_grad()
@@ -279,13 +310,15 @@ class ETCPSFRenderer:
 class ETCDataset(torch.utils.data.Dataset):
     """
     View of an `NFMDataset` exposing only the ETC inputs as telemetry (standardized like the full vectors) and configs whose Cn2
-    layer heights are replaced by `heights` (the inference-time profile); everything else is forwarded for `NFMCalibratorTrainer`.
+    layer heights are replaced by `heights` (the inference-time profile); everything else is forwarded for `NFMCalibratorTrainer`,
+    including the k_c groups (the trainer batches the samples per group: configs of different DM pitches cannot share a model).
     """
     def __init__(self, base, heights):
         self.base, self.features = base, list(ETC_INPUTS)
         self.feature_idx = torch.tensor([base.features.index(f) for f in ETC_INPUTS])
         self.fitted_vals, self.sample_ids = base.fitted_vals, base.sample_ids
         self.train_idx, self.val_idx, self.time_groups = base.train_idx, base.val_idx, base.time_groups
+        self.kc_group, self.kc_fraction, self.derotated = base.kc_group, base.kc_fraction, base.derotated
         self.N, self.H, self.W, self.C = base.N, base.H, base.W, base.C
         self.telemetry_preprocessor = None
         self.collate_batch = base.collate_batch
@@ -314,6 +347,10 @@ class ETCCalibrator:
         self.pool, self.mean, self.scale = self.state['pool'], self.state['etc_mean'], self.state['etc_scale']
         self.median_heights, self.phase_bump = list(self.state['median_heights']), float(self.state['phase_bump_median'])
         self.template_config, self.model_cfg = self.state['template_config'], self.state['model_cfg']
+        self.fixed_inputs  = self.state.get('fixed_inputs', {})  # bundles before 2026-10-21: none (isotropic jitter, no wing)
+        self.dataset_cache = Path(self.state['dataset_cache'])  # the dataset the bundle was built from (its validation split)
+        # Pools before 2026-10-21 are keyed F / J instead of the PSF-model inputs F_ctrl / J_ctrl
+        self.pool['fitted'] = {({'F': 'F_ctrl', 'J': 'J_ctrl'}).get(k, k): v for k, v in self.pool['fitted'].items()}
 
 
     def predictor(self, name, **kw):
@@ -332,4 +369,4 @@ class ETCCalibrator:
 
 
     def renderer(self, wavelengths_nm, batch_size=16):
-        return ETCPSFRenderer(self.template_config, self.model_cfg, wavelengths_nm, self.median_heights, batch_size, self.device)
+        return ETCPSFRenderer(self.template_config, self.model_cfg, wavelengths_nm, self.median_heights, batch_size, self.device, self.fixed_inputs)
