@@ -17,7 +17,7 @@ from tools.plotting import plot_radial_PSF_profiles, draw_PSF_stack, plot_chroma
 from datasets.MUSE_STD_dataset.STD_dataset_utils import STD_FOLDER, LoadSTDStarCache, KC_MISMATCH_FLAG, KC_FRACTION_FEATURE, KC_GROUP_FEATURE, apply_kc_fraction, kc_fraction_from_config
 # The fitting regime (model flags, loss, priors, multi-start fit) is the one of STD_fitter.py: this script only picks the samples, builds the
 # model and the objective through the fitter's functions and looks at the result. Override a fitter flag here before building the model
-# (e.g. fitter.DEFOCUS_STARTS = (20.0,), fitter.PSF_LOSS_CFG['peak_weight'] = 0.0) to test a change
+# (e.g. fitter.WING_WIDTH_T_PX = 3.0, fitter.DEFOCUS_STARTS = (20.0,), fitter.PSF_LOSS_CFG['peak_weight'] = 0.0) to test a change
 from datasets.MUSE_STD_dataset import STD_fitter as fitter
 from tiptorch._config import default_device
 
@@ -135,8 +135,8 @@ wavelengths = PSF_model.λ_sim
 print(f"Model k_c = {100 * kc_fraction_from_config(configs[0]):.1f} % of the nominal ({PSF_model.model.kc:.3f} 1/m, "
       f"DM pitch {np.asarray(configs[0]['DM']['DmPitchs']).ravel()[0]:.4f} m)")
 
-print(f"chromatic defocus: {fitter.CHROM_DEFOCUS} | anisotropic jitter: {fitter.ANISOTROPIC_JITTER} | "
-      f"defocus starts {fitter.DEFOCUS_STARTS} nm selected by {fitter.SELECT_BY}")
+print(f"chromatic defocus: {fitter.CHROM_DEFOCUS} | anisotropic jitter: {fitter.ANISOTROPIC_JITTER} | wing: {fitter.WING_KERNEL} "
+      f"({fitter.WING_WIDTH_PX} x {fitter.WING_WIDTH_T_PX} px) | defocus starts {fitter.DEFOCUS_STARTS} nm selected by {fitter.SELECT_BY}")
 
 #%%
 cmap = mpl.colormaps.get_cmap('gray')  # viridis is the default colormap for imshow
@@ -158,7 +158,7 @@ for j in range(N_src):
 # plot_chromatic_PSF_slice(PSF_0, wavelengths, window_size=100, slices=['horizontal'])
 
 #%%
-# Objective and parameter sets of the fitter: quality flags of the sample (blurry: bump suppressed, LO coefficients pulled
+# Objective and parameter sets of the fitter: quality flags of the sample (blurry: bump suppressed, LO coefficients and wing fraction pulled
 # to the dataset priors, L0 / wind speed / Cn2 at the config values; no 'Non-point' flag: bump suppressed), PSF loss (fitter.PSF_LOSS_CFG) +
 # LO regularization + MAP priors (fitter.PRIOR_STD), L-BFGS with a BFGS retry
 flags = fitter.sample_fit_flags(ids_)
@@ -183,6 +183,11 @@ for name in ['J_angle'] if PSF_model.anisotropic_jitter else []:
     
 if PSF_model.chrom_defocus:
     print('chromatic defocus at the spline nodes [nm]:', *[f'{v:.1f}' for v in PSF_model.inputs_manager['chrom_defocus_ctrl'].detach().cpu().numpy().flatten()])
+
+if PSF_model.wing_kernel:
+    print('wing fraction at the spline nodes:', *[f'{abs(v):.4f}' for v in PSF_model.inputs_manager['wing_frac_ctrl'].detach().cpu().numpy().flatten()],
+          '| widths [px]:', *[f'{abs(PSF_model.inputs_manager[k][0].item()):.2f}' for k in ('wing_width', 'wing_width_t')],
+          '| angle [deg]:', f"{PSF_model.inputs_manager['wing_angle'][0].item():.1f}")
 
 #%%
 from tools.plotting import plot_radial_PSF_profiles

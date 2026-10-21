@@ -33,6 +33,7 @@ class PSFModelNFM:
         dtype          = torch.float32,
         model_type     = None,    # 'physics-based' | 'psfao' | 'hybrid'
         anisotropic_jitter = False, # Jx, Jy and the kernel angle J_angle (image frame) instead of one isotropic J
+        wing_kernel        = False, # image-frame wing of the PSF (TipTorch.WingKernel): wing_frac (chromatic), wing_width, wing_width_t, wing_angle
         *, # MUSE NFM spectral data
         λ_min        = 475.e-9,
         λ_max        = 935.e-9,
@@ -57,6 +58,11 @@ class PSFModelNFM:
         # keeps Jx / Jy aligned with the image axes whatever the derotator state). Achromatic with chrom_defocus, chromatic (splines) otherwise.
         # Axis convention of TipTorch: x is the first image axis (rows), like dx; Jx blurs along the rows, Jy along the columns.
         self.anisotropic_jitter = anisotropic_jitter
+        # Elongated wing of the PSF along the image columns (rotated by wing_angle), fixed in the image frame: the detector-frame
+        # halo excess of the MUSE NFM data (slicer / spectrograph spread) that neither the pupil-frame PSDs nor a jitter can represent.
+        # Inputs: wing_frac (flux fraction, chromatic), wing_width [px] along the axis, wing_width_t [px] across it (0 = a one-dimensional
+        # line, the default) and wing_angle [deg]; the widths and the angle are achromatic, the angle is fixed at 0 by default
+        self.wing_kernel = wing_kernel
         self.__config_raw  = config # Input config dictionary, defined in TipTop-style
         self.device        = torch.device(device)
         self.dtype         = dtype
@@ -84,13 +90,15 @@ class PSFModelNFM:
         
         # Initialize the TipTorch model
         self._init_model(_config)
+        self.model.use_wing = self.wing_kernel
         # Initialize LO NCPAs
         if LO_NCPAs:
             self._init_NCPAs()
         
         # Chromatic blur: either the chromatic defocus (jitter achromatic) or the chromatic jitter itself (isotropic J or the pair Jx, Jy)
         self.jitter_params = ['Jx', 'Jy'] if self.anisotropic_jitter else ['J']
-        self.polychromatic_params = ['F', 'dx', 'dy', 'bg', 'F_norm_λ'] + (['chrom_defocus'] if self.chrom_defocus else self.jitter_params)
+        self.polychromatic_params = ['F', 'dx', 'dy', 'bg', 'F_norm_λ'] + (['chrom_defocus'] if self.chrom_defocus else self.jitter_params) + \
+                                    (['wing_frac'] if self.wing_kernel else [])
 
         if self.use_splines:
             # If splines are used, the chromatic parameters are represented by their values at a few control wavelengths and interpolated at the simulated
@@ -146,6 +154,7 @@ class PSFModelNFM:
             'LO_NCPAs':       self.LO_NCPAs,
             'chrom_defocus':  self.chrom_defocus,
             'anisotropic_jitter': self.anisotropic_jitter,
+            'wing_kernel':    self.wing_kernel,
             'model_type':     self.model_type,
             'use_Moffat':     self.use_Moffat,   # kept for backward compat readers
             'retain_PSDs':    self.retain_PSDs,
@@ -227,6 +236,7 @@ class PSFModelNFM:
             LO_NCPAs       = store_data.get('LO_NCPAs', True),
             chrom_defocus  = store_data.get('chrom_defocus', False),
             anisotropic_jitter = store_data.get('anisotropic_jitter', False),
+            wing_kernel    = store_data.get('wing_kernel', False),
             model_type     = store_data.get('model_type', 'hybrid' if store_data.get('use_Moffat', False) else 'physics-based'),
             retain_PSDs    = store_data.get('retain_PSDs', False),
             Z_mode_max     = store_data.get('Z_mode_max', 9),
@@ -294,6 +304,7 @@ class PSFModelNFM:
             LO_NCPAs        = self.LO_NCPAs,
             chrom_defocus   = self.chrom_defocus,
             anisotropic_jitter = self.anisotropic_jitter,
+            wing_kernel     = self.wing_kernel,
             N_spline_nodes  = self.N_wvl_ctrl,
             model_type      = self.model_type,
             Z_mode_max      = self.Z_mode_max,
@@ -458,6 +469,8 @@ class PSFModelNFM:
         norm_dxy         = Uniform(a=-1,    b=1)
         norm_J           = Uniform(a=0,     b=30)
         norm_J_angle     = Uniform(a=-45,   b=45)
+        norm_wing_frac   = Uniform(a=0,     b=0.05)
+        norm_wing_width  = Uniform(a=1,     b=30)
         norm_dn          = Uniform(a=25,    b=50)
         norm_amp         = Uniform(a=0,     b=10)
         norm_b           = Uniform(a=0,     b=0.1)
@@ -509,6 +522,18 @@ class PSFModelNFM:
         else:
             add_input('Jxy', torch.tensor([0.0]), norm_J, optimizable=False, is_shared=True) # essentially, this disables the TT jitter anisotropy
 
+        if self.wing_kernel:
+            # Flux fraction of the wing per wavelength (spline), its half-widths along and across the axis [px] and the axis angle [deg, from
+            # the image columns]; the transverse width and the angle are fixed by default (a line along the columns, as the wing of the MUSE
+            # NFM data), enable them with inputs_manager.set_optimizable
+            if self.use_splines:
+                add_input('wing_frac_ctrl', torch.tensor([[0.005,]*self.N_wvl_ctrl]*N_obs), norm_wing_frac, is_shared=True)
+            else:
+                add_input('wing_frac', torch.tensor([[0.005,]*N_wvl]*N_obs), norm_wing_frac, is_shared=True)
+            add_input('wing_width',   torch.tensor([5.0]*N_obs), norm_wing_width, is_shared=True)
+            add_input('wing_width_t', torch.tensor([0.0]*N_obs), norm_wing_width, optimizable=False, is_shared=True)
+            add_input('wing_angle',   torch.tensor([0.0]*N_obs), norm_J_angle,    optimizable=False, is_shared=True)
+        
         # Von Kármán turbulence parameters
         add_input('r0', self.model.r0.detach().clone(), norm_r0, is_shared=True)
         add_input('L0', self.model.L0.detach().clone(), norm_L0, is_shared=True)

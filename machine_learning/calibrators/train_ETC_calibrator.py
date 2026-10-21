@@ -8,7 +8,7 @@ Build the ETC calibrator bundle for MUSE NFM (`calibrators/ETC_calibrator.py`, E
    training samples are used: their configs carry their own DM pitch, and the trainer batches them per k_c group.
 3. Bundle `data/weights/ETC_calibrator/ETC_calibrator_bundle.pth` (+ `_meta.json`).
 
-The PSF-model regime (anisotropic jitter, J_angle fixed at the fitted median), the loss and the dataset cache (raw
+The PSF-model regime (anisotropic jitter, image-frame wing, J_angle fixed at the fitted median), the loss and the dataset cache (raw
 frames or derotated PSFs) come from the config, laid out like the NFM calibrator ones (configs/NFM_*calibrator_config.json): keep the
 "model", "loss" and "fixed_params" sections in sync with them and with STD_fitter.py.
 
@@ -161,7 +161,7 @@ if __name__ == '__main__':
             logger.warning('The kept direct network was trained with another "model" section than the config: retrain it (no --skip-direct-net)')
         logger.info('Kept the direct network of the existing bundle')
 
-    # Kept fixed inputs of the renderer (J_angle at the fitted training median)
+    # Kept fixed inputs of the renderer (J_angle at the fitted training median; the wing widths come with the "model" section)
     kept = kept if kept is not None else fits_median_inputs(dataset, train_idx, cfg['model'])
     logger.info(f"Fixed inputs: { {k: np.round(v.numpy(), 3).tolist() for k, v in kept.items()} }")
 

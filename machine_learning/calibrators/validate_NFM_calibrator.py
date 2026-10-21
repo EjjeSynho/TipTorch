@@ -182,7 +182,7 @@ plt.bar(np.arange(len(means)), means.cpu().numpy(), yerr=stds.cpu().numpy(), alp
 plt.xticks(ticks=np.arange(len(means)), labels=output_names, rotation=45, ha='right')
 
 selected_mean_features = []
-feature_keywords = {'J_ctrl', 'Jx_ctrl', 'Jy_ctrl', 'F_ctrl', 'LO_coefs', 'wind_speed_single', 'L0'}
+feature_keywords = {'J_ctrl', 'Jx_ctrl', 'Jy_ctrl', 'wing_frac_ctrl', 'F_ctrl', 'LO_coefs', 'wind_speed_single', 'L0'}
 
 for i, name in enumerate(output_names):
     if any(keyword in name for keyword in feature_keywords):
@@ -798,7 +798,7 @@ for start in range(0, N_val, ETC_batch_size):
     chunk_config  = MultipleTargetsInDifferentObservations(chunk_configs, device=default_device)
     chunk_telemetry = ETC_telemetry_vecs[start:end]
 
-    with torch.no_grad(): # the jitter regime of the training (see build_PSF_model)
+    with torch.no_grad(): # the jitter / wing regime and the fixed wing widths of the training (see build_PSF_model)
         ETC_PSF_model = build_PSF_model(chunk_config, cfg['model'], default_device)
         _ = ETC_calibrator.check_compatibility(ETC_PSF_model)
         ETC_calibrator.calibrate_prepared(chunk_telemetry, ETC_PSF_model)

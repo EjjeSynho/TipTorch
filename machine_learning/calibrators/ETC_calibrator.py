@@ -16,8 +16,8 @@ these ETC inputs alone, with two predictors sharing the interface `predict(etc, 
 template config) written by `train_ETC_calibrator.py`; `ETCDataset` is the dataset view used to train the network.
 
 The PSF model is the one of the STD-star fits and of the NFM calibrator (`build_PSF_model`, the "model" section of the training config):
-anisotropic chromatic jitter (Jx, Jy, J_angle) since 2026-10-21. The kept fixed inputs of the training (J_angle at the training median of
-the fits) are stored in the bundle (`fixed_inputs`) and set by the renderer.
+anisotropic jitter (Jx, Jy, J_angle) and the image-frame wing (wing_frac, fixed widths) since 2026-10-21. The kept fixed inputs of the
+training (J_angle at the training median of the fits, the wing widths) are stored in the bundle (`fixed_inputs`) and set by the renderer.
 
 Conventions: ETC tables are pandas DataFrames with one row per observation (`etc_table`); `x_dict` holds the PSF-model parameters
 as tensors [N, ...] on the device; rendered PSFs are [N, N_wvl, H, W] on the CPU.
@@ -48,9 +48,10 @@ def dataset_cache_path(derotated: bool) -> Path:
 
 
 def donor_keys(model_cfg: dict) -> list:
-    """ PSF-model inputs a donor passes on (the keys of the fits), in the jitter regime of the "model" section `model_cfg` """
+    """ PSF-model inputs a donor passes on (the keys of the fits), in the jitter / wing regime of the "model" section `model_cfg` """
     jitter = ['Jx_ctrl', 'Jy_ctrl', 'J_angle'] if model_cfg.get('anisotropic_jitter', False) else ['J_ctrl']
-    return ['F_ctrl', *jitter, 'r0', 'L0', 'dn', 'wind_speed_single', 'Cn2_weights', 'LO_coefs']
+    wing   = ['wing_frac_ctrl'] if model_cfg.get('wing_kernel', False) else []
+    return ['F_ctrl', *jitter, *wing, 'r0', 'L0', 'dn', 'wind_speed_single', 'Cn2_weights', 'LO_coefs']
 
 # The calibrator telemetry features an ETC can provide (the IRLOS regime follows from the NGS magnitude, see `IRLOS_frequency`)
 ETC_INPUTS = ['Seeing (header)', 'Tau0 (header)', 'Tel. altitude', 'NGS mag (from ph.)', 'IRLOS frequency', 'IRLOS gain']
@@ -135,9 +136,9 @@ class DonorPredictor:
     """
     Fitted PSF-model parameters of a nearest-neighbour training observation. `pool` holds, per training observation, the ETC
     inputs (`etc_inputs` [N, 6], physical units), the fitted parameters (`fitted`, keyed by the PSF-model inputs, see `donor_keys`:
-    F_ctrl, Jx_ctrl / Jy_ctrl / J_angle (or J_ctrl), r0, L0, dn, wind_speed_single, Cn2_weights [N, 2] without the ground layer,
-    LO_coefs [N, 8] with the phase bump first) and the Cn2 layer heights (`heights` [N, 3]). The donor's own jitter angle is passed
-    on with the rest of its fit. Queries are matched in the standardized input space (`mean`,
+    F_ctrl, Jx_ctrl / Jy_ctrl / J_angle (or J_ctrl), wing_frac_ctrl, r0, L0, dn, wind_speed_single, Cn2_weights [N, 2] without the
+    ground layer, LO_coefs [N, 8] with the phase bump first) and the Cn2 layer heights (`heights` [N, 3]). The donor's own jitter
+    angle and wing fraction are passed on with the rest of its fit. Queries are matched in the standardized input space (`mean`,
     `scale`); one of the `k` nearest donors is drawn at random (`nearest=True`: always the nearest). With `rescale`, r0 follows the
     requested seeing (r0 ~ 1/seeing, both at zenith) and the ground-layer wind the requested tau0 (v ~ r0/tau0, ratio clipped to [0.5, 2]).
     """
@@ -199,7 +200,7 @@ def build_ETC_config(template: dict, row, wavelengths_m, heights):
     TipTorch config (lists layout) of one ETC row: the template with the ETC atmosphere (seeing, TC outer scale / ground-layer
     fraction / ASM wind, `heights` [3] in m), zenith angle, LGS flux, NGS flux and IRLOS regime, science wavelengths [m].
     The atmosphere entries only matter where the predictors do not override them (layer heights, wind direction). The pupil is
-    not rotated: the ETC metrics are radial, and the jitter is defined in the image frame whatever the pupil angle.
+    not rotated: the ETC metrics are radial, and the jitter and the wing are defined in the image frame whatever the pupil angle.
     """
     tc, glf = int(row['tc']), TC_GLF[int(row['tc'])]
     cfg = deepcopy(template)
@@ -346,7 +347,7 @@ class ETCCalibrator:
         self.pool, self.mean, self.scale = self.state['pool'], self.state['etc_mean'], self.state['etc_scale']
         self.median_heights, self.phase_bump = list(self.state['median_heights']), float(self.state['phase_bump_median'])
         self.template_config, self.model_cfg = self.state['template_config'], self.state['model_cfg']
-        self.fixed_inputs  = self.state.get('fixed_inputs', {})  # bundles before 2026-10-21: none (isotropic jitter)
+        self.fixed_inputs  = self.state.get('fixed_inputs', {})  # bundles before 2026-10-21: none (isotropic jitter, no wing)
         self.dataset_cache = Path(self.state['dataset_cache'])  # the dataset the bundle was built from (its validation split)
         # Pools before 2026-10-21 are keyed F / J instead of the PSF-model inputs F_ctrl / J_ctrl
         self.pool['fitted'] = {({'F': 'F_ctrl', 'J': 'J_ctrl'}).get(k, k): v for k, v in self.pool['fitted'].items()}
