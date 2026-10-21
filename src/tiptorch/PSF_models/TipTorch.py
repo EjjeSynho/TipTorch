@@ -1248,6 +1248,10 @@ class TipTorch(torch.nn.Module):
         JitterKernel. Like the jitter, it is built on the image-frame grid, so it does not turn with the pupil angle. It models an
         instrument-frame spread (slicer / spectrograph) which an isotropic halo or a jitter cannot represent.
         """
+        # [N_src] or [N_src, 1] -> [N_src, 1, 1, 1] like Jxy in PSD2PSF: with only two trailing dims added ([N_src, 1, 1]) the sources would
+        # broadcast against the wavelength axis of nu_scale for N_src > 1 (the single-star fits never exercised this)
+        if angle.dim() < 4:
+            angle = pdims(min_2d(angle), 2)
         cos_theta = torch.cos( torch.deg2rad(angle) )
         sin_theta = torch.sin( torch.deg2rad(angle) )
         U_prime =  self.U * cos_theta + self.V * sin_theta
@@ -1648,7 +1652,7 @@ class TipTorch(torch.nn.Module):
         # Resulting combined OTF
         self.OTF = OTF_turb * OTF_static * fftPhasor * OTF_jitter
         if self.use_wing: # one-dimensional image-frame wing (unity at zero frequency, so the normalization below is unaffected)
-            self.OTF = self.OTF * self.WingKernel(self.wing_frac.abs(), self.wing_width.abs(), pdims(self.wing_angle, 2), self.wing_width_t.abs())
+            self.OTF = self.OTF * self.WingKernel(self.wing_frac.abs(), self.wing_width.abs(), self.wing_angle, self.wing_width_t.abs())
         # self.OTF = OTF_static
         # Index before abs(): the gradient of abs() is z/|z|, NaN where the OTF underflows to exactly zero (far wings at low r0),
         # and 0 * NaN from the indexing then poisons the whole batch in the backward pass

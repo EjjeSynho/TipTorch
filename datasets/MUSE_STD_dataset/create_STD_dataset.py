@@ -344,9 +344,10 @@ with open(STD_FOLDER / 'muse_df.pickle', 'wb') as handle:
 
 DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 
-# Derotated PSFs (the regime of the existing fits and calibrator weights) or raw frames with the per-sample pupil angle in the configs,
-# rotated by the PSF model (see build_dataset_cache). The raw-frame cache gets the '_raw' suffix
-DEROTATE_PSF = True
+# Derotated PSFs or raw frames with the per-sample pupil angle in the configs, rotated by the PSF model (see build_dataset_cache). Must match
+# the regime of the fits (STD_fitter.py DEROTATE_PSF, raw frames since 2026-10-20) and of the training (derotated_PSFs in the calibrator
+# configs). The raw-frame cache gets the '_raw' suffix
+DEROTATE_PSF = False
 
 #%%
 # Pack all data into the coherent dataset, where reduced telemetry is associated with spectral cubes and fitted PSF model parameters

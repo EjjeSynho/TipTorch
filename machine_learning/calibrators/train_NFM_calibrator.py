@@ -28,132 +28,50 @@ from tiptorch._config import *
 from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory, CONFIGS_FOLDER
 
 # ── JSON config ───────────────────────────────────────────────────────────────
-# All training settings live in an external JSON file; pass it via --config.
-# Anything not present in the file falls back to DEFAULT_CONFIG.
-DEFAULT_CONFIG = {
-    "name":                 "best_calibrator",
-    "debug":                True,
-    "seed":                 43,
-    "batch_size":           16,
-    "derotated_PSFs":       True,  # derotated STD-star cache (configs with PupilAngle 0) or the raw-frame cache (*_raw.pt, the PSF model rotates per OB)
-    "continue_training":    False,
-    "reuse_pretrain":       False,
-    "run_kfold_difficulty": False,
-    "kfolds":               5,
-    "kfold_epochs":         120,
-    "kfold_patience":       12,
-    "difficulty_alpha":     0.30,
-    "difficulty_clip_min":  0.50,
-    "difficulty_clip_max":  2.00,
-    "tune": {
-        "enabled":    False,
-        "params":     ["F_ctrl", "dn"],
-        "num_epochs": 20,
-        "lr":         1e-3
-    },
-    "model": {
-        "LO_NCPAs":       True,
-        "chrom_defocus":  False,
-        "use_Moffat":     False,
-        "retain_PSDs":    False,
-        "N_spline_nodes": 5,
-        "Z_mode_max":     9
-    },
-    "calibrator": {
-        "type":         "factor", # "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors, configs/NFM_factor_calibrator_config.json)
-        "hidden_dim":   48,
-        "dropout_rate": 0.2,
-        "factor_keys":  ["r0", "L0", "wind_speed_single", "Cn2_weights"], # factor type only: parameters predicted as log-factors on telemetry priors
-        "const_keys":   ["F_ctrl", "LO_coefs"],                            # factor type only: dataset-level constants, the rest is predicted directly
-        "Cn2_mix":      "fixed",   # factor type only, grid Cn2 features: reduction of the 8-node profile to the model layers, "learned" (soft assignment trained end-to-end) or "fixed" (altitude bins)
-        "Cn2_targets":  "fits",    # factor type only: pretraining target of the Cn2 corrections, "fits" (log-ratio to the fitted profile) or "prior" (zero: the telemetry profile itself)
-        "Cn2_offset":   False      # factor type only: learned dataset-level log-offset of the Cn2 layer weights
-    },
-    "trainer": {
-        "lr":                  0.01,
-        "lambda_step":         1,
-        "predict_LO_NCPAs":    True,
-        "predict_Cn2_profile": True,
-        "predict_wind_speed":  True,
-        "pre_init_astrometry": True,
-        "optimize_astrometry": False,
-        "nan_recovery":        True,
-        "random_state":        43,
-        "num_epochs":          250,
-        "patience":            20,
-        "max_nan_recoveries":  10,
-        "pretrain_epochs":     100,
-        "pretrain_patience":   15,
-        "pretrain_standardize": True
-    },
-    # PSF loss, see NFMCalibratorTrainer / BalancedPSFLoss. "legacy" is the linear MSE + MAE loss used before.
-    # r_max = 40: beyond it, the model's seeing halo is systematically 25-35 % fainter than the data (ratio 0.74 at 40-60 px,
-    # 0.64 at 60-85 px), and fitting it there degrades the AO-corrected halo and the core. The deficit is not a background offset
-    # nor an atmospheric normalization problem: it grows outward, with the fitted r0 and towards the red, i.e. a few % of the
-    # flux sit in a grey, flatter-than-Kolmogorov wing missing from the model (analysis/analyze_halo_deficit.py, 2026-10-14).
-    "loss": {
-        "type":             "balanced",
-        "radial_power":     2.0,
-        "r_max":            40.0,
-        "asinh_k":          3.0,
-        "huber_delta":      0.1,
-        "scale":            3.0,
-        "match_background": False,
-        "legacy_weight":    0.0,
-        "LO_sign_penalty":  False,
-        "fit_reg_weight":   0.0,  # parameter-space distance to the per-sample fits, see NFMCalibratorTrainer._regularization
-        "shrink_weight":    0.0   # factor calibrator only: shrinkage of the corrections towards the prior
-    },
-    # Alternative: legacy loss (linear MSE + MAE)
-    # "loss": {
-    #     "type":             "legacy",
-    #     "LO_sign_penalty":  False,
-    #     "fit_reg_weight":   0.0,
-    #     "shrink_weight":    0.0
-    # },
-    "fixed_params": [
-        "Jxy", "bg_ctrl",
-        "dx_ctrl", "dy_ctrl",
-        "F_norm", "F_norm_lambda_ctrl", "F_norm_λ_ctrl",
-        "src_dirs_x", "src_dirs_y",
-        "wind_dir_single"
-    ],
-    "weights_subdir":     "NFM_calibrator",
-    "max_train_samples":  None
-}
+# All training settings live in a JSON file of calibrators/configs/, passed with --config: NFM_calibrator_config.json (direct calibrator,
+# the default) or NFM_factor_calibrator_config.json (factor calibrator). The file is used as is, there are no defaults in this script; the
+# validation / ablation / comparison scripts take the same file to rebuild the identical setup and find the run's weights.
+# Sections:
+#   name, weights_subdir      run name and weights folder (WEIGHTS_FOLDER / weights_subdir / name_*): checkpoint, split, meta, bundle
+#   derotated_PSFs            derotated STD-star cache (configs with PupilAngle 0) or the raw-frame cache (*_raw.pt, the PSF model rotates per OB);
+#                             must match the regime of the fits (STD_fitter.py DEROTATE_PSF) and of the dataset cache (create_STD_dataset.py)
+#   model                     PSF model (build_PSF_model). The jitter / wing regime must be the one of the fits the pretraining targets come from
+#                             (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL, WING_WIDTH_PX, WING_WIDTH_T_PX, WING_POWER): since 2026-10-20 the
+#                             fits use the anisotropic chromatic jitter (Jx_ctrl, Jy_ctrl, J_angle) and the image-frame wing (wing_frac_ctrl per
+#                             star, dataset-wide wing_width_px x wing_width_t_px widths, wing_power exponent of the wing MTF)
+#   calibrator                "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors: factor_keys predicted as
+#                             log-factors on the priors, const_keys dataset-level constants, the rest predicted directly; Cn2_mix / Cn2_targets /
+#                             Cn2_offset for the grid Cn2 features), hidden_dim, dropout_rate
+#   trainer                   learning rate, epochs / patience of the pretraining and the training, what is predicted, NaN recovery
+#   loss                      PSF loss, see NFMCalibratorTrainer / BalancedPSFLoss. "balanced" (asinh-compressed, radially weighted, with the linear
+#                             MSE term mse_weight restoring the peak and the per-wavelength peak_weight term) is also the fitter's loss: keep its
+#                             parameters equal to PSF_LOSS_CFG in STD_fitter.py. r_max = 40: beyond it the model's seeing halo is systematically
+#                             25-35 % fainter than the data (ratio 0.74 at 40-60 px, 0.64 at 60-85 px) and fitting it there degrades the AO-corrected
+#                             halo and the core (analysis/analyze_halo_deficit.py, 2026-10-14). "legacy" is the linear MSE + MAE loss used before.
+#                             fit_reg_weight: parameter-space distance to the per-sample fits; shrink_weight (factor only): shrinkage to the prior
+#   fixed_params              not predicted. J_angle and the wing widths / angle are kept in the model at their initial values (FIXED_INPUTS_KEPT in
+#                             NFM_calibrator.py), the others are removed from the model inputs
 
-# The training configs live in calibrators/configs/ (NFM_calibrator_config.json: direct calibrator, NFM_factor_calibrator_config.json:
-# factor calibrator). The JSON given with --config overrides DEFAULT_CONFIG above section by section; without --config the direct one is used.
-# The validation / ablation / comparison scripts take the same file to rebuild the identical setup and find the run's weights.
+#   tune, kfold*, difficulty* optional fine-tuning of a few parameters and the k-fold difficulty weighting; max_train_samples: data ablation
+
 _parser = argparse.ArgumentParser(description="Train NFM Calibrator")
 _parser.add_argument('--config', type=str, default=str(CONFIGS_FOLDER / 'NFM_calibrator_config.json'), help='JSON training config (default: calibrators/configs/NFM_calibrator_config.json)')
 _parser.add_argument('--device', type=str, default=None, help="Torch device, e.g. 'cuda:1' (default: the one of project_config.json)")
 
 try:
-    _cli        = _parser.parse_args()
-    _cfg_path   = Path(_cli.config) if _cli.config else None
+    _cli      = _parser.parse_args()
+    _cfg_path = Path(_cli.config)
     if _cli.device:
         default_device = torch.device(_cli.device) # overrides the project setting for this run only
-        
-except SystemExit:
-    _cfg_path   = None
 
+except SystemExit: # IPython: the kernel's own arguments are not ours, take the default config
+    _cfg_path = CONFIGS_FOLDER / 'NFM_calibrator_config.json'
 
-if _cfg_path and _cfg_path.exists():
-    with open(_cfg_path) as _f:
-        _loaded = json.load(_f)
-        
-    cfg = deepcopy(DEFAULT_CONFIG)
-    
-    for _k, _v in _loaded.items():
-        if isinstance(_v, dict) and _k in cfg and isinstance(cfg[_k], dict):
-            cfg[_k] = {**cfg[_k], **_v}   # shallow-merge nested dicts
-        else:
-            cfg[_k] = _v
-else:
-    cfg = deepcopy(DEFAULT_CONFIG)
-    if _cfg_path:
-        print(f"Warning: config file not found: {_cfg_path}. Using defaults.")
+if not _cfg_path.exists():
+    raise FileNotFoundError(f"Training config not found: {_cfg_path}")
+
+with open(_cfg_path) as _f:
+    cfg = json.load(_f)
 
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
@@ -180,8 +98,7 @@ logging.getLogger('PIL').setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 logger.info(f"Log file: {log_filename}")
 
-if _cfg_path:
-    logger.info(f"Config loaded from: {_cfg_path}")
+logger.info(f"Config loaded from: {_cfg_path}")
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
 # Seeds the network initialization, the batch order and the dropout masks, so that runs differing only in the config (e.g. the

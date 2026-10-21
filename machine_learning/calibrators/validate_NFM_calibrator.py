@@ -18,7 +18,7 @@ sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibra
 from tiptorch._config import *
 from tiptorch.tools.utils import r0
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
-from calibrators.NFM_calibrator import (
+from calibrators.NFM_calibrator import (build_PSF_model,
     NFMDataset,
     build_NFM_trainer,
     load_NFM_calibrator,
@@ -86,8 +86,8 @@ if not _meta_path.exists():
 with open(_meta_path) as _f:
     train_meta = json.load(_f)
 
-# The config file only locates the run: the run itself may differ from it (from IPython, train_NFM_calibrator.py ignores
-# --config and trains with its DEFAULT_CONFIG under the same name), so the trainer is rebuilt from the run's own config
+# The config file only locates the run: the run itself may differ from it (the file may have been edited since the training, and from
+# IPython train_NFM_calibrator.py trains with the default config file under its name), so the trainer is rebuilt from the run's own config
 if 'config' in train_meta:
     cfg = train_meta['config']
 elif train_meta.get('calibrator_type', 'direct') != cfg.get('calibrator', {}).get('type', 'direct'):
@@ -184,7 +184,7 @@ plt.xticks(ticks=np.arange(len(means)), labels=output_names, rotation=45, ha='ri
 #         print(f"  {output_names[i]}: mean={means[i].item():.4f}, std={stds[i].item():.4f}, std/mean={stds[i].item()/means[i].item():.4f}")
 
 selected_mean_features = []
-feature_keywords = {'J_ctrl', 'F_ctrl', 'LO_coefs', 'wind_speed_single', 'L0'}
+feature_keywords = {'J_ctrl', 'Jx_ctrl', 'Jy_ctrl', 'wing_frac_ctrl', 'F_ctrl', 'LO_coefs', 'wind_speed_single', 'L0'}
 
 for i, name in enumerate(output_names):
     if any(keyword in name for keyword in feature_keywords):
@@ -806,18 +806,8 @@ for start in range(0, N_val, ETC_batch_size):
     chunk_config  = MultipleTargetsInDifferentObservations(chunk_configs, device=default_device)
     chunk_telemetry = ETC_telemetry_vecs[start:end]
 
-    with torch.no_grad():
-        ETC_PSF_model = PSFModelNFM(
-            chunk_config,
-            multiple_obs   = True,
-            LO_NCPAs       = cfg['model']['LO_NCPAs'],
-            chrom_defocus  = cfg['model']['chrom_defocus'],
-            use_Moffat     = cfg['model']['use_Moffat'],
-            retain_PSDs    = cfg['model']['retain_PSDs'],
-            N_spline_nodes = cfg['model']['N_spline_nodes'],
-            Z_mode_max     = cfg['model']['Z_mode_max'],
-            device         = default_device,
-        )
+    with torch.no_grad(): # the jitter / wing regime and the fixed wing widths of the training (see build_PSF_model)
+        ETC_PSF_model = build_PSF_model(chunk_config, cfg['model'], default_device)
         _ = ETC_calibrator.check_compatibility(ETC_PSF_model)
         ETC_calibrator.calibrate_prepared(chunk_telemetry, ETC_PSF_model)
 
