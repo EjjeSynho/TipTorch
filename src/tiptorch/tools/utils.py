@@ -805,13 +805,9 @@ def recompute_Cn2_Kmeans(Cn2_alts, Cn2_weights, n_layers=5, enforce_0_GL=False, 
     
     # Check if resulting layers are separated enough (useful for numerical stability)
     if min_separation is not None:
-        for i in range(1, len(H)-1):
-            if d1 := np.abs(H[i] - H[i-1]) < min_separation:
-                H[i] += min_separation - d1
-            
-            if d2 := np.abs(H[i+1] - H[i]) < min_separation:
-                H[i] -= min_separation - d2
-            
+        for i in range(1, len(H)):
+            H[i] = max(H[i], H[i-1] + min_separation)
+
     return H, W
 
 
