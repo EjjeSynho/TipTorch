@@ -78,8 +78,10 @@ def telemetry_base_params(telemetry_physical, features: list, L0_const: float | 
         f2  = col('Cn2_frac_binned_2').clamp(1e-3, 0.98)
         f3  = col('Cn2_frac_binned_3').clamp(1e-3, 0.98)
         Cn2 = torch.stack([(1.0 - f2 - f3).clamp(min=1e-3), f2, f3], dim=-1)
+        
     if Cn2_offset is not None:
         Cn2 = Cn2 * torch.exp(Cn2_offset.to(Cn2)).view(1, -1)
+    
     Cn2 = Cn2 / Cn2.sum(dim=-1, keepdim=True)
 
     base = {
@@ -87,6 +89,7 @@ def telemetry_base_params(telemetry_physical, features: list, L0_const: float | 
         'wind_speed_single': col('Wind speed (header)').clamp(0.5, 30.0)[:, None], # [m/s]
         'Cn2_weights':       Cn2,
     }
+    
     if L0_const is not None:
         base['L0'] = torch.full((len(T),), float(L0_const), dtype=T.dtype, device=T.device)
 
@@ -102,6 +105,7 @@ def Cn2_grid_features_from_GLF(Cn2_grid, GLF) -> dict:
     upper = Cn2_grid.median_fracs[1:] / Cn2_grid.median_fracs[1:].sum()
     g     = np.hstack([GLF[:, None], (1.0 - GLF)[:, None] * upper[None, :]])
     _, heights = Cn2_grid.to_layers(g)
+    
     feats = {name: g[:, k] for k, name in enumerate(Cn2_grid.feature_names)}
     feats.update({f'Cn2_layer_alt_{k+1}': heights[:, k] for k in range(1, Cn2_grid.N_layers)})
     return feats

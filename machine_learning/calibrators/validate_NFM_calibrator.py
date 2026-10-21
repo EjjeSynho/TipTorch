@@ -181,13 +181,6 @@ means = NN_params.mean(dim=0)
 plt.bar(np.arange(len(means)), means.cpu().numpy(), yerr=stds.cpu().numpy(), alpha=0.7, capsize=3)
 plt.xticks(ticks=np.arange(len(means)), labels=output_names, rotation=45, ha='right')
 
-# Select features with low varibility relative to their mean (e.g., < 5% std/mean)
-# low_var_features = (stds / means) < 0.05
-# print(f"Low variability features: {low_var_features.sum().item()} / {len(low_var_features)}:")
-# for i, is_low_var in enumerate(low_var_features):
-#     if is_low_var:
-#         print(f"  {output_names[i]}: mean={means[i].item():.4f}, std={stds[i].item():.4f}, std/mean={stds[i].item()/means[i].item():.4f}")
-
 selected_mean_features = []
 feature_keywords = {'J_ctrl', 'Jx_ctrl', 'Jy_ctrl', 'wing_frac_ctrl', 'F_ctrl', 'LO_coefs', 'wind_speed_single', 'L0'}
 
@@ -234,8 +227,8 @@ _ = Y.pop('Cn2_weights', None)
 #%%
 common_keys = [k for k in X if k in Y]
 n_keys = len(common_keys)
-ncols = min(3, n_keys)
-nrows = int(np.ceil(n_keys / ncols))
+ncols  = min(3, n_keys)
+nrows  = int(np.ceil(n_keys / ncols))
 
 fig, axes = plt.subplots(nrows, ncols, figsize=(ncols * 4.5, nrows * 3.5))
 axes_flat = np.array(axes).ravel()
@@ -261,8 +254,6 @@ fig.suptitle('Input vs. Predicted distributions', fontsize=13)
 plt.tight_layout()
 plt.show()
 
-
-# trainer.save_calibrator(Path(train_meta['bundle_path']))
 
 #%% ======================================================================================================================================================================
 #%  ======================================================================================================================================================================
