@@ -295,18 +295,18 @@ def build_loss(PSF_model, PSF_0, flags, device=default_device):
         loss += force_positive(PSF_model.inputs_manager['r0'])
         
         if PSF_model.wing_kernel: # keep the wing fraction in [0, WING_FRAC_MAX] and the widths within their bounds (see WING_WIDTH_BOUNDS)
-            wf = PSF_model.inputs_manager['wing_frac_ctrl' if PSF_model.use_splines else 'wing_frac']
-            ww = PSF_model.inputs_manager['wing_width']
-            wt = PSF_model.inputs_manager['wing_width_t']
+            wing_f = PSF_model.inputs_manager['wing_frac_ctrl' if PSF_model.use_splines else 'wing_frac']
+            wing_w = PSF_model.inputs_manager['wing_width']
+            wing_t = PSF_model.inputs_manager['wing_width_t']
             
-            loss += force_positive(wf) + force_positive(min(1.0, WING_FRAC_MAX) - wf) * 1e2
-            loss += (force_positive(ww - WING_WIDTH_BOUNDS[0]) + force_positive(WING_WIDTH_BOUNDS[1] - ww)) * 1e2
+            loss += force_positive(wing_f) + force_positive(min(1.0, WING_FRAC_MAX) - wing_f) * 1e2
+            loss += (force_positive(wing_w - WING_WIDTH_BOUNDS[0]) + force_positive(WING_WIDTH_BOUNDS[1] - wing_w)) * 1e2
             
             if FIT_WING_WIDTH_T:
-                loss += (force_positive(wt) + force_positive(WING_WIDTH_BOUNDS[1] - wt)) * 1e2
+                loss += (force_positive(wing_t) + force_positive(WING_WIDTH_BOUNDS[1] - wing_t)) * 1e2
             # Pull towards the dataset prior curve, dominant for blurry PSFs (the division by w undoes the overall weight below)
-            if wing_prior is not None and wf.shape[-1] == wing_prior.shape[-1]:
-                loss += (wf - wing_prior).pow(2).mean() * w_wing_prior * suppress_LO / 0.025
+            if wing_prior is not None and wing_f.shape[-1] == wing_prior.shape[-1]:
+                loss += (wing_f - wing_prior).pow(2).mean() * w_wing_prior * suppress_LO / 0.025
         
         if flags['fit_outerscale']:
             loss += force_positive(PSF_model.inputs_manager['L0'])
@@ -335,6 +335,7 @@ def build_loss(PSF_model, PSF_0, flags, device=default_device):
             LO_loss = LO_coefs.pow(2).sum(-1).mean() * w_LO * suppress_LO
             if LO_prior is not None and w_LO_prior > 0 and LO_coefs.shape[-1] == LO_prior.shape[-1]:
                 LO_loss += (LO_coefs[:, 1:] - LO_prior[1:]).pow(2).sum(-1).mean() * w_LO_prior
+        
         # Constraint to enforce first element of LO_coefs to be positive
         phase_bump = LO_coefs[:, 0]
         phase_bump_positive = force_positive(phase_bump) * w_bump * suppress_bump
@@ -363,7 +364,6 @@ def build_loss(PSF_model, PSF_0, flags, device=default_device):
         Moffat_loss = Moffat_loss_fn() if PSF_model.use_Moffat else 0.0
         
         return PSF_loss + LO_loss + Moffat_loss + loss_MAP()
-
 
     return func, loss_fn
 
@@ -460,7 +460,7 @@ def multistart_fit(PSF_model, PSF_0, loss_fn, minimize_params, include, exclude,
     """
     starts    = DEFOCUS_STARTS if starts is None else starts
     select_by = SELECT_BY if select_by is None else select_by
-    flip = DEFOCUS_SIGN == 'flip' and flags['suppress_bump'] and PSF_model.LO_NCPAs
+    flip      = DEFOCUS_SIGN == 'flip' and flags['suppress_bump'] and PSF_model.LO_NCPAs
 
     def fit_from(start_defocus):
         def _restart():

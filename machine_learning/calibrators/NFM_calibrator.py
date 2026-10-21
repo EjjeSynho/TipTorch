@@ -125,6 +125,7 @@ def kfold_splits(dataset, base_indices, n_splits, random_state=42):
     time groups, so that samples close in time stay in the same fold.
     """
     time_groups = getattr(dataset, 'time_groups', None)
+    
     if time_groups is None:
         logger.warning('Dataset cache has no time groups, K-fold splits ignore acquisition times')
         kf = KFold(n_splits=min(n_splits, len(base_indices)), shuffle=True, random_state=random_state)
@@ -344,6 +345,7 @@ class NFMCalibrator():
         self.N_spline_nodes = state.get('N_spline_nodes', None)
         self.model_flags    = state.get('model_flags', None) # None: bundle from before the anisotropic jitter / wing kernel (both False then)
         self.fixed_inputs   = state.get('fixed_inputs', {})  # {key: tensor [1, ...]}, see fixed_inputs()
+        self.training_config = state.get('training_config', None) # the resolved training config of the run (bundles since 2026-10-21)
 
     @staticmethod
     def _tree_to_cpu(obj):
@@ -662,20 +664,26 @@ def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 
     train_idx = trainer_overrides.get('train_idx')
     train_idx = default_split(dataset)[0] if train_idx is None else np.asarray(train_idx, dtype=int)
     names     = PSF_model.inputs_manager.get_names(optimizable_only=False)
+    
     for key in cfg['model'].get('fixed_from_fits', []):
         if key not in FIXED_INPUTS_KEPT or key not in cfg['fixed_params']:
             raise ValueError(f"fixed_from_fits: '{key}' must be one of the kept fixed inputs {FIXED_INPUTS_KEPT} and listed in fixed_params")
+        
         if key not in names:
             logger.warning(f"fixed_from_fits: the PSF model has no input '{key}' in this regime, skipped")
             continue
         fits = [dataset.fitted_vals[int(i)] for i in train_idx if key in dataset.fitted_vals[int(i)]]
+       
         if not fits:
             logger.warning(f"fixed_from_fits: the fits carry no '{key}', the model keeps its default value")
             continue
+        
         median = torch.stack([torch.as_tensor(np.asarray(f[key], dtype=np.float32)).reshape(-1) for f in fits]).median(dim=0).values
         cur    = PSF_model.inputs_manager[key]
+        
         with torch.no_grad():
             cur[:] = (median[0] if median.numel() == 1 else median.view(1, -1).expand(cur.shape[0], -1).reshape(cur.shape)).to(device=cur.device, dtype=cur.dtype)
+        
         logger.info(f"fixed_from_fits: {key} = {np.round(median.numpy(), 3).tolist()} (median of {len(fits)} training fits)")
 
     if PSF_model.use_Moffat:
@@ -689,9 +697,11 @@ def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 
     # Outputs transformer: calibrator predictions <-> PSF-model inputs, without the phase bump column of LO_coefs
     outputs_transformer = deepcopy(PSF_model.inputs_manager.get_transformer())
     buf = outputs_transformer.unstack(PSF_model.inputs_manager.stack())
+    
     if 'LO_coefs' in buf:
         buf['LO_coefs'] = buf['LO_coefs'][:, 1:]
     _ = outputs_transformer.stack(buf)
+    
     del buf
 
     calibrator_type = cfg.get('calibrator', {}).get('type', 'direct')
@@ -740,6 +750,7 @@ def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 
     else:
         raise ValueError(f"Unknown calibrator type '{calibrator_type}', expected 'direct' or 'factor'")
 
+    trainer.training_config = deepcopy(cfg) # the resolved training config, stored in the bundle (save_calibrator) for the validation
     return PSF_model, calibrator, outputs_transformer, trainer
 
 
@@ -892,10 +903,12 @@ class NFMCalibratorTrainer:
         groups = getattr(self.dataset, 'kc_group', None)
         if groups is None or len(np.unique(groups)) == 1:
             return 'k_c groups: none (single k_c)'
+        
         parts = []
         for g in np.unique(groups):
             frac = float(np.mean(np.asarray(self.dataset.kc_fraction)[np.asarray(groups) == g]))
             parts.append(f"{g}: {int(np.sum(np.asarray(groups)[self.train_idx] == g))}+{int(np.sum(np.asarray(groups)[self.val_idx] == g))} @ k_c {100 * frac:.1f}%")
+        
         return 'k_c groups (train+val): ' + ', '.join(parts)
 
     def _make_loader(self, indices, shuffle):
@@ -924,15 +937,15 @@ class NFMCalibratorTrainer:
 
     def _init_astrometry(self):
         n      = len(self.dataset)
-        n_ctrl = len(np.atleast_1d(self.dataset.fitted_vals[0].get('dx_ctrl', [0])))
+        N_ctrl = len(np.atleast_1d(self.dataset.fitted_vals[0].get('dx_ctrl', [0])))
         
         if self.pre_init_astrometry and 'dx_ctrl' in self.dataset.fitted_vals[0]:
             dx_data = np.array([d['dx_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
             dy_data = np.array([d['dy_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
         else:
             self.optimize_astrometry = True
-            dx_data = np.zeros((n, n_ctrl), dtype=np.float32)
-            dy_data = np.zeros((n, n_ctrl), dtype=np.float32)
+            dx_data = np.zeros((n, N_ctrl), dtype=np.float32)
+            dy_data = np.zeros((n, N_ctrl), dtype=np.float32)
             
         self.dx = torch.tensor(dx_data, device=self.device, dtype=torch.float32, requires_grad=self.optimize_astrometry)
         self.dy = torch.tensor(dy_data, device=self.device, dtype=torch.float32, requires_grad=self.optimize_astrometry)
@@ -949,13 +962,16 @@ class NFMCalibratorTrainer:
 
     def _make_optimizer(self, lr=None):
         lr     = lr or self.lr
+        
         groups = [{'params': self.calibrator.parameters(), 'lr': lr, 'weight_decay': 5e-4}]
         groups += self._extra_param_groups(lr)
+       
         if self.optimize_astrometry:
             groups.append({'params': [self.dx, self.dy], 'lr': 1e-3, 'weight_decay': 1e-5})
             
         opt = optim.AdamW(groups, lr=lr)
         sch = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=7, min_lr=1e-6)
+      
         return opt, sch
 
 
@@ -969,9 +985,11 @@ class NFMCalibratorTrainer:
         x_dict.update({k: v for k, v in x_dict_NN.items() if k in x_dict})
         # The non-predicted inputs kept in the model (FIXED_INPUTS_KEPT: J_angle, wing widths / angle) are dataset-wide constants stored
         # with the N_obs the model was built with: broadcast them to the batch (the last batch and the k_c-group batches are smaller)
+       
         for k in FIXED_INPUTS_KEPT:
             if k in x_dict and x_dict[k].shape[0] != len(idx):
                 x_dict[k] = x_dict[k][:1].expand(len(idx), *x_dict[k].shape[1:]).clone()
+        
         # Astrometric shifts are stored as full-dataset tensors and indexed per current batch.
         x_dict['dx_ctrl'] = self.dx[idx]
         x_dict['dy_ctrl'] = self.dy[idx]
@@ -1667,6 +1685,7 @@ class NFMCalibratorTrainer:
             'N_spline_nodes':       getattr(self.PSF_model, 'N_wvl_ctrl', None),
             'model_flags':          model_flags(self.PSF_model), # jitter / wing regime of the PSF model the calibrator was trained with
             'fixed_inputs':         fixed_inputs(self.PSF_model), # kept fixed inputs (J_angle, wing widths / angle), re-applied at calibration
+            'training_config':      getattr(self, 'training_config', None), # the resolved training config (build_NFM_trainer): validate_NFM_calibrator.py rebuilds the trainer from it
             'predict_phase_bump':   False,
             'loss_cfg':             self.loss_cfg,
             'calibrator_type':      self.calibrator_type,

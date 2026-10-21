@@ -55,8 +55,10 @@ from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gp
 
 #   tune, kfold*, difficulty* optional fine-tuning of a few parameters and the k-fold difficulty weighting; max_train_samples: data ablation
 
+DEFAULT_CONFIG = 'NFM_factor_calibrator_legacy_config.json'
+
 _parser = argparse.ArgumentParser(description="Train NFM Calibrator")
-_parser.add_argument('--config', type=str, default=str(CONFIGS_FOLDER / 'NFM_calibrator_config.json'), help='JSON training config (default: calibrators/configs/NFM_calibrator_config.json)')
+_parser.add_argument('--config', type=str, default=str(CONFIGS_FOLDER / DEFAULT_CONFIG), help=f'JSON training config (default: calibrators/configs/{DEFAULT_CONFIG})')
 _parser.add_argument('--device', type=str, default=None, help="Torch device, e.g. 'cuda:1' (default: the one of project_config.json)")
 
 try:
@@ -66,7 +68,7 @@ try:
         default_device = torch.device(_cli.device) # overrides the project setting for this run only
 
 except SystemExit: # IPython: the kernel's own arguments are not ours, take the default config
-    _cfg_path = CONFIGS_FOLDER / 'NFM_calibrator_config.json'
+    _cfg_path = CONFIGS_FOLDER / DEFAULT_CONFIG
 
 if not _cfg_path.exists():
     raise FileNotFoundError(f"Training config not found: {_cfg_path}")
@@ -185,8 +187,8 @@ else:
     trainer.pretrain(
         num_epochs  = cfg["trainer"]["pretrain_epochs"],
         patience    = cfg["trainer"]["pretrain_patience"],
-        save_path   = pretrain_path,
         standardize = cfg["trainer"]["pretrain_standardize"],
+        save_path   = pretrain_path,
     )
 
 release_gpu_memory(sync=True)
@@ -242,6 +244,7 @@ def _cleanup_epoch_checkpoints(directory: Path) -> None:
 
 _cleanup_epoch_checkpoints(trainer.weights_dir)
 _kfold_dir = trainer.weights_dir / 'kfold_difficulty'
+
 if _kfold_dir.exists():
     _cleanup_epoch_checkpoints(_kfold_dir)
 
@@ -265,6 +268,7 @@ _meta = {
     "config":                cfg, # the resolved training config: the validation rebuilds the trainer from it, not from the config file
 }
 _meta_path = trainer.weights_dir / f'{cfg["name"]}_meta.json'
+
 with open(_meta_path, 'w') as _f:
     json.dump(_meta, _f, indent=2)
 

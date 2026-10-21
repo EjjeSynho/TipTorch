@@ -14,8 +14,6 @@ and copied into the dataset cache and the calibrator bundles, so that training a
 """
 import json
 import numpy as np
-from pathlib import Path
-
 
 N_AOF_LAYERS = 8
 ALT_COLS     = [f'ALT{i}'          for i in range(1, N_AOF_LAYERS+1)] # [km]
@@ -23,7 +21,7 @@ FRAC_COLS    = [f'CN2_FRAC_ALT{i}' for i in range(1, N_AOF_LAYERS+1)]
 
 MAX_ALTITUDE_KM  = 100.0 # above: placeholder (1000 km) or garbage
 MIN_PROFILE_MASS = 0.5   # profiles with less valid mass are treated as missing
-MOMENT_POWER     = 5.0/3.0
+MOMENT_POWER     = 5/3
 
 
 def grid_feature_names(N_grid):
@@ -34,9 +32,9 @@ class Cn2Grid:
     def __init__(self, nodes_km, boundaries_km, median_fracs=None, layer_altitudes_km=None, pin_ground_layer=True):
         self.nodes      = np.asarray(nodes_km,      dtype=float).ravel() # [N_grid], increasing, nodes[0] = 0 (ground)
         self.boundaries = np.asarray(boundaries_km, dtype=float).ravel() # [N_layers-1], between the nodes
-        self.pin_ground_layer = bool(pin_ground_layer) # the first AOF layer (the profiler's ground layer, < 1.6 km) goes entirely to the ground node
         self.N_grid     = len(self.nodes)
         self.N_layers   = len(self.boundaries) + 1
+        self.pin_ground_layer = bool(pin_ground_layer) # the first AOF layer (the profiler's ground layer, < 1.6 km) goes entirely to the ground node
 
         if self.nodes[0] != 0.0 or np.any(np.diff(self.nodes) <= 0):
             raise ValueError('Grid nodes must start at 0 km and increase')
@@ -45,6 +43,7 @@ class Cn2Grid:
 
         self.median_fracs = np.full(self.N_grid, 1.0/self.N_grid) if median_fracs is None else np.asarray(median_fracs, dtype=float).ravel()
         self.median_fracs = self.median_fracs / self.median_fracs.sum()
+       
         # Altitudes assigned to the AOF layers whose altitude is invalid (median altitude per layer index)
         self.layer_altitudes = self.nodes.copy() if layer_altitudes_km is None else np.asarray(layer_altitudes_km, dtype=float).ravel()
         if len(self.layer_altitudes) != N_AOF_LAYERS:
@@ -65,21 +64,26 @@ class Cn2Grid:
             'pin_ground_layer':   self.pin_ground_layer,
         }
 
+
     @classmethod
     def from_state_dict(cls, state):
         return cls(**state)
 
+
     def save(self, path):
         with open(path, 'w') as f:
             json.dump(self.state_dict(), f, indent=2)
+
 
     @classmethod
     def load(cls, path):
         with open(path, 'r') as f:
             return cls.from_state_dict(json.load(f))
 
+
     def __repr__(self):
         return f'Cn2Grid(nodes {np.round(self.nodes, 2).tolist()} km, boundaries {self.boundaries.tolist()} km)'
+
 
     # ------------------------------------------------- Profiles --------------------------------------------------------
     def repair(self, alts, fracs):
@@ -106,6 +110,7 @@ class Cn2Grid:
         valid = mass >= MIN_PROFILE_MASS
         fracs = np.where(valid[:, None], fracs / np.where(valid, mass, 1.0)[:, None], np.nan)
         alts  = np.where(valid[:, None], alts, np.nan)
+        
         return alts, fracs, n_repaired, valid
 
 
@@ -118,9 +123,11 @@ class Cn2Grid:
         """
         alts  = np.array(alts,  dtype=float, ndmin=2)
         fracs = np.array(fracs, dtype=float, ndmin=2)
+        
         if self.pin_ground_layer:
             alts = alts.copy()
             alts[:, 0] = 0.0
+            
         N     = alts.shape[0]
         grid  = np.zeros((N, self.N_grid))
         valid = np.isfinite(fracs).all(axis=1)
@@ -134,6 +141,7 @@ class Cn2Grid:
         np.add.at(grid, (rows, k.ravel()),   ((1.0 - t) * w).ravel())
         np.add.at(grid, (rows, k.ravel()+1), (t * w).ravel())
         grid[~valid] = np.nan
+        
         return grid
 
 
@@ -152,7 +160,9 @@ class Cn2Grid:
         heights = (moment / np.clip(weights, 1e-12, None))**(1.0/MOMENT_POWER)
         heights = np.where(weights > 1e-6, heights, self._median_heights[None, :])
         heights[:, 0] = 0.0
+        
         return weights, heights
+
 
     @property
     def _median_heights(self):
@@ -163,10 +173,12 @@ class Cn2Grid:
         h[0]   = 0.0
         return h
 
+
     def default_layers(self):
         """(weights, heights [km]) of the median profile, used when a sample has no usable Cn2 profile."""
         w, h = self.to_layers(self.median_fracs[None, :])
         return w[0], h[0]
+
 
     def process(self, alts, fracs):
         """Raw profiles [N, 8] -> (grid [N, N_grid], weights [N, N_layers], heights [N, N_layers] km, n_repaired [N], valid [N])."""
@@ -175,11 +187,13 @@ class Cn2Grid:
         weights, heights = self.to_layers(grid)
         return grid, weights, heights, n_repaired, valid
 
+
     def process_df(self, df):
         """The same from a DataFrame with the ALT{i} / CN2_FRAC_ALT{i} columns (missing columns count as missing profiles)."""
         alts  = np.column_stack([df[c].to_numpy(float) if c in df else np.full(len(df), np.nan) for c in ALT_COLS])
         fracs = np.column_stack([df[c].to_numpy(float) if c in df else np.full(len(df), np.nan) for c in FRAC_COLS])
         return self.process(alts, fracs)
+
 
     def fraction_below(self, alts, fracs, h_km):
         """Fraction of the (repaired) profile mass below the altitude h_km, NaN for missing profiles."""
@@ -198,15 +212,25 @@ def fit_Cn2_grid(alts, fracs, boundaries_km, layer_altitudes_km=None, pin_ground
     fracs = np.array(fracs, dtype=float, ndmin=2)
     alt_ok = np.isfinite(alts) & (alts >= 0.0) & (alts < MAX_ALTITUDE_KM) & np.isfinite(fracs) & (fracs > 0.0) & (fracs <= 1.0)
     alt_ok[:, 1:] &= alts[:, 1:] > 0.0
+    
     layer_alts = np.array([np.median(alts[:, i][alt_ok[:, i]]) for i in range(N_AOF_LAYERS)]) if layer_altitudes_km is None \
                  else np.asarray(layer_altitudes_km, dtype=float)
+                 
     nodes = layer_alts.copy()
     nodes[0] = 0.0
     nodes = np.maximum.accumulate(nodes)
+    
     if np.any(np.diff(nodes) <= 0):
         raise ValueError(f'Median layer altitudes are not increasing: {nodes}')
 
     grid = Cn2Grid(nodes, boundaries_km, layer_altitudes_km=layer_alts, pin_ground_layer=pin_ground_layer)
     projected, _, _, _, valid = grid.process(alts, fracs)
     median = np.median(projected[valid], axis=0)
-    return Cn2Grid(nodes, boundaries_km, median_fracs=median / median.sum(), layer_altitudes_km=layer_alts, pin_ground_layer=pin_ground_layer)
+    
+    return Cn2Grid(
+        nodes,
+        boundaries_km,
+        median_fracs=median / median.sum(),
+        layer_altitudes_km=layer_alts,
+        pin_ground_layer=pin_ground_layer
+    )

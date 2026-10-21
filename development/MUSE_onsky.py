@@ -61,13 +61,13 @@ wvl_ids = np.clip(np.arange(0, (N_wvl_max:=31)+1, 2), a_min=0, a_max=N_wvl_max-1
 # The 'DM correction mismatch' samples below are flagged 'k_c mismatch' in muse_df (k_c ~93 % of the nominal); their configs get the scaled DM pitch automatically
 # ids = 440 # good one, but DM correction mismatch
 # ids = 449 # good one, but DM correction mismatch
-# ids = 446 # good one, but DM correction mismatch
+ids = 446 # good one, but DM correction mismatch
 # ids = 451 # good one, but DM correction mismatch
 # ids = 453 # good one, but DM correction mismatch
 
 # ids = 338 # poor blue fitting
 # ids = 457 # poor blue fitting
-ids = 477 # poor blue fitting
+# ids = 477 # poor blue fitting
 # ids = 467 # poor blue fitting
 # ids = 458 # poor blue fitting
 # ids = 494 # poor blue fitting
@@ -107,6 +107,7 @@ KC_FRACTION = None
 ids_ = ids if isinstance(ids, list) else [ids]
 
 print(muse_df.loc[ids_, [KC_MISMATCH_FLAG, KC_FRACTION_FEATURE, KC_GROUP_FEATURE, 'Pupil angle']])
+
 if APPLY_KC_CORRECTION and KC_FRACTION is None and muse_df.loc[ids_, KC_GROUP_FEATURE].nunique() > 1:
     raise ValueError(f"The ids {ids_} belong to different k_c groups {muse_df.loc[ids_, KC_GROUP_FEATURE].tolist()}: fit them in separate models")
 
@@ -133,6 +134,7 @@ wavelengths = PSF_model.λ_sim
 
 print(f"Model k_c = {100 * kc_fraction_from_config(configs[0]):.1f} % of the nominal ({PSF_model.model.kc:.3f} 1/m, "
       f"DM pitch {np.asarray(configs[0]['DM']['DmPitchs']).ravel()[0]:.4f} m)")
+
 print(f"chromatic defocus: {fitter.CHROM_DEFOCUS} | anisotropic jitter: {fitter.ANISOTROPIC_JITTER} | wing: {fitter.WING_KERNEL} "
       f"({fitter.WING_WIDTH_PX} x {fitter.WING_WIDTH_T_PX} px) | defocus starts {fitter.DEFOCUS_STARTS} nm selected by {fitter.SELECT_BY}")
 
@@ -165,6 +167,7 @@ print('fit flags:', flags)
 func, loss_fn    = fitter.build_loss(PSF_model, PSF_0, flags, default_device)
 minimize_params  = fitter.make_minimizer(PSF_model, func, loss_fn)
 include, exclude = fitter.parameter_sets(PSF_model, flags)
+
 print('fitted:', sorted(include), '| frozen:', sorted(exclude))
 
 #%%
@@ -177,8 +180,10 @@ print(f"kept the start at {fit['start']:+.0f} nm by {fitter.SELECT_BY}: loss {fi
 
 for name in ['J_angle'] if PSF_model.anisotropic_jitter else []:
     print(f'{name}:', *[f'{v:.2f}' for v in PSF_model.inputs_manager[name].detach().cpu().numpy().flatten()])
+    
 if PSF_model.chrom_defocus:
     print('chromatic defocus at the spline nodes [nm]:', *[f'{v:.1f}' for v in PSF_model.inputs_manager['chrom_defocus_ctrl'].detach().cpu().numpy().flatten()])
+
 if PSF_model.wing_kernel:
     print('wing fraction at the spline nodes:', *[f'{abs(v):.4f}' for v in PSF_model.inputs_manager['wing_frac_ctrl'].detach().cpu().numpy().flatten()],
           '| widths [px]:', *[f'{abs(PSF_model.inputs_manager[k][0].item()):.2f}' for k in ('wing_width', 'wing_width_t')],
@@ -232,6 +237,7 @@ for id_src, dataset_index in enumerate(ids_):
 # oriented pupil and the fitted static OPD (phase bump + NCPAs) rotated to the image frame as the model applies it. The streaks of the
 # model must follow the data's, and the bump, attached to the DM frame, must turn with the pupil: a bump amplitude (first LO
 # coefficient) fitted positive and comparable across OBs means the rotated bump matches the data
+
 if PSF_model.LO_NCPAs:
     m = PSF_model.model
     angles  = m.pupil_angle.expand(N_src).cpu().numpy()
@@ -261,35 +267,6 @@ if PSF_model.LO_NCPAs:
 
     print('Pupil angles [deg]:', *[f'{a:.1f}' for a in angles])
     print('Phase bump coefs.: ', *[f'{b:.1f}' for b in bump])
-
-#%
-# print('λ: ', *[f"{x:.0f}" for x in wavelengths.detach().cpu().numpy().flatten()*1e9])
-# print('r0:', *[f"{x:.3f}" for x in PSF_model.model.r0.detach().cpu().numpy().flatten()])
-# print('L0:', *[f"{x:.3f}" for x in PSF_model.model.L0.detach().cpu().numpy().flatten()])
-# print('dn:', *[f"{x:.3f}" for x in PSF_model.model.dn.detach().cpu().numpy().flatten()])
-# print('dx:', *[f"{x:.2f}" for x in PSF_model.model.dx.detach().cpu().numpy().flatten()])
-# print('dy:', *[f"{x:.2f}" for x in PSF_model.model.dy.detach().cpu().numpy().flatten()])
-# print('F: ', *[f"{x:.3f}" for x in PSF_model.model.F.detach().cpu().numpy().flatten()])
-# print('LO:', *[f"{x:.2f}" for x in PSF_model.inputs_manager['LO_coefs'].detach().cpu().numpy().flatten()])
-# print('wind_speed_single:', *[f"{x:.2f}" for x in PSF_model.inputs_manager['wind_speed_single'].detach().cpu().numpy().flatten()])
-
-# fig, ax = plt.subplots(1, 2, figsize=(10, 4))
-# wvl_plot = wavelengths.squeeze().cpu().numpy()*1e9
-
-# ax[0].plot(wvl_plot, PSF_model.model.F.detach().cpu().numpy().flatten())
-# ax[0].set_title('Flux factor')
-# ax[0].set_xlabel('Wavelength [nm]')
-# ax[0].set_xlim(485, 927.81)
-# ax[0].set_ylim(0.93, 1.05)
-# ax[1].plot(wvl_plot, PSF_model.model.dx.detach().cpu().numpy().flatten(), label='dx')
-# ax[1].plot(wvl_plot, PSF_model.model.dy.detach().cpu().numpy().flatten(), label='dy')
-# ax[1].legend()
-# ax[1].set_title('Position offset')
-# ax[1].set_xlabel('Wavelength [nm]')
-# ax[1].set_xlim(485, 927.81)
-# ax[1].set_ylim(-1.6, 0.2)
-
-# plt.show()
 
 
 #%%

@@ -38,63 +38,62 @@ STD_FOLDER = Path(project_settings["MUSE_STD_data_folder"])
 DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 
 #%%
-# ── Load training config ──────────────────────────────────────────────────────
-# The validation takes the config the calibrator was trained with (calibrators/configs/NFM_calibrator_config.json or
-# NFM_factor_calibrator_config.json): it rebuilds the same PSF model / trainer and reads the run's weights from weights_subdir / name.
+# ── Which run to validate ─────────────────────────────────────────────────────
+# A run is given by its bundle <name>_bundle.pth, which train_NFM_calibrator.py writes next to <name>_checkpoint.pth and <name>_meta.json:
+# --bundle <path>, or by default the most recently written bundle under WEIGHTS_FOLDER. The trainer is rebuilt from the training config
+# stored in the bundle (bundles since 2026-10-21) or else in the run's metadata, never from a config file, which may have been edited since.
+def _load_bundle(path):
+    return torch.load(path, map_location='cpu', weights_only=False)
+
+def _run_config(bundle_path, bundle_state):
+    """ Training config of a run: from its bundle, else from its <name>_meta.json; None if neither has one. """
+    if bundle_state.get('training_config') is not None:
+        return bundle_state['training_config']
+    meta_path = bundle_path.with_name(bundle_path.name.replace('_bundle.pth', '_meta.json'))
+    return json.loads(meta_path.read_text()).get('config') if meta_path.exists() else None
+
+def _latest_bundle():
+    """ (path, state) of the most recently written bundle under WEIGHTS_FOLDER that has a training config, (None, None) if there is none. """
+    for path in sorted(WEIGHTS_FOLDER.glob('*/*_bundle.pth'), key=lambda p: p.stat().st_mtime, reverse=True):
+        state = _load_bundle(path)
+        if _run_config(path, state) is not None:
+            return path, state
+    return None, None
+
 _vparser = argparse.ArgumentParser(description="Validate NFM Calibrator")
-_vparser.add_argument('--config', type=str, default=None, help='JSON config used for training (default: calibrators/configs/NFM_calibrator_config.json)')
+_vparser.add_argument('--bundle', help='calibrator bundle of the run to validate (default: the most recent one under the weights folder)')
 try:
-    _vargs, _    = _vparser.parse_known_args() # known only: IPython kernels add their own arguments (--f=...)
-    _config_path = Path(_vargs.config) if _vargs.config else None
+    _bundle_path = _vparser.parse_known_args()[0].bundle # known args only: IPython kernels add their own (--f=...)
 except SystemExit:
-    _config_path = None
+    _bundle_path = None
 
-if _config_path and _config_path.exists():
-    with open(_config_path) as _f:
-        cfg = json.load(_f)
+if _bundle_path:
+    _bundle_path = Path(_bundle_path)
+    if not _bundle_path.exists():
+        raise FileNotFoundError(f'Calibrator bundle not found: {_bundle_path}')
+    _bundle_state = _load_bundle(_bundle_path)
+else:
+    _bundle_path, _bundle_state = _latest_bundle()
+    if _bundle_path is None:
+        raise RuntimeError(f'No calibrator bundle with a training config under {WEIGHTS_FOLDER}: run train_NFM_calibrator.py first, or pass --bundle <path>')
 
-elif 'cfg' not in dir():
-    # No --config: take the config (direct or factor) whose training metadata is the most recent one
-    _candidates = []
-    for _p in sorted(CONFIGS_FOLDER.glob('NFM*_config.json')):
-        with open(_p) as _f:
-            _c = json.load(_f)
-        _m = WEIGHTS_FOLDER / _c.get('weights_subdir', '') / f'{_c.get("name", "")}_meta.json'
-        if _m.exists():
-            _candidates.append((_m.stat().st_mtime, _p))
+cfg = _run_config(_bundle_path, _bundle_state)
+if cfg is None:
+    raise ValueError(f'{_bundle_path} has no training config, in itself or in a <name>_meta.json next to it: it cannot be validated by this script')
 
-    _default_cfg_path = max(_candidates)[1] if _candidates else CONFIGS_FOLDER / 'NFM_calibrator_config.json'
-    
-    if _default_cfg_path.exists():
-        with open(_default_cfg_path) as _f:
-            cfg = json.load(_f)
-        logger.info(f"No --config given; loaded default config from {_default_cfg_path}")
-    else:
-        raise RuntimeError(
-            "cfg is not defined. Either pass --config path/to/config.json, "
-            "run this file after train_NFM_calibrator.py in the same IPython session, "
-            f"or place NFM_calibrator_config.json at {_default_cfg_path}."
-        )
+_cfg_source = 'bundle' if _bundle_state.get('training_config') is not None else 'metadata'
+logger.info(f"Validating the run of the bundle {_bundle_path}: {cfg['weights_subdir']} / {cfg['name']} "
+            f"({_bundle_state.get('calibrator_type', 'direct')} calibrator, config from the {_cfg_source})")
 
 #%%
-# ── Load post-training metadata ───────────────────────────────────────────────
-_meta_path = WEIGHTS_FOLDER / cfg["weights_subdir"] / f'{cfg["name"]}_meta.json'
-
+# ── Run metadata, next to the bundle: split, output names, training losses ───
+_meta_path = _bundle_path.with_name(f'{cfg["name"]}_meta.json')
 if not _meta_path.exists():
     raise FileNotFoundError(f"Training metadata not found: {_meta_path}. Run train_NFM_calibrator.py first.")
 
 with open(_meta_path) as _f:
     train_meta = json.load(_f)
 
-# The config file only locates the run: the run itself may differ from it (the file may have been edited since the training, and from
-# IPython train_NFM_calibrator.py trains with the default config file under its name), so the trainer is rebuilt from the run's own config
-if 'config' in train_meta:
-    cfg = train_meta['config']
-elif train_meta.get('calibrator_type', 'direct') != cfg.get('calibrator', {}).get('type', 'direct'):
-    raise ValueError(f"{_meta_path.name} is a '{train_meta['calibrator_type']}' calibrator run, but the config describes a "
-                     f"'{cfg.get('calibrator', {}).get('type', 'direct')}' one, and the metadata has no training config to rebuild it from")
-
-BEST_CALIB_PATH = Path(train_meta['checkpoint_path'])
 output_names    = train_meta['output_names']
 N_wvl_total     = train_meta['N_wvl_total']
 N_outputs       = train_meta['N_outputs']
@@ -106,8 +105,10 @@ logger.info(f"Metadata loaded: name={train_meta['name']} | best_val={train_meta[
 # ── Ensure consistent dataset split ──────────────────────────────────────────
 _split_path = Path(train_meta['split_path'])
 
-# ── Initialize trainer (when running standalone, outside a training session, or when the session's trainer is of another type) ──
-if 'trainer' not in dir() or trainer.calibrator_type != train_meta.get('calibrator_type', 'direct'):
+# ── Initialize trainer, unless the session already has one built for this very run ──────────────────────────
+# BEST_CALIB_PATH, set by train_NFM_calibrator.py or by a previous validation in this session, tells which run the session's trainer is for
+_checkpoint_path = _bundle_path.with_name(f'{cfg["name"]}_checkpoint.pth')
+if 'trainer' not in dir() or 'BEST_CALIB_PATH' not in dir() or Path(BEST_CALIB_PATH).resolve() != _checkpoint_path.resolve():
     # The regime the calibrator was trained in: derotated PSFs or raw frames (per-OB pupil rotation), see train_NFM_calibrator.py
     dataset = NFMDataset(DATASET_CACHE / ('muse_STD_stars_dataset.pt' if cfg.get('derotated_PSFs', True) else 'muse_STD_stars_dataset_raw.pt'))
     logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W}), {'derotated PSFs' if dataset.derotated else 'raw frames'}")
@@ -115,6 +116,8 @@ if 'trainer' not in dir() or trainer.calibrator_type != train_meta.get('calibrat
     PSF_model, calibrator, outputs_transformer, trainer = build_NFM_trainer(cfg, dataset, default_device, weights_dir=WEIGHTS_FOLDER / cfg['weights_subdir'])
     release_gpu_memory()
     logger.info("Trainer initialized from scratch (standalone mode).")
+
+BEST_CALIB_PATH = _checkpoint_path
 
 # The validation must use exactly the split the calibrator was trained with
 if _split_path.exists():
@@ -149,7 +152,9 @@ else:
 
 
 #%% ========================== Evaluation & diagnostics ===============================================
-trainer.load_checkpoint(BEST_CALIB_PATH)
+if not BEST_CALIB_PATH.exists():
+    raise FileNotFoundError(f"Checkpoint of the validated run not found: {BEST_CALIB_PATH}")
+trainer.load_checkpoint(BEST_CALIB_PATH, load_optimizer=False) # the optimizer state is not needed for the validation
 calibrator.eval()
 
 PSFs_pred_cube, PSFs_data_cube, validation_ids, NN_predictions, telemetry_vecs, final_val_loss = trainer.validate(return_cubes=True)
@@ -195,12 +200,7 @@ from tiptorch.tools.utils import r0
 
 # Telemetry scaler + imputer the validated calibrator was trained with. It is stored in the bundle (the checkpoint holds only the
 # network weights); without a bundle, the one of the dataset cache is the same by construction (see NFMCalibratorTrainer.save_calibrator)
-_bundle_path = Path(train_meta['bundle_path'])
-if _bundle_path.exists():
-    telemetry_preprocessor = load_telemetry_preprocessor(torch.load(_bundle_path, map_location='cpu', weights_only=False))
-else:
-    logger.warning(f"Calibrator bundle not found at {_bundle_path}, taking the telemetry preprocessor from the dataset cache")
-    telemetry_preprocessor = TelemetryPreprocessor.from_state_dict(dataset.telemetry_preprocessor)
+telemetry_preprocessor = load_telemetry_preprocessor(_bundle_state) # the bundle of the validated run (see above)
 
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as fh:
     muse_df = pickle.load(fh)
@@ -459,6 +459,7 @@ shares = {
     'legacy MSE term': (1200 * diff_np**2).sum(axis=(0, 1)),
     'legacy MAE term': (1.6 * np.abs(diff_np)).sum(axis=(0, 1)),
 }
+
 if trainer.balanced_loss is not None:
     with torch.no_grad():
         shares['balanced loss'] = sum(
@@ -781,7 +782,7 @@ print(f"TC distribution across the validation set: {dict(sorted(Counter(ETC_TCs)
 # ── Forward-run the calibrated physics-based model with the ETC atmosphere ──
 # Batched over samples (like the DataLoader batches) and over wavelength subsets (like
 # NFMCalibratorTrainer.run_model/validate) to keep peak VRAM usage bounded and avoid OOM.
-ETC_CALIB_PATH = Path(train_meta.get('bundle_path', WEIGHTS_FOLDER / 'NFM_calibrator/NFM_calibrator_bundle.pth'))
+ETC_CALIB_PATH = _bundle_path # the bundle of the validated run
 ETC_calibrator = load_NFM_calibrator(ETC_CALIB_PATH, device=default_device) # direct or factor bundle
 
 # NFMDataset stores telemetry after the same scaling/imputation pipeline used by

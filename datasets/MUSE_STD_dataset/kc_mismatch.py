@@ -50,10 +50,10 @@ from STD_dataset_utils import (
 
 SCRIPT_DIR    = Path(__file__).resolve().parent
 FITTED_FOLDER = STD_FOLDER / 'fitted'
-SCAN_FOLDER   = STD_FOLDER / 'fitted_kc_scan'      # fits of the k_c scan: <id>/kc_<fraction>/<id>.pickle ('_raw' suffix for raw-frame fits, see scan_folder)
+SCAN_FOLDER   = STD_FOLDER / 'temp/fitted_kc_scan'      # fits of the k_c scan: <id>/kc_<fraction>/<id>.pickle ('_raw' suffix for raw-frame fits, see scan_folder)
 PLOTS_FOLDER  = STD_FOLDER / 'plots'
-SCORES_FILE   = STD_FOLDER / 'kc_ring_scores.csv'  # ring diagnostics of every scanned fit (the ring estimate of k_c lives here)
-SCAN_FILE     = STD_FOLDER / 'kc_scan_results.csv' # loss per scanned k_c, fitted k_c
+SCORES_FILE   = STD_FOLDER / 'temp/kc_ring_scores.csv'  # ring diagnostics of every scanned fit (the ring estimate of k_c lives here)
+SCAN_FILE     = STD_FOLDER / 'temp/kc_scan_results.csv' # loss per scanned k_c, fitted k_c
 LABELS_FILE   = STD_FOLDER / 'kc_mismatch_labels.txt'
 
 PIX_MAS, DM_PITCH = 25.0, 0.22                       # MUSE NFM pixel scale [mas], nominal DM pitch [m] (InitNFMConfig)
@@ -246,6 +246,7 @@ def gallery(tab, stacks, path, ncol=10):
     nrow = int(np.ceil(len(tab) / ncol))
     fig, axs = plt.subplots(nrow, ncol, figsize=(2.2 * ncol, 2.4 * nrow))
     axs = np.atleast_1d(axs).ravel()
+    
     for ax, (i, r) in zip(axs, tab.iterrows()):
         ax.imshow(stacks[i], vmin=-0.5, vmax=0.5, cmap='RdBu_r')
         ax.add_patch(plt.Circle((STACK_HALF, STACK_HALF), STACK_RC, fill=False, color='k', ls='--', lw=0.7))

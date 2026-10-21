@@ -668,8 +668,10 @@ def apply_kc_fraction(config_dict, kc_fraction):
     becomes kc_fraction x the nominal one: the samples recorded with fewer corrected DM modes have a smaller correction radius.
     """
     kc_fraction = None if kc_fraction is None else float(np.asarray(kc_fraction, dtype=float).ravel()[0])
+    
     if kc_fraction is None or not np.isfinite(kc_fraction) or np.isclose(kc_fraction, 1.0):
         return config_dict
+    
     pitch = np.asarray(config_dict['DM']['DmPitchs'], dtype=float)
     config_dict['DM']['DmPitchs'] = (pitch / float(kc_fraction)).reshape(pitch.shape).tolist() if isinstance(config_dict['DM']['DmPitchs'], list) else pitch / float(kc_fraction)
     
@@ -698,6 +700,7 @@ def add_kc_mismatch_flag(muse_df, labels_file=None, verbose=True):
     """
     labels_file = Path(labels_file) if labels_file is not None else STD_FOLDER / 'kc_mismatch_labels.txt'
     labels = read_kc_mismatch_labels(labels_file) if labels_file.exists() else {}
+    
     if not labels_file.exists() and verbose:
         print(f'k_c mismatch labels file not found ({labels_file}): all samples are set to False / 1.0')
 
