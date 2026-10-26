@@ -260,11 +260,13 @@ from data_processing.MUSE_data_utils import CN2_BINNING
 # The LGS / IRLOS archive tables (working copies in STD_RESOURCES_FOLDER, filled while caching the cubes), the median Cn2 profile and
 # the Cn2 binning (with its grid) go into the distributed bundle: from here on, InitNFMConfig / reduce_dataframe read them from it,
 # as the users do
+
 pack_telemetry_resources(
     median_Cn2_profile = (median_Cn2_alts, median_Cn2_fracs),
     Cn2_binning        = CN2_BINNING,
     Cn2_grid           = Cn2_grid if CN2_BINNING == 'grid' else None, # the grid is stored only when the features / configs use it
 )
+
 print(f'Telemetry resources packed -> {BUNDLE_PATH}')
 
 #%% ================================= MUSE NFM STD stars dataset cleaning, imputation and scaling ==================================
@@ -355,9 +357,13 @@ with open(STD_FOLDER / 'muse_fitted_df.pickle', 'rb') as handle:
 # Detect the samples recorded with a different DM correction radius (k_c): scans only the fits not scored yet, appends the new
 # detections (with their k_c percentage) to STD_FOLDER / 'kc_mismatch_labels.txt' and refreshes the 'k_c mismatch' / 'k_c fraction'
 # columns of muse_df. See kc_mismatch.py; --force re-scores everything after re-fitting, --scan refines the k_c of the labeled samples by fits.
+
 from kc_mismatch import update_kc_mismatch_labels
+
 _ = update_kc_mismatch_labels(muse_df)
+
 muse_df = add_kc_mismatch_flag(muse_df)
+
 with open(STD_FOLDER / 'muse_df.pickle', 'wb') as handle:
     pickle.dump(muse_df, handle, protocol=pickle.HIGHEST_PROTOCOL)
 

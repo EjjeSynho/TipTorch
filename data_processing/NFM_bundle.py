@@ -77,14 +77,18 @@ def pack_telemetry_resources(median_Cn2_profile, Cn2_binning, Cn2_grid=None, pat
     AOF Cn2 profile (median_Cn2_alts, median_Cn2_fracs), the Cn2 binning and its grid (Cn2Grid, 'grid' binning only).
     """
     tables = dict(load_bundle(path).get('archive_telemetry', {}))
+    
     for name, file in ARCHIVE_TABLES.items():
         if STD_RESOURCES_FOLDER is not None and (STD_RESOURCES_FOLDER / file).exists():
             tables[name] = (STD_RESOURCES_FOLDER / file).read_text('utf-8')
+        
         elif name not in tables:
             logger.warning(f'No {name} table in {STD_RESOURCES_FOLDER} nor in the bundle: the cubes without this telemetry in their headers get the default values')
 
     median_alts, median_fracs = median_Cn2_profile
+   
     _warn_if_calibrated(path, 'The telemetry resources')
+   
     return update_bundle({
         'archive_telemetry':  tables,
         'median_Cn2_profile': { 'median_Cn2_alts': np.asarray(median_alts, dtype=float).tolist(), 'median_Cn2_fracs': np.asarray(median_fracs, dtype=float).tolist() },
