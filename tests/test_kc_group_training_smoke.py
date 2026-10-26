@@ -9,7 +9,7 @@ calibrator config and evaluated on a mixed subset:
     the batch's group,
   - the validation loss is finite and a backward pass through a mismatched batch gives finite gradients.
 
-Requires the dataset cache (muse_STD_stars_dataset.pt, ~3.6 GB), muse_df.pickle with the k_c columns and a GPU (~3 min).
+Requires the dataset cache of the config's regime (muse_STD_stars_dataset.pt for raw frames, ~3.6 GB), muse_df.pickle with the k_c columns and a GPU (~3 min).
 Run:  python tests/test_kc_group_training_smoke.py [cuda:N]
 """
 import sys, json, pickle
@@ -22,7 +22,7 @@ import numpy as np
 import torch
 
 from STD_dataset_utils import STD_FOLDER, apply_kc_fraction, kc_fraction_from_config, KC_FRACTION_FEATURE, KC_GROUP_FEATURE
-from machine_learning.calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory
+from machine_learning.calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory, load_STD_dataset
 
 device = torch.device(sys.argv[1]) if len(sys.argv) > 1 else torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 results = []
@@ -32,7 +32,7 @@ def check(name, ok, info=''):
 cfg = json.load(open(ROOT / 'machine_learning/calibrators/configs/NFM_factor_calibrator_config.json'))
 cfg['weights_subdir'] = 'kc_group_smoke_test'
 
-dataset = NFMDataset(STD_FOLDER / 'dataset_cache' / 'muse_STD_stars_dataset.pt')
+dataset = load_STD_dataset(cfg['derotated_PSFs'])
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as f:
     muse_df = pickle.load(f)
 

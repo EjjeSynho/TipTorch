@@ -48,12 +48,13 @@ from datetime import datetime
 _here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
 sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
-from calibrators.NFM_calibrator import NFMDataset, default_split, build_NFM_trainer, release_gpu_memory, CONFIGS_FOLDER
+from calibrators.NFM_calibrator import NFMDataset, default_split, build_NFM_trainer, release_gpu_memory, load_STD_dataset, CONFIGS_FOLDER
 
 # ── Base training config (mirrors DEFAULT_CONFIG in train_NFM_calibrator.py) ──
 _BASE_DEFAULT = {
     "name":                 "best_calibrator",
     "debug":                False,
+    "derotated_PSFs":       False, # raw-frame dataset cache, as the calibrator configs
     "batch_size":           16,
     "continue_training":    False,
     "run_kfold_difficulty": False,
@@ -185,7 +186,7 @@ def _cleanup_epoch_checkpoints(directory: Path) -> None:
 
 
 #%% ── 1. Load dataset (shared across all runs) ──────────────────────────────
-dataset     = NFMDataset(DATASET_CACHE / 'muse_STD_stars_dataset.pt')
+dataset     = load_STD_dataset(cfg["derotated_PSFs"])
 N_wvl_total = dataset.C
 logger.info(f"Dataset: {len(dataset)} samples | cubes ({dataset.C}, {dataset.H}, {dataset.W})")
 

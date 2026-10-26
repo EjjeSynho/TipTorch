@@ -22,7 +22,7 @@ from pathlib import Path
 _here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
 sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
-from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory, CONFIGS_FOLDER
+from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory, load_STD_dataset, CONFIGS_FOLDER
 from calibrators.NFM_validation_utils import predict_cubes, core_halo_metrics, metrics_table
 
 _parser = argparse.ArgumentParser(description="Compare NFM calibrators on the validation set")
@@ -43,7 +43,7 @@ device     = torch.device(_args.device) if _args.device else default_device
 STD_FOLDER = Path(project_settings["MUSE_STD_data_folder"])
 
 #%%
-dataset = NFMDataset(STD_FOLDER / 'dataset_cache' / 'muse_STD_stars_dataset.pt')
+dataset = load_STD_dataset(cfg['derotated_PSFs'])
 PSF_model, calibrator, outputs_transformer, trainer = build_NFM_trainer(cfg, dataset, device, weights_dir=DATA_FOLDER / 'temp')
 
 if _args.split:

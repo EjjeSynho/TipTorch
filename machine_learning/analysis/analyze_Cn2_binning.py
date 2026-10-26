@@ -4,7 +4,8 @@ Cn2 binning analysis for the MUSE NFM PSF model: how well 3-layer reductions of 
 the full (repaired) 8-layer profile, for the fitted parameters of validation samples with a recorded profile. Compared reductions:
 the current weighted K-means with free altitudes (the configs of the dataset cache), the profile projected on the fixed 8-node grid
 (projection error alone), the median profile (no information) and fixed altitude boundaries between the grid nodes, with per-sample
-(5/3)-moment layer heights or dataset-level heights. The best boundaries go into data/reduced_telemetry/MUSE/AOF_Cn2_grid.json.
+(5/3)-moment layer heights or dataset-level heights. The best boundaries go into the working copy of the grid in the STD folder
+(NFM_bundle.STD_RESOURCES_FOLDER / AOF_Cn2_grid.json), from which create_STD_dataset.py packs it into the calibrator bundle.
 
     python machine_learning/analysis/analyze_Cn2_binning.py [--device cuda:1] [--n-samples 64] [--batch 8] [--store]
 
@@ -28,15 +29,17 @@ from tiptorch._config import *
 from tiptorch.tools.utils import BalancedPSFLoss
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
-from calibrators.NFM_calibrator import NFMDataset, release_gpu_memory # first: adds the repo root to sys.path
+from calibrators.NFM_calibrator import NFMDataset, release_gpu_memory, load_STD_dataset # first: adds the repo root to sys.path
 from data_processing.Cn2_profile import Cn2Grid
-from data_processing.MUSE_data_utils import load_Cn2_grid, raw_Cn2_profiles
+from data_processing.MUSE_data_utils import raw_Cn2_profiles
+from data_processing.NFM_bundle import STD_RESOURCES_FOLDER, CN2_GRID_FILE
 
 _parser = argparse.ArgumentParser(description="Cn2 binning analysis")
 _parser.add_argument('--device',    type=str, default=None)
 _parser.add_argument('--n-samples', type=int, default=64)
 _parser.add_argument('--batch',     type=int, default=8)
 _parser.add_argument('--store',     action='store_true', help='store the best boundaries in AOF_Cn2_grid.json')
+_parser.add_argument('--derotated', action='store_true', help='use the derotated dataset cache (default: raw frames, as the calibrator configs)')
 try:
     _args = _parser.parse_args()
 except SystemExit:
@@ -52,11 +55,11 @@ LOSS_CFG  = dict(radial_power=2.0, r_max=40.0, asinh_k=3.0, huber_delta=0.1, sca
 CANDIDATE_BOUNDARIES = [(1.0, 13.0), (4.0, 9.0), (4.0, 13.0), (4.0, 16.5), (8.0, 16.5)] # between the grid nodes (2.1 / 6.6 / 11.3 / 14.9 / 18.6 km)
 
 #%%
-dataset = NFMDataset(STD_FOLDER / 'dataset_cache' / 'muse_STD_stars_dataset.pt')
+dataset = load_STD_dataset(_args.derotated)
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as f:
     muse_df = pickle.load(f)
 
-grid = load_Cn2_grid()
+grid = Cn2Grid.load(STD_RESOURCES_FOLDER / CN2_GRID_FILE) # the working copy (store_Cn2_grid), also with the K-means binning
 alts_raw, fracs_raw = raw_Cn2_profiles(muse_df.loc[dataset.sample_ids])
 alts, fracs, n_repaired, valid = grid.repair(alts_raw, fracs_raw)
 grid_fracs = grid.to_grid(alts, fracs)

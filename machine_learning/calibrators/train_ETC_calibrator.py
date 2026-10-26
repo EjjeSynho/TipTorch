@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / 'machine_learning'))
 
 from tiptorch._config import WEIGHTS_FOLDER, default_device
-from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, fixed_inputs, fits_median, model_flags, release_gpu_memory
+from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, fixed_inputs, fits_median, model_flags, release_gpu_memory, load_STD_dataset
 from calibrators.ETC_calibrator import ETCDataset, ETC_INPUTS, dataset_cache_path, donor_keys
 
 # The ETC calibrator config lives with the other calibrator configs in machine_learning/calibrators/configs/
@@ -122,10 +122,8 @@ if __name__ == '__main__':
     random.seed(cfg['seed']); np.random.seed(cfg['seed']); torch.manual_seed(cfg['seed'])
 
     # Raw frames with the per-sample pupil angles or derotated PSFs, as the NFM calibrator (see train_NFM_calibrator.py)
-    dataset_cache = dataset_cache_path(cfg['derotated_PSFs'])
-    dataset = NFMDataset(dataset_cache)
-    if dataset.derotated != cfg['derotated_PSFs']:
-        raise ValueError(f"The dataset cache is {'derotated' if dataset.derotated else 'raw'} but the config asks for derotated_PSFs = {cfg['derotated_PSFs']}")
+    dataset_cache = dataset_cache_path()
+    dataset = load_STD_dataset(cfg['derotated_PSFs'])
 
     pre = dataset.telemetry_preprocessor
     if pre is None:

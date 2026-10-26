@@ -28,7 +28,7 @@ from sklearn.model_selection import cross_val_predict
 _here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
 sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
-from calibrators.NFM_calibrator import NFMDataset, kfold_splits, telemetry_base_params, build_NFM_trainer, release_gpu_memory, CONFIGS_FOLDER
+from calibrators.NFM_calibrator import NFMDataset, kfold_splits, telemetry_base_params, build_NFM_trainer, release_gpu_memory, load_STD_dataset, CONFIGS_FOLDER
 from calibrators.NFM_validation_utils import predict_cubes, core_halo_metrics, metrics_table
 from data_processing.telemetry_preprocessor import TelemetryPreprocessor
 from data_processing.Cn2_profile import Cn2Grid
@@ -51,7 +51,7 @@ OUT_FOLDER = DATA_FOLDER / 'analysis' / 'NFM_calibrator'
 OUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 #%%
-dataset  = NFMDataset(STD_FOLDER / 'dataset_cache' / 'muse_STD_stars_dataset.pt')
+dataset  = load_STD_dataset(cfg['derotated_PSFs'])
 features = dataset.features
 N        = len(dataset)
 

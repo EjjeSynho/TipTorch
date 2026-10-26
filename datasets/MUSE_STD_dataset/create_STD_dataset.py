@@ -17,6 +17,8 @@ import subprocess
 
 import pandas as pd
 from STD_dataset_utils import *
+# The distributed calibrator bundle is built up here: telemetry resources (stage 1), telemetry preprocessor (stage 2), see NFM_bundle
+from data_processing.NFM_bundle import STD_RESOURCES_FOLDER, BUNDLE_PATH, pack_telemetry_resources, pack_telemetry_preprocessor
 
 #%%
 # with open(STD_FOLDER / 'muse_df.pickle', 'rb') as handle:
@@ -41,7 +43,8 @@ from STD_dataset_utils import *
 
 #%%
 # Check the existence of all necessary folders and create them if they don't exist
-STD_stars_folders = [CUBES_FOLDER, RAW_FOLDER, STD_FOLDER, CUBES_CACHE, TELEMETRY_CACHE, STD_FOLDER / 'NFM_cubes_temp/']
+# STD_RESOURCES_FOLDER: working copies of the LGS / IRLOS archive tables (the datalab fetches are appended to them) and of the Cn2 grid
+STD_stars_folders = [CUBES_FOLDER, RAW_FOLDER, STD_FOLDER, CUBES_CACHE, STD_RESOURCES_FOLDER, STD_FOLDER / 'NFM_cubes_temp/']
 for folder in STD_stars_folders:
     if not os.path.exists(folder):
         os.makedirs(folder)
@@ -247,21 +250,37 @@ else:
         muse_df = pickle.load(handle)
 
 
-_ = AOF_Cn2_profiles_stats(muse_df, store=True) # Update median AOF Cn2 profile
+(median_Cn2_alts, median_Cn2_fracs), _, _ = AOF_Cn2_profiles_stats(muse_df) # median AOF Cn2 profile
 # Fixed Cn2 grid (nodes = median AOF layer altitudes, model-layer boundaries chosen with machine_learning/analysis/analyze_Cn2_binning.py)
 Cn2_grid = store_Cn2_grid(muse_df, boundaries_km=None) # None: keep the boundaries of the stored grid
 
+#%% ================================= Calibrator bundle, stage 1: telemetry resources ==================================
+from data_processing.MUSE_data_utils import CN2_BINNING
+
+# The LGS / IRLOS archive tables (working copies in STD_RESOURCES_FOLDER, filled while caching the cubes), the median Cn2 profile and
+# the Cn2 binning (with its grid) go into the distributed bundle: from here on, InitNFMConfig / reduce_dataframe read them from it,
+# as the users do
+pack_telemetry_resources(
+    median_Cn2_profile = (median_Cn2_alts, median_Cn2_fracs),
+    Cn2_binning        = CN2_BINNING,
+    Cn2_grid           = Cn2_grid if CN2_BINNING == 'grid' else None, # the grid is stored only when the features / configs use it
+)
+print(f'Telemetry resources packed -> {BUNDLE_PATH}')
+
 #%% ================================= MUSE NFM STD stars dataset cleaning, imputation and scaling ==================================
 from data_processing.data_analysis_utils import *
-from data_processing.MUSE_data_utils import CN2_BINNING
 
 verbose = True
 
 # Filter and reduce the telemetry dataframe, fit the scaler and the iterative imputer (see fit_telemetry_preprocessor). The scaler and
 # the imputer are merged into a single lightweight TelemetryPreprocessor to process new (e.g. science) telemetry the same way;
-# it goes into the dataset cache and from there into every trained calibrator bundle
+# it goes into the distributed bundle (stage 2), into the dataset cache and from there into every trained calibrator bundle
 muse_df_pruned, muse_df_pruned_scaled, muse_df_pruned_scaled_imputed, muse_df_pruned_imputed, telemetry_preprocessor = \
     fit_telemetry_preprocessor(muse_df, Cn2_binning=CN2_BINNING, verbose=verbose) # same reduction as the configs (MUSE_data_utils.CN2_BINNING)
+
+# Calibrator bundle, stage 2: the telemetry preprocessor (stage 3, the calibrator itself, comes from train_NFM_calibrator.py --install)
+pack_telemetry_preprocessor(telemetry_preprocessor.state_dict())
+print(f'Telemetry preprocessor packed -> {BUNDLE_PATH}')
 
 numeric_cols = muse_df_pruned.select_dtypes(include="number").columns
 nan_mask     = muse_df_pruned[numeric_cols].isna().values  # (N_samples, N_numeric_cols)
@@ -346,7 +365,8 @@ DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 
 # Derotated PSFs or raw frames with the per-sample pupil angle in the configs, rotated by the PSF model (see build_dataset_cache). Must match
 # the regime of the fits (STD_fitter.py DEROTATE_PSF, raw frames since 2026-10-20) and of the training (derotated_PSFs in the calibrator
-# configs). The raw-frame cache gets the '_raw' suffix
+# configs). Both regimes are written to 'muse_STD_stars_dataset.pt', the cache stores its regime in the 'derotated' entry (see
+# dataset_cache_path / load_STD_dataset in machine_learning/calibrators/NFM_calibrator.py)
 DEROTATE_PSF = False
 
 #%%
@@ -354,7 +374,7 @@ DEROTATE_PSF = False
 # for each sample (see build_dataset_cache: good samples only, normalized PSFs, time-grouped train / val split)
 good_ids, bad_ids = build_dataset_cache(
     muse_df, reduced_telemetry, muse_fitted_df, telemetry_preprocessor_state,
-    out_path       = DATASET_CACHE / ('muse_STD_stars_dataset.pt' if DEROTATE_PSF else 'muse_STD_stars_dataset_raw.pt'),
+    out_path       = DATASET_CACHE / 'muse_STD_stars_dataset.pt',
     Cn2_grid_state = Cn2_grid_state,
     verbose        = True,
     derotate_PSF   = DEROTATE_PSF

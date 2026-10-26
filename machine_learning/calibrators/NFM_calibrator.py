@@ -13,7 +13,8 @@ import numpy as np
 import torch.optim as optim
 
 from tiptorch.tools.cubic_splines import natural_cubic_spline_coeffs, NaturalCubicSpline
-from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe, TELEMETRY_CACHE
+from data_processing.MUSE_data_utils import filter_dataframe, reduce_dataframe
+from data_processing.NFM_bundle import telemetry_resources, BUNDLE_PATH
 from data_processing.telemetry_preprocessor import TelemetryPreprocessor
 from data_processing.Cn2_profile import Cn2Grid
 from tiptorch.managers.input_manager import InputsTransformer
@@ -247,6 +248,26 @@ class NFMDataset(Dataset):
         return PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs
 
 
+STD_DATASET_CACHE = Path(project_settings['MUSE_STD_data_folder']) / 'dataset_cache'
+
+
+def dataset_cache_path() -> Path:
+    """
+    STD-star dataset cache written by create_STD_dataset.py. The same file holds either regime, derotated PSFs (configs with
+    PupilAngle 0) or raw frames (per-sample pupil angles); its 'derotated' entry tells which.
+    """
+    return STD_DATASET_CACHE / 'muse_STD_stars_dataset.pt'
+
+
+def load_STD_dataset(derotated: bool | None = None) -> NFMDataset:
+    """ Loads the STD-star dataset cache; with `derotated` given, checks that the stored cache is of that regime """
+    dataset = NFMDataset(dataset_cache_path())
+    if derotated is not None and dataset.derotated != bool(derotated):
+        raise ValueError(f"The dataset cache {dataset_cache_path().name} is {'derotated' if dataset.derotated else 'raw'} "
+                         f"but derotated_PSFs = {derotated} was requested; rebuild it with create_STD_dataset.py")
+    return dataset
+
+
 class SmallCalibratorNet(nn.Module):
     """
     Compact neural network for calibration with strong regularization.
@@ -337,6 +358,8 @@ class NFMCalibrator():
         # Cn2 profile features: the fixed altitude grid (Cn2_grid_*) of the caches since 2026-10-13 or the former K-means features
         self.Cn2_grid    = Cn2Grid.from_state_dict(state['Cn2_grid']) if state.get('Cn2_grid') is not None else None
         self.Cn2_binning = state.get('Cn2_binning', 'grid' if self.Cn2_grid is not None else 'kmeans')
+        # Median Cn2 profile of the K-means features (bundles before 2026-10-26 have none: the one of the distributed bundle is used)
+        self.median_Cn2_profile = state.get('median_Cn2_profile')
 
         # A factor bundle loaded with the base class would return the neutral values of the normalization for every parameter (its
         # network outputs are corrections, see NFMFactorCalibrator): use load_NFM_calibrator, which picks the class from the bundle
@@ -390,7 +413,8 @@ class NFMCalibrator():
 
 
     def prepare_telemetry(self, reduced_telemetry: pd.DataFrame) -> torch.Tensor:
-        telemetry_pruned = reduce_dataframe(filter_dataframe(reduced_telemetry), Cn2_binning=self.Cn2_binning, Cn2_grid=self.Cn2_grid)
+        telemetry_pruned = reduce_dataframe(filter_dataframe(reduced_telemetry), Cn2_binning=self.Cn2_binning, Cn2_grid=self.Cn2_grid,
+                                            median_Cn2_profile=self.median_Cn2_profile)
         return self.prepare_features(telemetry_pruned)
 
 
@@ -1658,12 +1682,21 @@ class NFMCalibratorTrainer:
 
     # ── Save calibrator bundle ─────────────────────────────────────────────────
     def save_calibrator(self, path):
-        """Export a self-contained calibrator bundle loadable by NFMCalibrator."""
+        """
+        Export a self-contained calibrator bundle loadable by NFMCalibrator: the telemetry resources of the distributed bundle (stages 1-2,
+        see data_processing/NFM_bundle.py) with the calibrator on top (stage 3). The telemetry preprocessor and the Cn2 grid are the ones
+        of the dataset cache, i.e. the ones the calibrator was trained with. install_calibrator copies the result into the distributed bundle.
+        """
         telemetry_preprocessor = getattr(self.dataset, 'telemetry_preprocessor', None)
         if telemetry_preprocessor is None:
             logger.warning('The dataset cache has no telemetry preprocessor (scaler + imputer): the bundle will not be loadable '
                            'by NFMCalibrator, regenerate the dataset cache with create_STD_dataset.py')
+        resources = telemetry_resources()
+        if 'archive_telemetry' not in resources or 'median_Cn2_profile' not in resources:
+            logger.warning(f'{BUNDLE_PATH} has no telemetry resources (LGS / IRLOS tables, median Cn2 profile): the bundle will not be '
+                           'sufficient to process new data, pack them with create_STD_dataset.py')
         state = {
+            **resources,
             'net_state_dict': self.calibrator.state_dict(),
             'net_arch': {
                 'n_features':   self.N_features,

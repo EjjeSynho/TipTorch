@@ -25,7 +25,8 @@ from datetime import datetime
 _here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
 sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
-from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory, CONFIGS_FOLDER
+from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory, load_STD_dataset, CONFIGS_FOLDER
+from data_processing.NFM_bundle import install_calibrator
 
 # ── JSON config ───────────────────────────────────────────────────────────────
 # All training settings live in a JSON file of calibrators/configs/, passed with --config: NFM_calibrator_config.json (direct calibrator,
@@ -33,7 +34,7 @@ from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gp
 # validation / ablation / comparison scripts take the same file to rebuild the identical setup and find the run's weights.
 # Sections:
 #   name, weights_subdir      run name and weights folder (WEIGHTS_FOLDER / weights_subdir / name_*): checkpoint, split, meta, bundle
-#   derotated_PSFs            derotated STD-star cache (configs with PupilAngle 0) or the raw-frame cache (*_raw.pt, the PSF model rotates per OB);
+#   derotated_PSFs            derotated STD-star PSFs (configs with PupilAngle 0) or raw frames (the PSF model rotates per OB), both in muse_STD_stars_dataset.pt;
 #                             must match the regime of the fits (STD_fitter.py DEROTATE_PSF) and of the dataset cache (create_STD_dataset.py)
 #   model                     PSF model (build_PSF_model). The jitter / wing regime must be the one of the fits the pretraining targets come from
 #                             (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL): since 2026-10-20 the fits use the anisotropic chromatic jitter
@@ -60,15 +61,18 @@ DEFAULT_CONFIG = 'NFM_factor_calibrator_legacy_config.json'
 _parser = argparse.ArgumentParser(description="Train NFM Calibrator")
 _parser.add_argument('--config', type=str, default=str(CONFIGS_FOLDER / DEFAULT_CONFIG), help=f'JSON training config (default: calibrators/configs/{DEFAULT_CONFIG})')
 _parser.add_argument('--device', type=str, default=None, help="Torch device, e.g. 'cuda:1' (default: the one of project_config.json)")
+_parser.add_argument('--install', action='store_true', help='install the trained calibrator into the distributed bundle (data_processing/NFM_bundle.py, stage 3)')
 
 try:
     _cli      = _parser.parse_args()
     _cfg_path = Path(_cli.config)
+    INSTALL   = _cli.install
     if _cli.device:
         default_device = torch.device(_cli.device) # overrides the project setting for this run only
 
 except SystemExit: # IPython: the kernel's own arguments are not ours, take the default config
     _cfg_path = CONFIGS_FOLDER / DEFAULT_CONFIG
+    INSTALL   = False # set to True to install the trained calibrator into the distributed bundle
 
 if not _cfg_path.exists():
     raise FileNotFoundError(f"Training config not found: {_cfg_path}")
@@ -112,10 +116,8 @@ logger.info(f"Seed: {cfg['seed']}")
 
 #%%
 # Derotated PSFs (the regime of the existing fits and weights) or raw frames with the per-sample pupil angles, see create_STD_dataset.py
-dataset     = NFMDataset(DATASET_CACHE / ('muse_STD_stars_dataset.pt' if cfg["derotated_PSFs"] else 'muse_STD_stars_dataset_raw.pt'))
+dataset     = load_STD_dataset(cfg["derotated_PSFs"])
 N_wvl_total = dataset.C
-if dataset.derotated != cfg["derotated_PSFs"]:
-    raise ValueError(f"The dataset cache is {'derotated' if dataset.derotated else 'raw'} but the config asks for derotated_PSFs = {cfg['derotated_PSFs']}")
 logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W}), {'derotated PSFs' if dataset.derotated else 'raw frames (per-OB pupil rotation)'}")
 
 #%%
@@ -278,6 +280,10 @@ logger.info(f"Training metadata saved -> {_meta_path}")
 # previous run, which NFMCalibrator (e.g. the ETC validation) would then load instead of the new checkpoint.
 trainer.save_calibrator(Path(_meta['bundle_path']))
 
+# Stage 3 of the distributed bundle: the run bundle carries the telemetry resources of stages 1-2 and the trained calibrator
+if INSTALL:
+    install_calibrator(Path(_meta['bundle_path']))
+
 # Quit here if not run with IPython (e.g. from command line)
 if not (hasattr(sys, 'ps1') or sys.flags.interactive):
     logger.info("Non-interactive environment detected. Exiting after training.")
@@ -307,5 +313,7 @@ if cfg["tune"]["enabled"]:
 
     logger.info(f"Post-tune metadata updated -> {_meta_path}")
     trainer.save_calibrator(Path(_meta['bundle_path']))
+    if INSTALL:
+        install_calibrator(Path(_meta['bundle_path']))
 
 # %%

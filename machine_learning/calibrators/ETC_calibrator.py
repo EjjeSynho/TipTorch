@@ -36,15 +36,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from tiptorch._config import DATA_FOLDER, default_device, project_settings
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 from tiptorch.managers.input_manager import InputsTransformer
-from calibrators.NFM_calibrator import SmallCalibratorNet, build_PSF_model, release_gpu_memory
+from calibrators.NFM_calibrator import SmallCalibratorNet, build_PSF_model, release_gpu_memory, STD_DATASET_CACHE, dataset_cache_path
 
 PUPIL_PATH = DATA_FOLDER / 'calibrations' / 'VLT_CALIBRATION' / 'VLT_PUPIL' / 'ut4pupil320.fits'
-STD_DATASET_CACHE = Path(project_settings['MUSE_STD_data_folder']) / 'dataset_cache'
-
-
-def dataset_cache_path(derotated: bool) -> Path:
-    """ STD-star dataset cache of the calibrators: derotated PSFs (configs with PupilAngle 0) or raw frames (per-sample pupil angles) """
-    return STD_DATASET_CACHE / ('muse_STD_stars_dataset.pt' if derotated else 'muse_STD_stars_dataset_raw.pt')
 
 
 def donor_keys(model_cfg: dict) -> list:

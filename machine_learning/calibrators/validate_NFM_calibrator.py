@@ -20,6 +20,7 @@ from tiptorch.tools.utils import r0
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from calibrators.NFM_calibrator import (build_PSF_model,
     NFMDataset,
+    load_STD_dataset,
     build_NFM_trainer,
     load_NFM_calibrator,
     load_telemetry_preprocessor,
@@ -109,8 +110,9 @@ _split_path = Path(train_meta['split_path'])
 # BEST_CALIB_PATH, set by train_NFM_calibrator.py or by a previous validation in this session, tells which run the session's trainer is for
 _checkpoint_path = _bundle_path.with_name(f'{cfg["name"]}_checkpoint.pth')
 if 'trainer' not in dir() or 'BEST_CALIB_PATH' not in dir() or Path(BEST_CALIB_PATH).resolve() != _checkpoint_path.resolve():
-    # The regime the calibrator was trained in: derotated PSFs or raw frames (per-OB pupil rotation), see train_NFM_calibrator.py
-    dataset = NFMDataset(DATASET_CACHE / ('muse_STD_stars_dataset.pt' if cfg.get('derotated_PSFs', True) else 'muse_STD_stars_dataset_raw.pt'))
+    # The regime the calibrator was trained in: derotated PSFs or raw frames (per-OB pupil rotation), see train_NFM_calibrator.py.
+    # Configs without the key predate the raw-frame regime and were trained on derotated PSFs
+    dataset = load_STD_dataset(cfg.get('derotated_PSFs', True))
     logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W}), {'derotated PSFs' if dataset.derotated else 'raw frames'}")
 
     PSF_model, calibrator, outputs_transformer, trainer = build_NFM_trainer(cfg, dataset, default_device, weights_dir=WEIGHTS_FOLDER / cfg['weights_subdir'])

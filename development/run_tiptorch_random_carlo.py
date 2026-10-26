@@ -20,7 +20,7 @@ computed by `tools.ETC_tools.tiptop_metrics`. The predicted model parameters go 
 and the telemetry to `tiptorch_random_PSFs/telemetry.csv`.
 
 Requirements: the trained calibrator bundle referenced by `machine_learning/NFM_calibrator_config.json` (`*_meta.json` in
-`data/weights/NFM_calibrator/`), the dataset cache `muse_STD_stars_dataset.pt` (loaded with mmap, only configs and telemetry are
+`data/weights/NFM_calibrator/`), the dataset cache built in the calibrator's regime (`muse_STD_stars_dataset.pt`, loaded with mmap, only configs and telemetry are
 read), a CUDA device (~1 min for 466 samples) and the astro-tiptop checkouts for the P3 metric functions (`tiptop_env.py`).
 Run from the repository root in the `TipTorch` conda env:
 
@@ -51,7 +51,7 @@ for p in (REPO_ROOT, REPO_ROOT / 'machine_learning', REPO_ROOT / 'development'):
 from tiptorch._config import DATA_FOLDER, WEIGHTS_FOLDER, default_device, project_settings
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
-from calibrators.NFM_calibrator import NFMCalibrator, release_gpu_memory, load_NFM_calibrator
+from calibrators.NFM_calibrator import NFMCalibrator, release_gpu_memory, load_NFM_calibrator, dataset_cache_path
 from calibrators.ETC_calibrator import ETCCalibrator, PREDICTORS, ETC_table_from_stars
 
 from tools import tiptop_env  # noqa: F401
@@ -63,7 +63,6 @@ ETC_CONFIG    = REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'ET
 OUTPUT_DIR    = ETC_FOLDER / 'tiptorch_random_PSFs'
 STARS_TABLE   = ETC_FOLDER / 'generated_random_PSFs' / 'stars.fits'
 CONFIG_PATH   = REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'NFM_calibrator_config.json'
-DATASET_CACHE = Path(project_settings['MUSE_STD_data_folder']) / 'dataset_cache' / 'muse_STD_stars_dataset.pt'
 PUPIL_PATH    = DATA_FOLDER / 'calibrations' / 'VLT_CALIBRATION' / 'VLT_PUPIL' / 'ut4pupil320.fits'
 
 WAVELENGTHS_M = [w * 1e-9 for w in rc.WAVELENGTHS]
@@ -83,9 +82,12 @@ def load_calibrator_setup(config_path=CONFIG_PATH):
     return cfg, meta, bundle_path
 
 
-def load_dataset_templates(path=DATASET_CACHE):
-    """ Configs, scaled telemetry rows and sample ids of the calibrator dataset (PSF cubes are not read) """
+def load_dataset_templates(derotated: bool):
+    """ Configs, scaled telemetry rows and sample ids of the calibrator dataset of the given regime (PSF cubes are not read) """
+    path = dataset_cache_path()
     data = torch.load(path, weights_only=False, mmap=True)
+    if bool(data.get('derotated', True)) != bool(derotated):
+        raise ValueError(f"The dataset cache {path.name} does not match derotated_PSFs = {derotated}; rebuild it with create_STD_dataset.py")
     configs = [c[0] if isinstance(c, list) else c for c in data['model_configs']]
     telemetry = pd.DataFrame(list(data['telemetry']))  # object array of dicts
     return configs, telemetry, np.asarray(data['sample_ids'])
@@ -279,7 +281,7 @@ if __name__ == '__main__':
 
     cfg, meta, bundle_path = load_calibrator_setup(args.config)
     calibrator = load_NFM_calibrator(bundle_path, device=default_device)
-    configs, telemetry_scaled, sample_ids = load_dataset_templates()
+    configs, telemetry_scaled, sample_ids = load_dataset_templates(cfg.get('derotated_PSFs', True))
     if list(telemetry_scaled.columns) != list(calibrator.features):
         raise ValueError('Dataset telemetry features do not match the calibrator bundle.')
     print(f'Calibrator {bundle_path.name}: {len(calibrator.features)} features; {len(configs)} template observations')

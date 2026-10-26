@@ -3,12 +3,13 @@ Round-trip test of the NFM calibrator bundle (`NFMCalibratorTrainer.save_calibra
 scaler + imputer stored in the bundle must be the one of the dataset cache, reproduce the training telemetry vectors from the raw
 MUSE telemetry (`muse_df.pickle` -> filter / reduce / scale / impute), and the loaded network must reproduce the checkpoint.
 
-1. The bundle's `telemetry_preprocessor` state (and Cn2 grid) equals the dataset cache's one, feature names match the calibrator inputs.
+1. The bundle's `telemetry_preprocessor` state (and Cn2 grid) equals the dataset cache's one, feature names match the calibrator inputs;
+   the bundle carries the telemetry resources (LGS / IRLOS archive tables, median Cn2 profile).
 2. `NFMCalibrator.prepare_telemetry(raw telemetry)` reproduces the dataset telemetry vectors of every sample (atol 1e-5).
 3. `NFMCalibrator.forward_prepared` reproduces the best checkpoint's network, with the phase-bump column prepended to LO_coefs.
 4. `NFMCalibrator.save` -> reload gives the same outputs and the same preprocessor; `inverse_transform` inverts the scaling.
 
-Needs the dataset cache `dataset_cache/muse_STD_stars_dataset.pt` (~3.6 GB), `muse_df.pickle` of the STD folder and the
+Needs the dataset cache built in the run's regime (`dataset_cache/muse_STD_stars_dataset.pt`, raw frames or derotated, ~3.6 GB), `muse_df.pickle` of the STD folder and the
 training outputs `best_calibrator_{bundle,checkpoint}.pth` + `best_calibrator_meta.json` in `data/weights/NFM_calibrator/`.
 CPU only, ~1 min. Run from the repository root in the `TipTorch` conda env:
 
@@ -32,7 +33,7 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from tiptorch._config import project_settings, WEIGHTS_FOLDER
 from data_processing.telemetry_preprocessor import TelemetryPreprocessor
-from machine_learning.calibrators.NFM_calibrator import NFMCalibrator, NFMFactorCalibrator, NFMDataset, SmallCalibratorNet, load_NFM_calibrator
+from machine_learning.calibrators.NFM_calibrator import NFMCalibrator, NFMFactorCalibrator, NFMDataset, SmallCalibratorNet, load_NFM_calibrator, load_STD_dataset
 
 
 def check(condition, message):
@@ -54,8 +55,10 @@ def main():
     meta = json.load(open(weights_dir / f'{args.name}_meta.json'))
     bundle_path, checkpoint_path = Path(meta['bundle_path']), Path(meta['checkpoint_path'])
 
-    dataset = NFMDataset(std_folder / 'dataset_cache' / 'muse_STD_stars_dataset.pt')
     bundle = torch.load(bundle_path, map_location=device, weights_only=False)
+    # The dataset cache of the regime the calibrator was trained in (configs without the key predate the raw frames: derotated)
+    train_cfg = bundle.get('training_config') or meta.get('config') or {}
+    dataset = load_STD_dataset(train_cfg.get('derotated_PSFs', True))
     calibrator = load_NFM_calibrator(bundle_path, device=device)
     print(f'bundle type: {type(calibrator).__name__}')
     results = []
@@ -78,6 +81,9 @@ def main():
         results.append(check(same_grid and calibrator.Cn2_binning == 'grid', f'bundle carries the Cn2 grid of the dataset cache ({calibrator.Cn2_grid})'))
     else:
         results.append(check(calibrator.Cn2_binning == 'kmeans', 'old cache without Cn2 grid: the bundle uses the K-means Cn2 features'))
+    # The telemetry resources of the distributed bundle (data_processing/NFM_bundle.py, stage 1): the bundle alone processes new data
+    results.append(check(sorted(bundle.get('archive_telemetry', {})) == ['IRLOS_regimes', 'LGS_flux', 'LGS_slopes'] and bundle.get('median_Cn2_profile') is not None,
+                         'bundle carries the LGS / IRLOS archive tables and the median Cn2 profile'))
 
     # 2. Raw telemetry -> prepared vectors reproduces the dataset
     rng = np.random.default_rng(0)

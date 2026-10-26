@@ -9,8 +9,9 @@ AOF Cn2 profiles (8 SPARTA layers with sample-dependent altitudes, placeholders 
     layers     the N_layers layers of the PSF model: fixed altitude boundaries between the nodes, the weights are the bin masses and
                the heights the (5/3)-moment effective altitudes of the bins (ground layer at 0), as the anisoplanatism scales
 
-The grid (nodes, boundaries, median profile) is stored in data/reduced_telemetry/MUSE/AOF_Cn2_grid.json (STD_dataset_utils.store_Cn2_grid)
-and copied into the dataset cache and the calibrator bundles, so that training and inference use the same reduction.
+The grid (nodes, boundaries, median profile) is fitted by STD_dataset_utils.store_Cn2_grid (working copy in the STD folder) and copied into
+the distributed calibrator bundle (data_processing/NFM_bundle.py), the dataset cache and the trained bundles, so that training and inference
+use the same reduction.
 """
 import json
 import numpy as np

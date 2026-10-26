@@ -32,9 +32,8 @@ PLOTS_DIR     = ETC_FOLDER / 'plots' / 'ETC_calibrator'
 ETC_CONFIG    = REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'ETC_calibrator_config.json' # the config the ETC bundle was trained with
 TIPTOP_TAG    = 'v1.4.3' # the TIPTOP release of Enrico's tuning (see tools/tiptop_env.py)
 
-with open(ETC_CONFIG) as _f:
-    # The dataset cache of the config (raw frames or derotated PSFs); a bundle carries its own (ETCCalibrator.dataset_cache)
-    DATASET_CACHE = dataset_cache_path(json.load(_f).get('derotated_PSFs', True))
+# The dataset cache (raw frames or derotated PSFs, stored in it); a bundle carries its own (ETCCalibrator.dataset_cache)
+DATASET_CACHE = dataset_cache_path()
 
 NOMINAL_WAVES = [500, 600, 700, 800, 900] # [nm], the dataset bins nearest to them are used
 PARAMS = { # parameter -> (label, scale, histogram bins)

@@ -1,7 +1,7 @@
 #%%
 import sys, os
 
-from tiptorch._config import default_device, xp, use_cupy, default_torch_type, TELEMETRY_CACHE, DATA_FOLDER, project_settings
+from tiptorch._config import default_device, xp, use_cupy, default_torch_type, DATA_FOLDER, project_settings
 
 import pickle
 import os
@@ -25,7 +25,8 @@ from scipy.ndimage import binary_dilation
 from pathlib import Path
 from tiptorch.tools.utils import GetROIaroundMax, GetJmag, check_framework, recompute_Cn2_Kmeans, rad2arc
 from data_processing.Cn2_profile import Cn2Grid, ALT_COLS, FRAC_COLS
-from functools import lru_cache
+# The median Cn2 profile, the Cn2 grid and the LGS / IRLOS archive tables come from the distributed calibrator bundle (see NFM_bundle)
+from data_processing.NFM_bundle import load_median_Cn2_profile, load_bundle_Cn2_grid, archive_table_csv, archive_cache_path
 
 # Reduction of the AOF Cn2 profile to the PSF-model layers and the calibrator features, used by default by InitNFMConfig (configs) and
 # reduce_dataframe (telemetry features); both must agree with the dataset cache the calibrator was trained on:
@@ -70,8 +71,8 @@ wvl_bins = np.array([
     880.125, 893.875, 907.625, 921.25 , 935.
 ], dtype='float32')
 
-# If current installation doesn't have a local copy of the reduced telemetry, fetch it from online
-# fetch_all_resource_packs()
+# The reduced telemetry (LGS / IRLOS archive tables, median Cn2 profile) comes with the calibrator bundle of the MUSE_NFM_cailbrator
+# resource pack, installed by tiptorch._config on import (see NFM_bundle)
 
 find_closest_λ   = lambda λ, λs: check_framework(λs).argmin(check_framework(λs).abs(λs-λ)).astype('int')
 pupil_angle_func = lambda par_ang: (45.0 - par_ang) % 360 # where par_ang is the parallactic angle
@@ -190,13 +191,14 @@ def GetExposureTimesList(cubes_folder: str | os.PathLike, verbose: bool = False)
 
 
 def check_cached_data(
-    cache_path: Path,
+    cache_path: Optional[Path],
     start_time: datetime.datetime,
     end_time:   datetime.datetime,
     fetch_function: Optional[Callable[[datetime.datetime, datetime.datetime], pd.DataFrame]] = None,
     parse_function: Optional[Callable[[pd.DataFrame], pd.DataFrame]] = lambda x: x,
     time_buffer_before: datetime.timedelta = datetime.timedelta(seconds=30),
     time_buffer_after:  datetime.timedelta = datetime.timedelta(seconds=30),
+    cache_csv: Optional[str] = None,
     verbose: bool = False
 ) -> pd.DataFrame:
     """
@@ -204,8 +206,10 @@ def check_cached_data(
 
     Parameters
     ----------
-    cache_path : Path
-        Path to the CSV cache file.
+    cache_path : Path or None
+        Path to the CSV cache file the fetched data are appended to (None: nothing is written).
+    cache_csv : str or None
+        CSV text read instead of cache_path when that file does not exist (the tables of the calibrator bundle).
     start_time, end_time : datetime.datetime
         Requested time range.
     fetch_function : Optional[Callable]
@@ -224,11 +228,15 @@ def check_cached_data(
         Returns empty DataFrame if nothing available and no fetching done/available.
     """
 
-    def _load_cache(path: Path) -> pd.DataFrame:
-        if not path.exists():
+    def _load_cache(path: Optional[Path]) -> pd.DataFrame:
+        if path is not None and path.exists():
+            source = path
+        elif cache_csv is not None:
+            source = StringIO(cache_csv)
+        else:
             return pd.DataFrame()
         try:
-            df = pd.read_csv(path, index_col=0)
+            df = pd.read_csv(source, index_col=0)
         except Exception:
             # Corrupt or unreadable? Treat as empty.
             return pd.DataFrame()
@@ -240,12 +248,15 @@ def check_cached_data(
         df = df[~df.index.duplicated(keep='first')]
         return df
 
-    def _save_cache(path: Path, df: pd.DataFrame) -> None:
+    def _save_cache(path: Optional[Path], df: pd.DataFrame) -> None:
+        if path is None:
+            return
         path.parent.mkdir(parents=True, exist_ok=True)
         df.to_csv(path, index=True)
 
     # 1) Load cache (or empty)
-    cache_df = _load_cache(cache_path)
+    cache_df   = _load_cache(cache_path)
+    cache_name = cache_path.name if cache_path is not None and cache_path.exists() else 'calibrator bundle' if cache_csv is not None else 'none'
 
     # 2) Try to satisfy from cache using buffer window
     query_start = start_time - time_buffer_before
@@ -260,7 +271,7 @@ def check_cached_data(
 
     if not result_df.empty:
         if verbose:
-            print(f"Serving {len(result_df)} rows from cache: {cache_path.name}")
+            print(f"Serving {len(result_df)} rows from cache: {cache_name}")
         return result_df
 
     # 3) If cache didn’t cover it, fetch (if possible)
@@ -273,7 +284,7 @@ def check_cached_data(
         return pd.DataFrame()
 
     if verbose:
-        if cache_df.empty and not cache_path.exists():
+        if cache_df.empty and cache_path is not None and not cache_path.exists():
             print(f"Cache file not found. Creating new cache: {cache_path.name}")
         elif cache_df.empty:
             print("Cache is empty. Fetching data...")
@@ -299,7 +310,7 @@ def check_cached_data(
 
         if verbose:
             first, last = merged.index[0], merged.index[-1]
-            print(f"Successfully fetched and updated cache: {cache_path.name} ({first} to {last})")
+            print(f"Successfully fetched and updated cache: {cache_path.name if cache_path is not None else '(in memory)'} ({first} to {last})")
 
         # 5) Return slice from merged cache
         return _slice(merged)
@@ -474,8 +485,10 @@ def GetIRLoopData(hdul_raw, exposure_start, exposure_end, verbose=False):
         IRLOS_record = ParseIRLOSregimes(regime_df_)
     else:
         if verbose: print(f'Not Found IRLOS regime in FITS header, scanning archive')
+        # The working copy of the STD folder when building the dataset (the fetches are appended to it), the table of the bundle otherwise
         IRLOS_df = check_cached_data(
-            cache_path = TELEMETRY_CACHE / 'MUSE/IRLOS_regimes_df.csv',
+            cache_path = archive_cache_path('IRLOS_regimes'),
+            cache_csv  = archive_table_csv('IRLOS_regimes'),
             start_time = exposure_start,
             end_time   = exposure_end,
             fetch_function = FetchIRLOSlogsFromDatalab if datalab_available else None,
@@ -573,9 +586,11 @@ def GetLGSdata(hdul_cube, exposure_start, exposure_end, fill_missing=False, verb
     # AOS LGSi FLUX: [ADU] Median flux in subapertures /
     # Median of the LGS{i} flux in all subapertures with 0.17 photons/ADU when the camera gain is 100.
     
-    # Read/fetch dataset with the LGS WFSs data
+    # Read/fetch dataset with the LGS WFSs data: the working copies of the STD folder when building the dataset (the fetches are appended
+    # to them), the tables of the calibrator bundle otherwise
     LGS_flux_df = check_cached_data(
-        cache_path = TELEMETRY_CACHE / 'MUSE/LGS_flux_df.csv',
+        cache_path = archive_cache_path('LGS_flux'),
+        cache_csv  = archive_table_csv('LGS_flux'),
         start_time = exposure_start,
         end_time   = exposure_end,
         fetch_function = FetchLGSfluxFromDatalab if datalab_available else None,
@@ -585,7 +600,8 @@ def GetLGSdata(hdul_cube, exposure_start, exposure_end, fill_missing=False, verb
     )
     
     LGS_slopes_df = check_cached_data(
-        cache_path = TELEMETRY_CACHE / 'MUSE/LGS_slopes_df.csv',
+        cache_path = archive_cache_path('LGS_slopes'),
+        cache_csv  = archive_table_csv('LGS_slopes'),
         start_time = exposure_start,
         end_time   = exposure_end,
         fetch_function = FetchLGSslopesFromDatalab if datalab_available else None,
@@ -2267,10 +2283,8 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, co
 
     else: # weighted K-means into 3 layers with free altitudes
         # >>>>>>> Compute simplified Cn2 profile
-        # Read median Cn2 profile from the json file to serve as a fallback
-        with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'r') as f:
-            profile = json.load(f)
-            median_Cn2_alts, median_Cn2_fracs = np.array(profile['median_Cn2_alts']), np.array(profile['median_Cn2_fracs'])
+        # Median Cn2 profile of the calibrator bundle as a fallback
+        median_Cn2_alts, median_Cn2_fracs = load_median_Cn2_profile()
 
         try:
             # Attempt to extract the profile from the sample data
@@ -2495,10 +2509,9 @@ def compute_mass_turb_statistics(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-@lru_cache(maxsize=1)
 def load_Cn2_grid() -> Cn2Grid:
-    """Fixed Cn2 grid of the MUSE NFM dataset (datasets/MUSE_STD_dataset/STD_dataset_utils.store_Cn2_grid)."""
-    return Cn2Grid.load(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_Cn2_grid.json')
+    """Fixed Cn2 grid of the MUSE NFM dataset, from the calibrator bundle (see NFM_bundle; 'grid' binning only)."""
+    return load_bundle_Cn2_grid()
 
 
 def raw_Cn2_profiles(df: pd.DataFrame):
@@ -2512,7 +2525,7 @@ def compute_Cn2_grid_features(df: pd.DataFrame, grid: Cn2Grid | None = None) -> 
     """
     Cn2 profile features of the calibrator: the repaired profile projected onto the fixed altitude grid (Cn2_grid_1..N, fractions
     summing to 1) and the effective altitudes of the upper model layers (Cn2_layer_alt_2.., [km]). Missing profiles stay NaN and
-    are imputed with the rest of the telemetry. The grid of the dataset (AOF_Cn2_grid.json) unless given (e.g. the one of a bundle).
+    are imputed with the rest of the telemetry. The grid of the distributed bundle unless given (e.g. the one of another bundle).
     """
     grid = grid or load_Cn2_grid()
     grid_fracs, _, heights, n_repaired, valid = grid.process(*raw_Cn2_profiles(df))
@@ -2525,10 +2538,10 @@ def compute_Cn2_grid_features(df: pd.DataFrame, grid: Cn2Grid | None = None) -> 
     return df
 
 
-def compute_fraction_below_layer(df: pd.DataFrame, h_GL: float = 2000, repaired: bool = False) -> pd.DataFrame:
+def compute_fraction_below_layer(df: pd.DataFrame, h_GL: float = 2000, repaired: bool = False, grid: Cn2Grid | None = None) -> pd.DataFrame:
     """Fraction of the Cn2 profile below h_GL [m]; from the raw AOF layers (as before 2026-10-13) or from the repaired profile."""
     if repaired:
-        grid = load_Cn2_grid()
+        grid = grid or load_Cn2_grid()
         alts, fracs, _, _ = grid.repair(*raw_Cn2_profiles(df))
         df = df.copy()
         df[f'Cn2 fraction below {h_GL}m'] = grid.fraction_below(alts, fracs, h_GL / 1000.0)
@@ -2556,11 +2569,9 @@ def compute_fraction_below_layer(df: pd.DataFrame, h_GL: float = 2000, repaired:
     return df
 
 
-def recompute_simplified_Cn2(df: pd.DataFrame, n_layers: int) -> pd.DataFrame:
-    # Load the pre-computed median Cn2 profile from the json file to serve as a fallback
-    with open(DATA_FOLDER / 'reduced_telemetry/MUSE/AOF_median_Cn2_profile.json', 'r') as f:
-        profile = json.load(f)
-        median_Cn2_alts, median_Cn2_fracs = np.array(profile['median_Cn2_alts']), np.array(profile['median_Cn2_fracs'])
+def recompute_simplified_Cn2(df: pd.DataFrame, n_layers: int, median_Cn2_profile: dict | None = None) -> pd.DataFrame:
+    # The median Cn2 profile (the 'median_Cn2_profile' entry of a calibrator bundle, by default the distributed one) as a fallback
+    median_Cn2_alts, median_Cn2_fracs = load_median_Cn2_profile(median_Cn2_profile)
 
     # Retrieve Cn2 profile for each sample
     Cn2_alts  = df[[f'ALT{i}' for i in range(1, 9)]].values
@@ -2595,11 +2606,11 @@ def recompute_simplified_Cn2(df: pd.DataFrame, n_layers: int) -> pd.DataFrame:
     return df
 
 
-def compute_anisoplanatic_angle(df: pd.DataFrame, repaired: bool = False) -> pd.DataFrame:
+def compute_anisoplanatic_angle(df: pd.DataFrame, repaired: bool = False, grid: Cn2Grid | None = None) -> pd.DataFrame:
     df = df.copy()
 
     if repaired: # repaired profile (NaN rows for the samples without one)
-        h_km, w = load_Cn2_grid().repair(*raw_Cn2_profiles(df))[:2]
+        h_km, w = (grid or load_Cn2_grid()).repair(*raw_Cn2_profiles(df))[:2]
         h_m     = 1000.0 * h_km
     else:
         w     = df[[f'CN2_FRAC_ALT{i}' for i in range(1, 9)]].values
@@ -2626,11 +2637,12 @@ def compute_anisoplanatic_angle(df: pd.DataFrame, repaired: bool = False) -> pd.
 
 
 # Dataset cleaning
-def reduce_dataframe(df, Cn2_binning=None, Cn2_grid=None):
+def reduce_dataframe(df, Cn2_binning=None, Cn2_grid=None, median_Cn2_profile=None):
     """
     Telemetry features of the calibrator from the full MUSE telemetry dataframe. Cn2_binning selects the Cn2 profile features
     (CN2_BINNING by default): 'kmeans' (3-layer K-means features Cn2_alt/frac_binned_2/3), 'grid' (fractions at the fixed altitude
-    grid + model-layer altitudes, see compute_Cn2_grid_features) or 'both'.
+    grid + model-layer altitudes, see compute_Cn2_grid_features) or 'both'. Cn2_grid / median_Cn2_profile: those of a calibrator
+    bundle, the ones of the distributed bundle by default.
     """
     Cn2_binning = Cn2_binning or CN2_BINNING
     if Cn2_binning not in ('grid', 'kmeans', 'both'):
@@ -2661,14 +2673,14 @@ def reduce_dataframe(df, Cn2_binning=None, Cn2_grid=None):
     # Compute turbulence statistics
     df_ = compute_mass_turb_statistics(df_)
     # Compute Cn² fractions below a specified altitude in [m] (from the repaired profile in grid mode)
-    df_ = compute_fraction_below_layer(df_, h_GL=2000, repaired=(Cn2_binning != 'kmeans'))
+    df_ = compute_fraction_below_layer(df_, h_GL=2000, repaired=(Cn2_binning != 'kmeans'), grid=Cn2_grid)
     # Cn2 profile features
     if Cn2_binning in ('grid', 'both'):
         df_ = compute_Cn2_grid_features(df_, grid=Cn2_grid)
     if Cn2_binning in ('kmeans', 'both'):
-        df_ = recompute_simplified_Cn2(df_, n_layers=3)
+        df_ = recompute_simplified_Cn2(df_, n_layers=3, median_Cn2_profile=median_Cn2_profile)
     # Compute anisoplanatic angle
-    df_ = compute_anisoplanatic_angle(df_, repaired=(Cn2_binning != 'kmeans'))
+    df_ = compute_anisoplanatic_angle(df_, repaired=(Cn2_binning != 'kmeans'), grid=Cn2_grid)
 
 
     entries_to_drop = [

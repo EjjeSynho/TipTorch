@@ -82,10 +82,11 @@ def onsky_to_dataset_ids(onsky_dates):
     std_folder = Path(project_settings['MUSE_STD_data_folder'])
     with open(std_folder / 'muse_df.pickle', 'rb') as f:
         muse_df = pickle.load(f)
-    data = torch.load(std_folder / 'dataset_cache' / 'muse_STD_stars_dataset.pt', weights_only=False, mmap=True)
-    sample_ids = np.asarray(data['sample_ids'])
     with open(REPO_ROOT / 'machine_learning' / 'calibrators' / 'configs' / 'NFM_calibrator_config.json') as f:
         cfg = json.load(f)
+    from calibrators.NFM_calibrator import dataset_cache_path
+    data = torch.load(dataset_cache_path(), weights_only=False, mmap=True) # the cache the calibrator split refers to
+    sample_ids = np.asarray(data['sample_ids'])
     with open(WEIGHTS_FOLDER / cfg['weights_subdir'] / f'{cfg["name"]}_meta.json') as f:
         split = np.load(json.load(f)['split_path'])
     val_ids = set(sample_ids[split['val_idx']].tolist())
