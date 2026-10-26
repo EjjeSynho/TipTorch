@@ -202,7 +202,8 @@ def update_labels(labels, entries, source):
 def update_kc_mismatch_labels(muse_df, force=False, plot=True, verbose=True):
     """Incremental detection: scores the fits whose MUSE filename is not in SCORES_FILE (all with force), updates the labels file.
     Returns (scores of all scanned fits, labels dict)."""
-    scores = pd.read_csv(SCORES_FILE, index_col='id') if SCORES_FILE.exists() else pd.DataFrame(columns=['Filename'])
+    # Sample id in the first column (unnamed in the files written before 2026-10-26)
+    scores = pd.read_csv(SCORES_FILE, index_col=0).rename_axis('id') if SCORES_FILE.exists() else pd.DataFrame(columns=['Filename']).rename_axis('id')
     labels = read_kc_mismatch_labels(LABELS_FILE) if LABELS_FILE.exists() else {}
     ids = [int(p.stem) for p in FITTED_FOLDER.glob('*.pickle') if p.stem.isdigit() and int(p.stem) in muse_df.index]
     scanned = set() if force else set(scores['Filename'])
@@ -217,7 +218,7 @@ def update_kc_mismatch_labels(muse_df, force=False, plot=True, verbose=True):
     new, stacks = score_fits({i: FITTED_FOLDER / f'{i}.pickle' for i in ids}, verbose)
     new = muse_df.loc[new.index, ['time', 'Filename']].join(new)
     scores = pd.concat([scores[~scores['Filename'].isin(new['Filename'])], new]).sort_values('time')
-    scores.to_csv(SCORES_FILE)
+    scores.to_csv(SCORES_FILE, index_label='id')
 
     added, _ = update_labels(labels, new, 'ring')
     write_kc_mismatch_labels(labels, LABELS_FILE)
@@ -300,7 +301,7 @@ def scan_kc_by_fits(muse_df, ids=None, factors=SCAN_FACTORS, devices=('cuda:0',)
     """Fits the labeled samples (ids: default all flagged, fittable) at k_c = ring estimate x factors in parallel, takes the loss minimum
     as the sample's k_c, stores the results in SCAN_FILE and (apply) writes the fitted k_c to the labels and refreshes muse_df."""
     labels = read_kc_mismatch_labels(LABELS_FILE)
-    scores = pd.read_csv(SCORES_FILE).set_index('Filename') if SCORES_FILE.exists() else pd.DataFrame()
+    scores = pd.read_csv(SCORES_FILE, index_col=0).set_index('Filename') if SCORES_FILE.exists() else pd.DataFrame()
     
     if ids is None:
         ids = muse_df.index[muse_df[KC_MISMATCH_FLAG] & ~muse_df['Corrupted'] & ~muse_df['Bad quality']].tolist()
