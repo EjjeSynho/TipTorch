@@ -36,10 +36,10 @@ from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gp
 #   derotated_PSFs            derotated STD-star cache (configs with PupilAngle 0) or the raw-frame cache (*_raw.pt, the PSF model rotates per OB);
 #                             must match the regime of the fits (STD_fitter.py DEROTATE_PSF) and of the dataset cache (create_STD_dataset.py)
 #   model                     PSF model (build_PSF_model). The jitter / wing regime must be the one of the fits the pretraining targets come from
-#                             (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL, WING_WIDTH_PX, WING_WIDTH_T_PX, WING_POWER): since 2026-10-20 the
-#                             fits use the anisotropic chromatic jitter (Jx_ctrl, Jy_ctrl, J_angle) and the image-frame wing (wing_frac_ctrl per
-#                             star, dataset-wide wing_width_px x wing_width_t_px widths, wing_power exponent of the wing MTF). fixed_from_fits:
-#                             kept fixed inputs (see fixed_params) set to the training-set median of the fits instead of their defaults (J_angle)
+#                             (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL): since 2026-10-20 the fits use the anisotropic chromatic jitter
+#                             (Jx_ctrl, Jy_ctrl, J_angle) and the image-frame wing (wing_frac_ctrl per star). fixed_from_fits: kept fixed inputs
+#                             (see fixed_params) set to the training-set median of the fits (required in the fits): J_angle and the wing shape
+#                             wing_width / wing_width_t / wing_angle, which is not a config value but comes from the fits
 #   calibrator                "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors: factor_keys predicted as
 #                             log-factors on the priors, const_keys dataset-level constants, the rest predicted directly; Cn2_mix / Cn2_targets /
 #                             Cn2_offset for the grid Cn2 features), hidden_dim, dropout_rate

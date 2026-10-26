@@ -281,3 +281,17 @@ blue peak error 0.6-13 % between branches). Cost: the fit time doubles (~30 s pe
 
 **STD_fitted_df.py** stores the fit priors explicitly (`compute_fit_priors(..., out_path=FIT_PRIORS_FILE, store=True)`); the priors now include
 `wing_width` / `wing_width_t`, and the fitter warns at import when the priors come from fits with another wing shape.
+
+## Wing kernel reinstated, shape taken from the fits (2026-10-21, user's decision after further analysis)
+
+The removal commit (19505e5) is reverted (e4727cd): the wing is back in the model, the wrapper, the fitter, the dev script and the calibrators.
+Simplifications kept from the exercise: the exponent of the wing MTF (`wing_power` / `WING_POWER`, always 1) is gone, `WingKernel` is the
+elliptical Moffat form only (`w_t = 0` still gives the line); the exploratory fitter knobs `FIT_WING_WIDTH`, `FIT_WING_WIDTH_T`,
+`FIT_WING_ANGLE`, `WING_FRAC_MAX`, `WING_WIDTH_BOUNDS` are gone (only the fraction is fitted, bounded to [0, 1]); the wrapper creates
+`wing_width` / `wing_width_t` / `wing_angle` non-optimizable with the adopted 5 x 1.5 px, 0 deg defaults. The wing shape is no longer a
+calibrator config value: `wing_width_px`, `wing_width_t_px`, `wing_power` are removed from the "model" sections, and `wing_width`,
+`wing_width_t`, `wing_angle` join `J_angle` in `fixed_from_fits`, i.e. the calibrators take the shape from the medians of the fits (recorded
+in every fit pickle, passed on by STD_fitted_df.py to the fitted table, `fitted_priors.pickle` and the dataset cache). `fits_median`
+(NFM_calibrator.py, shared with train_ETC_calibrator.py) raises when the fits lack a `fixed_from_fits` key instead of keeping a default: the
+current raw cache and priors (refit of 2026-10-21 without the wing, 457 sharp stars) carry no wing entries, so the dataset must be refit with
+`WING_KERNEL = True`, then STD_fitted_df.py and create_STD_dataset.py re-run, before the calibrators train.

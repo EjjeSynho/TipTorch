@@ -60,8 +60,8 @@ class PSFModelNFM:
         self.anisotropic_jitter = anisotropic_jitter
         # Elongated wing of the PSF along the image columns (rotated by wing_angle), fixed in the image frame: the detector-frame
         # halo excess of the MUSE NFM data (slicer / spectrograph spread) that neither the pupil-frame PSDs nor a jitter can represent.
-        # Inputs: wing_frac (flux fraction, chromatic), wing_width [px] along the axis, wing_width_t [px] across it (0 = a one-dimensional
-        # line, the default) and wing_angle [deg]; the widths and the angle are achromatic, the angle is fixed at 0 by default
+        # Inputs: wing_frac (flux fraction, chromatic, fitted) and the achromatic shape wing_width [px] along the axis, wing_width_t [px]
+        # across it (0 = a one-dimensional line) and wing_angle [deg], created non-optimizable: dataset-wide constants (5 x 1.5 px, 0 deg)
         self.wing_kernel = wing_kernel
         self.__config_raw  = config # Input config dictionary, defined in TipTop-style
         self.device        = torch.device(device)
@@ -523,15 +523,15 @@ class PSFModelNFM:
             add_input('Jxy', torch.tensor([0.0]), norm_J, optimizable=False, is_shared=True) # essentially, this disables the TT jitter anisotropy
 
         if self.wing_kernel:
-            # Flux fraction of the wing per wavelength (spline), its half-widths along and across the axis [px] and the axis angle [deg, from
-            # the image columns]; the transverse width and the angle are fixed by default (a line along the columns, as the wing of the MUSE
-            # NFM data), enable them with inputs_manager.set_optimizable
+            # Flux fraction of the wing per wavelength (spline), fitted; its half-widths along and across the axis [px] and the axis angle
+            # [deg, from the image columns] are dataset-wide constants (the fitter sets them, the calibrators take the medians of the fits),
+            # so they are created non-optimizable: set them by assignment, or fit them with inputs_manager.set_optimizable
             if self.use_splines:
                 add_input('wing_frac_ctrl', torch.tensor([[0.005,]*self.N_wvl_ctrl]*N_obs), norm_wing_frac, is_shared=True)
             else:
                 add_input('wing_frac', torch.tensor([[0.005,]*N_wvl]*N_obs), norm_wing_frac, is_shared=True)
-            add_input('wing_width',   torch.tensor([5.0]*N_obs), norm_wing_width, is_shared=True)
-            add_input('wing_width_t', torch.tensor([0.0]*N_obs), norm_wing_width, optimizable=False, is_shared=True)
+            add_input('wing_width',   torch.tensor([5.0]*N_obs), norm_wing_width, optimizable=False, is_shared=True)
+            add_input('wing_width_t', torch.tensor([1.5]*N_obs), norm_wing_width, optimizable=False, is_shared=True)
             add_input('wing_angle',   torch.tensor([0.0]*N_obs), norm_J_angle,    optimizable=False, is_shared=True)
         
         # Von Kármán turbulence parameters

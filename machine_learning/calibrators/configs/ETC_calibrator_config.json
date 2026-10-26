@@ -9,15 +9,15 @@
     "chrom_defocus": false,
     "anisotropic_jitter": true,
     "wing_kernel": true,
-    "wing_width_px": 5.0,
-    "wing_width_t_px": 1.5,
-    "wing_power": 1.0,
     "use_Moffat": false,
     "retain_PSDs": false,
     "N_spline_nodes": 5,
     "Z_mode_max": 9,
     "fixed_from_fits": [
-      "J_angle"
+      "J_angle",
+      "wing_width",
+      "wing_width_t",
+      "wing_angle"
     ]
   },
   "calibrator": {

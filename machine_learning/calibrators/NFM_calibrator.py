@@ -506,20 +506,15 @@ class NFMCalibrator():
                 )
 
         # Jitter / wing regime: the predictions of a regime the PSF model does not have are ignored, and the model's inputs of a regime the
-        # calibrator does not predict stay at their defaults (e.g. J for a calibrator trained with Jx / Jy, wing_frac for one trained without wing)
-        flags = self.model_flags if self.model_flags is not None else {'anisotropic_jitter': False, 'wing_kernel': False}
+        # calibrator does not predict stay at their defaults (e.g. J for a calibrator trained with Jx / Jy, wing_frac for one trained without
+        # wing). The wing shape and J_angle need no check: the bundle's fixed_inputs are set in the PSF model at calibration
+        flags = self.model_flags or {} # None / empty: bundle from before the anisotropic jitter and the wing kernel (both False then)
         for flag in ('anisotropic_jitter', 'wing_kernel'):
             f_calib, f_model = bool(flags.get(flag, False)), bool(getattr(PSF_model, flag, False))
             if f_calib != f_model:
                 issues[flag] = (f_calib, f_model)
                 warnings.warn(f"NFMCalibrator: {flag} mismatch — the calibrator was trained with {flag} = {f_calib}, the PSF model has {f_model}: "
                               "the predictions of the missing regime are ignored and the model's inputs stay at their defaults.")
-        if flags.get('wing_kernel', False) and getattr(PSF_model, 'wing_kernel', False):
-            for key, name in (('wing_width_px', 'wing_width'), ('wing_width_t_px', 'wing_width_t')):
-                if key in flags and abs(float(PSF_model.inputs_manager[name].ravel()[0]) - flags[key]) > 1e-6:
-                    issues[key] = (flags[key], float(PSF_model.inputs_manager[name].ravel()[0]))
-                    warnings.warn(f"NFMCalibrator: {name} mismatch — trained with {flags[key]:g} px, the PSF model has "
-                                  f"{float(PSF_model.inputs_manager[name].ravel()[0]):g} px (the wing widths are dataset-wide constants).")
 
         return issues
 
@@ -584,13 +579,13 @@ def build_PSF_model(config, model_cfg: dict, device):
     """
     PSFModelNFM from the "model" section of a training config, as the trainer and the validation build it. anisotropic_jitter (Jx, Jy,
     J_angle instead of one J) and wing_kernel (image-frame wing: wing_frac, wing_width, wing_width_t, wing_angle), both False by default,
-    select the regime of the fits (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL). With the wing, the widths are set to the dataset-wide
-    values wing_width_px x wing_width_t_px [px] (the fitter's WING_WIDTH_PX / WING_WIDTH_T_PX, 5 x 1.5 by default) and the exponent of the
-    wing MTF to wing_power (WING_POWER, 1 = Lorentzian wing); they are kept fixed through "fixed_params" (see FIXED_INPUTS_KEPT).
+    select the regime of the fits (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL). The wing shape (widths, angle) and J_angle are not config
+    values: the model is built with the wrapper defaults and build_NFM_trainer sets them to the medians of the fits ("fixed_from_fits"),
+    which the bundles store (fixed_inputs) and NFMCalibrator re-applies.
     """
     from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
-    PSF_model = PSFModelNFM(
+    return PSFModelNFM(
         config,
         multiple_obs       = True,
         LO_NCPAs           = model_cfg['LO_NCPAs'],
@@ -603,23 +598,20 @@ def build_PSF_model(config, model_cfg: dict, device):
         Z_mode_max         = model_cfg['Z_mode_max'],
         device             = device,
     )
-    if PSF_model.wing_kernel:
-        PSF_model.inputs_manager['wing_width'][:]   = float(model_cfg.get('wing_width_px',   5.0))
-        PSF_model.inputs_manager['wing_width_t'][:] = float(model_cfg.get('wing_width_t_px', 1.5))
-        PSF_model.model.wing_power = float(model_cfg.get('wing_power', 1.0))
-    return PSF_model
 
 
 def model_flags(PSF_model) -> dict:
     """ The jitter / wing regime of a PSFModelNFM (stored in the calibrator bundles, checked by NFMCalibrator.check_compatibility). """
-    flags = {k: bool(getattr(PSF_model, k, False)) for k in ('anisotropic_jitter', 'wing_kernel', 'chrom_defocus')}
-    if flags['wing_kernel']:
-        flags |= {
-            'wing_width_px':   float(PSF_model.inputs_manager['wing_width'].ravel()[0]),
-            'wing_width_t_px': float(PSF_model.inputs_manager['wing_width_t'].ravel()[0]),
-            'wing_power':      float(getattr(PSF_model.model, 'wing_power', 1.0)),
-        }
-    return flags
+    return {k: bool(getattr(PSF_model, k, False)) for k in ('anisotropic_jitter', 'wing_kernel', 'chrom_defocus')}
+
+
+def fits_median(dataset, idx, key) -> torch.Tensor:
+    """ Median over the samples `idx` of the fitted value `key` of the dataset, as a flat tensor [n_values]. Raises if the fits carry no such key:
+    the kept fixed inputs set from the fits (J_angle, wing shape) define the regime of the model, a default would silently change it. """
+    fits = [dataset.fitted_vals[int(i)] for i in idx if key in dataset.fitted_vals[int(i)]]
+    if not fits:
+        raise KeyError(f"The fits of the dataset carry no '{key}' (fixed_from_fits): refit the dataset in the regime of the config and rebuild the cache")
+    return torch.stack([torch.as_tensor(np.asarray(f[key], dtype=np.float32)).reshape(-1) for f in fits]).median(dim=0).values
 
 
 def fixed_inputs(PSF_model) -> dict:
@@ -663,8 +655,9 @@ def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 
         except Exception:
             pass
 
-    # Kept fixed inputs set to the training-set median of the fits ("fixed_from_fits" of the model section, e.g. J_angle: the fitter fits the
-    # angle of the jitter kernel per star, the calibrator holds one dataset-wide value, 0 otherwise). The value goes into the bundle (fixed_inputs)
+    # Kept fixed inputs set to the training-set median of the fits ("fixed_from_fits" of the model section: J_angle, which the fitter fits per
+    # star, and the wing shape wing_width / wing_width_t / wing_angle, which the fitter sets; the calibrator holds one dataset-wide value of
+    # each). The values go into the bundle (fixed_inputs)
     train_idx = trainer_overrides.get('train_idx')
     train_idx = default_split(dataset)[0] if train_idx is None else np.asarray(train_idx, dtype=int)
     names     = PSF_model.inputs_manager.get_names(optimizable_only=False)
@@ -676,19 +669,14 @@ def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 
         if key not in names:
             logger.warning(f"fixed_from_fits: the PSF model has no input '{key}' in this regime, skipped")
             continue
-        fits = [dataset.fitted_vals[int(i)] for i in train_idx if key in dataset.fitted_vals[int(i)]]
-       
-        if not fits:
-            logger.warning(f"fixed_from_fits: the fits carry no '{key}', the model keeps its default value")
-            continue
         
-        median = torch.stack([torch.as_tensor(np.asarray(f[key], dtype=np.float32)).reshape(-1) for f in fits]).median(dim=0).values
+        median = fits_median(dataset, train_idx, key)
         cur    = PSF_model.inputs_manager[key]
         
         with torch.no_grad():
             cur[:] = (median[0] if median.numel() == 1 else median.view(1, -1).expand(cur.shape[0], -1).reshape(cur.shape)).to(device=cur.device, dtype=cur.dtype)
         
-        logger.info(f"fixed_from_fits: {key} = {np.round(median.numpy(), 3).tolist()} (median of {len(fits)} training fits)")
+        logger.info(f"fixed_from_fits: {key} = {np.round(median.numpy(), 3).tolist()} (median of the training fits)")
 
     if PSF_model.use_Moffat:
         PSF_model.inputs_manager.delete('theta')
@@ -1225,6 +1213,12 @@ class NFMCalibratorTrainer:
         """
         lr        = lr or self.lr
         save_path = save_path or (self.weights_dir / 'pretrain_weights.pth')
+        # Predicted outputs the fits do not carry get a zero (neutral) target silently (_pretrain_target_vector): a regime mismatch between
+        # the fits and the config (e.g. a wing_frac_ctrl output with fits made without the wing), say so
+        missing = [k for k in self.outputs_transformer.slices if k not in self.dataset.fitted_vals[0]]
+        if missing:
+            warnings.warn(f"pretrain: the fits of the dataset carry no {missing}; their pretraining targets are 0 (neutral). The regime of the "
+                          "fits (STD_fitter.py flags) does not match the \"model\" section of the config: refit the dataset and rebuild the cache")
         opt       = optim.AdamW(self.calibrator.parameters(), lr=lr, weight_decay=5e-4)
         sch       = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=10, min_lr=1e-4)
         best_loss, best_state, pat_count = float('inf'), None, 0

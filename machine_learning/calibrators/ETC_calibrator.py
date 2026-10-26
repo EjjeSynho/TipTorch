@@ -16,8 +16,8 @@ these ETC inputs alone, with two predictors sharing the interface `predict(etc, 
 template config) written by `train_ETC_calibrator.py`; `ETCDataset` is the dataset view used to train the network.
 
 The PSF model is the one of the STD-star fits and of the NFM calibrator (`build_PSF_model`, the "model" section of the training config):
-anisotropic jitter (Jx, Jy, J_angle) and the image-frame wing (wing_frac, fixed widths) since 2026-10-21. The kept fixed inputs of the
-training (J_angle at the training median of the fits, the wing widths) are stored in the bundle (`fixed_inputs`) and set by the renderer.
+anisotropic jitter (Jx, Jy, J_angle) and the image-frame wing (wing_frac, fixed shape) since 2026-10-21. The kept fixed inputs of the
+training (J_angle and the wing shape at the training medians of the fits) are stored in the bundle (`fixed_inputs`) and set by the renderer.
 
 Conventions: ETC tables are pandas DataFrames with one row per observation (`etc_table`); `x_dict` holds the PSF-model parameters
 as tensors [N, ...] on the device; rendered PSFs are [N, N_wvl, H, W] on the CPU.

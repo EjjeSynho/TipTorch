@@ -106,30 +106,17 @@ ANISOTROPIC_JITTER = True
 
 # Elongated wing of the PSF along the image columns (PSFModelNFM wing_kernel, TipTorch.WingKernel): the detector-frame halo excess of the
 # data (5-25 % brighter along the columns than along the rows from 3 to 35 px, growing to the red), which neither the pupil-frame PSDs nor a
-# jitter represent. Fitted: wing_frac (spline over λ); the widths are dataset-wide (below) and the axis angle stays at 0 unless FIT_WING_ANGLE
-WING_KERNEL    = True
-FIT_WING_ANGLE = False
-# Transverse half-width of the wing [px] (TipTorch wing_width_t): 0 makes the wing a one-dimensional line, which is too thin for the data (the
-# excess of the data over the no-wing model is a band of ~3-4 px HWHM across the axis in the red, the line is as thin as the PSF core and shows
-# as a bright streak in the reddest PSFs); with WING_WIDTH_T_PX > 0 the wing is an elliptical Moffat (beta = 1.5) halo with half-widths
-# WING_WIDTH_PX along and WING_WIDTH_T_PX across the axis. Fixed by default, like the width along the axis
-FIT_WING_WIDTH_T  = False
-WING_WIDTH_T_PX   = 1.5
-# Upper bound of the wing fraction (penalty above it); 1.0 = only the physical bound f <= 1
-WING_FRAC_MAX     = 1.0
-# Exponent p of the wing MTF exp(-(2 pi w nu)^p) (TipTorch wing_power): 1 = Lorentzian / Moffat tails (r^-2 line, r^-3 halo), 2 = Gaussian
-WING_POWER        = 1.0
-# The wing fraction and widths are degenerate along a valley (a ~1 px wing holding 10-40 % of the flux fits as well as a 30-50 px wing holding
-# a few %, and f > 1 gives an unphysical kernel): the fraction is kept in [0, WING_FRAC_MAX] and the widths in WING_WIDTH_BOUNDS by penalties,
-# and the widths are fixed at WING_WIDTH_PX / WING_WIDTH_T_PX (their initial values) with FIT_WING_WIDTH / FIT_WING_WIDTH_T = False. They are
-# fixed by default (a dataset-wide wing, as it will be in the calibrator): only the chromatic fraction is fitted per star, which removes the
-# degeneracy. 5 x 1.5 px (30-star subset, 2026-10-20): the same loss and peak error as the 1 px line (loss 0.122 vs 0.121, |peak err| 2.5 %),
-# the quadrupole residual still suppressed (0.05 % of the peak at 3-8 px vs 0.2 % without a wing), the model streak no brighter than the data's
-# band in any star (the line overshot it by up to 28 % of the local halo in the sharp red PSFs), half the wing flux (10 % vs 18 % at 935 nm) and
-# a smaller halo deficit beyond 40 px (22 % vs 25 %). Widths fitted freely go back to a ~1.5 x 0.5 px line (loss -4 %) that keeps the streak
-FIT_WING_WIDTH    = False
-WING_WIDTH_PX     = 5.0    # initial (or fixed) half-width of the wing along its axis [px]
-WING_WIDTH_BOUNDS = (0.5, 20.0)
+# jitter represent. Fitted per star: the chromatic flux fraction wing_frac (spline over λ). The shape is a dataset-wide constant: an elliptical
+# Moffat (beta = 1.5) halo of half-widths WING_WIDTH_PX along the image columns and WING_WIDTH_T_PX across them, axis angle 0 (wing_width,
+# wing_width_t, wing_angle are non-optimizable inputs of the wrapper, set here and recorded in every fit pickle, from where STD_fitted_df.py
+# passes them to the fitted table, the priors and the dataset cache: the calibrators take the wing shape from the fits, not from a config).
+# The fraction and the widths are degenerate along a valley (a ~1 px wing holding 10-40 % of the flux fits as well as a 30-50 px wing holding
+# a few %), and widths fitted freely go back to a ~1.5 x 0.5 px line that draws a bright streak through the sharp red PSFs (up to 28 % of the
+# local halo), so only the fraction is fitted. 5 x 1.5 px (30-star subset, 2026-10-20): the same loss and peak error as the 1 px line, the
+# quadrupole residual suppressed (0.05 % of the peak at 3-8 px vs 0.2 % without a wing), no streak, 10 % of the flux in the wing at 935 nm
+WING_KERNEL     = True
+WING_WIDTH_PX   = 5.0
+WING_WIDTH_T_PX = 1.5
 
 # Sign convention of the static aberrations when the phase bump is suppressed. A PSF is invariant under the joint sign flip of all the EVEN
 # Zernike modes (defocus, astigmatisms; the odd ones, comas and trefoils, keep their sign), so without the bump (which breaks the symmetry
@@ -214,7 +201,7 @@ def sample_fit_flags(ids):
 
 
 def build_PSF_model(configs, device=default_device):
-    """ PSFModelNFM in the regime of the module flags (jitter, wing and its fixed widths); the backup state is the initial one. """
+    """ PSFModelNFM in the regime of the module flags (jitter, wing with the dataset-wide shape); the backup state is the initial one. """
     PSF_model = PSFModelNFM(
         configs,
         multiple_obs    = True,
@@ -231,7 +218,6 @@ def build_PSF_model(configs, device=default_device):
     if WING_KERNEL:
         PSF_model.inputs_manager['wing_width'][:]   = WING_WIDTH_PX
         PSF_model.inputs_manager['wing_width_t'][:] = WING_WIDTH_T_PX
-        PSF_model.model.wing_power = WING_POWER
         
     PSF_model.backup_manager = PSF_model.inputs_manager.copy()
     return PSF_model
@@ -240,8 +226,8 @@ def build_PSF_model(configs, device=default_device):
 def build_loss(PSF_model, PSF_0, flags, device=default_device):
     """
     The fit objective for the data PSF_0: `func(x)` evaluates the model from the stacked parameter vector and `loss_fn(x)` is the PSF loss
-    (PSF_LOSS_CFG) + the LO NCPAs regularization (bump, defocus sign, dataset priors) + the MAP terms (r0, L0, wind speed) and the wing
-    bounds. `flags` is the dictionary of sample_fit_flags. Returns (func, loss_fn).
+    (PSF_LOSS_CFG) + the LO NCPAs regularization (bump, defocus sign, dataset priors) + the MAP terms (r0, L0, wind speed) and the
+    wing-fraction bounds / prior. `flags` is the dictionary of sample_fit_flags. Returns (func, loss_fn).
     """
     func = lambda x_: PSF_model( PSF_model.inputs_manager.unstack(x_) )
 
@@ -294,16 +280,9 @@ def build_loss(PSF_model, PSF_0, flags, device=default_device):
         # Also, force L0, r0, and wind speed to be positive to avoid unphysical values
         loss += force_positive(PSF_model.inputs_manager['r0'])
         
-        if PSF_model.wing_kernel: # keep the wing fraction in [0, WING_FRAC_MAX] and the widths within their bounds (see WING_WIDTH_BOUNDS)
+        if PSF_model.wing_kernel: # keep the wing fraction in [0, 1] (a physical flux fraction)
             wing_f = PSF_model.inputs_manager['wing_frac_ctrl' if PSF_model.use_splines else 'wing_frac']
-            wing_w = PSF_model.inputs_manager['wing_width']
-            wing_t = PSF_model.inputs_manager['wing_width_t']
-            
-            loss += force_positive(wing_f) + force_positive(min(1.0, WING_FRAC_MAX) - wing_f) * 1e2
-            loss += (force_positive(wing_w - WING_WIDTH_BOUNDS[0]) + force_positive(WING_WIDTH_BOUNDS[1] - wing_w)) * 1e2
-            
-            if FIT_WING_WIDTH_T:
-                loss += (force_positive(wing_t) + force_positive(WING_WIDTH_BOUNDS[1] - wing_t)) * 1e2
+            loss  += force_positive(wing_f) + force_positive(1.0 - wing_f) * 1e2
             # Pull towards the dataset prior curve, dominant for blurry PSFs (the division by w undoes the overall weight below)
             if wing_prior is not None and wing_f.shape[-1] == wing_prior.shape[-1]:
                 loss += (wing_f - wing_prior).pow(2).mean() * w_wing_prior * suppress_LO / 0.025
@@ -419,13 +398,11 @@ def make_minimizer(PSF_model, func, loss_fn):
 
 def parameter_sets(PSF_model, flags):
     """ The sets of parameters to fit (include) and to freeze (exclude) for the regime `flags` of sample_fit_flags. """
-    # Achromatic jitter entries (the chromatic ones, J_ctrl / Jx_ctrl / Jy_ctrl / chrom_defocus_ctrl, come with the polychromatic parameters)
+    # Achromatic jitter entries (the chromatic ones, J_ctrl / Jx_ctrl / Jy_ctrl / chrom_defocus_ctrl, come with the polychromatic parameters,
+    # like the wing fraction wing_frac_ctrl; the wing shape is a non-optimizable constant of the wrapper)
     jitter_achromatic = (PSF_model.jitter_params if PSF_model.chrom_defocus else []) + (['J_angle'] if PSF_model.anisotropic_jitter else [])
-    # Achromatic wing entries (wing_frac_ctrl comes with the polychromatic parameters)
-    wing_achromatic = ((['wing_width'] if FIT_WING_WIDTH else []) + (['wing_width_t'] if FIT_WING_WIDTH_T else []) + (['wing_angle'] if FIT_WING_ANGLE else [])) \
-                      if PSF_model.wing_kernel else []
 
-    include = ['r0', 'dn'] + jitter_achromatic + wing_achromatic + \
+    include = ['r0', 'dn'] + jitter_achromatic + \
               (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
               ([x+'_ctrl' for x in PSF_model.polychromatic_params if x != 'F_norm_λ'] if PSF_model.use_splines else [x for x in PSF_model.polychromatic_params if x != 'F_norm_λ']) + \
               (['L0'] if flags['fit_outerscale'] else []) + \
@@ -434,10 +411,9 @@ def parameter_sets(PSF_model, flags):
               (['Cn2_weights'] if flags['fit_Cn2_profile'] else []) + \
               (['amp', 'alpha', 'b'] if PSF_model.use_Moffat else [])
 
-    # NOTE: set_optimizable only touches the listed names, so an input created optimizable (wing_width, L0, wind_speed_single) stays fitted
-    # unless it is excluded explicitly. Blurry PSFs: L0 and the wind speed stay at the reduced-telemetry values of the config
+    # NOTE: set_optimizable only touches the listed names, so an input created optimizable (L0, wind_speed_single) stays fitted unless it
+    # is excluded explicitly. Blurry PSFs: L0 and the wind speed stay at the reduced-telemetry values of the config
     exclude = (['ratio', 'theta', 'beta'] if PSF_model.use_Moffat else []) + \
-              (['wing_width'] if (PSF_model.wing_kernel and not FIT_WING_WIDTH) else []) + \
               ([] if flags['fit_outerscale'] else ['L0']) + ([] if flags['fit_wind_speed'] else ['wind_speed_single'])
 
     return set(include), set(exclude)
@@ -574,11 +550,7 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None, verbose=Fal
         'loss config':        PSF_LOSS_CFG,
         'chrom_defocus':      bool(CHROM_DEFOCUS),
         'anisotropic_jitter': bool(ANISOTROPIC_JITTER),
-        'wing_kernel':        bool(WING_KERNEL),
-        'wing width fitted':  bool(FIT_WING_WIDTH),
-        'wing transverse width fitted': bool(FIT_WING_WIDTH_T),
-        'wing frac max':      float(WING_FRAC_MAX),
-        'wing power':         float(WING_POWER),
+        'wing_kernel':        bool(WING_KERNEL), # the wing shape (wing_width, wing_width_t, wing_angle) is stored with the fitted values below
         'blurry':             bool(flags['blurry']), # LO coefficients and wing fraction pulled to the dataset priors, L0 / wind speed / Cn2 at the config values
         'defocus sign':       DEFOCUS_SIGN,
         'even modes flipped': bool(fit['flipped']),

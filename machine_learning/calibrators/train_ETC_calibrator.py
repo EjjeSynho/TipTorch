@@ -8,7 +8,7 @@ Build the ETC calibrator bundle for MUSE NFM (`calibrators/ETC_calibrator.py`, E
    training samples are used: their configs carry their own DM pitch, and the trainer batches them per k_c group.
 3. Bundle `data/weights/ETC_calibrator/ETC_calibrator_bundle.pth` (+ `_meta.json`).
 
-The PSF-model regime (anisotropic jitter, image-frame wing, J_angle fixed at the fitted median), the loss and the dataset cache (raw
+The PSF-model regime (anisotropic jitter, image-frame wing; J_angle and the wing shape at the fitted medians), the loss and the dataset cache (raw
 frames or derotated PSFs) come from the config, laid out like the NFM calibrator ones (configs/NFM_*calibrator_config.json): keep the
 "model", "loss" and "fixed_params" sections in sync with them and with STD_fitter.py.
 
@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / 'machine_learning'))
 
 from tiptorch._config import WEIGHTS_FOLDER, default_device
-from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, fixed_inputs, model_flags, release_gpu_memory
+from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, fixed_inputs, fits_median, model_flags, release_gpu_memory
 from calibrators.ETC_calibrator import ETCDataset, ETC_INPUTS, dataset_cache_path, donor_keys
 
 # The ETC calibrator config lives with the other calibrator configs in machine_learning/calibrators/configs/
@@ -62,14 +62,12 @@ def build_pool(dataset, idx, preprocessor, keys):
 
 
 def fits_median_inputs(dataset, idx, model_cfg):
-    """ Kept fixed inputs set from the fits ("fixed_from_fits" of the model section, e.g. J_angle): medians over `idx` as {key: tensor [1, ...]},
-    as build_NFM_trainer sets them (used when the direct network is not retrained) """
+    """ Kept fixed inputs set from the fits ("fixed_from_fits" of the model section: J_angle, wing shape): medians over `idx` as
+    {key: tensor [1, ...]}, as build_NFM_trainer sets them (used when the direct network is not retrained) """
     out = {}
     for key in model_cfg.get('fixed_from_fits', []):
-        fits = [torch.as_tensor(np.asarray(dataset.fitted_vals[int(i)][key], dtype=np.float32)).reshape(-1) for i in idx if key in dataset.fitted_vals[int(i)]]
-        if fits:
-            median   = torch.stack(fits).median(dim=0).values # [n_values]
-            out[key] = median if median.numel() == 1 else median.view(1, -1)
+        median   = fits_median(dataset, idx, key) # [n_values]
+        out[key] = median if median.numel() == 1 else median.view(1, -1)
     return out
 
 
@@ -161,7 +159,7 @@ if __name__ == '__main__':
             logger.warning('The kept direct network was trained with another "model" section than the config: retrain it (no --skip-direct-net)')
         logger.info('Kept the direct network of the existing bundle')
 
-    # Kept fixed inputs of the renderer (J_angle at the fitted training median; the wing widths come with the "model" section)
+    # Kept fixed inputs of the renderer (J_angle and the wing shape at the fitted training medians)
     kept = kept if kept is not None else fits_median_inputs(dataset, train_idx, cfg['model'])
     logger.info(f"Fixed inputs: { {k: np.round(v.numpy(), 3).tolist() for k, v in kept.items()} }")
 

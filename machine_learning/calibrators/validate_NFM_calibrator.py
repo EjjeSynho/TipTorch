@@ -798,7 +798,7 @@ for start in range(0, N_val, ETC_batch_size):
     chunk_config  = MultipleTargetsInDifferentObservations(chunk_configs, device=default_device)
     chunk_telemetry = ETC_telemetry_vecs[start:end]
 
-    with torch.no_grad(): # the jitter / wing regime and the fixed wing widths of the training (see build_PSF_model)
+    with torch.no_grad(): # the jitter / wing regime of the training (see build_PSF_model); calibrate sets the bundle's fixed inputs (J_angle, wing shape)
         ETC_PSF_model = build_PSF_model(chunk_config, cfg['model'], default_device)
         _ = ETC_calibrator.check_compatibility(ETC_PSF_model)
         ETC_calibrator.calibrate_prepared(chunk_telemetry, ETC_PSF_model)
