@@ -4,8 +4,8 @@
   "seed": 43,
   "batch_size": 16,
   "derotated_PSFs": false,
-  "continue_training": false,
-  "reuse_pretrain": false,
+  "continue_training": true,
+  "reuse_pretrain": true,
   "run_kfold_difficulty": false,
   "kfolds": 5,
   "kfold_epochs": 120,
@@ -64,7 +64,7 @@
     "pretrain_standardize": true
   },
   "loss": {
-    "type": "balanced",
+    "type": "legacy",
     "radial_power": 2.0,
     "r_max": 40.0,
     "asinh_k": 3.0,

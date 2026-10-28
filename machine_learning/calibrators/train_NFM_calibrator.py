@@ -56,7 +56,7 @@ from data_processing.NFM_bundle import install_calibrator
 
 #   tune, kfold*, difficulty* optional fine-tuning of a few parameters and the k-fold difficulty weighting; max_train_samples: data ablation
 
-DEFAULT_CONFIG = 'NFM_factor_calibrator_legacy_config.json'
+DEFAULT_CONFIG = 'NFM_calibrator_config.json'
 
 _parser = argparse.ArgumentParser(description="Train NFM Calibrator")
 _parser.add_argument('--config', type=str, default=str(CONFIGS_FOLDER / DEFAULT_CONFIG), help=f'JSON training config (default: calibrators/configs/{DEFAULT_CONFIG})')
@@ -313,6 +313,7 @@ if cfg["tune"]["enabled"]:
 
     logger.info(f"Post-tune metadata updated -> {_meta_path}")
     trainer.save_calibrator(Path(_meta['bundle_path']))
+    
     if INSTALL:
         install_calibrator(Path(_meta['bundle_path']))
 

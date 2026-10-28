@@ -32,11 +32,11 @@ files_matches, _ = MatchRawWithCubes(RAW_FOLDER, CUBES_FOLDER, verbose=False)
 # reduced_cube = "DATACUBEFINALexpcombine_20200224T050448_7388e773.fits"
 # reduced_cube = "ADP.2019-05-30T08-10-58.821.fits" # meh
 # reduced_cube = "ADP.2021-05-19T05-26-01.345.fits" # meh
-# reduced_cube = "ADP.2021-05-19T05-26-01.337.fits"
+reduced_cube = "ADP.2021-05-19T05-26-01.337.fits"
 
 # reduced_cube = "DATACUBEFINALscipost_20191102T010934_fb6f4016.fits"
 # reduced_cube = "DATACUBEFINALscipost_20220531T034028_d33feab3.fits" # One source is nuts
-reduced_cube = "ADP.2022-06-20T16-50-01.871.pickle"
+# reduced_cube = "ADP.2022-06-20T16-50-01.871.pickle"
 
 raw_file   = RAW_FOLDER   / files_matches.loc[files_matches['cube'] == reduced_cube]['raw'].values[0]
 cube_path  = CUBES_FOLDER / reduced_cube
@@ -237,7 +237,10 @@ else:
 ob.FitPSFModel(fit=['astrometry'], repeat=1, max_iter=200)
 
 #%%
-field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=True, force_cpu=False)
+
+
+field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=False, force_cpu=False)
+
 # field_disentangled = ob.SimulateField(full_spectrum=False, disentangle_spectra=False, force_cpu=False)
 data_img = ob.cube_sparse.clone() - ob.background_sparse.view(ob.N_wvl, 1, 1)
 
@@ -489,7 +492,15 @@ plt.show()
 
 
 #%%
-simulated_full = ob.SimulateField(full_spectrum=True, N_λ_per_batch=10, disentangle_spectra=True, force_cpu=False)
+import time
+
+if torch.cuda.is_available(): torch.cuda.synchronize()
+t_start = time.perf_counter()
+
+simulated_full = ob.SimulateField(full_spectrum=True, N_λ_per_batch=100, disentangle_spectra=False, force_cpu=False)
+
+if torch.cuda.is_available(): torch.cuda.synchronize()  # wait for async GPU kernels before stopping the clock
+print(f"SimulateField (full spectrum) runtime: {time.perf_counter() - t_start:.3f} s")
 
 #%% Plot multispectral cubes as RGB images
 from tools.plotting import PlotSpetralCubeInRGB

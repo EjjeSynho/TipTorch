@@ -21,7 +21,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from matplotlib.colors import LogNorm
 
-from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, detect_flickering_peaks, spectral_outlier_scores
+from data_processing.MUSE_data_utils import GetSpectrum, LoadCachedDataMUSE, detect_flickering_peaks, spectral_outlier_scores, NA_GAP_SLICES
 from machine_learning.calibrators.NFM_calibrator import NFMCalibrator
 from fitting.PSF_optimizer import OptimizePSFModel
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
@@ -84,6 +84,7 @@ class MUSEObservation:
         # Initialize no sources in the OB yet
         self.sources_table = None
         self.sources = None
+        self.mask_full = None # full-cube QC mask (1 = good pixel), computed by ExtractSources / _compute_mask_full
         self.N_src = 0
         
         # The number of λ slices simulated per batch for the full-spectrum simulation
@@ -534,24 +535,45 @@ class MUSEObservation:
         radius = 16
 
         box_size = np.round(radius * 2 + 4).astype(int)
-        ROIs_0, coords_loc_0, _, _ = extract_ROIs(self.cube_full,  self.sources.table, box_size=box_size)
+        # Sources whose box is mostly NaN (edge of the valid field, NaN regions of the cube) are skipped by extract_ROIs: valid_ids
+        # are the positions (in self.sources order) of the sources it kept
+        ROIs_0, coords_loc_0, _, valid_ids = extract_ROIs(self.cube_full, self.sources.table, box_size=box_size)
 
-        N_src = len(ROIs_0)
+        N_src, N_wvl = len(self.sources), self.cube_full.shape[0]
 
-        # Stack all ROIs into a batch: [N_src, N_wvl, H, W]
+        # The masks are defined for all sources: a source without a usable ROI gets no flicker / exposure flags (only the Na gap)
+        anomalous_mask    = torch.zeros((N_src, N_wvl), dtype=torch.bool)
+        overexposure_mask = torch.zeros((N_src, N_wvl), dtype=torch.bool)
+        low_SNR_mask      = torch.zeros((N_src, N_wvl), dtype=torch.bool)
+        Na_mask           = torch.zeros((N_src, N_wvl), dtype=torch.bool)
+        Na_mask[:, NA_GAP_SLICES[0]:NA_GAP_SLICES[1]] = True
+
+        if len(valid_ids) < N_src:
+            skipped = [int(self.sources.table.index[i]) for i in range(N_src) if i not in valid_ids]
+            warnings.warn(f"Flicker detection skipped for sources {skipped}: their {box_size}x{box_size} ROI in the full cube is mostly NaN.")
+
+        if len(valid_ids) == 0:
+            return anomalous_mask, overexposure_mask, low_SNR_mask, Na_mask
+
+        # Stack the valid ROIs into a batch: [N_valid, N_wvl, H, W]
         ROIs_batch = torch.stack(ROIs_0)
 
         # Central pixel coordinates per source
-        cps = torch.tensor([[int(np.round(np.sum(c[0]))/2), int(np.round(np.sum(c[1]))/2)] for c in coords_loc_0])  # [N_src, 2]
+        cps = torch.tensor([[int(np.round(np.sum(c[0]))/2), int(np.round(np.sum(c[1]))/2)] for c in coords_loc_0])  # [N_valid, 2]
 
         # Flicker detection itself is shared with the STD-star tools (data_processing/MUSE_data_utils.py)
-        return detect_flickering_peaks(
+        masks = detect_flickering_peaks(
             ROIs_batch, cps,
             overexposure_threshold = overexposure_threshold,
             low_SNR_threshold      = low_SNR_threshold,
             roi_coords   = coords_loc_0,
-            source_table = self.sources.table,
+            source_table = self.sources.table.iloc[valid_ids],
         )
+        valid_ids = torch.as_tensor(valid_ids, dtype=torch.long)
+        for full, part in zip((anomalous_mask, overexposure_mask, low_SNR_mask, Na_mask), masks):
+            full[valid_ids] = part.cpu()
+
+        return anomalous_mask, overexposure_mask, low_SNR_mask, Na_mask
 
 
     def _mask_bad_peaks(self, bad_slices_mask):
@@ -628,6 +650,8 @@ class MUSEObservation:
         if self.sources is None:
             # raise ValueError("Sources table must be initialized before initializing the PSF model. Please (re-)run ExtractSources() or AddSources() first.")
             self.ExtractSources(verbose=True, max_nan_fraction=0.7)
+        elif getattr(self, 'mask_full', None) is None:
+            self._compute_mask_full() # sources set without ExtractSources() (e.g. after a failed extraction)
         
         # The model config is also updated to simulate only sparse λs
         self.model_config['sources_science']['Wavelength'] = torch.tensor(self.λ_sparse, device=self.device, dtype=torch.float32) * 1e-9 #[m]
@@ -847,13 +871,28 @@ class MUSEObservation:
         if verbose:
             print(f"Extracted {self.N_src} source{'s' if self.N_src != 1 else ''}.")
             print(f"Num. of filtered sources on the edge of the field: {N_filtered}")
-            
-        # The mask that mask out overexposed and underexposed pixels
+
+        # The mask that mask out overexposed and underexposed pixels. If it fails, the sources are discarded too: otherwise the
+        # object is left half-initialised (sources without a mask) and InitSimulation() would not re-run the extraction
+        try:
+            self._compute_mask_full()
+        except Exception:
+            self.sources, self.N_src, self.mask_full = None, 0, None
+            raise
+
+
+    def _compute_mask_full(self) -> torch.Tensor:
+        ''' Full-cube QC mask of the extracted sources (0 means a bad pixel, 1 means a good pixel): over-/under-exposed and
+            flickering source peaks, the Na gap and the detected hot pixels. Requires the extracted sources. '''
+        if self.sources is None:
+            raise ValueError("Sources must be extracted before computing the mask: run ExtractSources() first.")
+
         anomaly_mask, overexposure_mask, low_SNR_mask, Na_mask = self._detect_bad_exposures()
         bad_regions = anomaly_mask | overexposure_mask | low_SNR_mask | Na_mask
 
-        self.mask_full = (~self._mask_bad_peaks(bad_regions)).float() # 0 means a bad pixel, 1 means a good pixel
+        self.mask_full = (~self._mask_bad_peaks(bad_regions)).float()
         self._apply_hot_pixel_mask(self.mask_full)
+        return self.mask_full
 
 
     @torch.no_grad()
@@ -1490,6 +1529,8 @@ class MUSEObservation:
             if disentangle_spectra:
                 # Exposure-quality failures retain the existing soft weight of
                 # 0.5, while confidently detected hot pixels are fully excluded.
+                if getattr(self, 'mask_full', None) is None:
+                    self._compute_mask_full()
                 pixel_weights_full = self.mask_full.clip(0.5) * self.valid_mask.cpu()
                 self._apply_hot_pixel_mask(pixel_weights_full)
 
@@ -2521,11 +2562,9 @@ class MUSEObservation:
         # mask_full is a full-cube-sized QC mask; it's not stored, just recomputed the same way
         # ExtractSources() does, now that cube_full and the restored sources are both available.
         try:
-            anomaly_mask, overexposure_mask, low_SNR_mask, Na_mask = self._detect_bad_exposures()
-            bad_regions = anomaly_mask | overexposure_mask | low_SNR_mask | Na_mask
-            self.mask_full = (~self._mask_bad_peaks(bad_regions)).float()
-            self._apply_hot_pixel_mask(self.mask_full)
+            self._compute_mask_full()
         except Exception as e:
+            self.mask_full = None
             warnings.warn(f"Could not recompute mask_full after loading OB state: {e}")
 
         # Restore the calibrator from its own checkpoint bundle (weights not duplicated in the OB state)

@@ -961,19 +961,32 @@ def detect_flickering_peaks(
     ratio = ring_mean.clamp(min=1e-12) / peaks
     ratio = ratio.nan_to_num(nan=2.0, posinf=2.0, neginf=2.0)
 
+    # Sources with (almost) no good-SNR slices (faint sources, entirely below low_SNR_threshold) have no baseline to center on and no
+    # distribution to take quantiles of: they get no adaptive threshold and no anomalous slices (their slices are masked as low-SNR anyway)
+    min_good_slices = 2
+    has_baseline = torch.tensor([good_SNR_ids_per_src[i].numel() >= min_good_slices for i in range(N_src)], dtype=torch.bool)
+
     # Center ratio by subtracting the baseline median (per source)
-    baseline = torch.stack([ratio[i, good_SNR_ids_per_src[i]].median() for i in range(N_src)]).unsqueeze(1)
+    baseline = torch.stack([
+        ratio[i, good_SNR_ids_per_src[i]].median() if has_baseline[i] else ratio.new_zeros(()) for i in range(N_src)
+    ]).unsqueeze(1)
     ratio_centered = ratio - baseline
 
     # Adaptive threshold per source
     Ps = torch.arange(50, 100, 1)
-    quantiles = Ps.float() / 100.0
+    quantiles = (Ps.float() / 100.0).to(ratio.device)
 
-    threshs = torch.stack([torch.quantile(ratio_centered[i, good_SNR_ids_per_src[i]], quantiles) for i in range(N_src)])  # [N_src, len(Ps)]
-    d_threshs = threshs.diff(dim=1).abs()
-    best_pct = (Ps[1:][d_threshs.argmax(dim=1)]) / 100.0  # [N_src]
+    best_pct    = torch.full((N_src,), float('nan'))
+    thresh_vals = torch.full((N_src,), float('inf'), dtype=ratio.dtype, device=ratio.device) # +inf: no slice can exceed the threshold
 
-    thresh_vals = torch.stack([torch.quantile(ratio_centered[i, good_SNR_ids_per_src[i]], best_pct[i]) for i in range(N_src)])  # [N_src]
+    for i in range(N_src):
+        if not has_baseline[i]:
+            continue
+        samples  = ratio_centered[i, good_SNR_ids_per_src[i]]
+        threshs  = torch.quantile(samples, quantiles)  # [len(Ps)]
+        d_threshs = threshs.diff().abs()
+        best_pct[i]    = Ps[1:][d_threshs.argmax().item()] / 100.0
+        thresh_vals[i] = torch.quantile(samples, best_pct[i].item())
 
     # Flag slices with potential overexposure. A slice is flagged as bad only if it:
     # 1. In the overexposed region
@@ -982,7 +995,7 @@ def detect_flickering_peaks(
     anomalous_slices = torch.zeros_like(ratio, dtype=torch.bool)
     for i in range(N_src):
         in_overexposure = overexposure_mask_full[i]
-        in_good_region = torch.isin(torch.arange(N_wvl), good_SNR_ids_per_src[i])
+        in_good_region = torch.isin(torch.arange(N_wvl, device=ratio.device), good_SNR_ids_per_src[i])
         exceeds_threshold = ratio_centered[i] > thresh_vals[i]
         anomalous_slices[i] = in_overexposure & exceeds_threshold & in_good_region
 
