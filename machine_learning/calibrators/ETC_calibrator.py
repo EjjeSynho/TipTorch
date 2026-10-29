@@ -17,8 +17,8 @@ template config) written by `train_ETC_calibrator.py`; `ETCDataset` is the datas
 
 The PSF model is the one of the STD-star fits and of the NFM calibrator (`build_PSF_model`, the "model" section of the training config):
 anisotropic jitter (the isotropic J_ctrl stretched by J_aniso along the axis at J_angle) and the image-frame wing (wing_frac, fixed shape) since
-2026-10-21. The kept fixed inputs of the training (J_angle and the wing shape at the training medians of the fits) are stored in the bundle
-(`fixed_inputs`) and set by the renderer.
+2026-10-21. The fitted shared keys of the training (e.g. J_angle and the wing shape at the training medians of the fits) are stored in the
+bundle (`fitted_shared`) and set by the renderer.
 
 Conventions: ETC tables are pandas DataFrames with one row per observation (`etc_table`); `x_dict` holds the PSF-model parameters
 as tensors [N, ...] on the device; rendered PSFs are [N, N_wvl, H, W] on the CPU.
@@ -235,12 +235,12 @@ class ETCPSFRenderer:
     """
     Renders the PSFs of an ETC table for a predictor with `PSFModelNFM`: configs built from `template_config` (layer heights of
     the donor when the predictor provides them, `median_heights` otherwise), the model of the "model" section `model_cfg`
-    (`build_PSF_model`) with the kept fixed inputs `fixed_inputs` ({key: tensor [1, ...]}, e.g. J_angle; a prediction of the same
+    (`build_PSF_model`) with the fitted shared values `fitted_shared` ({key: tensor [1, ...]}, e.g. J_angle; a prediction of the same
     input overrides them), predicted parameters applied, PSFs [N, N_wvl, H, W].
     """
-    def __init__(self, template_config: dict, model_cfg: dict, wavelengths_nm, median_heights, batch_size=16, device=default_device, fixed_inputs=None):
+    def __init__(self, template_config: dict, model_cfg: dict, wavelengths_nm, median_heights, batch_size=16, device=default_device, fitted_shared=None):
         self.template, self.model_cfg, self.batch_size, self.device = template_config, dict(model_cfg), batch_size, device
-        self.fixed_inputs   = dict(fixed_inputs or {})
+        self.fitted_shared  = dict(fitted_shared or {})
         self.wavelengths_nm = [float(w) for w in wavelengths_nm]
         self.median_heights = [float(h) for h in median_heights]
 
@@ -252,7 +252,7 @@ class ETCPSFRenderer:
         names = model.inputs_manager.get_names(optimizable_only=False)
 
         with torch.no_grad():
-            for key, val in self.fixed_inputs.items():
+            for key, val in self.fitted_shared.items():
                 if key in names:
                     cur = model.inputs_manager[key]
                     cur[:] = torch.as_tensor(val, dtype=cur.dtype, device=cur.device).reshape(1, *cur.shape[1:])
@@ -342,10 +342,8 @@ class ETCCalibrator:
         self.pool, self.mean, self.scale = self.state['pool'], self.state['etc_mean'], self.state['etc_scale']
         self.median_heights, self.phase_bump = list(self.state['median_heights']), float(self.state['phase_bump_median'])
         self.template_config, self.model_cfg = self.state['template_config'], self.state['model_cfg']
-        self.fixed_inputs  = self.state.get('fixed_inputs', {})  # bundles before 2026-10-21: none (isotropic jitter, no wing)
+        self.fitted_shared = self.state['fitted_shared']        # fitted shared values of the training (J_angle, wing shape)
         self.dataset_cache = Path(self.state['dataset_cache'])  # the dataset the bundle was built from (its validation split)
-        # Pools before 2026-10-21 are keyed F / J instead of the PSF-model inputs F_ctrl / J_ctrl
-        self.pool['fitted'] = {({'F': 'F_ctrl', 'J': 'J_ctrl'}).get(k, k): v for k, v in self.pool['fitted'].items()}
 
 
     def predictor(self, name, **kw):
@@ -364,4 +362,4 @@ class ETCCalibrator:
 
 
     def renderer(self, wavelengths_nm, batch_size=16):
-        return ETCPSFRenderer(self.template_config, self.model_cfg, wavelengths_nm, self.median_heights, batch_size, self.device, self.fixed_inputs)
+        return ETCPSFRenderer(self.template_config, self.model_cfg, wavelengths_nm, self.median_heights, batch_size, self.device, self.fitted_shared)

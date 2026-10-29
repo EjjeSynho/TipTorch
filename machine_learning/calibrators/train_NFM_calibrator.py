@@ -38,21 +38,26 @@ from data_processing.NFM_bundle import install_calibrator
 #                             must match the regime of the fits (STD_fitter.py DEROTATE_PSF) and of the dataset cache (create_STD_dataset.py)
 #   model                     PSF model (build_PSF_model). The jitter / wing regime must be the one of the fits the pretraining targets come from
 #                             (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL): the fits use the anisotropic jitter (J_ctrl stretched by
-#                             J_aniso along J_angle) and the image-frame wing (wing_frac_ctrl per star). fixed_from_fits: kept fixed inputs
-#                             (see fixed_params) set to the training-set median of the fits (required in the fits): J_angle and the wing shape
-#                             wing_width / wing_width_t / wing_angle, which is not a config value but comes from the fits
-#   calibrator                "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors: factor_keys predicted as
-#                             log-factors on the priors, const_keys dataset-level constants, the rest predicted directly; Cn2_mix / Cn2_targets /
-#                             Cn2_offset for the grid Cn2 features), hidden_dim, dropout_rate
-#   trainer                   learning rate, epochs / patience of the pretraining and the training, what is predicted, NaN recovery
+#                             J_aniso along J_angle) and the image-frame wing (wing_frac_ctrl per star)
+#   calibrator                type "direct" (absolute parameters) or "factor", hidden_dim, dropout_rate, and what the calibrator does with the
+#                             inputs of the PSF model, in non-overlapping key groups (KEY_GROUPS in NFM_calibrator.py):
+#                             predicted_keys         predicted per sample by the network, directly
+#                             factor_keys            predicted per sample by the network as a factor on a telemetry-derived baseline (factor
+#                                                    calibrator; r0, L0, wind_speed_single, Cn2_weights)
+#                             optimized_shared_keys  one value for all samples, starting from the median of the training fits and trained
+#                                                    together with the network, not predicted (factor calibrator, e.g. J_aniso / J_angle)
+#                             fitted_keys            per sample, the values of the fitted dataset, not optimized (the astrometry dx_ctrl / dy_ctrl)
+#                             fitted_shared_keys     one value for all samples set in the PSF model, the median of the training fits, not
+#                                                    optimized (e.g. the wing shape wing_width / wing_width_t / wing_angle)
+#                             Every other input is left to the PSF model: its own values, from the config of the batch or its defaults.
+#                             Factor calibrator: Cn2_mix / Cn2_targets / Cn2_offset for the grid Cn2 features
+#   trainer                   learning rate, epochs / patience of the pretraining and the training, NaN recovery
 #   loss                      PSF loss, see NFMCalibratorTrainer / BalancedPSFLoss. "balanced" (asinh-compressed, radially weighted, with the linear
 #                             MSE term mse_weight restoring the peak and the per-wavelength peak_weight term) is also the fitter's loss: keep its
 #                             parameters equal to PSF_LOSS_CFG in STD_fitter.py. r_max = 40: beyond it the model's seeing halo is systematically
 #                             25-35 % fainter than the data (ratio 0.74 at 40-60 px, 0.64 at 60-85 px) and fitting it there degrades the AO-corrected
 #                             halo and the core (analysis/analyze_halo_deficit.py, 2026-10-14). "legacy" is the linear MSE + MAE loss used before.
 #                             fit_reg_weight: parameter-space distance to the per-sample fits; shrink_weight (factor only): shrinkage to the prior
-#   fixed_params              not predicted. J_angle and the wing widths / angle are kept in the model at their initial values (FIXED_INPUTS_KEPT in
-#                             NFM_calibrator.py), the others are removed from the model inputs
 
 #   tune, kfold*, difficulty* optional fine-tuning of a few parameters and the k-fold difficulty weighting; max_train_samples: data ablation
 
@@ -109,7 +114,7 @@ logger.info(f"Config loaded from: {_cfg_path}")
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
 # Seeds the network initialization, the batch order and the dropout masks, so that runs differing only in the config (e.g. the
-# loss) are comparable. The train/val split does not depend on it: it is stored in the dataset cache (see trainer.random_state).
+# loss) are comparable. The train/val split does not depend on it: it is stored in the dataset cache.
 random.seed(cfg["seed"]); np.random.seed(cfg["seed"]); torch.manual_seed(cfg["seed"])
 logger.info(f"Seed: {cfg['seed']}")
 
@@ -141,7 +146,7 @@ print(PSF_model.inputs_manager)
 
 N_outputs  = outputs_transformer.get_stacked_size()
 N_features = len(dataset.features)
-print(f"Calibrator ({trainer.calibrator_type}): {N_features} inputs -> {N_outputs} outputs")
+print(f"Calibrator ({trainer.calibrator_type}): {N_features} inputs -> {trainer.N_net_outputs} network outputs ({N_outputs} model parameters)")
 
 # Build readable output names from the transformer
 output_names = []

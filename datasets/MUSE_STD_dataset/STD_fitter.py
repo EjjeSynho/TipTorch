@@ -189,11 +189,12 @@ def sample_fit_flags(ids):
     dataset priors (FIT_PRIORS) and L0, the wind speed and the Cn2 profile stay at the config values. PSFs without the 'Non-point' flag:
     the phase bump is suppressed. Several OBs: nothing is suppressed.
     """
-    ids   = [ids] if np.isscalar(ids) else list(ids)
-    rows  = muse_df_all.loc[ids]
-    multi = len(ids) > 1
+    ids       = [ids] if np.isscalar(ids) else list(ids)
+    rows      = muse_df_all.loc[ids]
+    multi     = len(ids) > 1
     blurry    = bool((rows['Bad quality'].astype(bool) | (rows['Medium quality'].astype(bool) & ~rows['Good quality'].astype(bool))).any())
     non_point = bool(rows['Non-point'].astype(bool).all())
+    
     return {
         'blurry':          blurry,
         'suppress_bump':   (blurry or not non_point) and not multi,

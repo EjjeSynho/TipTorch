@@ -56,31 +56,27 @@ def main():
     bundle_path, checkpoint_path = Path(meta['bundle_path']), Path(meta['checkpoint_path'])
 
     bundle = torch.load(bundle_path, map_location=device, weights_only=False)
-    # The dataset cache of the regime the calibrator was trained in (configs without the key predate the raw frames: derotated)
-    train_cfg = bundle.get('training_config') or meta.get('config') or {}
-    dataset = load_STD_dataset(train_cfg.get('derotated_PSFs', True))
+    # The dataset cache of the regime the calibrator was trained in
+    dataset = load_STD_dataset(bundle['training_config']['derotated_PSFs'])
     calibrator = load_NFM_calibrator(bundle_path, device=device)
     print(f'bundle type: {type(calibrator).__name__}')
     results = []
 
     # 1. Preprocessor of the bundle vs. the dataset cache
-    cache_state = dataset.telemetry_preprocessor
-    results.append(check(cache_state is not None, 'dataset cache carries a telemetry preprocessor'))
-    bundle_state = bundle.get('telemetry_preprocessor')
-    results.append(check(bundle_state is not None, 'bundle carries a telemetry preprocessor'))
-    if cache_state is not None and bundle_state is not None:
-        same = all(
-            (np.array_equal(np.asarray(cache_state[k]), np.asarray(bundle_state[k])) if k != 'meta' else cache_state[k] == bundle_state[k])
-            for k in cache_state
-        )
-        results.append(check(same, 'bundle preprocessor state == dataset cache preprocessor state'))
+    cache_state  = dataset.telemetry_preprocessor
+    bundle_state = bundle['telemetry_preprocessor']
+    same = all(
+        (np.array_equal(np.asarray(cache_state[k]), np.asarray(bundle_state[k])) if k != 'meta' else cache_state[k] == bundle_state[k])
+        for k in cache_state
+    )
+    results.append(check(same, 'bundle preprocessor state == dataset cache preprocessor state'))
     results.append(check(list(calibrator.features) == list(dataset.features) == list(bundle['input_feature_names']),
                          f'feature names of the preprocessor, the dataset and the bundle match ({len(dataset.features)} features)'))
-    if dataset.Cn2_grid is not None: # caches since 2026-10-13: the Cn2 grid of the features goes into the bundle
-        same_grid = bundle.get('Cn2_grid') is not None and all(np.allclose(np.asarray(dataset.Cn2_grid[k]), np.asarray(bundle['Cn2_grid'][k])) for k in dataset.Cn2_grid)
+    if dataset.Cn2_grid is not None: # grid Cn2 features: the Cn2 grid of the features goes into the bundle
+        same_grid = bundle['Cn2_grid'] is not None and all(np.allclose(np.asarray(dataset.Cn2_grid[k]), np.asarray(bundle['Cn2_grid'][k])) for k in dataset.Cn2_grid)
         results.append(check(same_grid and calibrator.Cn2_binning == 'grid', f'bundle carries the Cn2 grid of the dataset cache ({calibrator.Cn2_grid})'))
     else:
-        results.append(check(calibrator.Cn2_binning == 'kmeans', 'old cache without Cn2 grid: the bundle uses the K-means Cn2 features'))
+        results.append(check(calibrator.Cn2_binning == 'kmeans' and bundle['Cn2_grid'] is None, 'K-means Cn2 features: the bundle has no Cn2 grid'))
     # The telemetry resources of the distributed bundle (data_processing/NFM_bundle.py, stage 1): the bundle alone processes new data
     results.append(check(sorted(bundle.get('archive_telemetry', {})) == ['IRLOS_regimes', 'LGS_flux', 'LGS_slopes'] and bundle.get('median_Cn2_profile') is not None,
                          'bundle carries the LGS / IRLOS archive tables and the median Cn2 profile'))
@@ -120,8 +116,14 @@ def main():
                          'outputs transformer slices match the stored output names'))
     if isinstance(calibrator, NFMFactorCalibrator):
         P = calibrator.parameterization
-        results.append(check(set(P.const_keys) == set(calibrator.consts) and all(k in P.slices for k in P.factor_keys + P.direct_keys),
-                             f'factor bundle: parameterization and constants ({P.factor_keys} / {P.direct_keys} / {P.const_keys})'))
+        results.append(check(set(P.optimized_shared_keys) == set(calibrator.consts) and all(k in P.slices for k in P.factor_keys + P.direct_keys),
+                             f'factor bundle: parameterization and optimized shared values (predicted {P.direct_keys} / factor {P.factor_keys} / '
+                             f'optimized shared {P.optimized_shared_keys})'))
+        # The network outputs only the predicted and factor keys, the optimized shared keys are the same for all samples
+        results.append(check(bundle['net_arch']['n_outputs'] == P.N_net and set(P.net_slices) == set(P.factor_keys + P.direct_keys),
+                             f'factor bundle: {P.N_net} network outputs, the predicted and factor keys only'))
+        spread = max(((x_pred[k][:, 1:] if k == 'LO_coefs' else x_pred[k]).reshape(len(pos), -1).std(dim=0).max().item() for k in P.optimized_shared_keys), default=0.0)
+        results.append(check(spread == 0.0, f'factor bundle: the optimized shared keys {P.optimized_shared_keys} are the same for every sample'))
         base = P.base_values(stored)
         results.append(check(all(torch.isfinite(v).all() for v in base.values()) and bool((base['Cn2_weights'].sum(-1) - 1).abs().max() < 1e-5),
                              'factor bundle: telemetry base values are finite, Cn2 profile normalized'))

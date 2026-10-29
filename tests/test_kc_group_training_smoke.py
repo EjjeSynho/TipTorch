@@ -1,18 +1,17 @@
 """
 Smoke test of the k_c-group handling in the NFM calibrator trainer on the real dataset cache.
 
-The samples flagged 'k_c mismatch' in muse_df.pickle are injected into the loaded dataset (k_c group / fraction and the scaled DM pitch
-of their configs, exactly what build_dataset_cache stores for a cache built after 2026-10-16), then a trainer is built from the factor
-calibrator config and evaluated on a mixed subset:
+The dataset cache carries the samples flagged 'k_c mismatch' (k_c group / fraction and the scaled DM pitch of their configs, stored by
+build_dataset_cache); a trainer is built from the factor calibrator config and evaluated on a mixed subset:
   - every batch holds a single k_c group (KcGroupBatchSampler) and the configs merge without error,
   - run_model rebuilds the model grids (Update(grids=True)) exactly when the k_c of the batch changes, and the model's k_c follows
     the batch's group,
   - the validation loss is finite and a backward pass through a mismatched batch gives finite gradients.
 
-Requires the dataset cache of the config's regime (muse_STD_stars_dataset.pt for raw frames, ~3.6 GB), muse_df.pickle with the k_c columns and a GPU (~3 min).
+Requires the dataset cache of the config's regime (muse_STD_stars_dataset.pt for raw frames, ~3.6 GB) and a GPU (~3 min).
 Run:  python tests/test_kc_group_training_smoke.py [cuda:N]
 """
-import sys, json, pickle
+import sys, json
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -21,7 +20,7 @@ sys.path.insert(0, str(ROOT / 'datasets' / 'MUSE_STD_dataset'))
 import numpy as np
 import torch
 
-from STD_dataset_utils import STD_FOLDER, apply_kc_fraction, kc_fraction_from_config, KC_FRACTION_FEATURE, KC_GROUP_FEATURE
+from STD_dataset_utils import kc_fraction_from_config
 from machine_learning.calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory, load_STD_dataset
 
 device = torch.device(sys.argv[1]) if len(sys.argv) > 1 else torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -33,16 +32,6 @@ cfg = json.load(open(ROOT / 'machine_learning/calibrators/configs/NFM_factor_cal
 cfg['weights_subdir'] = 'kc_group_smoke_test'
 
 dataset = load_STD_dataset(cfg['derotated_PSFs'])
-with open(STD_FOLDER / 'muse_df.pickle', 'rb') as f:
-    muse_df = pickle.load(f)
-
-# Inject the k_c labels (the cache predates them)
-if len(np.unique(dataset.kc_group)) == 1:
-    dataset.kc_fraction = muse_df.loc[dataset.sample_ids, KC_FRACTION_FEATURE].to_numpy(float)
-    dataset.kc_group    = muse_df.loc[dataset.sample_ids, KC_GROUP_FEATURE].to_numpy(int)
-    for i in np.flatnonzero(dataset.kc_group > 0):
-        dataset.configs[i] = apply_kc_fraction(dataset.configs[i], dataset.kc_fraction[i] / kc_fraction_from_config(dataset.configs[i]))
-    print('k_c labels injected into the loaded cache')
 groups = dataset.kc_group
 print('k_c groups in the cache:', {int(g): int(n) for g, n in zip(*np.unique(groups, return_counts=True))})
 check('the cache holds mismatched samples of several k_c groups', len(np.unique(groups)) >= 3)

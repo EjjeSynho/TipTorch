@@ -10,7 +10,7 @@ Build the ETC calibrator bundle for MUSE NFM (`calibrators/ETC_calibrator.py`, E
 
 The PSF-model regime (anisotropic jitter, image-frame wing; J_angle and the wing shape at the fitted medians), the loss and the dataset cache (raw
 frames or derotated PSFs) come from the config, laid out like the NFM calibrator ones (configs/NFM_*calibrator_config.json): keep the
-"model", "loss" and "fixed_params" sections in sync with them and with STD_fitter.py.
+"model", "loss" and "calibrator" (key groups) sections in sync with them and with STD_fitter.py.
 
 Requirements: the dataset cache (with its telemetry preprocessor and stored split) and a CUDA device (~20 s per epoch).
 Run from the repository root in the `TipTorch` conda env:
@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / 'machine_learning'))
 
 from tiptorch._config import WEIGHTS_FOLDER, default_device
-from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, fixed_inputs, fits_median, model_flags, release_gpu_memory, load_STD_dataset
+from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, fitted_shared_values, fits_median, model_flags, release_gpu_memory, load_STD_dataset
 from calibrators.ETC_calibrator import ETCDataset, ETC_INPUTS, dataset_cache_path, donor_keys
 
 # The ETC calibrator config lives with the other calibrator configs in machine_learning/calibrators/configs/
@@ -61,18 +61,18 @@ def build_pool(dataset, idx, preprocessor, keys):
     }
 
 
-def fits_median_inputs(dataset, idx, model_cfg):
-    """ Kept fixed inputs set from the fits ("fixed_from_fits" of the model section: J_angle, wing shape): medians over `idx` as
-    {key: tensor [1, ...]}, as build_NFM_trainer sets them (used when the direct network is not retrained) """
+def fits_median_inputs(dataset, idx, cfg):
+    """ Fitted shared values ("fitted_shared_keys" of the calibrator section: J_angle, wing shape): medians over `idx` as {key: tensor [1, ...]},
+    as build_NFM_trainer sets them (used when the direct network is not retrained) """
     out = {}
-    for key in model_cfg.get('fixed_from_fits', []):
+    for key in cfg['calibrator']['fitted_shared_keys']:
         median   = fits_median(dataset, idx, key) # [n_values]
         out[key] = median if median.numel() == 1 else median.view(1, -1)
     return out
 
 
 def train_direct_net(dataset, cfg, weights_dir, median_heights, train_idx, val_idx):
-    """ End-to-end training of the direct network; returns the state stored in the bundle and the kept fixed inputs / regime of its PSF model """
+    """ End-to-end training of the direct network; returns the state stored in the bundle and the fitted shared values / regime of its PSF model """
     etc_dataset = ETCDataset(dataset, heights=median_heights)
     PSF_model, net, transformer, trainer = build_NFM_trainer(cfg, etc_dataset, default_device, weights_dir=weights_dir, seed=cfg['seed'],
                                                              train_idx=train_idx, val_idx=val_idx)
@@ -96,7 +96,7 @@ def train_direct_net(dataset, cfg, weights_dir, median_heights, train_idx, val_i
         'train_losses': train_losses, 'val_losses': val_losses, 'best_val_loss': float(min(val_losses)),
         'model_cfg': deepcopy(cfg['model']),
     }
-    kept, flags = fixed_inputs(PSF_model), model_flags(PSF_model)
+    kept, flags = fitted_shared_values(PSF_model, trainer.fitted_shared_keys), model_flags(PSF_model)
     PSF_model.cleanup()
 
     release_gpu_memory(sync=True)
@@ -153,13 +153,13 @@ if __name__ == '__main__':
     elif bundle_path.exists():
         old = torch.load(bundle_path, map_location='cpu', weights_only=False)
         direct_net = old.get('direct_net')
-        if direct_net is not None and direct_net.get('model_cfg', old.get('model_cfg')) != cfg['model']:
+        if direct_net is not None and direct_net['model_cfg'] != cfg['model']:
             logger.warning('The kept direct network was trained with another "model" section than the config: retrain it (no --skip-direct-net)')
         logger.info('Kept the direct network of the existing bundle')
 
-    # Kept fixed inputs of the renderer (J_angle and the wing shape at the fitted training medians)
-    kept = kept if kept is not None else fits_median_inputs(dataset, train_idx, cfg['model'])
-    logger.info(f"Fixed inputs: { {k: np.round(v.numpy(), 3).tolist() for k, v in kept.items()} }")
+    # Fitted shared values of the renderer (J_angle and the wing shape at the fitted training medians)
+    kept = kept if kept is not None else fits_median_inputs(dataset, train_idx, cfg)
+    logger.info(f"Fitted shared values: { {k: np.round(v.numpy(), 3).tolist() for k, v in kept.items()} }")
 
     state = {
         'name': cfg['name'],
@@ -173,7 +173,7 @@ if __name__ == '__main__':
         'template_config': template_config,
         'model_cfg': cfg['model'],
         'model_flags': flags,
-        'fixed_inputs': kept,
+        'fitted_shared': kept,
         'direct_net': direct_net,
         'dataset_cache': str(dataset_cache),
         'derotated': dataset.derotated,
@@ -184,7 +184,7 @@ if __name__ == '__main__':
     torch.save(state, bundle_path)
     meta = { k: state[k] for k in ('name', 'etc_inputs', 'median_heights', 'phase_bump_median', 'dataset_cache', 'derotated', 'created_at') }
     meta.update({'bundle_path': str(bundle_path), 'N_pool': int(len(pool_idx)), 'N_val': int(len(val_idx)), 'model_cfg': cfg['model'],
-                 'fixed_inputs': {k: v.numpy().tolist() for k, v in kept.items()},
+                 'fitted_shared': {k: v.numpy().tolist() for k, v in kept.items()},
                  'direct_net_best_val_loss': None if direct_net is None else direct_net['best_val_loss']})
 
     with open(weights_dir / f'{cfg["name"]}_meta.json', 'w') as f:

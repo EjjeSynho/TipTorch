@@ -7,7 +7,7 @@ per-sample fits (the floor of the PSF model) and, optionally, the pretrain-only 
     python machine_learning/analysis/compare_NFM_calibrators.py [--config <training config>] [--device cuda:1] [--out table.json] \\
         name=path/to/checkpoint_or_bundle.pth [name=path ...]
 
-Every run must have the same outputs (fixed_params, Z_mode_max, N_spline_nodes) as the config: the PSF model and the trainer
+Every run must have the same outputs (key groups of the calibrator section, Z_mode_max, N_spline_nodes) as the config: the PSF model and the trainer
 are built once from the config, only the network weights (and the factor constants / parameterization) are swapped.
 A factor checkpoint can only be evaluated with a factor config, and vice versa.
 """

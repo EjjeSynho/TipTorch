@@ -41,23 +41,16 @@ DATASET_CACHE = STD_FOLDER / 'dataset_cache'
 #%%
 # ── Which run to validate ─────────────────────────────────────────────────────
 # A run is given by its bundle <name>_bundle.pth, which train_NFM_calibrator.py writes next to <name>_checkpoint.pth and <name>_meta.json:
-# --bundle <path>, or by default the most recently written bundle under WEIGHTS_FOLDER. The trainer is rebuilt from the training config
-# stored in the bundle (bundles since 2026-10-21) or else in the run's metadata, never from a config file, which may have been edited since.
+# --bundle <path>, or by default the most recently written NFM calibrator bundle under WEIGHTS_FOLDER. The trainer is rebuilt from the
+# training config stored in the bundle, never from a config file, which may have been edited since.
 def _load_bundle(path):
     return torch.load(path, map_location='cpu', weights_only=False)
 
-def _run_config(bundle_path, bundle_state):
-    """ Training config of a run: from its bundle, else from its <name>_meta.json; None if neither has one. """
-    if bundle_state.get('training_config') is not None:
-        return bundle_state['training_config']
-    meta_path = bundle_path.with_name(bundle_path.name.replace('_bundle.pth', '_meta.json'))
-    return json.loads(meta_path.read_text()).get('config') if meta_path.exists() else None
-
 def _latest_bundle():
-    """ (path, state) of the most recently written bundle under WEIGHTS_FOLDER that has a training config, (None, None) if there is none. """
+    """ (path, state) of the most recently written NFM calibrator bundle under WEIGHTS_FOLDER (not an ETC one), (None, None) if there is none. """
     for path in sorted(WEIGHTS_FOLDER.glob('*/*_bundle.pth'), key=lambda p: p.stat().st_mtime, reverse=True):
         state = _load_bundle(path)
-        if _run_config(path, state) is not None:
+        if 'calibrator_type' in state:
             return path, state
     return None, None
 
@@ -76,15 +69,10 @@ if _bundle_path:
 else:
     _bundle_path, _bundle_state = _latest_bundle()
     if _bundle_path is None:
-        raise RuntimeError(f'No calibrator bundle with a training config under {WEIGHTS_FOLDER}: run train_NFM_calibrator.py first, or pass --bundle <path>')
+        raise RuntimeError(f'No NFM calibrator bundle under {WEIGHTS_FOLDER}: run train_NFM_calibrator.py first, or pass --bundle <path>')
 
-cfg = _run_config(_bundle_path, _bundle_state)
-if cfg is None:
-    raise ValueError(f'{_bundle_path} has no training config, in itself or in a <name>_meta.json next to it: it cannot be validated by this script')
-
-_cfg_source = 'bundle' if _bundle_state.get('training_config') is not None else 'metadata'
-logger.info(f"Validating the run of the bundle {_bundle_path}: {cfg['weights_subdir']} / {cfg['name']} "
-            f"({_bundle_state.get('calibrator_type', 'direct')} calibrator, config from the {_cfg_source})")
+cfg = _bundle_state['training_config']
+logger.info(f"Validating the run of the bundle {_bundle_path}: {cfg['weights_subdir']} / {cfg['name']} ({_bundle_state['calibrator_type']} calibrator)")
 
 #%%
 # ── Run metadata, next to the bundle: split, output names, training losses ───
@@ -110,9 +98,8 @@ _split_path = Path(train_meta['split_path'])
 # BEST_CALIB_PATH, set by train_NFM_calibrator.py or by a previous validation in this session, tells which run the session's trainer is for
 _checkpoint_path = _bundle_path.with_name(f'{cfg["name"]}_checkpoint.pth')
 if 'trainer' not in dir() or 'BEST_CALIB_PATH' not in dir() or Path(BEST_CALIB_PATH).resolve() != _checkpoint_path.resolve():
-    # The regime the calibrator was trained in: derotated PSFs or raw frames (per-OB pupil rotation), see train_NFM_calibrator.py.
-    # Configs without the key predate the raw-frame regime and were trained on derotated PSFs
-    dataset = load_STD_dataset(cfg.get('derotated_PSFs', True))
+    # The regime the calibrator was trained in: derotated PSFs or raw frames (per-OB pupil rotation), see train_NFM_calibrator.py
+    dataset = load_STD_dataset(cfg['derotated_PSFs'])
     logger.info(f"Dataset loaded: {len(dataset)} samples, PSF cubes ({dataset.C}, {dataset.H}, {dataset.W}), {'derotated PSFs' if dataset.derotated else 'raw frames'}")
 
     PSF_model, calibrator, outputs_transformer, trainer = build_NFM_trainer(cfg, dataset, default_device, weights_dir=WEIGHTS_FOLDER / cfg['weights_subdir'])
@@ -121,36 +108,29 @@ if 'trainer' not in dir() or 'BEST_CALIB_PATH' not in dir() or Path(BEST_CALIB_P
 
 BEST_CALIB_PATH = _checkpoint_path
 
-# The validation must use exactly the split the calibrator was trained with
-if _split_path.exists():
-    with np.load(_split_path) as _f:
-        _split = dict(_f) # read and close, otherwise the file stays locked on Windows
+# The validation must use exactly the split the calibrator was trained with, matched by sample IDs (the dataset cache may have been
+# regenerated since training)
+with np.load(_split_path) as _f:
+    _split = dict(_f) # read and close, otherwise the file stays locked on Windows
 
-    if 'train_ids' in _split and 'val_ids' in _split:
-        # Match by sample IDs, so the split stays valid even if the dataset cache was regenerated since training
-        _id_to_pos = {sample_id: pos for pos, sample_id in enumerate(dataset.sample_ids)}
-        _lost_ids  = [i for i in np.concatenate([_split['train_ids'], _split['val_ids']]) if i not in _id_to_pos]
-        if _lost_ids:
-            raise ValueError(f"{len(_lost_ids)} samples of the training split are missing in the current dataset cache "
-                             f"(e.g. {_lost_ids[:5]}). The calibrator was trained on a different dataset.")
-        _train_idx = np.array([_id_to_pos[i] for i in _split['train_ids']], dtype=int)
-        _val_idx   = np.array([_id_to_pos[i] for i in _split['val_ids']],   dtype=int)
-    else:
-        logger.warning("Split file has no sample IDs (older training run); trusting the stored positions.")
-        _train_idx, _val_idx = _split['train_idx'], _split['val_idx']
+_id_to_pos = {sample_id: pos for pos, sample_id in enumerate(dataset.sample_ids)}
+_lost_ids  = [i for i in np.concatenate([_split['train_ids'], _split['val_ids']]) if i not in _id_to_pos]
+if _lost_ids:
+    raise ValueError(f"{len(_lost_ids)} samples of the training split are missing in the current dataset cache "
+                     f"(e.g. {_lost_ids[:5]}). The calibrator was trained on a different dataset.")
+_train_idx = np.array([_id_to_pos[i] for i in _split['train_ids']], dtype=int)
+_val_idx   = np.array([_id_to_pos[i] for i in _split['val_ids']],   dtype=int)
 
-    if dataset.val_idx is not None and set(_val_idx) != set(dataset.val_idx):
-        logger.warning("The calibrator was trained with a split different from the one stored in the dataset cache.")
+if set(_val_idx) != set(dataset.val_idx):
+    logger.warning("The calibrator was trained with a split different from the one stored in the dataset cache.")
 
-    if not (np.array_equal(_train_idx, trainer.train_idx) and np.array_equal(_val_idx, trainer.val_idx)):
-        logger.info("Restoring the training split.")
-        trainer.train_idx    = _train_idx
-        trainer.val_idx      = _val_idx
-        trainer.train_loader = trainer._make_loader(trainer.train_idx, shuffle=True)
-        trainer.val_loader   = trainer._make_loader(trainer.val_idx,   shuffle=False)
-    logger.info(f"Split: {len(trainer.train_idx)} train / {len(trainer.val_idx)} val")
-else:
-    logger.warning(f"Split file not found at {_split_path}; using the split stored in the dataset cache (or a random one for old caches).")
+if not (np.array_equal(_train_idx, trainer.train_idx) and np.array_equal(_val_idx, trainer.val_idx)):
+    logger.info("Restoring the training split.")
+    trainer.train_idx    = _train_idx
+    trainer.val_idx      = _val_idx
+    trainer.train_loader = trainer._make_loader(trainer.train_idx, shuffle=True)
+    trainer.val_loader   = trainer._make_loader(trainer.val_idx,   shuffle=False)
+logger.info(f"Split: {len(trainer.train_idx)} train / {len(trainer.val_idx)} val")
 
 
 #%% ========================== Evaluation & diagnostics ===============================================
@@ -203,9 +183,8 @@ with open(STD_FOLDER / 'muse_df.pickle', 'rb') as fh:
 x_vec = telemetry_preprocessor.inverse_transform(telemetry_vecs.cpu().numpy())
 
 # Telemetry-derived Cn2 profile (the base of the factor calibrator: AOF profile on the fixed grid binned into the model layers,
-# or the K-means fractions of the older datasets)
-_Cn2_base = telemetry_base_params(x_vec, input_features, Cn2_grid=getattr(trainer, 'Cn2_grid', None) or
-                                  (Cn2Grid.from_state_dict(dataset.Cn2_grid) if getattr(dataset, 'Cn2_grid', None) else None))['Cn2_weights'].numpy()
+# or the K-means fractions)
+_Cn2_base = telemetry_base_params(x_vec, input_features, Cn2_grid=Cn2Grid.from_state_dict(dataset.Cn2_grid) if dataset.Cn2_grid is not None else None)['Cn2_weights'].numpy()
 X = {
     'r0': r0(muse_df['Seeing (header)'].loc[validation_ids].to_numpy(), 500e-9),
     'L0': muse_df['L0Tot'].loc[validation_ids].to_numpy(),
@@ -742,7 +721,7 @@ def build_ETC_telemetry(telemetry_vectors, TCs, calibrator):
         'Cn2_alt_binned_3':              np.full_like(seeing, 20.0),
         'Cn2_frac_binned_3':             np.zeros_like(seeing),
     }
-    if getattr(calibrator, 'Cn2_grid', None) is not None: # grid profile features: GLF on the ground node, the median profile above
+    if calibrator.Cn2_grid is not None: # grid profile features: GLF on the ground node, the median profile above
         replacements.update(Cn2_grid_features_from_GLF(calibrator.Cn2_grid, GLF))
 
     for feature, values in replacements.items():
@@ -800,7 +779,7 @@ for start in range(0, N_val, ETC_batch_size):
     chunk_config  = MultipleTargetsInDifferentObservations(chunk_configs, device=default_device)
     chunk_telemetry = ETC_telemetry_vecs[start:end]
 
-    with torch.no_grad(): # the jitter / wing regime of the training (see build_PSF_model); calibrate sets the bundle's fixed inputs (J_angle, wing shape)
+    with torch.no_grad(): # the jitter / wing regime of the training (see build_PSF_model); calibrate sets the bundle's fitted shared values (e.g. the wing shape)
         ETC_PSF_model = build_PSF_model(chunk_config, cfg['model'], default_device)
         _ = ETC_calibrator.check_compatibility(ETC_PSF_model)
         ETC_calibrator.calibrate_prepared(chunk_telemetry, ETC_PSF_model)
@@ -1089,17 +1068,19 @@ mean_abs_shap = np.abs(shap_values).mean(axis=0)
 
 #%%
 # ── 3.  Build readable output names from the transformer ──────────────────────
-# Each output neuron corresponds to one element of the stacked parameter vector.
+# Each output neuron corresponds to one element of the stacked parameter vector (direct calibrator) or of the predicted keys only
+# (factor calibrator, its constants are not network outputs): net_slices gives the layout of the network output.
 # We expand the parameter names to match individual neurons for clear labelling.
+net_slices = trainer.net_slices()
 output_neuron_names = []
-for param_name, slc in outputs_transformer.slices.items():
+for param_name, slc in net_slices.items():
     width = slc.stop - slc.start
     if width == 1:
         output_neuron_names.append(param_name)
     else:
         output_neuron_names.extend([f"{param_name}[{i}]" for i in range(width)])
 
-assert len(output_neuron_names) == N_outputs, f"Name count mismatch: {len(output_neuron_names)} vs {N_outputs}"
+assert len(output_neuron_names) == shap_values.shape[-1], f"Name count mismatch: {len(output_neuron_names)} vs {shap_values.shape[-1]}"
 
 #%%
 # ── 4.  Global feature importance  (mean |SHAP| summed over all outputs) ─────
@@ -1154,10 +1135,10 @@ print(f"Useful features ({len(useful_features)}): {useful_features}")
 #%%
 # Aggregate per-parameter-group (not per-neuron) for readability:
 # collapse the neuron dimension by averaging within each parameter group.
-param_names  = list(outputs_transformer.slices.keys())
+param_names  = list(net_slices.keys())
 mean_abs_per_param = np.zeros((len(shap_input_features), len(param_names)))
 
-for j, (pname, slc) in enumerate(outputs_transformer.slices.items()):
+for j, (pname, slc) in enumerate(net_slices.items()):
     mean_abs_per_param[:, j] = mean_abs_shap[:, slc].mean(axis=1)
 
 import seaborn as sns
@@ -1227,7 +1208,7 @@ axes_flat = np.array(axes).ravel()
 
 for j, pname in enumerate(param_names):
     ax   = axes_flat[j]
-    slc  = outputs_transformer.slices[pname]
+    slc  = net_slices[pname]
     imp  = mean_abs_shap[:, slc].mean(axis=1)          # mean over neurons in this param
     top  = np.argsort(imp)[::-1][:TOP_K_FEATURES]
     ax.barh([shap_input_features[i] for i in top[::-1]], imp[top[::-1]],
@@ -1250,7 +1231,7 @@ print("\nMost predictive input feature per predicted parameter:")
 print(f"{'Parameter':<30} {'Feature':<35} {'Mean |SHAP|':>12}")
 print("-" * 80)
 for j, pname in enumerate(param_names):
-    slc  = outputs_transformer.slices[pname]
+    slc  = net_slices[pname]
     imp  = mean_abs_shap[:, slc].mean(axis=1)
     best = int(np.argmax(imp))
     print(f"{pname:<30} {shap_input_features[best]:<35} {imp[best]:>12.4f}")
@@ -1271,7 +1252,7 @@ shap_input_features = np.array(dataset.features[:_n_feat])
 
 shap_per_param = {
     pname: shap_values[:, :, slc].mean(axis=-1)   # [N, N_feat]  mean SHAP over neurons
-    for pname, slc in outputs_transformer.slices.items()
+    for pname, slc in net_slices.items()
 }
 
 N_PARAM_PLOTS = min(6, n_params)

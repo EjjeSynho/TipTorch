@@ -138,3 +138,78 @@ altitudes as features. First check, in the fitting pipeline, that fits with the 
 - Not done / next: the Cn2 input (follow-up above), more seeds for the factor-vs-direct comparison, and the ETC-regime
   validation of the factor bundle (`validate_NFM_calibrator.py` ETC section uses `NFMCalibrator`; switch it to
   `load_NFM_calibrator`).
+
+## Follow-up: key groups of the calibrator, everything else left to the PSF model (2026-10-29, user's requests)
+
+The "calibrator" section of every training config says what the calibrator does with the inputs of the PSF model, in five non-overlapping
+key groups (`KEY_GROUPS` in `NFM_calibrator.py`, checked by `calibrator_key_groups`):
+
+| group | per sample | network output | trained | at inference |
+|---|---|---|---|---|
+| `predicted_keys` | yes | yes, directly | via the network | predicted |
+| `factor_keys` | yes | yes, factor on a telemetry baseline | via the network | predicted |
+| `optimized_shared_keys` | no, one value | in the outputs layout, not predicted | yes, from the fit medians | bundle `consts` |
+| `fitted_keys` | yes, the fits | no | no | unknown, left to the model |
+| `fitted_shared_keys` | no, the fit medians | no, set in the PSF model | no | bundle `fitted_shared` |
+
+Every other input is left to the PSF model: `run_model` does not pass it, and TipTorch re-initializes it for every batch from the batch
+config (r0, L0, wind, Cn2 profile, source directions) or to its defaults (F, bg, dx, dy, wing shape, ...) in `Update` -> `InitValues`. The
+inputs the wrapper's forward reads at every call (`MODEL_REQUIRED_INPUTS`: the jitter `J` / `J_ctrl`, `J_aniso`, `J_angle`, the chromatic
+defocus, `LO_coefs`) are passed at the wrapper defaults when left to the model. The phase bump (first LO coefficient) is always the per-sample
+fit. Factor keys need a telemetry baseline (`FACTOR_BASE_KEYS`: r0, L0, wind_speed_single, Cn2_weights); the direct calibrator has no factor /
+optimized shared keys. A key in two groups raises; keys that are not inputs in the regime of the "model" section are dropped with a warning.
+
+Configs: factor -- predicted `J_ctrl, dn`, factor `r0, L0, wind_speed_single, Cn2_weights`, optimized shared `F_ctrl, LO_coefs,
+wing_frac_ctrl, J_aniso, J_angle`, fitted `dx_ctrl, dy_ctrl`, fitted shared `wing_width, wing_width_t, wing_angle`; legacy factor -- the same
+with `J_aniso` predicted and `J_angle` fitted shared; direct and ETC -- predicted `F_ctrl, J_ctrl, J_aniso, wing_frac_ctrl, r0, L0, dn,
+wind_speed_single, Cn2_weights, LO_coefs`, fitted `dx_ctrl, dy_ctrl`, fitted shared `J_angle` and the wing shape. The configs were edited as
+text (formatting and escapes kept) and checked to parse to the intended structure; the network outputs of every config are the ones of the
+former `fixed_params` setup (30 / 30 / 12 / 13).
+
+- **Shared, not per sample** (user's decision on the first request): "optimized for all training samples at the same time" was read as one
+  value for the whole dataset, not as per-sample free parameters like `dx` / `dy` (no inference value for new stars).
+- **Settings replaced by the groups**: `fixed_params` (the inputs in no group), `fixed_from_fits` and the former factor `fitted_keys` (both
+  now `fitted_shared_keys`), `FIXED_INPUTS_KEPT` (`MODEL_REQUIRED_INPUTS`), the bundle's `fixed_inputs` (`fitted_shared`, also in the ETC
+  bundle and renderer), and the trainer switches `predict_LO_NCPAs` (`LO_coefs` fitted shared: the NCPAs at the fit median),
+  `predict_Cn2_profile` / `predict_wind_speed` (the input left to the model: the batch config) and `pre_init_astrometry` (`dx_ctrl` /
+  `dy_ctrl` fitted). **Dropped**: `optimize_astrometry`, the per-sample optimization of `dx` / `dy` (off in every config).
+- **The network outputs only the predicted and factor keys** (12 of 31 for the factor config). `FactorParameterization`: the statistics
+  (`Y_median`, `log_ratio_mean`, `delta_std`) stay in the stacked layout of the outputs transformer, `pred_index` / `net_slices` / `N_net`
+  describe the network output, `to_stacked` scatters it back; `pretrain_targets` returns the network layout. Before, the constant entries
+  were dead outputs pinned to 0 by the pretraining, with weight 1e4 (`1 / var.clamp(min=1e-4)` of zero-variance targets). The trainer hooks
+  `net_slices()` / `N_net_outputs` size the pretraining weights, `validate(return_cubes)` network outputs, the bundle's `net_arch`,
+  `tune_calibrator` (optimized shared keys skipped with a warning) and the SHAP section of `validate_NFM_calibrator.py`.
+- **Optimized shared keys trained in the normalized space** of the outputs transformer (`optimized_params`, `optimized_shared_values()`),
+  still at lr / 10 without weight decay. In physical units Adam's ~lr-sized steps (1e-3) were ill-scaled: a `J_angle` in degrees would barely
+  move (1e-3 deg / step), `wing_frac` (~0.005) moved by 20 % per step. In the `Uniform` normalizations the step is 0.045 deg for `J_angle`,
+  0.035 nm for `LO_coefs` (35x faster than before), 2.5e-5 for `wing_frac` (40x slower), 5e-4 for `F_ctrl` (2x slower): **the dynamics of
+  the formerly trained constants change, the results table above is not reproducible with this code.**
+- **No backward compatibility** (user's decision: the dataset is refit and every cache / bundle rebuilt). Removed from the calibrator code
+  (`NFM_calibrator.py`, `ETC_calibrator.py`, `train_ETC_calibrator.py`, `validate_NFM_calibrator.py`, `run_ablation_NFM_calibrator.py`,
+  the tests): the fallbacks for dataset caches without telemetry preprocessor / Cn2 grid entry / `derotated` / stored split / time groups /
+  k_c groups (`default_split` no longer draws a random split, `kfold_splits` always groups by time, the k_c groups are no longer derived from
+  the DM pitches; the trainer lost its `test_size` / `random_state` arguments), for bundles without `Cn2_binning` / `calibrator_type` /
+  `model_flags` / `training_config`, for old factor bundles and configs, for ETC pools keyed F / J, for runs validated from their metadata
+  instead of the bundle's training config or from split files without sample IDs, and the k_c-label injection of
+  `tests/test_kc_group_training_smoke.py`. Every config key is read directly, without defaults. The stale built-in default config of
+  `run_ablation_NFM_calibrator.py` was replaced by the training config file (default `NFM_calibrator_config.json`), and the alias
+  `F_norm_lambda_ctrl` (not an input of the wrapper) was dropped. The K-means Cn2 features stay: they are the current `CN2_BINNING`, not a
+  legacy path. Not swept: the data-processing / fitting code outside the calibrators.
+- Pre-existing, untouched: the k-fold difficulty weighting resets the network but not the optimized shared keys between folds.
+- Checks: `tests/test_factor_calibrator_key_groups.py` (new, synthetic PSFs rendered by the model, no STD data, GPU ~40 s; the factor config
+  with `wing_frac_ctrl` moved to `fitted_shared_keys`): 34 / 34 -- the outputs are the predicted, factor and optimized shared keys, the network
+  the predicted and factor ones; overlapping groups, a factor key without baseline and a direct calibrator with optimized shared keys raise;
+  every config has the five groups and none of the former settings; the optimized shared keys start at the training medians (normalized),
+  the fitted shared ones are the medians in the PSF model, the fitted ones the per-sample fits; `run_model` passes the per-sample fits, the
+  broadcast shared values and the per-sample phase bump, and none of the inputs left to the model but the required ones; with a truth stretch
+  1.4 at 25 deg and fits at ~1.1 / ~0.5 deg, a 25-epoch run moves `J_aniso` 1.118 -> 1.391 and `J_angle` 0.5 -> 25.8 deg, and these two alone
+  lower the training loss 0.321 -> 0.183, while the fitted (shared) keys stay bit-identical; checkpoint round trip; bundle ->
+  `NFMFactorCalibrator.forward_prepared` identical to the trainer; `calibrate_prepared` sets the learned `J_angle` and the fitted shared
+  values in a fresh PSF model and leaves `dx_ctrl` at the model value. All four configs through `build_NFM_trainer` on the same data: the
+  outputs above, the same inputs passed to the model, finite validation losses, exact bundle round trips. A direct config with `Cn2_weights` /
+  `wind_speed_single` left to the model and `LO_coefs` fitted shared: Cn2 / wind not passed (the model's Cn2 weights are the batch configs'),
+  LO coefficients with the per-sample bump and the median NCPAs. A cache file with the entries of `build_dataset_cache` loads through
+  `NFMDataset`, a cache without one of them raises. `tests/test_NFM_calibrator_bundle.py` and `tests/test_kc_group_training_smoke.py` not
+  run: the STD data drive was not mounted.
+- Next: refit / rebuild the cache, retrain the factor calibrator on the STD stars and compare with the table above (and with a run where
+  `J_aniso` stays predicted, to see whether the per-star stretch is predictable from the telemetry at all).

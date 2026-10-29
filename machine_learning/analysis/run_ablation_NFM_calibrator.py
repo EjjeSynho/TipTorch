@@ -40,7 +40,6 @@ import logging
 import argparse
 import numpy as np
 import torch
-from copy import deepcopy
 from pathlib import Path
 from datetime import datetime
 
@@ -50,109 +49,29 @@ sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibra
 from tiptorch._config import *
 from calibrators.NFM_calibrator import NFMDataset, default_split, build_NFM_trainer, release_gpu_memory, load_STD_dataset, CONFIGS_FOLDER
 
-# ── Base training config (mirrors DEFAULT_CONFIG in train_NFM_calibrator.py) ──
-_BASE_DEFAULT = {
-    "name":                 "best_calibrator",
-    "debug":                False,
-    "derotated_PSFs":       False, # raw-frame dataset cache, as the calibrator configs
-    "batch_size":           16,
-    "continue_training":    False,
-    "run_kfold_difficulty": False,
-    
-    "tune": {
-        "enabled": False,
-        "params": [],
-        "num_epochs": 20,
-        "lr": 1e-3
-    },
-    
-    "model": {
-        "LO_NCPAs": True,
-        "chrom_defocus": False,
-        "use_Moffat": False,
-        "retain_PSDs": False,
-        "N_spline_nodes": 5,
-        "Z_mode_max": 9
-    },
-    
-    "calibrator": {
-        "hidden_dim": 48,
-        "dropout_rate": 0.2
-    },
-    
-    "trainer": {
-        "lr": 0.01,
-        "lambda_step": 1,
-        "predict_LO_NCPAs": True,
-        "predict_Cn2_profile": True,
-        "predict_wind_speed": True,
-        "pre_init_astrometry": True,
-        "optimize_astrometry": False,
-        "random_state": 43,
-        "num_epochs": 250,
-        "patience": 20,
-        "nan_recovery": True,
-        "max_nan_recoveries": 10,
-        "pretrain_epochs": 100,
-        "pretrain_patience": 15,
-    },
-    
-    "fixed_params": [
-        "Jxy", "bg_ctrl", "dx_ctrl", "dy_ctrl",
-        "F_norm", "F_norm_lambda_ctrl", "src_dirs_x", "src_dirs_y",
-        "wind_dir_single", "F_norm_λ_ctrl",
-    ],
-    
-    "weights_subdir":    "NFM_calibrator",
-    "max_train_samples": None,
-    # ── ablation-specific ──────────────────────────────────────────────────────
-    "ablation": {
-        "sample_counts":        [50, 100, 150, 200, 300, 400],
-        "n_repeats":            2,
-        "base_seed":            200,   # repeat k uses seed base_seed + k*1000
-        "output_subdir":        "NFM_data_ablation",
-        "include_full_dataset": True,  # also benchmark the full training set
-    },
+# ── Training config ───────────────────────────────────────────────────────────
+# The training config of the calibrator, used as is (default: the direct one). Its "ablation" section sets the study; the configs
+# without one (e.g. the factor ones) get ABLATION_DEFAULT
+DEFAULT_CONFIG   = CONFIGS_FOLDER / 'NFM_calibrator_config.json'
+ABLATION_DEFAULT = {
+    "sample_counts":        [50, 100, 150, 200, 300, 400],
+    "n_repeats":            2,
+    "base_seed":            200,   # repeat k uses seed base_seed + k*1000
+    "output_subdir":        "NFM_data_ablation",
+    "include_full_dataset": True,  # also benchmark the full training set
 }
 
-# ── Parse CLI ─────────────────────────────────────────────────────────────────
 _parser = argparse.ArgumentParser(description="NFM Calibrator - Data Ablation Study")
-_parser.add_argument('--config', type=str, default=None,
-                     help='Path to the same JSON config used for training')
+_parser.add_argument('--config', type=str, default=str(DEFAULT_CONFIG), help='the JSON training config of the calibrator')
 try:
-    _cli      = _parser.parse_args()
-    _cfg_path = Path(_cli.config) if _cli.config else None
-except SystemExit:
-    _cfg_path = None
+    _cfg_path = Path(_parser.parse_args().config)
+except SystemExit: # IPython: the kernel's own arguments are not ours, take the default config
+    _cfg_path = DEFAULT_CONFIG
 
-if _cfg_path and _cfg_path.exists():
-    with open(_cfg_path) as _f:
-        _loaded = json.load(_f)
-    cfg = deepcopy(_BASE_DEFAULT)
-    for _k, _v in _loaded.items():
-        if isinstance(_v, dict) and _k in cfg and isinstance(cfg[_k], dict):
-            cfg[_k] = {**cfg[_k], **_v}
-        else:
-            cfg[_k] = _v
-else:
-    cfg = deepcopy(_BASE_DEFAULT)
-    if _cfg_path:
-        print(f"Warning: config not found at {_cfg_path}. Using defaults.")
+with open(_cfg_path) as _f:
+    cfg = json.load(_f)
 
-# Fall back to the direct calibrator's config in calibrators/configs/ when running interactively
-if 'cfg' not in dir():
-    _default_cfg_path = CONFIGS_FOLDER / 'NFM_calibrator_config.json'
-    if _default_cfg_path.exists():
-        with open(_default_cfg_path) as _f:
-            _loaded = json.load(_f)
-        cfg = deepcopy(_BASE_DEFAULT)
-        for _k, _v in _loaded.items():
-            if isinstance(_v, dict) and _k in cfg and isinstance(cfg[_k], dict):
-                cfg[_k] = {**cfg[_k], **_v}
-            else:
-                cfg[_k] = _v
-
-abl = cfg["ablation"]    # shorthand
+abl = cfg.get("ablation", ABLATION_DEFAULT)    # shorthand
 
 # ── Paths & logging ───────────────────────────────────────────────────────────
 STD_FOLDER    = Path(project_settings["MUSE_STD_data_folder"])
@@ -202,13 +121,12 @@ for _pname, _slc in _outputs_transformer.slices.items():
 
 del _PSF_model, _outputs_transformer
 release_gpu_memory(sync=True)
-logger.info(f"Calibrator ({cfg['calibrator'].get('type', 'direct')}): {N_features} → {N_outputs}")
+logger.info(f"Calibrator ({cfg['calibrator']['type']}): {N_features} → {N_outputs}")
 
 #%% ── 3. Compute fixed train / val split ─────────────────────────────────────
 # All ablation runs share the same validation set for fair comparison.
-# It's the split stored in the dataset cache (grouped by acquisition time), random only for old caches
-_ref_split_seed = cfg["trainer"]["random_state"]
-full_train_idx, val_idx = default_split(dataset, test_size=0.2, random_state=_ref_split_seed)
+# It's the split stored in the dataset cache (grouped by acquisition time)
+full_train_idx, val_idx = default_split(dataset)
 logger.info(f"Fixed split: {len(full_train_idx)} train / {len(val_idx)} val")
 
 # Save the fixed split so the evaluation script can verify it
@@ -251,7 +169,6 @@ for n_samples in sample_counts:
             seed         = run_seed,
             train_idx    = run_train_idx,
             val_idx      = val_idx,
-            random_state = run_seed,
         )
 
         # ── Pretrain ─────────────────────────────────────────────────────────
@@ -260,7 +177,7 @@ for n_samples in sample_counts:
             num_epochs  = cfg["trainer"]["pretrain_epochs"],
             patience    = cfg["trainer"]["pretrain_patience"],
             save_path   = pretrain_path,
-            standardize = cfg["trainer"].get("pretrain_standardize", True),
+            standardize = cfg["trainer"]["pretrain_standardize"],
         )
         release_gpu_memory(sync=True)
         logger.info(f"  Pretrain done | post-pretrain val = {trainer.validate():.6f}")

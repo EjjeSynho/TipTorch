@@ -30,28 +30,35 @@
     "use_Moffat": false,
     "retain_PSDs": false,
     "N_spline_nodes": 5,
-    "Z_mode_max": 9,
-    "fixed_from_fits": [
-      "J_angle",
-      "wing_width",
-      "wing_width_t",
-      "wing_angle"
-    ]
+    "Z_mode_max": 9
   },
   "calibrator": {
     "type": "factor",
     "hidden_dim": 48,
     "dropout_rate": 0.2,
+    "predicted_keys": [
+      "J_ctrl",
+      "dn"
+    ],
     "factor_keys": [
       "r0",
-      "L0",
-      "wind_speed_single",
       "Cn2_weights"
     ],
-    "const_keys": [
+    "optimized_shared_keys": [
       "F_ctrl",
       "LO_coefs",
-      "wing_frac_ctrl"
+      "wing_frac_ctrl",
+      "J_aniso",
+      "J_angle"
+    ],
+    "fitted_keys": [
+      "dx_ctrl",
+      "dy_ctrl"
+    ],
+    "fitted_shared_keys": [
+      "wing_width",
+      "wing_width_t",
+      "wing_angle"
     ],
     "Cn2_mix": "fixed",
     "Cn2_targets": "fits",
@@ -60,11 +67,6 @@
   "trainer": {
     "lr": 0.01,
     "lambda_step": 1,
-    "predict_LO_NCPAs": true,
-    "predict_Cn2_profile": true,
-    "predict_wind_speed": true,
-    "pre_init_astrometry": true,
-    "optimize_astrometry": false,
     "random_state": 43,
     "num_epochs": 500,
     "patience": 20,
@@ -89,22 +91,6 @@
     "shrink_weight": 0.0,
     "fit_reg_weight": 0.0
   },
-  "fixed_params": [
-    "Jxy",
-    "bg_ctrl",
-    "dx_ctrl",
-    "dy_ctrl",
-    "F_norm",
-    "F_norm_lambda_ctrl",
-    "src_dirs_x",
-    "src_dirs_y",
-    "wind_dir_single",
-    "F_norm_\u03bb_ctrl",
-    "J_angle",
-    "wing_width",
-    "wing_width_t",
-    "wing_angle"
-  ],
   "weights_subdir": "NFM_factor_calibrator",
   "max_train_samples": null
 }

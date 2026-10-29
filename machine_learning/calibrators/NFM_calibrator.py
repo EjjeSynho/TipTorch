@@ -24,7 +24,7 @@ from copy import deepcopy
 from pathlib import Path
 from torch.utils.data import Dataset, DataLoader, Subset
 from sklearn.ensemble import RandomForestRegressor
-from sklearn.model_selection import train_test_split, KFold, GroupKFold, cross_val_score
+from sklearn.model_selection import GroupKFold, cross_val_score
 
 from tiptorch._config import *
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
@@ -40,15 +40,10 @@ CONFIGS_FOLDER = Path(__file__).resolve().parent / 'configs'
 def load_telemetry_preprocessor(bundle_state: dict) -> TelemetryPreprocessor:
     """
     Telemetry scaler + imputer the calibrator was trained with (TelemetryPreprocessor.state_dict() copied from the dataset
-    cache into the bundle by NFMCalibratorTrainer.save_calibrator). Bundles older than 2026-10-12 do not have it and cannot
-    be loaded: the sklearn pickles they relied on are no longer part of the telemetry cache.
+    cache into the bundle by NFMCalibratorTrainer.save_calibrator).
     """
-    if bundle_state.get('telemetry_preprocessor') is not None:
-        preprocessor = TelemetryPreprocessor.from_state_dict(bundle_state['telemetry_preprocessor'])
-    else:
-        raise ValueError('Calibrator bundle has no telemetry preprocessor (bundle exported from a dataset cache without one?)')
-
-    if (names := bundle_state.get('input_feature_names')) is not None and list(names) != preprocessor.features:
+    preprocessor = TelemetryPreprocessor.from_state_dict(bundle_state['telemetry_preprocessor'])
+    if list(bundle_state['input_feature_names']) != preprocessor.features:
         raise ValueError('Telemetry features of the preprocessor do not match the calibrator inputs')
 
     return preprocessor
@@ -60,7 +55,7 @@ def telemetry_base_params(telemetry_physical, features: list, L0_const: float | 
     seeing, the speed of the single wind layer from the header, the Cn2 profile [GL, layer 2, layer 3] from the AOF profile on the
     fixed altitude grid (Cn2_grid_* features: masses of the altitude bins of Cn2_grid, or the learned soft assignment Cn2_mix
     [N_grid, N_layers] of the factor calibrator, then rescaled by exp(Cn2_offset) [N_layers], its learned dataset-level log-offset
-    per layer) or, for the datasets before 2026-10-13, from the K-means fractions Cn2_frac_binned_2/3. L0 has no telemetry
+    per layer) or, with the K-means Cn2 features (Cn2_binning 'kmeans'), from the fractions Cn2_frac_binned_2/3. L0 has no telemetry
     counterpart, so a dataset-level constant (median of the fits) is used instead.
 
     telemetry_physical: [N, N_features] in physical units (TelemetryPreprocessor.inverse_transform of the calibrator inputs).
@@ -112,31 +107,17 @@ def Cn2_grid_features_from_GLF(Cn2_grid, GLF) -> dict:
     return feats
 
 
-def default_split(dataset, test_size=0.2, random_state=42):
-    """
-    Train/val split stored in the dataset cache, where samples acquired close in time never end up in both subsets.
-    Older caches without it fall back to a random split.
-    """
-    if getattr(dataset, 'train_idx', None) is not None and getattr(dataset, 'val_idx', None) is not None:
-        return np.asarray(dataset.train_idx, dtype=int), np.asarray(dataset.val_idx, dtype=int)
-
-    logger.warning('Dataset cache has no train/val split, falling back to a random split (samples close in time may leak between subsets)')
-    return train_test_split(np.arange(len(dataset)), test_size=test_size, random_state=random_state)
+def default_split(dataset):
+    """ Train/val split stored in the dataset cache, where samples acquired close in time never end up in both subsets. """
+    return np.asarray(dataset.train_idx, dtype=int), np.asarray(dataset.val_idx, dtype=int)
 
 
 def kfold_splits(dataset, base_indices, n_splits, random_state=42):
     """
-    K-fold splits of base_indices (relative positions), grouped by acquisition time when the dataset provides
-    time groups, so that samples close in time stay in the same fold.
+    K-fold splits of base_indices (relative positions), grouped by acquisition time (the time groups of the dataset cache), so that
+    samples close in time stay in the same fold.
     """
-    time_groups = getattr(dataset, 'time_groups', None)
-    
-    if time_groups is None:
-        logger.warning('Dataset cache has no time groups, K-fold splits ignore acquisition times')
-        kf = KFold(n_splits=min(n_splits, len(base_indices)), shuffle=True, random_state=random_state)
-        return list(kf.split(base_indices))
-
-    groups = np.asarray(time_groups)[base_indices]
+    groups = np.asarray(dataset.time_groups)[base_indices]
     gkf = GroupKFold(n_splits=min(n_splits, len(np.unique(groups))), shuffle=True, random_state=random_state)
     return list(gkf.split(base_indices, groups=groups))
 
@@ -181,21 +162,19 @@ class NFMDataset(Dataset):
         self.configs     = data['model_configs']
         self.fitted_vals = data['fitted_param_values']
         self.features    = list(data['telemetry'][0].keys())
-        self.telemetry_preprocessor = data.get('telemetry_preprocessor') # TelemetryPreprocessor.state_dict(), absent in older caches
-        self.Cn2_grid    = data.get('Cn2_grid') # Cn2Grid.state_dict() of the Cn2 features / configs, absent in the caches before 2026-10-13
-        # Derotated PSFs (configs with PupilAngle 0) or raw frames (configs with the per-sample pupil angle, rotated by the model);
-        # the caches before 2026-10-16 are derotated
-        self.derotated   = bool(data.get('derotated', True))
-        # Train/val split grouped by acquisition time (positions into sample_ids), absent in older caches
-        self.train_idx   = data.get('train_idx')
-        self.val_idx     = data.get('val_idx')
-        self.time_groups = data.get('time_groups')
+        self.telemetry_preprocessor = data['telemetry_preprocessor'] # TelemetryPreprocessor.state_dict()
+        self.Cn2_grid    = data['Cn2_grid'] # Cn2Grid.state_dict() of the Cn2 features / configs, None with the K-means Cn2 features
+        # Derotated PSFs (configs with PupilAngle 0) or raw frames (configs with the per-sample pupil angle, rotated by the model)
+        self.derotated   = bool(data['derotated'])
+        # Train/val split grouped by acquisition time (positions into sample_ids)
+        self.train_idx   = data['train_idx']
+        self.val_idx     = data['val_idx']
+        self.time_groups = data['time_groups']
         # Samples flagged 'k_c mismatch' (fewer corrected DM modes, see datasets/MUSE_STD_dataset/kc_mismatch.py): k_c relative to the
         # nominal one and the k_c group (0 = nominal). Their configs carry the scaled DM pitch. The PSF model holds a single k_c per batch, so
-        # the loaders batch the samples per group (KcGroupBatchSampler) and run_model rebuilds the model grids when the k_c changes.
-        # Older caches have no such entries: the groups are then derived from the DM pitches of the configs
-        self.kc_fraction = data.get('kc_fraction')
-        self.kc_group    = data.get('kc_group')
+        # the loaders batch the samples per group (KcGroupBatchSampler) and run_model rebuilds the model grids when the k_c changes
+        self.kc_fraction = np.asarray(data['kc_fraction'], dtype=float)
+        self.kc_group    = np.asarray(data['kc_group'],    dtype=int)
 
         # The fitted table stores the spline control values without the '_ctrl' suffix: J (the isotropic jitter width) and wing_frac
         # (image-frame wing) are the chromatic parameters of STD_fitter.py's regimes, see PSFModelNFM.polychromatic_params
@@ -208,22 +187,6 @@ class NFMDataset(Dataset):
                     self.fitted_vals[i][new_k] = self.fitted_vals[i].pop(old_k)
 
         self.N, self.H, self.W, self.C = self.PSF_cubes.shape
-
-        if self.kc_group is None:
-            pitches = np.array([float(np.min(np.asarray(self._config_pitch(c), dtype=float))) for c in self.configs])
-            nominal = np.max(pitches) # the mismatched samples have a smaller k_c, i.e. a larger pitch... unless all are nominal
-            nominal = pitches[np.argmax(np.unique(pitches, return_counts=True)[1])] if len(np.unique(pitches)) > 1 else pitches[0]
-            uniq    = np.unique(np.round(pitches, 6))
-            uniq    = np.concatenate([[np.round(nominal, 6)], [u for u in uniq if not np.isclose(u, nominal)]])
-            self.kc_group    = np.array([int(np.argmin(np.abs(uniq - p))) for p in pitches], dtype=int)
-            self.kc_fraction = nominal / pitches
-        self.kc_group    = np.asarray(self.kc_group, dtype=int)
-        self.kc_fraction = np.asarray(self.kc_fraction, dtype=float)
-
-    @staticmethod
-    def _config_pitch(config):
-        pitch = config['DM']['DmPitchs']
-        return pitch.detach().cpu().numpy() if isinstance(pitch, torch.Tensor) else pitch
 
     def __len__(self):
         return self.N
@@ -355,24 +318,24 @@ class NFMCalibrator():
         self.telemetry_preprocessor = load_telemetry_preprocessor(state)
         self.features = self.telemetry_preprocessor.features
 
-        # Cn2 profile features: the fixed altitude grid (Cn2_grid_*) of the caches since 2026-10-13 or the former K-means features
-        self.Cn2_grid    = Cn2Grid.from_state_dict(state['Cn2_grid']) if state.get('Cn2_grid') is not None else None
-        self.Cn2_binning = state.get('Cn2_binning', 'grid' if self.Cn2_grid is not None else 'kmeans')
-        # Median Cn2 profile of the K-means features (bundles before 2026-10-26 have none: the one of the distributed bundle is used)
+        # Cn2 profile features: the fixed altitude grid (Cn2_grid_*) or the K-means features (Cn2_binning)
+        self.Cn2_grid    = Cn2Grid.from_state_dict(state['Cn2_grid']) if state['Cn2_grid'] is not None else None
+        self.Cn2_binning = state['Cn2_binning']
+        # Median Cn2 profile of the K-means features (None when the telemetry resources were not packed: the one of the distributed bundle is used)
         self.median_Cn2_profile = state.get('median_Cn2_profile')
 
         # A factor bundle loaded with the base class would return the neutral values of the normalization for every parameter (its
         # network outputs are corrections, see NFMFactorCalibrator): use load_NFM_calibrator, which picks the class from the bundle
-        if state.get('calibrator_type', 'direct') != self.bundle_type:
-            raise TypeError(f"{type(self).__name__} cannot load a '{state.get('calibrator_type')}' calibrator bundle ({Path(checkpoint_path).name}): "
+        if state['calibrator_type'] != self.bundle_type:
+            raise TypeError(f"{type(self).__name__} cannot load a '{state['calibrator_type']}' calibrator bundle ({Path(checkpoint_path).name}): "
                             "use load_NFM_calibrator(bundle_path, device), which selects NFMCalibrator / NFMFactorCalibrator from the bundle")
 
         # Aux params
-        self.LO_modes_max   = state.get('LO_modes_max', None)
-        self.N_spline_nodes = state.get('N_spline_nodes', None)
-        self.model_flags    = state.get('model_flags', None) # None: bundle from before the anisotropic jitter / wing kernel (both False then)
-        self.fixed_inputs   = state.get('fixed_inputs', {})  # {key: tensor [1, ...]}, see fixed_inputs()
-        self.training_config = state.get('training_config', None) # the resolved training config of the run (bundles since 2026-10-21)
+        self.LO_modes_max    = state['LO_modes_max']
+        self.N_spline_nodes  = state['N_spline_nodes'] # None: PSF model without splines
+        self.model_flags     = state['model_flags']
+        self.fitted_shared   = state['fitted_shared']  # {key: tensor [1, ...]}, see fitted_shared_values()
+        self.training_config = state['training_config'] # the resolved training config of the run
 
     @staticmethod
     def _tree_to_cpu(obj):
@@ -467,13 +430,16 @@ class NFMCalibrator():
     def _apply_calibration(self, x_dict_pred: dict, PSF_model) -> None:
         """Adapt a calibrator prediction and apply it to a PSF model."""
         x_dict_adapted = self._adapt_to_PSF_model(x_dict_pred, PSF_model)
-        # The kept fixed inputs of the training (J_angle, wing widths / angle) are dataset-wide values: set them in the PSF model as well
+        # The fitted shared keys (e.g. the wing shape at the medians of the fits) are dataset-wide values: set them in the PSF model as well.
+        # The inputs left to the model and the fitted keys (per-sample fits, unknown for new data) are not touched
         names = PSF_model.inputs_manager.get_names(optimizable_only=False)
-        for key, val in self.fixed_inputs.items():
+        
+        for key, val in self.fitted_shared.items():
             if key in names:
                 cur = PSF_model.inputs_manager[key]
                 v   = torch.as_tensor(val, dtype=cur.dtype, device=cur.device).reshape(1, -1)
                 x_dict_adapted[key] = (v.reshape(-1)[:1].expand(cur.shape[0]) if cur.dim() == 1 else v.expand(cur.shape[0], -1).reshape(cur.shape)).clone()
+       
         PSF_model.update_manager_params(x_dict_adapted)
         _ = PSF_model()
 
@@ -508,7 +474,7 @@ class NFMCalibrator():
         """
         issues = {}
 
-        if self.LO_modes_max is not None and hasattr(PSF_model, 'Z_mode_max'):
+        if hasattr(PSF_model, 'Z_mode_max'):
             n_calib = self.LO_modes_max - 2  # modes predicted (phase bump excluded)
             n_model = PSF_model.Z_mode_max - 2
             if n_calib != n_model:
@@ -531,10 +497,9 @@ class NFMCalibrator():
 
         # Jitter / wing regime: the predictions of a regime the PSF model does not have are ignored, and the model's inputs of a regime the
         # calibrator does not predict stay at their defaults (e.g. J_aniso for a calibrator trained without the stretch, wing_frac for one trained
-        # without wing). The wing shape and J_angle need no check: the bundle's fixed_inputs are set in the PSF model at calibration
-        flags = self.model_flags or {} # None / empty: bundle from before the anisotropic jitter and the wing kernel (both False then)
+        # without wing). The fitted shared keys need no check: the bundle's values are set in the PSF model at calibration
         for flag in ('anisotropic_jitter', 'wing_kernel'):
-            f_calib, f_model = bool(flags.get(flag, False)), bool(getattr(PSF_model, flag, False))
+            f_calib, f_model = bool(self.model_flags[flag]), bool(getattr(PSF_model, flag))
             if f_calib != f_model:
                 issues[flag] = (f_calib, f_model)
                 warnings.warn(f"NFMCalibrator: {flag} mismatch — the calibrator was trained with {flag} = {f_calib}, the PSF model has {f_model}: "
@@ -593,20 +558,54 @@ class NFMCalibrator():
 
 
 
-# Inputs of the PSF model that stay in the model at their initial values when listed in "fixed_params": the wrapper needs them in the input
-# dictionary at every forward (J_angle -> Jxy of the anisotropic jitter kernel, the wing widths and angle -> TipTorch.WingKernel), so they are
-# made non-optimizable (not predicted, not in the outputs transformer) instead of deleted like the other fixed inputs
-FIXED_INPUTS_KEPT = ('J_angle', 'wing_width', 'wing_width_t', 'wing_angle')
+# Key groups of the "calibrator" section of a training config. They do not overlap; the inputs of the PSF model in none of them are left to
+# the model, the calibrator does not touch them (see MODEL_REQUIRED_INPUTS):
+#   predicted_keys         predicted per sample by the network, directly (in the normalized space of the outputs transformer)
+#   factor_keys            predicted per sample by the network as a factor on a telemetry-derived baseline (factor calibrator, FACTOR_BASE_KEYS)
+#   optimized_shared_keys  one value for all samples, starting from the median of the training fits and trained with the network (factor calibrator)
+#   fitted_keys            per sample, the values of the fitted dataset (e.g. the astrometry dx_ctrl / dy_ctrl), not optimized; unknown at inference
+#   fitted_shared_keys     one value for all samples set in the PSF model, the median of the training fits, not optimized (stored in the bundle,
+#                          set in the PSF model by NFMCalibrator)
+# The calibrator outputs (outputs transformer) are the predicted, factor and optimized shared keys
+KEY_GROUPS       = ('predicted_keys', 'factor_keys', 'optimized_shared_keys', 'fitted_keys', 'fitted_shared_keys')
+FACTOR_BASE_KEYS = ('r0', 'L0', 'wind_speed_single', 'Cn2_weights') # the inputs with a telemetry-derived baseline, see telemetry_base_params
+
+# Inputs that PSFModelNFM.forward reads at every call (the jitter width, the stretch and angle of the anisotropic kernel, the chromatic defocus,
+# the NCPAs): left to the model, they are passed at the model's own (wrapper default) values. The other inputs left to the model are not passed
+# at all, and TipTorch uses its own values, re-initialized for every batch from the batch's config (r0, L0, wind, Cn2 profile, source
+# directions) or to its defaults (F, bg, dx, dy, wing shape, ...)
+MODEL_REQUIRED_INPUTS = ('J', 'J_ctrl', 'J_aniso', 'J_angle', 'chrom_defocus', 'chrom_defocus_ctrl', 'LO_coefs')
+
+
+def calibrator_key_groups(calib_cfg: dict, input_names: list) -> dict:
+    """
+    The key groups (KEY_GROUPS) of the "calibrator" section `calib_cfg`, checked against the inputs `input_names` of the PSF model: every key
+    in one group at most, factor keys with a telemetry baseline, no factor / optimized shared keys for the direct calibrator. Keys that are not
+    inputs of the model in its regime (e.g. J_aniso without the anisotropic jitter) are dropped with a warning.
+    Returns {group: [keys]}, each in the order of the model inputs.
+    """
+    groups = {g: list(calib_cfg[g]) for g in KEY_GROUPS}
+    listed = [k for keys in groups.values() for k in keys]
+
+    if repeated := sorted({k for k in listed if listed.count(k) > 1}):
+        raise ValueError(f'{repeated} are listed more than once in the key groups {KEY_GROUPS}: the groups must not overlap')
+    if no_base := [k for k in groups['factor_keys'] if k not in FACTOR_BASE_KEYS]:
+        raise ValueError(f'factor_keys {no_base} have no telemetry baseline (only {FACTOR_BASE_KEYS} have one)')
+    if calib_cfg['type'] == 'direct' and (groups['factor_keys'] or groups['optimized_shared_keys']):
+        raise ValueError('The direct calibrator has no factor_keys / optimized_shared_keys: use the factor calibrator')
+    if unknown := [k for k in listed if k not in input_names]:
+        logger.warning(f'{unknown} are not inputs of the PSF model in the regime of the "model" section, ignored')
+
+    return {g: [k for k in input_names if k in keys] for g, keys in groups.items()}
 
 
 def build_PSF_model(config, model_cfg: dict, device):
     """
     PSFModelNFM from the "model" section of a training config, as the trainer and the validation build it. anisotropic_jitter (the isotropic
     J_ctrl stretched by the achromatic J_aniso along the axis at J_angle, instead of one isotropic J) and wing_kernel (image-frame wing:
-    wing_frac, wing_width, wing_width_t, wing_angle), both False by default,
-    select the regime of the fits (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL). The wing shape (widths, angle) and J_angle are not config
-    values: the model is built with the wrapper defaults and build_NFM_trainer sets them to the medians of the fits ("fixed_from_fits"),
-    which the bundles store (fixed_inputs) and NFMCalibrator re-applies.
+    wing_frac, wing_width, wing_width_t, wing_angle) select the regime of the fits (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL). The model is
+    built with the wrapper defaults; build_NFM_trainer sets the fitted shared keys (e.g. the wing shape) to the medians of the fits, which the
+    bundles store (fitted_shared) and NFMCalibrator sets in the PSF models it calibrates.
     """
     from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 
@@ -615,8 +614,8 @@ def build_PSF_model(config, model_cfg: dict, device):
         multiple_obs       = True,
         LO_NCPAs           = model_cfg['LO_NCPAs'],
         chrom_defocus      = model_cfg['chrom_defocus'],
-        anisotropic_jitter = model_cfg.get('anisotropic_jitter', False),
-        wing_kernel        = model_cfg.get('wing_kernel', False),
+        anisotropic_jitter = model_cfg['anisotropic_jitter'],
+        wing_kernel        = model_cfg['wing_kernel'],
         use_Moffat         = model_cfg['use_Moffat'],
         retain_PSDs        = model_cfg['retain_PSDs'],
         N_spline_nodes     = model_cfg['N_spline_nodes'],
@@ -627,40 +626,53 @@ def build_PSF_model(config, model_cfg: dict, device):
 
 def model_flags(PSF_model) -> dict:
     """ The jitter / wing regime of a PSFModelNFM (stored in the calibrator bundles, checked by NFMCalibrator.check_compatibility). """
-    return {k: bool(getattr(PSF_model, k, False)) for k in ('anisotropic_jitter', 'wing_kernel', 'chrom_defocus')}
+    return {k: bool(getattr(PSF_model, k)) for k in ('anisotropic_jitter', 'wing_kernel', 'chrom_defocus')}
+
+
+def fitted_values(dataset, key, idx=None) -> np.ndarray:
+    """
+    Fitted values of `key` of the samples `idx` (all by default) in the layout of the PSF-model input, [N, n_values]: the Cn2 weights with the
+    ground layer (the fits store the upper layers only), LO_coefs with the phase bump. Raises if the fits carry no such key.
+    """
+    idx = range(len(dataset.fitted_vals)) if idx is None else idx
+    try:
+        values = np.stack([np.asarray(dataset.fitted_vals[int(i)][key], dtype=np.float32).reshape(-1) for i in idx])
+    except KeyError:
+        raise KeyError(f"The fits of the dataset carry no '{key}': refit the dataset in the regime of the config and rebuild the cache") from None
+
+    if key == 'Cn2_weights': # as _calibrator_friendly_fit_dict
+        values = values.clip(min=1e-3)
+        values = np.hstack([(1.0 - values.sum(-1, keepdims=True)).clip(min=1e-3), values])
+
+    return values
 
 
 def fits_median(dataset, idx, key) -> torch.Tensor:
-    """ Median over the samples `idx` of the fitted value `key` of the dataset, as a flat tensor [n_values]. Raises if the fits carry no such key:
-    the kept fixed inputs set from the fits (J_angle, wing shape) define the regime of the model, a default would silently change it. """
-    fits = [dataset.fitted_vals[int(i)] for i in idx if key in dataset.fitted_vals[int(i)]]
-    if not fits:
-        raise KeyError(f"The fits of the dataset carry no '{key}' (fixed_from_fits): refit the dataset in the regime of the config and rebuild the cache")
-    return torch.stack([torch.as_tensor(np.asarray(f[key], dtype=np.float32)).reshape(-1) for f in fits]).median(dim=0).values
+    """ Median over the samples `idx` of the fitted values of `key` (see fitted_values), as a flat tensor [n_values]. """
+    return torch.as_tensor(fitted_values(dataset, key, idx)).median(dim=0).values
 
 
-def fixed_inputs(PSF_model) -> dict:
-    """ Values of the kept fixed inputs (FIXED_INPUTS_KEPT, one value per key: they are dataset-wide) of a PSFModelNFM, as {key: tensor [1, ...]}.
-    Stored in the calibrator bundles and re-applied by NFMCalibrator to the PSF models it calibrates (e.g. J_angle set to the fitted median). """
-    names = PSF_model.inputs_manager.get_names(optimizable_only=False)
-    return {k: PSF_model.inputs_manager[k][:1].detach().cpu().clone() for k in FIXED_INPUTS_KEPT
-            if k in names and not PSF_model.inputs_manager.is_optimizable(k)}
+def fitted_shared_values(PSF_model, keys) -> dict:
+    """ Values of the fitted shared keys `keys` in a PSFModelNFM (one value per key: they are dataset-wide), as {key: tensor [1, ...]}. Stored in
+    the calibrator bundles and set by NFMCalibrator in the PSF models it calibrates (e.g. the wing shape at the fitted medians). """
+    return {k: PSF_model.inputs_manager[k][:1].detach().cpu().clone() for k in keys}
 
 
 def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 0, **trainer_overrides):
     """
-    PSF model, calibrator network, outputs transformer and trainer from a training config (the "model", "calibrator", "trainer",
-    "loss" and "fixed_params" sections of calibrators/configs/NFM_calibrator_config.json), as train_NFM_calibrator.py builds them. Shared by the
-    validation / analysis scripts so that they reproduce the training setup exactly.
+    PSF model, calibrator network, outputs transformer and trainer from a training config (the "model", "calibrator", "trainer" and
+    "loss" sections of calibrators/configs/NFM_calibrator_config.json; the key groups of the "calibrator" section, see KEY_GROUPS, say what
+    the calibrator does with each input of the PSF model), as train_NFM_calibrator.py builds them. Shared by the validation / analysis scripts
+    so that they reproduce the training setup exactly.
 
-    trainer_overrides (e.g. train_idx, val_idx, random_state) replace the corresponding trainer arguments.
+    trainer_overrides (e.g. train_idx, val_idx) replace the corresponding trainer arguments.
     Returns (PSF_model, calibrator, outputs_transformer, trainer).
     """
     # The PSF model is initialized with a representative batch config, the actual configs are set per batch in run_model
     # (samples of a single k_c group, the configs of different k_c groups cannot be merged into one model)
-    groups = np.asarray(getattr(dataset, 'kc_group', np.zeros(len(dataset), dtype=int)))
-    pool   = np.flatnonzero(groups == np.bincount(groups).argmax())
-    batch  = tuple(dataset[int(i)] for i in np.random.default_rng(seed).choice(pool, size=min(cfg['batch_size'], len(pool)), replace=False))
+    kc_groups = np.asarray(dataset.kc_group)
+    pool      = np.flatnonzero(kc_groups == np.bincount(kc_groups).argmax())
+    batch     = tuple(dataset[int(i)] for i in np.random.default_rng(seed).choice(pool, size=min(cfg['batch_size'], len(pool)), replace=False))
     _, _, _, batch_config, _ = dataset.collate_batch(batch, device=device)
 
     with torch.no_grad():
@@ -668,104 +680,80 @@ def build_NFM_trainer(cfg: dict, dataset, device, weights_dir=None, seed: int = 
     del batch, batch_config
     release_gpu_memory()
 
-    # Parameters fixed externally are not predicted: deleted from the model inputs, except the ones the model needs at every forward
-    # (FIXED_INPUTS_KEPT), which stay at their initial values as non-optimizable inputs
-    for key in cfg['fixed_params']:
-        try:
-            if key in FIXED_INPUTS_KEPT:
-                if key in PSF_model.inputs_manager.get_names(optimizable_only=False):
-                    PSF_model.inputs_manager.set_optimizable([key], False)
-            else:
-                PSF_model.inputs_manager.delete(key)
-        except Exception:
-            pass
+    # The calibrator outputs (predicted, factor and optimized shared keys) are the optimizable inputs of the PSF model, the others are not
+    names   = PSF_model.inputs_manager.get_names(optimizable_only=False)
+    groups  = calibrator_key_groups(cfg['calibrator'], names)
+    outputs = [k for k in names if k in groups['predicted_keys'] + groups['factor_keys'] + groups['optimized_shared_keys']]
+    PSF_model.inputs_manager.set_optimizable(outputs, True)
+    PSF_model.inputs_manager.set_optimizable([k for k in names if k not in outputs], False)
 
-    # Kept fixed inputs set to the training-set median of the fits ("fixed_from_fits" of the model section: J_angle, which the fitter fits per
-    # star, and the wing shape wing_width / wing_width_t / wing_angle, which the fitter sets; the calibrator holds one dataset-wide value of
-    # each). The values go into the bundle (fixed_inputs)
+    # Fitted shared keys: one dataset-wide value in the PSF model, the training-set median of the fits (e.g. the wing shape wing_width /
+    # wing_width_t / wing_angle, which the fitter sets). The values go into the bundle (fitted_shared)
     train_idx = trainer_overrides.get('train_idx')
     train_idx = default_split(dataset)[0] if train_idx is None else np.asarray(train_idx, dtype=int)
-    names     = PSF_model.inputs_manager.get_names(optimizable_only=False)
-    
-    for key in cfg['model'].get('fixed_from_fits', []):
-        if key not in FIXED_INPUTS_KEPT or key not in cfg['fixed_params']:
-            raise ValueError(f"fixed_from_fits: '{key}' must be one of the kept fixed inputs {FIXED_INPUTS_KEPT} and listed in fixed_params")
-        
-        if key not in names:
-            logger.warning(f"fixed_from_fits: the PSF model has no input '{key}' in this regime, skipped")
-            continue
-        
+
+    for key in groups['fitted_shared_keys']:
         median = fits_median(dataset, train_idx, key)
         cur    = PSF_model.inputs_manager[key]
-        
+
         with torch.no_grad():
             cur[:] = (median[0] if median.numel() == 1 else median.view(1, -1).expand(cur.shape[0], -1).reshape(cur.shape)).to(device=cur.device, dtype=cur.dtype)
-        
-        logger.info(f"fixed_from_fits: {key} = {np.round(median.numpy(), 3).tolist()} (median of the training fits)")
 
-    if PSF_model.use_Moffat:
-        PSF_model.inputs_manager.delete('theta')
-        PSF_model.inputs_manager.delete('ratio')
-
-    PSF_model.inputs_manager.set_optimizable(['LO_coefs'],          cfg['trainer']['predict_LO_NCPAs'])
-    PSF_model.inputs_manager.set_optimizable(['Cn2_weights'],       cfg['trainer']['predict_Cn2_profile'])
-    PSF_model.inputs_manager.set_optimizable(['wind_speed_single'], cfg['trainer']['predict_wind_speed'])
+        logger.info(f"fitted_shared_keys: {key} = {np.round(median.numpy(), 3).tolist()} (median of the training fits)")
 
     # Outputs transformer: calibrator predictions <-> PSF-model inputs, without the phase bump column of LO_coefs
     outputs_transformer = deepcopy(PSF_model.inputs_manager.get_transformer())
     buf = outputs_transformer.unstack(PSF_model.inputs_manager.stack())
-    
+
     if 'LO_coefs' in buf:
         buf['LO_coefs'] = buf['LO_coefs'][:, 1:]
     _ = outputs_transformer.stack(buf)
-    
+
     del buf
 
-    calibrator_type = cfg.get('calibrator', {}).get('type', 'direct')
-    trainer_kwargs  = dict(
-        device              = device,
-        batch_size          = cfg['batch_size'],
-        lr                  = cfg['trainer']['lr'],
-        lambda_step         = cfg['trainer']['lambda_step'],
-        predict_LO_NCPAs    = cfg['trainer']['predict_LO_NCPAs'],
-        predict_Cn2_profile = cfg['trainer']['predict_Cn2_profile'],
-        random_state        = cfg['trainer']['random_state'],
-        pre_init_astrometry = cfg['trainer']['pre_init_astrometry'],
-        optimize_astrometry = cfg['trainer']['optimize_astrometry'],
-        collate_fn          = dataset.collate_batch,
-        loss_cfg            = cfg.get('loss'),
-        weights_dir         = weights_dir,
+    calib_cfg      = cfg['calibrator']
+    trainer_kwargs = dict(
+        device             = device,
+        batch_size         = cfg['batch_size'],
+        lr                 = cfg['trainer']['lr'],
+        lambda_step        = cfg['trainer']['lambda_step'],
+        fitted_keys        = groups['fitted_keys'],
+        fitted_shared_keys = groups['fitted_shared_keys'],
+        collate_fn         = dataset.collate_batch,
+        loss_cfg           = cfg['loss'],
+        weights_dir        = weights_dir,
     )
     trainer_kwargs.update(trainer_overrides)
 
-    if calibrator_type == 'direct':
+    if calib_cfg['type'] == 'direct':
         calibrator = SmallCalibratorNet(
             n_features   = len(dataset.features),
             n_outputs    = outputs_transformer.get_stacked_size(),
-            hidden_dim   = cfg['calibrator']['hidden_dim'],
-            dropout_rate = cfg['calibrator']['dropout_rate'],
+            hidden_dim   = calib_cfg['hidden_dim'],
+            dropout_rate = calib_cfg['dropout_rate'],
         ).to(device)
         trainer = NFMCalibratorTrainer(PSF_model, calibrator, dataset, outputs_transformer, **trainer_kwargs)
 
-    elif calibrator_type == 'factor':
+    elif calib_cfg['type'] == 'factor':
+        # The network outputs only the predicted and factor keys; the optimized shared keys are dataset-level parameters of the trainer
         calibrator = SmallFactorNet(
             n_features   = len(dataset.features),
-            n_outputs    = outputs_transformer.get_stacked_size(),
-            hidden_dim   = cfg['calibrator']['hidden_dim'],
-            dropout_rate = cfg['calibrator']['dropout_rate'],
+            n_outputs    = sum(sl.stop - sl.start for k, sl in outputs_transformer.slices.items() if k not in groups['optimized_shared_keys']),
+            hidden_dim   = calib_cfg['hidden_dim'],
+            dropout_rate = calib_cfg['dropout_rate'],
         ).to(device)
         trainer = NFMFactorCalibratorTrainer(
             PSF_model, calibrator, dataset, outputs_transformer,
-            factor_keys = cfg['calibrator'].get('factor_keys', ('r0', 'L0', 'wind_speed_single', 'Cn2_weights')),
-            const_keys  = cfg['calibrator'].get('const_keys',  ('F_ctrl', 'LO_coefs')),
-            Cn2_mix     = cfg['calibrator'].get('Cn2_mix',     'fixed'),
-            Cn2_targets = cfg['calibrator'].get('Cn2_targets', 'fits'),
-            Cn2_offset  = cfg['calibrator'].get('Cn2_offset',  False),
+            factor_keys           = groups['factor_keys'],
+            optimized_shared_keys = groups['optimized_shared_keys'],
+            Cn2_mix               = calib_cfg['Cn2_mix'],
+            Cn2_targets           = calib_cfg['Cn2_targets'],
+            Cn2_offset            = calib_cfg['Cn2_offset'],
             **trainer_kwargs,
         )
 
     else:
-        raise ValueError(f"Unknown calibrator type '{calibrator_type}', expected 'direct' or 'factor'")
+        raise ValueError(f"Unknown calibrator type '{calib_cfg['type']}', expected 'direct' or 'factor'")
 
     trainer.training_config = deepcopy(cfg) # the resolved training config, stored in the bundle (save_calibrator) for the validation
     return PSF_model, calibrator, outputs_transformer, trainer
@@ -786,26 +774,24 @@ class NFMCalibratorTrainer:
     Parameters
     ----------
     PSF_model : PSFModelNFM
-        Initialised (and pruned) PSF model.
+        Initialised PSF model, its optimizable inputs the calibrator outputs and its fitted shared keys set (build_NFM_trainer).
     calibrator : nn.Module
         Network mapping a [B, N_features] telemetry tensor -> [B, N_outputs] stacked params.
     dataset : NFMDataset (or compatible)
-        Full labelled dataset. Split internally via train_test_split.
+        Full labelled dataset, split by the train / val indices stored in its cache (default_split) unless train_idx / val_idx are given.
     outputs_transformer : InputsTransformer
         Knows how to stack / unstack the calibrator output vector.
     device : torch.device
     batch_size, lr, lambda_step : int / float / int
         Basic training hyper-parameters.
-    predict_LO_NCPAs, predict_Cn2_profile : bool
-    pre_init_astrometry : bool
-        Seed per-sample dx/dy from dataset fitted values instead of zeros.
-    optimize_astrometry : bool
-        Include per-sample dx/dy in the optimizer.
+    fitted_keys : list[str]
+        Inputs set per sample to the values of the fitted dataset (e.g. the astrometry dx_ctrl / dy_ctrl), not optimized.
+    fitted_shared_keys : list[str]
+        Inputs set in the PSF model to one dataset-wide value (the medians of the fits, see build_NFM_trainer), stored in the bundle.
     weights_dir : Path | None
         Directory for checkpoints / bundles (default: WEIGHTS_FOLDER/NFM_calibrator).
-    test_size : float
-        Fraction of samples held out for validation.
-    random_state : int
+    train_idx, val_idx : array | None
+        Train / val split (dataset positions); default: the one stored in the dataset cache.
     """
     calibrator_type = 'direct'
 
@@ -820,13 +806,9 @@ class NFMCalibratorTrainer:
         batch_size           = 16,
         lr                   = 1e-2,
         lambda_step          = 2,
-        predict_LO_NCPAs     = True,
-        predict_Cn2_profile  = True,
-        pre_init_astrometry  = True,
-        optimize_astrometry  = False,
+        fitted_keys          = (),
+        fitted_shared_keys   = (),
         weights_dir          = None,
-        test_size            = 0.20,
-        random_state         = 42,
         train_idx            = None,
         val_idx              = None,
         collate_fn: Optional[Callable] = None,
@@ -839,10 +821,8 @@ class NFMCalibratorTrainer:
         self.device              = device
         self.batch_size          = batch_size
         self.lr                  = lr
-        self.predict_LO_NCPAs    = predict_LO_NCPAs
-        self.predict_Cn2_profile = predict_Cn2_profile
-        self.pre_init_astrometry = pre_init_astrometry
-        self.optimize_astrometry = optimize_astrometry
+        self.fitted_keys         = list(fitted_keys)
+        self.fitted_shared_keys  = list(fitted_shared_keys)
         self.collate_fn          = collate_fn
         self.weights_dir         = Path(weights_dir) if weights_dir else WEIGHTS_FOLDER / 'NFM_calibrator'
         self.weights_dir.mkdir(parents=True, exist_ok=True)
@@ -875,7 +855,7 @@ class NFMCalibratorTrainer:
             self.train_idx = np.asarray(train_idx, dtype=int)
             self.val_idx   = np.asarray(val_idx,   dtype=int)
         else:
-            self.train_idx, self.val_idx = default_split(dataset, test_size=test_size, random_state=random_state)
+            self.train_idx, self.val_idx = default_split(dataset)
         self.train_loader = self._make_loader(self.train_idx, shuffle=True)
         self.val_loader   = self._make_loader(self.val_idx,   shuffle=False)
 
@@ -884,16 +864,18 @@ class NFMCalibratorTrainer:
         self.lambda_id_sets = [list(range(dataset.C))] if lambda_step == 1 else self._build_wavelength_sets(lambda_step, dataset.C-1)
         self.lambda_sets    = [self.lambda_full[ids] for ids in self.lambda_id_sets]
 
-        # Astrometry
-        self._init_astrometry()
+        # Inputs taken from the PSF model and broadcast to the batch at every forward: the fitted shared keys and, among the inputs left to the
+        # model, the ones its forward needs (MODEL_REQUIRED_INPUTS). The other inputs left to the model are not passed (see run_model)
+        names = PSF_model.inputs_manager.get_names(optimizable_only=False)
+        self.model_keys = [k for k in names if k in self.fitted_shared_keys or
+                           (k in MODEL_REQUIRED_INPUTS and k not in outputs_transformer.slices and k not in self.fitted_keys)]
 
-        # Phase-bump (first LO coef) and optional NCPA median fallback
-        LO_data = np.array([d['LO_coefs'] for d in dataset.fitted_vals], dtype=np.float32)
-        self.phase_bump   = torch.tensor(LO_data[:, 0], device=device, dtype=torch.float32)
-        self.NCPAs_median = (
-            None if predict_LO_NCPAs else
-            torch.tensor(np.median(LO_data[:, 1:], axis=0)[None, ...], device=device, dtype=torch.float32)
-        )
+        # Fitted keys: the per-sample values of the fitted dataset, [N_dataset, ...] in the shape of the PSF-model input
+        self.fitted = {k: torch.as_tensor(fitted_values(dataset, k), device=device).reshape(len(dataset), *PSF_model.inputs_manager[k].shape[1:])
+                       for k in self.fitted_keys}
+
+        # Phase bump (first LO coefficient): always the per-sample fit, it is not predicted
+        self.phase_bump = torch.as_tensor(fitted_values(dataset, 'LO_coefs')[:, 0], device=device) if 'LO_coefs' in names else None
 
         self.optimizer, self.scheduler = self._make_optimizer()
 
@@ -917,8 +899,8 @@ class NFMCalibratorTrainer:
 
 
     def _kc_groups_summary(self):
-        groups = getattr(self.dataset, 'kc_group', None)
-        if groups is None or len(np.unique(groups)) == 1:
+        groups = self.dataset.kc_group
+        if len(np.unique(groups)) == 1:
             return 'k_c groups: none (single k_c)'
         
         parts = []
@@ -939,33 +921,13 @@ class NFMCalibratorTrainer:
             raise ValueError("NFMCalibratorTrainer requires a collate function. Pass collate_fn=... or define dataset.collate_batch(batch, device).")
 
         indices = [int(i) for i in indices]
-        groups  = getattr(self.dataset, 'kc_group', None)
-        if groups is None: # datasets without k_c groups: plain batching
-            return DataLoader(dataset=Subset(self.dataset, indices), batch_size=self.batch_size, shuffle=shuffle, num_workers=0, collate_fn=collator, drop_last=False)
-
         # One k_c group per batch (the PSF model holds a single k_c): the mismatched samples form their own, possibly smaller, batches
         return DataLoader(
             dataset=Subset(self.dataset, indices),
-            batch_sampler=KcGroupBatchSampler(np.asarray(groups)[indices], self.batch_size, shuffle),
+            batch_sampler=KcGroupBatchSampler(np.asarray(self.dataset.kc_group)[indices], self.batch_size, shuffle),
             num_workers=0,
             collate_fn=collator,
         )
-
-
-    def _init_astrometry(self):
-        n      = len(self.dataset)
-        N_ctrl = len(np.atleast_1d(self.dataset.fitted_vals[0].get('dx_ctrl', [0])))
-        
-        if self.pre_init_astrometry and 'dx_ctrl' in self.dataset.fitted_vals[0]:
-            dx_data = np.array([d['dx_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
-            dy_data = np.array([d['dy_ctrl'] for d in self.dataset.fitted_vals], dtype=np.float32)
-        else:
-            self.optimize_astrometry = True
-            dx_data = np.zeros((n, N_ctrl), dtype=np.float32)
-            dy_data = np.zeros((n, N_ctrl), dtype=np.float32)
-            
-        self.dx = torch.tensor(dx_data, device=self.device, dtype=torch.float32, requires_grad=self.optimize_astrometry)
-        self.dy = torch.tensor(dy_data, device=self.device, dtype=torch.float32, requires_grad=self.optimize_astrometry)
 
 
     def _trainable_tensors(self):
@@ -982,10 +944,6 @@ class NFMCalibratorTrainer:
         
         groups = [{'params': self.calibrator.parameters(), 'lr': lr, 'weight_decay': 5e-4}]
         groups += self._extra_param_groups(lr)
-       
-        if self.optimize_astrometry:
-            groups.append({'params': [self.dx, self.dy], 'lr': 1e-3, 'weight_decay': 1e-5})
-            
         opt = optim.AdamW(groups, lr=lr)
         sch = optim.lr_scheduler.ReduceLROnPlateau(opt, mode='min', factor=0.5, patience=7, min_lr=1e-6)
       
@@ -996,25 +954,22 @@ class NFMCalibratorTrainer:
     def run_model(self, x_dict_NN, config, idx, lambda_ids):
         """Run the PSF model for a batch at the given wavelength indices."""
         # NOTE: idx are dataset ids (global sample ids), not per-batch local offsets.
-        self.PSF_model.model.N_obs = len(idx)
-        x_dict = self.PSF_model.inputs_manager.to_dict()
-        # Update only parameters predicted by the calibrator and keep the rest from manager defaults.
-        x_dict.update({k: v for k, v in x_dict_NN.items() if k in x_dict})
-        # The non-predicted inputs kept in the model (FIXED_INPUTS_KEPT: J_angle, wing widths / angle) are dataset-wide constants stored
-        # with the N_obs the model was built with: broadcast them to the batch (the last batch and the k_c-group batches are smaller)
-       
-        for k in FIXED_INPUTS_KEPT:
-            if k in x_dict and x_dict[k].shape[0] != len(idx):
-                x_dict[k] = x_dict[k][:1].expand(len(idx), *x_dict[k].shape[1:]).clone()
-        
-        # Astrometric shifts are stored as full-dataset tensors and indexed per current batch.
-        x_dict['dx_ctrl'] = self.dx[idx]
-        x_dict['dy_ctrl'] = self.dy[idx]
+        B = len(idx)
+        self.PSF_model.model.N_obs = B
+        manager = self.PSF_model.inputs_manager
 
-        # Re-attach the phase bump as the first LO coefficient.
-        bump = self.phase_bump[idx].unsqueeze(-1)
-        ncpa = x_dict['LO_coefs'] if self.predict_LO_NCPAs else self.NCPAs_median.expand(len(idx), -1)
-        x_dict['LO_coefs'] = torch.hstack((bump, ncpa))
+        # The fitted shared keys and the required inputs left to the model: dataset-wide values in the PSF model, stored with the N_obs the
+        # model was built with, broadcast to the batch. The other inputs left to the model are not passed: TipTorch re-initializes them for
+        # every batch from its config or to its defaults (Update below)
+        x_dict = {k: manager[k][:1].expand(B, *manager[k].shape[1:]).clone() for k in self.model_keys}
+        # The calibrator outputs (predicted, factor and optimized shared keys) and the per-sample fits of the fitted keys
+        x_dict.update({k: v for k, v in x_dict_NN.items() if k in self.outputs_transformer.slices})
+        x_dict.update({k: v[idx] for k, v in self.fitted.items()})
+
+        # The phase bump (first LO coefficient) is the per-sample fit; the calibrator outputs carry the LO coefficients without it
+        if 'LO_coefs' in x_dict:
+            NCPAs = x_dict['LO_coefs'] if 'LO_coefs' in self.outputs_transformer.slices else x_dict['LO_coefs'][:, 1:]
+            x_dict['LO_coefs'] = torch.hstack((self.phase_bump[idx].unsqueeze(-1), NCPAs))
 
         # Predict only a subset of wavelengths at once to reduce peak GPU memory.
         wvl = self.lambda_full[lambda_ids].to(device=self.device)
@@ -1059,6 +1014,16 @@ class NFMCalibratorTrainer:
     def _predict(self, tel_b):
         x_pred = self.calibrator(tel_b)
         return x_pred, self._params_from_pred(x_pred, tel_b)
+
+
+    def net_slices(self) -> dict:
+        """{key: slice of the network output}: the stacked layout of the outputs transformer (the factor network predicts only some keys)."""
+        return self.outputs_transformer.slices
+
+
+    @property
+    def N_net_outputs(self) -> int:
+        return max((sl.stop for sl in self.net_slices().values()), default=0)
 
 
     def _params_to_normalized(self, x_dict):
@@ -1110,7 +1075,7 @@ class NFMCalibratorTrainer:
             PSF = self.balanced_loss(PSF_data, PSF_pred)
             if self.legacy_loss_weight > 0:
                 PSF = PSF + self.legacy_loss_weight * self._legacy_PSF_loss(PSF_data, PSF_pred)
-        if self.predict_LO_NCPAs and 'LO_coefs' in x_dict_pred:
+        if 'LO_coefs' in x_dict_pred: # predicted (or optimized shared) LO coefficients
             c  = x_dict_pred['LO_coefs'] # predicted modes without the phase bump: [defocus, astig., astig., coma, ...]
             # L2 regularization of predicted LO modes
             LO = c.pow(2).sum(-1) * 1e-7
@@ -1147,10 +1112,6 @@ class NFMCalibratorTrainer:
             'optimizer_state_dict':  self.optimizer.state_dict(),
         }
         data.update(self._extra_state())
-        if self.optimize_astrometry:
-            data['dx'] = self.dx.detach().clone()
-            data['dy'] = self.dy.detach().clone()
-            
         torch.save(data, path)
         logger.debug(f"Checkpoint saved -> {path}")
 
@@ -1174,9 +1135,6 @@ class NFMCalibratorTrainer:
         self._load_extra_state(ckpt)
         if load_optimizer and 'optimizer_state_dict' in ckpt:
             self.optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        if self.optimize_astrometry and 'dx' in ckpt:
-            self.dx.data = ckpt['dx'].to(self.device)
-            self.dy.data = ckpt['dy'].to(self.device)
         logger.info(f"Checkpoint loaded <- {path} (epoch {ckpt.get('epoch', '?')})")
         return ckpt.get('epoch'), ckpt.get('train_loss'), ckpt.get('val_loss')
 
@@ -1251,7 +1209,7 @@ class NFMCalibratorTrainer:
         if standardize:
             inv_var = 1.0 / self._train_fit_targets().var(dim=0).clamp(min=1e-4)
         else:
-            inv_var = torch.ones(self.N_outputs, device=self.device)
+            inv_var = torch.ones(self.N_net_outputs, device=self.device)
         criterion = lambda y_pred, y: ((y_pred - y).pow(2) * inv_var).mean()
 
         for epoch in range(num_epochs):
@@ -1317,7 +1275,7 @@ class NFMCalibratorTrainer:
             # Validation can return full cubes for diagnostics; tensors are kept on CPU by default.
             PSFs_pred = torch.zeros((N, self.N_wvl_total, self.H, self.W))
             PSFs_data = torch.zeros((N, self.N_wvl_total, self.H, self.W))
-            NN_pred   = torch.zeros((N, self.N_outputs))
+            NN_pred   = torch.zeros((N, self.N_net_outputs))
             tel_vecs  = torch.zeros((N, self.N_features))
 
         total_loss, total_count = 0.0, 0
@@ -1420,18 +1378,14 @@ class NFMCalibratorTrainer:
                 # gradients non-finite: the optimizer step would corrupt the weights and the next forward pass would crash
                 # (torch.linalg.lstsq of the tomographic reconstructor). Skip such batches instead.
                 grads = [p.grad for p in self._trainable_tensors() if p.grad is not None]
-                if self.optimize_astrometry:
-                    grads += [g for g in (self.dx.grad, self.dy.grad) if g is not None]
                 if not all(torch.isfinite(g).all() for g in grads):
                     bad_grad_count += 1
                     logger.warning(f"Non-finite gradients at epoch {epoch} (sample ids {idxs_b.tolist()}): batch skipped, {bad_grad_count} so far")
                     self.optimizer.zero_grad(set_to_none=True)
                     continue
 
-                # Gradient clipping helps keep training stable for both NN and optional astrometry tensors.
+                # Gradient clipping helps keep training stable
                 torch.nn.utils.clip_grad_norm_(self._trainable_tensors(), max_norm=1.0)
-                if self.optimize_astrometry:
-                    torch.nn.utils.clip_grad_norm_([self.dx, self.dy], max_norm=10.0)
                 self.optimizer.step()
                 epoch_loss += batch_loss
                 n_batches  += 1
@@ -1622,17 +1576,24 @@ class NFMCalibratorTrainer:
         """
         Fine-tune only specific output dimensions while anchoring the rest to a frozen reference.
 
-        tuned_params : list[str] - keys present in outputs_transformer.slices.
+        tuned_params : list[str] - keys predicted by the network (net_slices); the others (constants of the factor calibrator) are skipped.
         """
+        slices = self.net_slices()
+        if skipped := [k for k in tuned_params if k not in slices]:
+            warnings.warn(f"tune_calibrator: {skipped} are not predicted by the network, skipped")
+        tuned_params = [k for k in tuned_params if k in slices]
+        if not tuned_params:
+            raise ValueError(f"tune_calibrator: none of the tuned parameters is predicted by the network ({list(slices)})")
+
         ref = deepcopy(self.calibrator)
         ref.eval()
         for p in ref.parameters():
             p.requires_grad_(False)
 
-        mask = torch.zeros(self.N_outputs, dtype=torch.bool, device=self.device)
+        mask = torch.zeros(self.N_net_outputs, dtype=torch.bool, device=self.device)
         for k in tuned_params:
-            mask[self.outputs_transformer.slices[k]] = True
-        mask = mask.unsqueeze(0)   # [1, N_outputs] for broadcasting
+            mask[slices[k]] = True
+        mask = mask.unsqueeze(0)   # [1, N_net_outputs] for broadcasting
 
         opt_tune = optim.AdamW(self.calibrator.parameters(), lr=lr, weight_decay=5e-4)
         sch_tune = optim.lr_scheduler.ReduceLROnPlateau(opt_tune, factor=0.5, patience=5)
@@ -1688,10 +1649,6 @@ class NFMCalibratorTrainer:
         see data_processing/NFM_bundle.py) with the calibrator on top (stage 3). The telemetry preprocessor and the Cn2 grid are the ones
         of the dataset cache, i.e. the ones the calibrator was trained with. install_calibrator copies the result into the distributed bundle.
         """
-        telemetry_preprocessor = getattr(self.dataset, 'telemetry_preprocessor', None)
-        if telemetry_preprocessor is None:
-            logger.warning('The dataset cache has no telemetry preprocessor (scaler + imputer): the bundle will not be loadable '
-                           'by NFMCalibrator, regenerate the dataset cache with create_STD_dataset.py')
         resources = telemetry_resources()
         if 'archive_telemetry' not in resources or 'median_Cn2_profile' not in resources:
             logger.warning(f'{BUNDLE_PATH} has no telemetry resources (LGS / IRLOS tables, median Cn2 profile): the bundle will not be '
@@ -1701,22 +1658,20 @@ class NFMCalibratorTrainer:
             'net_state_dict': self.calibrator.state_dict(),
             'net_arch': {
                 'n_features':   self.N_features,
-                'n_outputs':    self.N_outputs,
+                'n_outputs':    self.N_net_outputs,
                 'hidden_dim':   self.calibrator.network[0].out_features,
                 'dropout_rate': self.calibrator.network[3].p,
             },
             'input_feature_names':  self.dataset.features,
             'output_feature_names': list(self.outputs_transformer.slices.keys()),
             'outputs_transformer':  self.outputs_transformer.save(),
-            'telemetry_preprocessor': telemetry_preprocessor, # TelemetryPreprocessor.state_dict()
-            'Cn2_grid':             getattr(self.dataset, 'Cn2_grid', None), # Cn2Grid.state_dict() of the Cn2 features
-            'Cn2_binning':          'grid' if getattr(self.dataset, 'Cn2_grid', None) is not None else 'kmeans',
-            'predict_LO_NCPAs':     self.predict_LO_NCPAs,
-            'predict_Cn2_profile':  self.predict_Cn2_profile,
+            'telemetry_preprocessor': self.dataset.telemetry_preprocessor, # TelemetryPreprocessor.state_dict()
+            'Cn2_grid':             self.dataset.Cn2_grid, # Cn2Grid.state_dict() of the Cn2 features, None with the K-means features
+            'Cn2_binning':          'grid' if self.dataset.Cn2_grid is not None else 'kmeans',
             'LO_modes_max':         self.PSF_model.Z_mode_max,
             'N_spline_nodes':       getattr(self.PSF_model, 'N_wvl_ctrl', None),
             'model_flags':          model_flags(self.PSF_model), # jitter / wing regime of the PSF model the calibrator was trained with
-            'fixed_inputs':         fixed_inputs(self.PSF_model), # kept fixed inputs (J_angle, wing widths / angle), re-applied at calibration
+            'fitted_shared':        fitted_shared_values(self.PSF_model, self.fitted_shared_keys), # set in the PSF models NFMCalibrator calibrates
             'training_config':      getattr(self, 'training_config', None), # the resolved training config (build_NFM_trainer): validate_NFM_calibrator.py rebuilds the trainer from it
             'predict_phase_bump':   False,
             'loss_cfg':             self.loss_cfg,
@@ -1738,10 +1693,12 @@ class NFMCalibratorTrainer:
 #        soft assignment softmax(Cn2_mix_logits) [N_grid, N_layers], a dataset-level parameter initialized at the altitude bins
 #        of the grid and learned end-to-end (Cn2_mix: learned | fixed); its corrections are pretrained to zero (Cn2_targets:
 #        prior), since the fitted profiles are unreliable, or to the fits like the other factor keys (Cn2_targets: fits)
-#    direct keys (dn, J_ctrl, ...):                        value = median of the fits + delta, in the normalized space
-#    constant keys (F_ctrl, LO_coefs):                     one dataset-level vector optimized end-to-end, no per-sample term
-#  The outputs keep the stacked layout of the direct calibrator (outputs_transformer.slices), so the validation, the k-fold
-#  weighting and the bundles work the same way; the entries of the constant keys are unused.
+#    predicted keys (dn, J_ctrl):                          value = median of the fits + delta, in the normalized space
+#    optimized shared keys (F_ctrl, LO_coefs,              one value for all samples, starting from the median of the training fits and
+#      wing_frac_ctrl, J_aniso, J_angle)                   trained end-to-end together with the network, not predicted
+#  The network outputs only the predicted and factor keys; the parameters the calibrator returns (with the optimized shared keys), the
+#  validation plots and the bundles keep the stacked layout of the outputs transformer. The fitted and fitted shared keys and the inputs
+#  left to the model are handled as for the direct calibrator (see KEY_GROUPS).
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _as_float_tensor(value, device) -> torch.Tensor:
@@ -1763,26 +1720,38 @@ class FactorParameterization:
     Maps the corrections predicted by the factor network to PSF-model parameters, and the fits to corrections (pretraining
     targets). The statistics (median of the normalized fits, mean log-ratio fit / base of the factor entries, std of the
     corrections, i.e. the widths of the shrinkage prior) are computed on the training set by fit() and stored in the bundle.
+
+    The optimized shared keys (one dataset-level value each, trained by NFMFactorCalibratorTrainer) are not predicted: params() takes their
+    values from `consts`.
+
+    The statistics live in the stacked layout of the outputs transformer [N_outputs]; the network outputs only the predicted and factor entries
+    [N_net] (pred_index: their positions in the stacked layout, net_slices: the keys' slices of the network output).
     """
     MIX_EPS = 1e-2 # leakage of the initial soft assignment of the grid nodes to the other model layers
 
-    def __init__(self, slices: dict, features: list, factor_keys, const_keys, tel_mean, tel_scale,
+    def __init__(self, slices: dict, features: list, factor_keys, tel_mean, tel_scale, optimized_shared_keys=(),
                  L0_const=None, Y_median=None, log_ratio_mean=None, delta_std=None, Cn2_grid=None, Cn2_targets='fits'):
-        self.slices      = {k: (v if isinstance(v, slice) else slice(int(v[0]), int(v[1]))) for k, v in slices.items()}
-        self.features    = list(features)
-        self.factor_keys = [k for k in factor_keys if k in self.slices]
-        self.const_keys  = [k for k in const_keys  if k in self.slices]
-        self.direct_keys = [k for k in self.slices if k not in self.factor_keys and k not in self.const_keys]
-        self.L0_const    = None if L0_const is None else float(L0_const)
-        self.N_outputs   = max(sl.stop for sl in self.slices.values())
+        self.slices                = {k: (v if isinstance(v, slice) else slice(int(v[0]), int(v[1]))) for k, v in slices.items()}
+        self.features              = list(features)
+        self.factor_keys           = [k for k in factor_keys           if k in self.slices]
+        self.optimized_shared_keys = [k for k in optimized_shared_keys if k in self.slices]
+        self.direct_keys           = [k for k in self.slices if k not in self.factor_keys and k not in self.optimized_shared_keys] # predicted_keys
+        self.L0_const              = None if L0_const is None else float(L0_const)
+        self.N_outputs             = max(sl.stop for sl in self.slices.values())
+
+        net_keys         = [k for k in self.slices if k not in self.optimized_shared_keys] # the predicted and factor keys
+        self.pred_index  = torch.tensor([i for k in net_keys for i in range(self.slices[k].start, self.slices[k].stop)], dtype=torch.long)
+        self.net_slices, n = {}, 0
+        for k in net_keys:
+            self.net_slices[k] = slice(n, n + self.slices[k].stop - self.slices[k].start)
+            n = self.net_slices[k].stop
+        self.N_net       = n
 
         if Cn2_targets not in ('prior', 'fits'):
             raise ValueError(f"Unknown Cn2_targets '{Cn2_targets}', expected 'prior' or 'fits'")
         self.Cn2_grid    = None if Cn2_grid is None else (Cn2_grid if isinstance(Cn2_grid, Cn2Grid) else Cn2Grid.from_state_dict(Cn2_grid))
         self.Cn2_targets = Cn2_targets
         self.prior_keys  = ['Cn2_weights'] if (Cn2_targets == 'prior' and 'Cn2_weights' in self.factor_keys) else [] # corrections pretrained to 0
-        if self.Cn2_grid is not None and not all(name in self.features for name in self.Cn2_grid.feature_names):
-            self.Cn2_grid = None # the features of the dataset are the K-means ones
 
         as_t = lambda x, default: default if x is None else _as_float_tensor(x, 'cpu')
         self.tel_mean       = as_t(tel_mean,  None)
@@ -1790,15 +1759,17 @@ class FactorParameterization:
         self.Y_median       = as_t(Y_median,       torch.zeros(self.N_outputs))
         self.log_ratio_mean = as_t(log_ratio_mean, torch.zeros(self.N_outputs))
         self.delta_std      = as_t(delta_std,      torch.ones(self.N_outputs))
-        self.const_mask     = torch.ones(self.N_outputs) # 0 for the entries of the constant keys
-        for k in self.const_keys:
-            self.const_mask[self.slices[k]] = 0.0
 
 
     def to(self, device):
-        for name in ('tel_mean', 'tel_scale', 'Y_median', 'log_ratio_mean', 'delta_std', 'const_mask'):
+        for name in ('tel_mean', 'tel_scale', 'Y_median', 'log_ratio_mean', 'delta_std', 'pred_index'):
             setattr(self, name, getattr(self, name).to(device))
         return self
+
+
+    def to_stacked(self, delta: torch.Tensor) -> torch.Tensor:
+        """Network outputs [B, N_net] -> corrections in the stacked layout [B, N_outputs], zero at the optimized shared entries."""
+        return delta.new_zeros(delta.shape[0], self.N_outputs).index_copy(1, self.pred_index, delta)
 
 
     def base_values(self, tel_std: torch.Tensor, Cn2_mix: torch.Tensor | None = None, Cn2_offset: torch.Tensor | None = None) -> dict:
@@ -1828,8 +1799,9 @@ class FactorParameterization:
         return r
 
 
-    def pretrain_targets(self, y_fit: torch.Tensor, fit_phys: dict, base: dict) -> torch.Tensor:
-        """Corrections reproducing the fits: y_fit - median (direct), log(fit / base) - mean log-ratio (factor), 0 (constants)."""
+    def _stacked_targets(self, y_fit: torch.Tensor, fit_phys: dict, base: dict) -> torch.Tensor:
+        """Corrections reproducing the fits [B, N_outputs]: y_fit - median (direct), log(fit / base) - mean log-ratio (factor); the entries
+        of the optimized shared keys are not network outputs and are dropped by pretrain_targets."""
         delta = y_fit - self.Y_median
         r     = self.log_ratios(fit_phys, base)
         for k in self.factor_keys:
@@ -1837,15 +1809,22 @@ class FactorParameterization:
             delta[:, sl] = r[:, sl] - self.log_ratio_mean[sl]
         for k in self.prior_keys:
             delta[:, self.slices[k]] = 0.0
-        return delta * self.const_mask
+        return delta
+
+
+    def pretrain_targets(self, y_fit: torch.Tensor, fit_phys: dict, base: dict) -> torch.Tensor:
+        """Network outputs reproducing the fits, [B, N_net]."""
+        return self._stacked_targets(y_fit, fit_phys, base)[:, self.pred_index]
 
 
     def params(self, delta: torch.Tensor, tel_std: torch.Tensor, transformer, consts: dict,
                Cn2_mix: torch.Tensor | None = None, Cn2_offset: torch.Tensor | None = None) -> dict:
-        """Corrections [B, N_outputs] + standardized telemetry -> PSF-model parameters of the batch (phase bump excluded)."""
-        B    = delta.shape[0]
-        x    = transformer.unstack(self.Y_median + delta) # direct keys (the rest is overwritten below)
-        base = self.base_values(tel_std, Cn2_mix, Cn2_offset)
+        """Network outputs [B, N_net] + standardized telemetry -> PSF-model parameters of the batch (phase bump excluded); consts:
+        the optimized shared keys in physical units, {key: [1, n]}."""
+        delta = self.to_stacked(delta)
+        B     = delta.shape[0]
+        x     = transformer.unstack(self.Y_median + delta) # direct keys (the rest is overwritten below)
+        base  = self.base_values(tel_std, Cn2_mix, Cn2_offset)
 
         for k in self.factor_keys:
             sl  = self.slices[k]
@@ -1854,7 +1833,7 @@ class FactorParameterization:
                 val = val / val.sum(dim=-1, keepdim=True)
             x[k] = val.squeeze(-1) if sl.stop - sl.start < 2 else val
 
-        for k in self.const_keys:
+        for k in self.optimized_shared_keys:
             sl  = self.slices[k]
             val = consts[k].expand(B, -1)
             x[k] = val.squeeze(-1) if sl.stop - sl.start < 2 else val
@@ -1869,7 +1848,7 @@ class FactorParameterization:
         self.log_ratio_mean = r.mean(dim=0)
         for k in self.prior_keys: # the prior is the base itself
             self.log_ratio_mean[self.slices[k]] = 0.0
-        self.delta_std      = self.pretrain_targets(y_fit, fit_phys, base).std(dim=0)
+        self.delta_std      = self._stacked_targets(y_fit, fit_phys, base).std(dim=0)
         for k in self.prior_keys: # width of the shrinkage prior: the scatter of the fits around the base
             self.delta_std[self.slices[k]] = r[:, self.slices[k]].std(dim=0)
         self.delta_std      = self.delta_std.clamp(min=1e-3)
@@ -1881,7 +1860,7 @@ class FactorParameterization:
             'slices':         {k: [sl.start, sl.stop] for k, sl in self.slices.items()},
             'features':       self.features,
             'factor_keys':    self.factor_keys,
-            'const_keys':     self.const_keys,
+            'optimized_shared_keys': self.optimized_shared_keys,
             'L0_const':       self.L0_const,
             'tel_mean':       self.tel_mean.cpu().numpy(),
             'tel_scale':      self.tel_scale.cpu().numpy(),
@@ -1905,8 +1884,8 @@ class NFMFactorCalibrator(NFMCalibrator):
         state = self._bundle_state
         self.parameterization = FactorParameterization.from_state_dict(state['factor_parameterization']).to(device)
         self.consts = {k: _as_float_tensor(v, device) for k, v in state['consts'].items()}
-        self.Cn2_mix_logits = _as_float_tensor(state['Cn2_mix_logits'], device) if state.get('Cn2_mix_logits') is not None else None
-        self.Cn2_offset     = _as_float_tensor(state['Cn2_offset'],     device) if state.get('Cn2_offset')     is not None else None
+        self.Cn2_mix_logits = _as_float_tensor(state['Cn2_mix_logits'], device) if state['Cn2_mix_logits'] is not None else None
+        self.Cn2_offset     = _as_float_tensor(state['Cn2_offset'],     device) if state['Cn2_offset']     is not None else None
 
     def _params_from_pred(self, x_pred: torch.Tensor, telemetry_vector: torch.Tensor) -> dict:
         return self.parameterization.params(x_pred, telemetry_vector, self.outputs_transformer, self.consts,
@@ -1916,38 +1895,40 @@ class NFMFactorCalibrator(NFMCalibrator):
 def load_NFM_calibrator(bundle_path, device: torch.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')):
     """NFMCalibrator or NFMFactorCalibrator, depending on the type stored in the bundle."""
     state = torch.load(bundle_path, map_location='cpu', weights_only=False)
-    calibrator_class = NFMFactorCalibrator if state.get('calibrator_type', 'direct') == 'factor' else NFMCalibrator
+    calibrator_class = NFMFactorCalibrator if state['calibrator_type'] == 'factor' else NFMCalibrator
     return calibrator_class(bundle_path, device=device)
 
 
 class NFMFactorCalibratorTrainer(NFMCalibratorTrainer):
     """
     NFMCalibratorTrainer for the factor calibrator: the same data, PSF loss, pretraining, k-fold weighting and bundle
-    machinery, but the network predicts corrections (FactorParameterization) and the constant keys are dataset-level
-    parameters optimized together with the network (at a tenth of the learning rate).
+    machinery, but the network predicts corrections (FactorParameterization) of the predicted and factor keys only, and the optimized
+    shared keys are dataset-level parameters trained together with the network (at a tenth of the learning rate).
 
-    factor_keys, const_keys, Cn2_mix, Cn2_targets, Cn2_offset : see the "calibrator" section of calibrators/configs/NFM_factor_calibrator_config.json.
-    The remaining outputs are predicted directly as corrections to the median of the fits. Cn2_mix 'learned' makes the reduction
+    factor_keys, optimized_shared_keys, Cn2_mix, Cn2_targets, Cn2_offset : see the "calibrator" section of
+    calibrators/configs/NFM_factor_calibrator_config.json (calibrator_key_groups, build_NFM_trainer); every output that is not an optimized
+    shared key is a network output (FactorParameterization.N_net), the predicted keys as corrections to the median of the fits. The optimized
+    shared keys start from the median of the training fits and are trained in the normalized space of the outputs transformer
+    (optimized_params), where one learning rate suits them all (J_angle in degrees as well as wing_frac ~ 0.005); checkpoints and bundles
+    store them in physical units ('consts'). Cn2_mix 'learned' makes the reduction
     of the grid profile to the model layers (softmax of Cn2_mix_logits [N_grid, N_layers]) a dataset-level parameter trained
-    end-to-end (at the full learning rate, unlike the constants); 'fixed' keeps the altitude bins of the grid. Cn2_offset adds a
+    end-to-end (at the full learning rate, unlike the optimized keys); 'fixed' keeps the altitude bins of the grid. Cn2_offset adds a
     learned dataset-level log-offset of the layer weights (the PSF model wants far less turbulence in the upper layers than the
     AOF profiler reports, see the fitted profiles).
     """
     calibrator_type = 'factor'
 
     def __init__(self, PSF_model, calibrator, dataset, outputs_transformer, *,
-                 factor_keys=('r0', 'L0', 'wind_speed_single', 'Cn2_weights'), const_keys=('F_ctrl', 'LO_coefs'),
-                 Cn2_mix='fixed', Cn2_targets='fits', Cn2_offset=False, **kwargs):
-        if getattr(dataset, 'telemetry_preprocessor', None) is None:
-            raise ValueError('The factor calibrator derives its base values from the telemetry and needs the telemetry preprocessor '
-                             'of the dataset cache (regenerate it with create_STD_dataset.py)')
+                 factor_keys=(), optimized_shared_keys=(), Cn2_mix='fixed', Cn2_targets='fits', Cn2_offset=False, **kwargs):
         if Cn2_mix not in ('learned', 'fixed'):
             raise ValueError(f"Unknown Cn2_mix '{Cn2_mix}', expected 'learned' or 'fixed'")
-        preprocessor = TelemetryPreprocessor.from_state_dict(dataset.telemetry_preprocessor)
-        self.parameterization = FactorParameterization(outputs_transformer.slices, dataset.features, factor_keys, const_keys,
-                                                       preprocessor.mean, preprocessor.scale,
-                                                       Cn2_grid=getattr(dataset, 'Cn2_grid', None), Cn2_targets=Cn2_targets)
-        self.consts = {}
+        preprocessor = TelemetryPreprocessor.from_state_dict(dataset.telemetry_preprocessor) # the base values are derived from the telemetry
+        self.parameterization = FactorParameterization(outputs_transformer.slices, dataset.features, factor_keys, preprocessor.mean, preprocessor.scale,
+                                                       optimized_shared_keys=optimized_shared_keys, Cn2_grid=dataset.Cn2_grid, Cn2_targets=Cn2_targets)
+        if calibrator.network[-1].out_features != self.parameterization.N_net:
+            raise ValueError(f'The factor network has {calibrator.network[-1].out_features} outputs, the predicted and factor keys '
+                             f'{list(self.parameterization.net_slices)} need {self.parameterization.N_net}')
+        self.optimized_params = {} # {key: nn.Parameter [1, n]}, the optimized shared keys in the normalized space of the outputs transformer
         self.Cn2_mix_logits = None
         self.Cn2_offset     = None
         super().__init__(PSF_model, calibrator, dataset, outputs_transformer, **kwargs)
@@ -1959,23 +1940,33 @@ class NFMFactorCalibratorTrainer(NFMCalibratorTrainer):
                     logger.warning('Cn2_mix = learned needs the Cn2 grid features of the dataset cache (Cn2_grid_*): the reduction stays fixed')
                 else:
                     self.Cn2_mix_logits = nn.Parameter(self.parameterization.initial_mix_logits().to(self.device))
+                    
             if Cn2_offset:
                 sl = self.parameterization.slices['Cn2_weights']
                 self.Cn2_offset = nn.Parameter(torch.zeros(sl.stop - sl.start, device=self.device))
 
-        # Training-set statistics of the parameterization and the dataset-level constants (medians of the fits)
+        # Training-set statistics of the parameterization and the starting point of the optimized shared keys (medians of the fits)
         fit, tel = self._train_fit_dict()
         fit_phys = self._calibrator_friendly_fit_dict(fit)
         self.parameterization.L0_const = float(fit['L0'].median()) if 'L0' in self.parameterization.factor_keys else None
+        
         with torch.no_grad():
             y_fit = super()._pretrain_target_vector(fit, device=self.device)
             self.parameterization.fit(y_fit, fit_phys, self.parameterization.base_values(tel))
-        for k in self.parameterization.const_keys:
-            self.consts[k] = nn.Parameter(fit_phys[k].reshape(len(tel), -1).median(dim=0).values.unsqueeze(0).clone())
+        
+        for k in self.parameterization.optimized_shared_keys:
+            if k not in fit_phys:
+                raise KeyError(f"The fits of the dataset carry no '{k}', its shared value cannot start from their median: refit the dataset in "
+                               "the regime of the config and rebuild the cache")
+           
+            median = fit_phys[k].reshape(len(tel), -1).median(dim=0).values.unsqueeze(0).detach().clone()
+            self.optimized_params[k] = nn.Parameter(self.outputs_transformer.transforms[k](median))
 
-        self.optimizer, self.scheduler = self._make_optimizer() # now including the constants and the Cn2 mixing
-        logger.info(f"Factor calibrator | factor: {self.parameterization.factor_keys} | direct: {self.parameterization.direct_keys} | "
-                    f"constant: {self.parameterization.const_keys} | L0 = {self.parameterization.L0_const} | "
+        self.optimizer, self.scheduler = self._make_optimizer() # now including the optimized shared keys and the Cn2 mixing
+        
+        logger.info(f"Factor calibrator | network outputs: predicted {self.parameterization.direct_keys}, factor {self.parameterization.factor_keys} "
+                    f"({self.parameterization.N_net} outputs) | optimized shared: {self.parameterization.optimized_shared_keys} | "
+                    f"fitted: {self.fitted_keys} | fitted shared: {self.fitted_shared_keys} | L0 = {self.parameterization.L0_const} | "
                     f"Cn2: {self.parameterization.Cn2_grid or 'K-means features'}, mixing {'learned' if self.Cn2_mix_logits is not None else 'fixed'}, "
                     f"offset {'learned' if self.Cn2_offset is not None else 'none'}, targets {self.parameterization.Cn2_targets}")
 
@@ -1987,7 +1978,16 @@ class NFMFactorCalibratorTrainer(NFMCalibratorTrainer):
         return [p for p in (self.Cn2_mix_logits, self.Cn2_offset) if p is not None]
 
 
+    def optimized_shared_values(self) -> dict:
+        """The optimized shared keys in physical units, {key: [1, n]} (differentiable w.r.t. optimized_params)."""
+        return {k: self.outputs_transformer.transforms[k].inverse(p) for k, p in self.optimized_params.items()}
+
+
     # ── Hooks ──────────────────────────────────────────────────────────────────
+    def net_slices(self) -> dict:
+        return self.parameterization.net_slices
+
+
     def _pretrain_target_vector(self, fitted_vals, device, tel=None):
         if tel is None:
             raise ValueError('The factor calibrator needs the telemetry vectors to compute its targets (base values)')
@@ -1996,20 +1996,20 @@ class NFMFactorCalibratorTrainer(NFMCalibratorTrainer):
 
 
     def _params_from_pred(self, x_pred, tel_b):
-        return self.parameterization.params(x_pred, tel_b, self.outputs_transformer, self.consts, Cn2_mix=self._Cn2_mix(), Cn2_offset=self.Cn2_offset)
+        return self.parameterization.params(x_pred, tel_b, self.outputs_transformer, self.optimized_shared_values(), Cn2_mix=self._Cn2_mix(), Cn2_offset=self.Cn2_offset)
 
 
     def _regularization(self, x_pred, x_dict, fit_b, tel_b):
         reg = super()._regularization(x_pred, x_dict, fit_b, tel_b)
         if self.shrink_weight > 0:
             # Gaussian prior on the corrections, widths = training-set scatter of the corrections reproducing the fits
-            mask = self.parameterization.const_mask
-            reg  = reg + self.shrink_weight * ((x_pred / self.parameterization.delta_std).pow(2) * mask).sum(dim=-1) / mask.sum()
+            P   = self.parameterization
+            reg = reg + self.shrink_weight * (x_pred / P.delta_std[P.pred_index]).pow(2).mean(dim=-1)
         return reg
 
 
     def _dataset_level_params(self):
-        return list(self.consts.values()) + self._Cn2_params()
+        return list(self.optimized_params.values()) + self._Cn2_params()
 
 
     def _trainable_tensors(self):
@@ -2018,16 +2018,18 @@ class NFMFactorCalibratorTrainer(NFMCalibratorTrainer):
 
     def _extra_param_groups(self, lr):
         groups = []
-        if self.consts:
-            groups.append({'params': list(self.consts.values()), 'lr': lr * 0.1, 'weight_decay': 0.0})
+        if self.optimized_params:
+            groups.append({'params': list(self.optimized_params.values()), 'lr': lr * 0.1, 'weight_decay': 0.0})
         if self._Cn2_params(): # the Cn2 mixing / offset must be able to move by O(1) in log space within the training
             groups.append({'params': self._Cn2_params(), 'lr': lr, 'weight_decay': 0.0})
         return groups
 
 
     def _extra_state(self) -> dict:
+        with torch.no_grad():
+            consts = {k: v.cpu().clone() for k, v in self.optimized_shared_values().items()}
         return {
-            'consts':                 {k: v.detach().cpu().clone() for k, v in self.consts.items()},
+            'consts':                 consts, # physical units, as NFMFactorCalibrator uses them
             'factor_parameterization': self.parameterization.state_dict(),
             'Cn2_mix_logits':         None if self.Cn2_mix_logits is None else self.Cn2_mix_logits.detach().cpu().clone(),
             'Cn2_offset':             None if self.Cn2_offset is None else self.Cn2_offset.detach().cpu().clone(),
@@ -2035,9 +2037,9 @@ class NFMFactorCalibratorTrainer(NFMCalibratorTrainer):
 
 
     def _load_extra_state(self, state: dict) -> None:
-        for k, v in state.get('consts', {}).items():
-            if k in self.consts:
-                self.consts[k].data = _as_float_tensor(v, self.device)
+        for k, v in state.get('consts', {}).items(): # the optimized shared keys in physical units
+            if k in self.optimized_params:
+                self.optimized_params[k].data = self.outputs_transformer.transforms[k](_as_float_tensor(v, self.device).reshape(1, -1))
         if 'factor_parameterization' in state:
             self.parameterization = FactorParameterization.from_state_dict(state['factor_parameterization']).to(self.device)
         rebuild = False
