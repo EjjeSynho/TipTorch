@@ -178,7 +178,7 @@ x0, PSF_1, OPD_map = fit['x'], fit['PSF'], fit['OPD_map']
 print(f"kept the start at {fit['start']:+.0f} nm by {fitter.SELECT_BY}: loss {fit['loss']:.4f}, median |peak err| {100 * fit['peak_error']:.2f} %, "
       f"defocus {fit['defocus']:+.1f} nm, even modes flipped {fit['flipped']}")
 
-for name in ['J_angle'] if PSF_model.anisotropic_jitter else []:
+for name in PSF_model.aniso_jitter_params: # J_aniso (the stretch of the kernel along its axis) and J_angle [deg]
     print(f'{name}:', *[f'{v:.2f}' for v in PSF_model.inputs_manager[name].detach().cpu().numpy().flatten()])
     
 if PSF_model.chrom_defocus:

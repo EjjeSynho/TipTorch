@@ -37,8 +37,8 @@ from data_processing.NFM_bundle import install_calibrator
 #   derotated_PSFs            derotated STD-star PSFs (configs with PupilAngle 0) or raw frames (the PSF model rotates per OB), both in muse_STD_stars_dataset.pt;
 #                             must match the regime of the fits (STD_fitter.py DEROTATE_PSF) and of the dataset cache (create_STD_dataset.py)
 #   model                     PSF model (build_PSF_model). The jitter / wing regime must be the one of the fits the pretraining targets come from
-#                             (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL): since 2026-10-20 the fits use the anisotropic chromatic jitter
-#                             (Jx_ctrl, Jy_ctrl, J_angle) and the image-frame wing (wing_frac_ctrl per star). fixed_from_fits: kept fixed inputs
+#                             (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL): the fits use the anisotropic jitter (J_ctrl stretched by
+#                             J_aniso along J_angle) and the image-frame wing (wing_frac_ctrl per star). fixed_from_fits: kept fixed inputs
 #                             (see fixed_params) set to the training-set median of the fits (required in the fits): J_angle and the wing shape
 #                             wing_width / wing_width_t / wing_angle, which is not a config value but comes from the fits
 #   calibrator                "direct" (absolute parameters) or "factor" (corrections to telemetry-derived priors: factor_keys predicted as

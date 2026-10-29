@@ -16,8 +16,9 @@ these ETC inputs alone, with two predictors sharing the interface `predict(etc, 
 template config) written by `train_ETC_calibrator.py`; `ETCDataset` is the dataset view used to train the network.
 
 The PSF model is the one of the STD-star fits and of the NFM calibrator (`build_PSF_model`, the "model" section of the training config):
-anisotropic jitter (Jx, Jy, J_angle) and the image-frame wing (wing_frac, fixed shape) since 2026-10-21. The kept fixed inputs of the
-training (J_angle and the wing shape at the training medians of the fits) are stored in the bundle (`fixed_inputs`) and set by the renderer.
+anisotropic jitter (the isotropic J_ctrl stretched by J_aniso along the axis at J_angle) and the image-frame wing (wing_frac, fixed shape) since
+2026-10-21. The kept fixed inputs of the training (J_angle and the wing shape at the training medians of the fits) are stored in the bundle
+(`fixed_inputs`) and set by the renderer.
 
 Conventions: ETC tables are pandas DataFrames with one row per observation (`etc_table`); `x_dict` holds the PSF-model parameters
 as tensors [N, ...] on the device; rendered PSFs are [N, N_wvl, H, W] on the CPU.
@@ -43,7 +44,7 @@ PUPIL_PATH = DATA_FOLDER / 'calibrations' / 'VLT_CALIBRATION' / 'VLT_PUPIL' / 'u
 
 def donor_keys(model_cfg: dict) -> list:
     """ PSF-model inputs a donor passes on (the keys of the fits), in the jitter / wing regime of the "model" section `model_cfg` """
-    jitter = ['Jx_ctrl', 'Jy_ctrl', 'J_angle'] if model_cfg.get('anisotropic_jitter', False) else ['J_ctrl']
+    jitter = ['J_ctrl', 'J_aniso', 'J_angle'] if model_cfg.get('anisotropic_jitter', False) else ['J_ctrl']
     wing   = ['wing_frac_ctrl'] if model_cfg.get('wing_kernel', False) else []
     return ['F_ctrl', *jitter, *wing, 'r0', 'L0', 'dn', 'wind_speed_single', 'Cn2_weights', 'LO_coefs']
 
@@ -130,7 +131,7 @@ class DonorPredictor:
     """
     Fitted PSF-model parameters of a nearest-neighbour training observation. `pool` holds, per training observation, the ETC
     inputs (`etc_inputs` [N, 6], physical units), the fitted parameters (`fitted`, keyed by the PSF-model inputs, see `donor_keys`:
-    F_ctrl, Jx_ctrl / Jy_ctrl / J_angle (or J_ctrl), wing_frac_ctrl, r0, L0, dn, wind_speed_single, Cn2_weights [N, 2] without the
+    F_ctrl, J_ctrl / J_aniso / J_angle (or J_ctrl alone), wing_frac_ctrl, r0, L0, dn, wind_speed_single, Cn2_weights [N, 2] without the
     ground layer, LO_coefs [N, 8] with the phase bump first) and the Cn2 layer heights (`heights` [N, 3]). The donor's own jitter
     angle and wing fraction are passed on with the rest of its fit. Queries are matched in the standardized input space (`mean`,
     `scale`); one of the `k` nearest donors is drawn at random (`nearest=True`: always the nearest). With `rescale`, r0 follows the

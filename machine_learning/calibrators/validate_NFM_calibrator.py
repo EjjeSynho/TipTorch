@@ -184,7 +184,7 @@ plt.bar(np.arange(len(means)), means.cpu().numpy(), yerr=stds.cpu().numpy(), alp
 plt.xticks(ticks=np.arange(len(means)), labels=output_names, rotation=45, ha='right')
 
 selected_mean_features = []
-feature_keywords = {'J_ctrl', 'Jx_ctrl', 'Jy_ctrl', 'wing_frac_ctrl', 'F_ctrl', 'LO_coefs', 'wind_speed_single', 'L0'}
+feature_keywords = {'J_ctrl', 'J_aniso', 'wing_frac_ctrl', 'F_ctrl', 'LO_coefs', 'wind_speed_single', 'L0'}
 
 for i, name in enumerate(output_names):
     if any(keyword in name for keyword in feature_keywords):

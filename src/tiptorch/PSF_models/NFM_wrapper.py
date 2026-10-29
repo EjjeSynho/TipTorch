@@ -32,7 +32,7 @@ class PSFModelNFM:
         device         = default_device,
         dtype          = torch.float32,
         model_type     = None,    # 'physics-based' | 'psfao' | 'hybrid'
-        anisotropic_jitter = False, # Jx, Jy and the kernel angle J_angle (image frame) instead of one isotropic J
+        anisotropic_jitter = False, # stretch the isotropic jitter J by J_aniso along the axis at the angle J_angle (image frame)
         wing_kernel        = False, # image-frame wing of the PSF (TipTorch.WingKernel): wing_frac (chromatic), wing_width, wing_width_t, wing_angle
         *, # MUSE NFM spectral data
         λ_min        = 475.e-9,
@@ -53,10 +53,16 @@ class PSFModelNFM:
         self.model_type    = model_type
         self.use_Moffat    = model_type in ('hybrid',)   # kept for backward compat
         self.chrom_defocus = chrom_defocus and LO_NCPAs
-        # Anisotropic TT jitter kernel: Jx, Jy [mas] along the kernel axes and J_angle [deg], the rotation of the kernel in the IMAGE frame
-        # (TipTorch.JitterKernel is built on the image-frame frequency grid, so the kernel does not turn with the pupil angle: J_angle = 0
-        # keeps Jx / Jy aligned with the image axes whatever the derotator state). Achromatic with chrom_defocus, chromatic (splines) otherwise.
-        # Axis convention of TipTorch: x is the first image axis (rows), like dx; Jx blurs along the rows, Jy along the columns.
+        # Jitter kernel = the isotropic TT jitter J [mas] (chromatic through the J_ctrl splines, achromatic with chrom_defocus) stretched by the
+        # dimensionless coefficient J_aniso along the axis at the angle J_angle [deg] in the IMAGE frame: TipTorch.JitterKernel takes the sigmas
+        # along its own first (Jx) and second (Jy) axes rotated by Jxy, so Jx = J, Jy = J * J_aniso, Jxy = J_angle -- J_aniso = 1 is exactly the
+        # isotropic kernel at any angle, J_aniso = 1.1 widens the jitter sigma by 10 % along the axis. The stretch axis is the second image axis
+        # (the image columns, V) at J_angle = 0, the axis of the wing at wing_angle = 0 and of the detector-frame elongation of the NFM data.
+        # The stretch and its angle are ACHROMATIC: the residual tip/tilt jitter is physically isotropic, what J_aniso absorbs is an
+        # instrument-frame ellipticity of the PSF (e.g. the one left by the MUSE NFM post-processing). J_aniso >= 1 is the convention (a squeeze
+        # is the same kernel as a stretch along the perpendicular axis, with the elongation left in J); STD_fitter.py folds a fitted squeeze into it.
+        # TipTorch builds the kernel on the image-frame frequency grid, so it does not turn with the pupil angle (J_angle = 0 stays along the
+        # image axes whatever the derotator state).
         self.anisotropic_jitter = anisotropic_jitter
         # Elongated wing of the PSF along the image columns (rotated by wing_angle), fixed in the image frame: the detector-frame
         # halo excess of the MUSE NFM data (slicer / spectrograph spread) that neither the pupil-frame PSDs nor a jitter can represent.
@@ -67,10 +73,10 @@ class PSFModelNFM:
         self.device        = torch.device(device)
         self.dtype         = dtype
 
-        if N_spline_nodes:
+        self.use_splines = bool(N_spline_nodes) # the chromatic parameters are represented by a few control λs, or sampled on the simulated grid
+        if self.use_splines:
             if N_spline_nodes < 2 or N_spline_nodes > num_λ_slices:
                 raise ValueError(f"Number of control wavelengths for spline representation must be between 2 and {num_λ_slices}. Got {N_spline_nodes}.")
-            self.use_splines = True # enable the use of splines for chromatic parameters representation
                 
         # The PSF model can be used in two configurations:
         #  1) Simulating different sources in multiple observations with different conditions -- used mostly in ML training and PSF model calibration
@@ -95,8 +101,11 @@ class PSFModelNFM:
         if LO_NCPAs:
             self._init_NCPAs()
         
-        # Chromatic blur: either the chromatic defocus (jitter achromatic) or the chromatic jitter itself (isotropic J or the pair Jx, Jy)
-        self.jitter_params = ['Jx', 'Jy'] if self.anisotropic_jitter else ['J']
+        # Chromatic blur: either the chromatic defocus (the jitter is then achromatic) or the chromatic jitter J itself. The jitter width is always
+        # the isotropic J; the anisotropy, when enabled, is the achromatic stretch composed with it in _resolve_jitter (see anisotropic_jitter)
+        self.jitter_params = ['J']
+        # The achromatic entries of the stretched kernel, fitted jointly with the jitter width; empty when the kernel stays isotropic
+        self.aniso_jitter_params = ['J_aniso', 'J_angle'] if self.anisotropic_jitter else []
         self.polychromatic_params = ['F', 'dx', 'dy', 'bg', 'F_norm_λ'] + (['chrom_defocus'] if self.chrom_defocus else self.jitter_params) + \
                                     (['wing_frac'] if self.wing_kernel else [])
 
@@ -468,6 +477,7 @@ class PSFModelNFM:
         norm_L0          = Uniform(a=6,     b=34)
         norm_dxy         = Uniform(a=-1,    b=1)
         norm_J           = Uniform(a=0,     b=30)
+        norm_J_aniso     = Uniform(a=1.0,   b=2.0) # the stretch factor of the kernel, >= 1 (1 = isotropic)
         norm_J_angle     = Uniform(a=-45,   b=45)
         norm_wing_frac   = Uniform(a=0,     b=0.05)
         norm_wing_width  = Uniform(a=1,     b=30)
@@ -508,7 +518,7 @@ class PSFModelNFM:
 
         # Enabling chromatic defocus means that chromatic PSF bluriness is attributed to chromatic defocus aberration only.
         # Thus, TT jitter is considered monochromatic in this case. Otherwise, this bluriness is "absorbed" by the chromatic jitter parameters.
-        # The jitter is one isotropic J, or the pair Jx / Jy along the axes of the kernel plus its angle J_angle in the image frame
+        # The jitter width is always the single isotropic J; the kernel anisotropy is the separate achromatic stretch below
         for name in self.jitter_params:
             if self.chrom_defocus:
                 add_input(name, torch.tensor([[25.0]]*N_obs), norm_J, is_shared=True) # If chromatic defocus is enabled, jitter is monochromatic
@@ -517,8 +527,12 @@ class PSFModelNFM:
             else:
                 add_input(name, torch.tensor([[25.0]*N_wvl]*N_obs), norm_J, is_shared=True)
         if self.anisotropic_jitter:
-            # [deg], counter-clockwise rotation of the (Jx, Jy) kernel axes with respect to the image axes; achromatic
-            add_input('J_angle', torch.tensor([0.0]*N_obs), norm_J_angle, is_shared=True)
+            # Both achromatic, and both [N_obs, 1] so that they broadcast against the wavelength-sampled J in _resolve_jitter. A stretch applied
+            # along the kernel's second axis (Jy = J * J_aniso), the width across it left at the isotropic J: 1.1 widens the jitter by 10 %
+            add_input('J_aniso', torch.tensor([[1.0]]*N_obs), norm_J_aniso, is_shared=True)
+            # [deg], rotation of the stretch axis from the image columns, in the sense of TipTorch.JitterKernel / WingKernel (J_aniso = 1 leaves
+            # the kernel isotropic at any angle)
+            add_input('J_angle', torch.tensor([[0.0]]*N_obs), norm_J_angle, is_shared=True)
         else:
             add_input('Jxy', torch.tensor([0.0]), norm_J, optimizable=False, is_shared=True) # essentially, this disables the TT jitter anisotropy
 
@@ -645,14 +659,30 @@ class PSFModelNFM:
         return spline.evaluate(λ_grid).T
 
 
-    def _resolve_jitter(self, x_dict):
-        """ Map the wrapper's jitter inputs onto TipTorch's Jx, Jy, Jxy (in place): the isotropic J is cloned to both axes, the kernel angle
-        J_angle of the anisotropic kernel becomes Jxy. The kernel is built on the image-frame grid, so Jx / Jy stay along the image axes. """
+    def _resolve_jitter(self, x_dict, J_holder=None):
+        """
+        Compose TipTorch's (Jx, Jy, Jxy) from the wrapper's jitter inputs, in place.
+
+        The kernel is the isotropic TT jitter J [mas] stretched by the dimensionless coefficient J_aniso along the axis at the angle J_angle
+        [deg]: Jx = J across the axis, Jy = J * J_aniso along it, Jxy = J_angle -- TipTorch.JitterKernel rotates the (Jx, Jy) axes by Jxy in the
+        IMAGE frame, where the kernel is built (it does not turn with the pupil angle), so J_angle = 0 stretches along the image columns like the
+        wing at wing_angle = 0, and J_aniso = 1 gives the isotropic kernel back at any J_angle. J is the only chromatic entry of the kernel: the
+        stretch is an instrument-frame ellipticity of the PSF, not a wavelength-dependent blur (see the anisotropic_jitter constructor flag).
+
+        J_holder is where J lives: x_dict by default, or the full-grid dictionary of SimulateSpectralRange once J has been evaluated on the whole
+        MUSE spectrum -- Jx / Jy are built there so that they are sliced per wavelength batch like the other polychromatic entries, while
+        J_aniso / J_angle stay in x_dict with the other achromatic entries. Everything is reshaped to [N_obs, n_λ] and [N_obs, 1]: the inputs
+        manager stores the achromatic entries as [N_obs, 1], but unstacking an optimizer vector squeezes a width-1 entry down to [N_obs].
+        """
+        N_obs    = self.model.N_obs
+        J_holder = x_dict if J_holder is None else J_holder
+        
+        J = J_holder['J'].reshape(N_obs, -1) # [N_obs, n_λ], or [N_obs, 1] when the jitter is achromatic (chrom_defocus regime)
+        J_holder['Jx'] = J
+        J_holder['Jy'] = J * x_dict['J_aniso'].reshape(N_obs, 1) if self.anisotropic_jitter else J
         if self.anisotropic_jitter:
-            x_dict['Jxy'] = x_dict['J_angle']
-        else:
-            x_dict['Jx'] = x_dict['J']
-            x_dict['Jy'] = x_dict['J']
+            x_dict['Jxy'] = x_dict['J_angle'].reshape(N_obs, 1)
+        # Otherwise Jxy is the non-optimizable zero input already sitting in x_dict, and the kernel stays isotropic
 
 
     def forward(self, x_dict=None, src_ids=None, include_list=None, update_params=True):
@@ -808,13 +838,9 @@ class PSFModelNFM:
                 x_dict_λ_full[entry] = self.evaluate_splines(x_dict[entry + '_ctrl'], self.λ_full_normed)
                 x_dict.pop(entry + '_ctrl')
 
-        # Jitter: chromatic entries live in x_dict_λ_full (evaluated on the full grid), achromatic ones (chrom_defocus regime) in x_dict
-        if self.anisotropic_jitter:
-            x_dict['Jxy'] = x_dict.pop('J_angle')
-        else:
-            J_holder = x_dict_λ_full if 'J' in x_dict_λ_full else x_dict
-            J_holder['Jx'] = J_holder['J']
-            J_holder['Jy'] = J_holder.pop('J')
+        # Jitter: the chromatic J has just been evaluated on the full grid and lives in x_dict_λ_full together with the Jx / Jy built from it
+        # (so that they get sliced per wavelength batch), the achromatic entries (the J of the chromatic-defocus regime, J_aniso, J_angle) in x_dict
+        self._resolve_jitter(x_dict, J_holder=x_dict_λ_full if 'J' in x_dict_λ_full else x_dict)
 
         if 'wind_speed_single' in x_dict:
             x_dict['wind_speed'] = torch.nn.functional.pad(x_dict['wind_speed_single'].view(-1, 1), (0, self.model.N_L - 1))

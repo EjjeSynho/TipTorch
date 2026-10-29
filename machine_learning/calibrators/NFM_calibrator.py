@@ -197,9 +197,9 @@ class NFMDataset(Dataset):
         self.kc_fraction = data.get('kc_fraction')
         self.kc_group    = data.get('kc_group')
 
-        # The fitted table stores the spline control values without the '_ctrl' suffix: J (isotropic jitter), Jx / Jy (anisotropic jitter)
-        # and wing_frac (image-frame wing) are the chromatic parameters of STD_fitter.py's regimes, see PSFModelNFM.polychromatic_params
-        _rename = {p: p + '_ctrl' for p in ['J', 'Jx', 'Jy', 'wing_frac', 'F', 'bg', 'dx', 'dy']}
+        # The fitted table stores the spline control values without the '_ctrl' suffix: J (the isotropic jitter width) and wing_frac
+        # (image-frame wing) are the chromatic parameters of STD_fitter.py's regimes, see PSFModelNFM.polychromatic_params
+        _rename = {p: p + '_ctrl' for p in ['J', 'wing_frac', 'F', 'bg', 'dx', 'dy']}
         for i in range(len(self.sample_ids)):
             if isinstance(self.configs[i], list):
                 self.configs[i] = self.configs[i][0]
@@ -530,8 +530,8 @@ class NFMCalibrator():
                 )
 
         # Jitter / wing regime: the predictions of a regime the PSF model does not have are ignored, and the model's inputs of a regime the
-        # calibrator does not predict stay at their defaults (e.g. J for a calibrator trained with Jx / Jy, wing_frac for one trained without
-        # wing). The wing shape and J_angle need no check: the bundle's fixed_inputs are set in the PSF model at calibration
+        # calibrator does not predict stay at their defaults (e.g. J_aniso for a calibrator trained without the stretch, wing_frac for one trained
+        # without wing). The wing shape and J_angle need no check: the bundle's fixed_inputs are set in the PSF model at calibration
         flags = self.model_flags or {} # None / empty: bundle from before the anisotropic jitter and the wing kernel (both False then)
         for flag in ('anisotropic_jitter', 'wing_kernel'):
             f_calib, f_model = bool(flags.get(flag, False)), bool(getattr(PSF_model, flag, False))
@@ -601,8 +601,9 @@ FIXED_INPUTS_KEPT = ('J_angle', 'wing_width', 'wing_width_t', 'wing_angle')
 
 def build_PSF_model(config, model_cfg: dict, device):
     """
-    PSFModelNFM from the "model" section of a training config, as the trainer and the validation build it. anisotropic_jitter (Jx, Jy,
-    J_angle instead of one J) and wing_kernel (image-frame wing: wing_frac, wing_width, wing_width_t, wing_angle), both False by default,
+    PSFModelNFM from the "model" section of a training config, as the trainer and the validation build it. anisotropic_jitter (the isotropic
+    J_ctrl stretched by the achromatic J_aniso along the axis at J_angle, instead of one isotropic J) and wing_kernel (image-frame wing:
+    wing_frac, wing_width, wing_width_t, wing_angle), both False by default,
     select the regime of the fits (STD_fitter.py: ANISOTROPIC_JITTER, WING_KERNEL). The wing shape (widths, angle) and J_angle are not config
     values: the model is built with the wrapper defaults and build_NFM_trainer sets them to the medians of the fits ("fixed_from_fits"),
     which the bundles store (fixed_inputs) and NFMCalibrator re-applies.

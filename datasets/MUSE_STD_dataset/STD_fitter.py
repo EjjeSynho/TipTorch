@@ -92,15 +92,20 @@ APPLY_KC_CORRECTION = True
 
 # Chromatic blur and TT jitter kernel of the model (PSFModelNFM flags). CHROM_DEFOCUS: the chromatic part of the core blur is a chromatic
 # defocus term (spline over λ, added to the defocus coefficient of the LO NCPAs) and the jitter kernel is achromatic; otherwise the jitter
-# itself is chromatic (spline). ANISOTROPIC_JITTER: the kernel is (Jx, Jy) along its own axes rotated by J_angle [deg] in the IMAGE frame
-# (the kernel does not turn with the pupil angle), instead of one isotropic J. Introduced on 2026-10-20 for the detector-frame quadrupole
-# of the median fit residual (the data cores are elongated along the image x axis, which an isotropic kernel cannot follow); the fits before
-# that date are isotropic and chromatic-jitter fits (CHROM_DEFOCUS = ANISOTROPIC_JITTER = False).
+# itself is chromatic (spline). ANISOTROPIC_JITTER: the kernel is the isotropic jitter J stretched by the coefficient J_aniso along the axis at
+# the angle J_angle [deg] in the IMAGE frame (the kernel does not turn with the pupil angle) -- Jy = J * J_aniso along the axis, Jx = J across it,
+# so J_aniso = 1 is the isotropic kernel and 1.1 a 10 % stretch along the axis, which is the image columns at J_angle = 0 (like the wing).
+# J_aniso and J_angle are achromatic: the residual tip/tilt jitter is isotropic by nature, what the stretch absorbs is a wavelength-independent
+# ellipticity of the PSF (MUSE NFM post-processing). J_aniso is fitted freely and a squeeze (J_aniso < 1) is folded into the identical stretch
+# along the perpendicular axis after the fit (fold_jitter_stretch), so that J stays the isotropic jitter and J_aniso >= 1 in every fit.
+# Introduced on 2026-10-20 for the detector-frame quadrupole of the median fit residual (the data cores are elongated along the image x axis,
+# which an isotropic kernel cannot follow); the fits before that date are isotropic (CHROM_DEFOCUS = ANISOTROPIC_JITTER = False).
 # 30-sample test (agents/execplans/anisotropic-jitter-execplan.md): the anisotropic kernel lowers the loss by ~10 % (Jy 18 mas along the columns
 # vs Jx 13 mas, J_angle ~0) at +0.5 % peak error, but does not remove the 3-8 px detector-frame quadrupole of the residual; the chromatic
 # defocus stays ~0 nm and costs 0.6-1.5 % of peak error vs the chromatic jitter. Both False = the isotropic chromatic jitter (J_ctrl) of the
-# fits before 2026-10-20. Adopted regime (user, 2026-10-20): anisotropic chromatic jitter (Jx_ctrl, Jy_ctrl, J_angle) without chromatic
-# defocus, together with the image-frame wing below (30-sample subset: loss 0.109 vs 0.150, |peak err| 3.9 % vs 4.4 %)
+# fits before 2026-10-20. Adopted regime (user, 2026-10-20): anisotropic chromatic jitter without chromatic defocus, together with the image-frame
+# wing below (30-sample subset: loss 0.109 vs 0.150, |peak err| 3.9 % vs 4.4 %). Re-parametrized on 2026-10-29: the anisotropic kernel used to be
+# the free pair of chromatic splines Jx_ctrl / Jy_ctrl, now it is the chromatic J_ctrl and one achromatic stretch (fits before that date need a refit)
 CHROM_DEFOCUS      = False
 ANISOTROPIC_JITTER = True
 
@@ -286,7 +291,7 @@ def build_loss(PSF_model, PSF_0, flags, device=default_device):
             # Pull towards the dataset prior curve, dominant for blurry PSFs (the division by w undoes the overall weight below)
             if wing_prior is not None and wing_f.shape[-1] == wing_prior.shape[-1]:
                 loss += (wing_f - wing_prior).pow(2).mean() * w_wing_prior * suppress_LO / 0.025
-        
+
         if flags['fit_outerscale']:
             loss += force_positive(PSF_model.inputs_manager['L0'])
             
@@ -398,9 +403,9 @@ def make_minimizer(PSF_model, func, loss_fn):
 
 def parameter_sets(PSF_model, flags):
     """ The sets of parameters to fit (include) and to freeze (exclude) for the regime `flags` of sample_fit_flags. """
-    # Achromatic jitter entries (the chromatic ones, J_ctrl / Jx_ctrl / Jy_ctrl / chrom_defocus_ctrl, come with the polychromatic parameters,
-    # like the wing fraction wing_frac_ctrl; the wing shape is a non-optimizable constant of the wrapper)
-    jitter_achromatic = (PSF_model.jitter_params if PSF_model.chrom_defocus else []) + (['J_angle'] if PSF_model.anisotropic_jitter else [])
+    # Achromatic jitter entries (the chromatic ones, J_ctrl / chrom_defocus_ctrl, come with the polychromatic parameters, like the wing fraction
+    # wing_frac_ctrl; the stretch J_aniso and its angle J_angle are achromatic by construction; the wing shape is a non-optimizable constant)
+    jitter_achromatic = (PSF_model.jitter_params if PSF_model.chrom_defocus else []) + PSF_model.aniso_jitter_params
 
     include = ['r0', 'dn'] + jitter_achromatic + \
               (['LO_coefs'] if PSF_model.LO_NCPAs else []) + \
@@ -427,6 +432,28 @@ def peak_error(PSF_data, PSF_pred, half=3):
     return float(((d - m).abs() / d).median())
 
 
+def fold_jitter_stretch(PSF_model):
+    """
+    Impose the convention J_aniso >= 1 on a fitted model, in place, without changing its PSF. A squeeze a < 1 along J_angle is exactly the
+    stretch 1 / a along J_angle + 90 deg with the isotropic width J * a, so J ends up the width of the narrow axis (the isotropic jitter) and
+    J_aniso the stretch; J_angle is wrapped to [-90, 90) deg (the kernel has a 180-deg period). Folding after a free fit instead of
+    penalizing a < 1 during it: from the isotropic start the gradient on J_angle vanishes, so a star elongated more than 45 deg away from
+    J_angle = 0 is fitted with a squeeze along J_angle = 0, and with a penalty the fit stalls at a ~ 1 instead of turning the stretch by 90 deg.
+    """
+    im    = PSF_model.inputs_manager
+    N_obs = PSF_model.model.N_obs
+    J_key = 'J_ctrl' if 'J_ctrl' in im.get_names(optimizable_only=False) else 'J'
+    
+    with torch.no_grad():
+        J, a, angle = im[J_key], im['J_aniso'], im['J_angle'] # unstacking leaves the width-1 entries as [N_obs]
+        a_abs   = a.reshape(N_obs, 1).abs() # the kernel takes |Jy|, the sign of J_aniso carries nothing
+        squeeze = a_abs < 1.0
+        
+        J[:]     = torch.where(squeeze, J.reshape(N_obs, -1) * a_abs, J.reshape(N_obs, -1)).reshape(J.shape)
+        a[:]     = torch.where(squeeze, 1.0 / a_abs, a_abs).reshape(a.shape)
+        angle[:] = (torch.remainder(angle.reshape(N_obs, 1) + 90.0 * squeeze + 90.0, 180.0) - 90.0).reshape(angle.shape)
+
+
 def multistart_fit(PSF_model, PSF_0, loss_fn, minimize_params, include, exclude, flags, starts=None, select_by=None, verbose=False):
     """
     The fit from each starting defocus value of `starts` (DEFOCUS_STARTS), with the even-mode sign convention (DEFOCUS_SIGN) applied per
@@ -449,6 +476,7 @@ def multistart_fit(PSF_model, PSF_0, loss_fn, minimize_params, include, exclude,
         if not ok:
             if verbose:
                 print("Retrying minimization without Cn2 profile fitting...")
+                
             _restart()
             x, PSF, OPD, ok = minimize_params(include - {'Cn2_weights', 'L0', 'wind_speed_single', 'wind_dir_single'}, exclude, 300, verbose=verbose, force_BFGS=True)
 
@@ -467,6 +495,11 @@ def multistart_fit(PSF_model, PSF_0, loss_fn, minimize_params, include, exclude,
                 print(f"The reflected even modes cost {100 * (loss_f / loss_val - 1):.1f} % of loss, keeping the negative-defocus branch")
                 PSF_model.inputs_manager['LO_coefs'][:] = LO_orig
                 _ = PSF_model.inputs_manager.unstack(x, include_all=True, update=True)
+
+        # J_aniso >= 1 convention: a fitted squeeze becomes the identical stretch along the perpendicular axis (same PSF, same loss)
+        if PSF_model.anisotropic_jitter:
+            fold_jitter_stretch(PSF_model)
+            x = PSF_model.inputs_manager.stack().detach().clone()
 
         defocus = float(PSF_model.inputs_manager['LO_coefs'][0, 1]) if PSF_model.LO_NCPAs else float('nan')
         return dict(x=x, PSF=PSF, OPD_map=OPD, loss=loss_val, peak_error=peak_error(PSF_0, PSF.detach()), flipped=flipped, success=ok, defocus=defocus)
@@ -543,7 +576,7 @@ def load_and_fit_sample(id, device=default_device, kc_fraction=None, verbose=Fal
     loss_type = PSF_LOSS_CFG['type']
     save_data = {
         'comments':    f'NFM fitting with re-normalized dn, {loss_type} PSF loss, phase bump pulled to 0 unless flagged "Non-point", '
-                       f'{"chromatic defocus + achromatic" if CHROM_DEFOCUS else "chromatic"} {"anisotropic (Jx, Jy, J_angle)" if ANISOTROPIC_JITTER else "isotropic"} jitter'
+                       f'{"chromatic defocus + achromatic" if CHROM_DEFOCUS else "chromatic"} {"stretched (J_ctrl, J_aniso, J_angle)" if ANISOTROPIC_JITTER else "isotropic"} jitter'
                        f'{", image-frame wing (wing_frac, wing_width, wing_width_t)" if WING_KERNEL else ""}, '
                        f'{len(DEFOCUS_STARTS)}-start fit selected by {SELECT_BY}',
                        

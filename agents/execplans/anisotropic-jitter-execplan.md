@@ -295,3 +295,42 @@ in every fit pickle, passed on by STD_fitted_df.py to the fitted table, `fitted_
 (NFM_calibrator.py, shared with train_ETC_calibrator.py) raises when the fits lack a `fixed_from_fits` key instead of keeping a default: the
 current raw cache and priors (refit of 2026-10-21 without the wing, 457 sharp stars) carry no wing entries, so the dataset must be refit with
 `WING_KERNEL = True`, then STD_fitted_df.py and create_STD_dataset.py re-run, before the calibrators train.
+
+## The kernel becomes (J_ctrl, J_aniso, J_angle): an isotropic jitter with one achromatic stretch (2026-10-29, user's request)
+
+The anisotropic regime fitted a pair of independent chromatic splines `Jx_ctrl` / `Jy_ctrl`, which made the residual tip/tilt jitter -- isotropic by
+nature -- carry the instrument-frame ellipticity, and forced a chromatic `Jy` on the wrapper. The user asked to separate the two: `J_ctrl` stays the
+polychromatic isotropic jitter, and the anisotropy becomes a single dimensionless stretch `J_aniso` along the axis at `J_angle` [deg], reflecting a
+PSF ellipticity that MUSE NFM post-processing can leave behind. `TipTorch.JitterKernel(Jx, Jy, Jxy)` takes the sigmas along its own first / second
+axes rotated by `Jxy`; the wrapper composes `Jx = J`, `Jy = J * J_aniso`, `Jxy = J_angle` in `_resolve_jitter`, so the stretch axis at `J_angle = 0`
+is the second image axis (the image columns, V), the axis of the wing at `wing_angle = 0` and of the detector-frame elongation of the data.
+`J_aniso = 1` is the isotropic kernel at any angle, 1.1 widens the jitter sigma by 10 % along the axis. `jitter_params` is `['J']` in every regime and
+`aniso_jitter_params` (`['J_aniso', 'J_angle']`, `[]` when isotropic) is what `STD_fitter.parameter_sets` adds to the achromatic set. `J_aniso` /
+`J_angle` are `[N_obs, 1]` inputs normalized by `Uniform(1, 2)` / `Uniform(-45, 45)`, defaults 1.0 / 0. `_resolve_jitter` reshapes everything to
+`[N_obs, n_λ]` / `[N_obs, 1]` (unstacking an optimizer vector squeezes a width-1 entry down to `[N_obs]`); `SimulateSpectralRange` builds `Jx` / `Jy`
+on the full grid so that they are sliced per wavelength batch like the other polychromatic entries.
+
+- **Convention J_aniso >= 1, by folding** (user's decision after review): a squeeze `a < 1` along `J_angle` is exactly the stretch `1 / a` along
+  `J_angle + 90` with the width `J * a`. The first version composed the stretch on `Jx` (axis 0 at `J_angle = 0`), perpendicular to the data's
+  elongation, so free fits land on the squeeze branch (`J` = the wide axis): synthetic truth `J = 15`, `a = 1.35` along the rows -> free fit `J = 20.2`,
+  `a = 0.741`, `J_angle = 0`. A hinge penalty on `a < 1` was tried and rejected: from the isotropic start the gradient on `J_angle` vanishes, so a star
+  elongated > 45 deg from `J_angle = 0` is first fitted with a squeeze, and the penalty stalls the fit at `a = 0.95`, `J_angle = 0` (loss x1000 on the
+  synthetic case) instead of turning the stretch by 90 deg. `STD_fitter.fold_jitter_stretch` instead folds the free fit after each start in
+  `multistart_fit` (`J_ctrl * a`, `1 / a`, `J_angle + 90`, `J_angle` wrapped to [-90, 90)); the result vector `x` is restacked, PSF and loss unchanged.
+- Propagated to the consumers by name: `STD_fitter.py`, `STD_fitted_df.py` (`J_aniso` a singular, its abs taken like `J`), `STD_dataset_utils.py`
+  (`FIT_PRIOR_KEYS`), `ETC_calibrator.donor_keys`, `NFM_calibrator` (`_rename`, docstrings), `validate_NFM_calibrator.feature_keywords`,
+  `train_NFM_calibrator.py`, `development/MUSE_onsky.py`. `J_angle` stays in `fixed_from_fits` (dataset median); `J_aniso` is predicted.
+- No backward compatibility (user: the dataset is refit from scratch): stores, fitted tables, priors and calibrator bundles with `Jx_ctrl` / `Jy_ctrl`
+  are not migrated. A bundle trained in that regime would have its jitter predictions ignored without a warning (both have `anisotropic_jitter = True`);
+  the installed bundle predicts the isotropic `J_ctrl` and is not affected.
+- Fixed on the way (pre-existing): `N_spline_nodes = None` left `self.use_splines` unset and `__init__` crashed; it is now `bool(N_spline_nodes)`.
+- Still pre-existing, untouched: `SimulateSpectralRange` needs the single-OB union (raises with `multiple_obs=True`); `PSFModelNFM.copy` passes
+  `N_spline_nodes = self.N_wvl_ctrl`, set only with splines on; `TipTorch.SetWavelengths` re-runs its parameter block, so `model.Jx / Jy` read back
+  as 1.0 after a render until the next forward.
+- Checks (2026-10-29, scratch script, `muse_ltao.ini`, cuda:0, 15 / 15): inputs of both regimes; `_resolve_jitter` shapes and composition;
+  `J_aniso = 1` = the isotropic model at 37 deg (1.9e-07); a 1.5 stretch at `J_angle = 0` widens axis 1 only (variance +0.71 px^2 vs -0.02 on axis 0),
+  at 90 deg axis 0 only, the wing at 0 deg widens axis 1; forward from an unstacked vector, save / load, full-grid render with the sparse state
+  restored; finite gradients on `J_aniso` / `J_angle`; fitter on synthetic PSFs (fake `muse_df`, 201 px, `build_loss` / `multistart_fit` unchanged
+  otherwise): truth `J = 15`, `a = 1.35` at 0 / 90 / 60 deg recovered exactly, the folded state reproducing the fitted PSF (< 5e-7) and loss;
+  `fold_jitter_stretch` alone: (J, 0.7, 30) -> (0.7 J, 1/0.7, -60) with the same PSF, 135 deg wrapped to -45. `tests/test_tiptop_integration.py`
+  passes. Not run on real stars (the STD data drive was not mounted).
