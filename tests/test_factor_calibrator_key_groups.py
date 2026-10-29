@@ -217,7 +217,7 @@ check('pretraining targets have the network layout', tuple(targets.shape) == (le
 with torch.no_grad():
     x_fit = trainer._params_from_pred(targets, tel_all)
 err = max((x_fit[k].reshape(len(tel_all), -1) - trainer._calibrator_friendly_fit_dict(fit_all)[k].reshape(len(tel_all), -1)).abs().max().item()
-          for k in P.direct_keys + ['r0', 'wind_speed_single'])
+          for k in P.direct_keys + [k for k in P.factor_keys if k != 'Cn2_weights']) # the Cn2 targets are clamped at 1e-3
 check('the targets reproduce the fits of the predicted and factor keys', err < 1e-3, f'max |diff| {err:.2e}')
 trainer.pretrain(num_epochs=40, patience=100, save_path=scratch / 'pretrain.pth')
 

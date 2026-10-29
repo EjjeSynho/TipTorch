@@ -1,5 +1,8 @@
 # Cn2 profile input of the NFM calibrator: repaired 8-layer input, fixed-grid binning, learned 3-layer reduction
 
+Superseded on 2026-10-29 by `cn2-fixed-grid-execplan.md`: the 'grid' binning is now 3 layers at fixed altitudes with a (5/3)-moment
+reprojection (no 8-node features, boundaries or per-sample heights), and the learned mixing / offset are removed.
+
 Started 2026-10-13. Follows `agents/PLANS.md`. Continues the Cn2 follow-up of `factor-calibrator-execplan.md`: the factor calibrator
 (15.5 % median peak error) is limited by the telemetry -> parameter mapping, and the Cn2 profile was the next lever.
 

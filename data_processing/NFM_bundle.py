@@ -14,7 +14,7 @@ loaders (ProcessMUSEcube, InitNFMConfig, reduce_dataframe) find what they need b
        stages 1-2, install_calibrator copies it into the distributed bundle
 
 The writable working copies of the dataset building stay in the STD folder (STD_RESOURCES_FOLDER): the archive tables the datalab fetches are
-appended to and the Cn2 grid of store_Cn2_grid / analyze_Cn2_binning.py.
+appended to and the Cn2 grid of store_Cn2_grid.
 """
 import logging
 import numpy as np

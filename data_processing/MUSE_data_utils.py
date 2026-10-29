@@ -31,8 +31,8 @@ from data_processing.NFM_bundle import load_median_Cn2_profile, load_bundle_Cn2_
 # Reduction of the AOF Cn2 profile to the PSF-model layers and the calibrator features, used by default by InitNFMConfig (configs) and
 # reduce_dataframe (telemetry features); both must agree with the dataset cache the calibrator was trained on:
 #   'kmeans': weighted K-means into 3 layers with free altitudes (features Cn2_alt/frac_binned_2/3), the mechanism of the current datasets
-#   'grid':   repaired profile on the fixed altitude grid, fixed altitude bins (features Cn2_grid_1..8 + Cn2_layer_alt_2/3), see
-#             data_processing.Cn2_profile and agents/execplans/cn2-profile-input-execplan.md (tested 2026-10-13, no gain for the calibrator)
+#   'grid':   repaired profile reprojected onto 3 layers at fixed altitudes, the same for all samples (features Cn2_grid_1..3), see
+#             data_processing.Cn2_profile and agents/execplans/cn2-fixed-grid-execplan.md
 CN2_BINNING = 'kmeans'
 from tools.plotting import wavelength_to_RGB
 from tiptorch.managers.config_manager import ConfigManager
@@ -2259,7 +2259,7 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, co
     config_dict = config_manager.Load(DATA_FOLDER / 'parameter_files/muse_ltao.ini')
 
     if Cn2_binning == 'grid':
-        # >>>>>>> Cn2 profile: the 8 AOF layers repaired and projected onto the fixed altitude grid, then binned into the model layers
+        # >>>>>>> Cn2 profile: the 8 AOF layers repaired and reprojected onto the fixed layers of the grid, the same altitudes for all samples
         # (data_processing.Cn2_profile.Cn2Grid). The same reduction gives the Cn2_grid_* telemetry features of the calibrator, so the
         # weights it predicts refer to the layers of this config. Samples without a usable profile get the median grid profile.
         Cn2_grid = load_Cn2_grid()
@@ -2275,17 +2275,14 @@ def InitNFMConfig(sample, PSF_data=None, wvl_ids=None, device=default_device, co
         Cn2_alt_rep, Cn2_frac_rep, n_repaired, valid = Cn2_grid.repair(Cn2_alt[None, :], Cn2_frac[None, :])
         if not valid[0] and np.isfinite(Cn2_frac).any():
             print("Warning: Cn2 profile data is invalid. Using the median profile.")
-        Cn2_grid_fracs = Cn2_grid.to_grid(Cn2_alt_rep, Cn2_frac_rep)
-        Cn2_frac_binned, Cn2_alt_binned = (x[0] for x in Cn2_grid.to_layers(Cn2_grid_fracs)) # [km]
+        Cn2_frac_binned = Cn2_grid.to_grid(Cn2_alt_rep, Cn2_frac_rep)[0] if valid[0] else Cn2_grid.median_fracs.copy()
+        Cn2_alt_binned  = Cn2_grid.nodes.copy() # [km]
 
         if plotting:
             if valid[0]:
                 plt.plot(Cn2_frac_rep[0], Cn2_alt_rep[0], 'o-', label='AOF Cn2 profile (repaired)')
-                plt.plot(Cn2_grid_fracs[0], Cn2_grid.nodes, 's:', alpha=0.7, label='On the fixed grid')
             plt.plot(Cn2_grid.median_fracs, Cn2_grid.nodes, '--', alpha=0.5, label='Median grid profile')
             plt.plot(Cn2_frac_binned, Cn2_alt_binned, 'o--', label='Model layers')
-            for b in Cn2_grid.boundaries:
-                plt.axhline(b, color='gray', alpha=0.3)
             plt.xlim(-0.01, 1)
             plt.ylim(0, 30)
             plt.xlabel('Cn2 Fraction')
@@ -2536,18 +2533,16 @@ def raw_Cn2_profiles(df: pd.DataFrame):
 
 def compute_Cn2_grid_features(df: pd.DataFrame, grid: Cn2Grid | None = None) -> pd.DataFrame:
     """
-    Cn2 profile features of the calibrator: the repaired profile projected onto the fixed altitude grid (Cn2_grid_1..N, fractions
-    summing to 1) and the effective altitudes of the upper model layers (Cn2_layer_alt_2.., [km]). Missing profiles stay NaN and
-    are imputed with the rest of the telemetry. The grid of the distributed bundle unless given (e.g. the one of another bundle).
+    Cn2 profile features of the calibrator: the weights of the repaired profile reprojected onto the fixed layers of the grid
+    (Cn2_grid_1..N, summing to 1, the Cn2 profile of the configs). Missing profiles stay NaN and are imputed with the rest of the
+    telemetry. The grid of the distributed bundle unless given (e.g. the one of another bundle).
     """
     grid = grid or load_Cn2_grid()
-    grid_fracs, _, heights, n_repaired, valid = grid.process(*raw_Cn2_profiles(df))
+    weights, _, _ = grid.process(*raw_Cn2_profiles(df))
 
     df = df.copy()
     for k, name in enumerate(grid.feature_names):
-        df[name] = grid_fracs[:, k]
-    for k in range(1, grid.N_layers):
-        df[f'Cn2_layer_alt_{k+1}'] = np.where(valid, heights[:, k], np.nan)
+        df[name] = weights[:, k]
     return df
 
 
@@ -2653,13 +2648,12 @@ def compute_anisoplanatic_angle(df: pd.DataFrame, repaired: bool = False, grid: 
 def reduce_dataframe(df, Cn2_binning=None, Cn2_grid=None, median_Cn2_profile=None):
     """
     Telemetry features of the calibrator from the full MUSE telemetry dataframe. Cn2_binning selects the Cn2 profile features
-    (CN2_BINNING by default): 'kmeans' (3-layer K-means features Cn2_alt/frac_binned_2/3), 'grid' (fractions at the fixed altitude
-    grid + model-layer altitudes, see compute_Cn2_grid_features) or 'both'. Cn2_grid / median_Cn2_profile: those of a calibrator
-    bundle, the ones of the distributed bundle by default.
+    (CN2_BINNING by default): 'kmeans' (3-layer K-means features Cn2_alt/frac_binned_2/3) or 'grid' (weights of the fixed layers,
+    see compute_Cn2_grid_features). Cn2_grid / median_Cn2_profile: those of a calibrator bundle, the ones of the distributed bundle by default.
     """
     Cn2_binning = Cn2_binning or CN2_BINNING
-    if Cn2_binning not in ('grid', 'kmeans', 'both'):
-        raise ValueError(f"Unknown Cn2_binning '{Cn2_binning}', expected 'grid', 'kmeans' or 'both'")
+    if Cn2_binning not in ('grid', 'kmeans'):
+        raise ValueError(f"Unknown Cn2_binning '{Cn2_binning}', expected 'grid' or 'kmeans'")
     df_ = df.copy()
     
     df_['LGS_R0']         = df_[[f'LGS{i}_R0'         for i in range(1,5)]].median(axis=1, skipna=True)
@@ -2686,14 +2680,14 @@ def reduce_dataframe(df, Cn2_binning=None, Cn2_grid=None, median_Cn2_profile=Non
     # Compute turbulence statistics
     df_ = compute_mass_turb_statistics(df_)
     # Compute Cn² fractions below a specified altitude in [m] (from the repaired profile in grid mode)
-    df_ = compute_fraction_below_layer(df_, h_GL=2000, repaired=(Cn2_binning != 'kmeans'), grid=Cn2_grid)
+    df_ = compute_fraction_below_layer(df_, h_GL=2000, repaired=(Cn2_binning == 'grid'), grid=Cn2_grid)
     # Cn2 profile features
-    if Cn2_binning in ('grid', 'both'):
+    if Cn2_binning == 'grid':
         df_ = compute_Cn2_grid_features(df_, grid=Cn2_grid)
-    if Cn2_binning in ('kmeans', 'both'):
+    else:
         df_ = recompute_simplified_Cn2(df_, n_layers=3, median_Cn2_profile=median_Cn2_profile)
     # Compute anisoplanatic angle
-    df_ = compute_anisoplanatic_angle(df_, repaired=(Cn2_binning != 'kmeans'), grid=Cn2_grid)
+    df_ = compute_anisoplanatic_angle(df_, repaired=(Cn2_binning == 'grid'), grid=Cn2_grid)
 
 
     entries_to_drop = [

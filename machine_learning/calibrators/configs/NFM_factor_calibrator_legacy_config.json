@@ -41,9 +41,7 @@
     "optimized_shared_keys": [ "F_ctrl", "LO_coefs", "wing_frac_ctrl" ],
     "fitted_keys": [ "dx_ctrl", "dy_ctrl" ],
     "fitted_shared_keys": [ "J_angle", "wing_width", "wing_width_t", "wing_angle" ],
-    "Cn2_mix": "fixed",
-    "Cn2_targets": "fits",
-    "Cn2_offset": false
+    "Cn2_targets": "fits"
   },
   "trainer": {
     "lr": 0.01,

@@ -251,8 +251,8 @@ else:
 
 
 (median_Cn2_alts, median_Cn2_fracs), _, _ = AOF_Cn2_profiles_stats(muse_df) # median AOF Cn2 profile
-# Fixed Cn2 grid (nodes = median AOF layer altitudes, model-layer boundaries chosen with machine_learning/analysis/analyze_Cn2_binning.py)
-Cn2_grid = store_Cn2_grid(muse_df, boundaries_km=None) # None: keep the boundaries of the stored grid
+# Fixed Cn2 grid of the 'grid' binning: 3 layers at the dataset medians of the per-sample K-means altitudes, the same for all samples
+Cn2_grid = store_Cn2_grid(muse_df, median_Cn2_profile=(median_Cn2_alts, median_Cn2_fracs))
 
 #%% ================================= Calibrator bundle, stage 1: telemetry resources ==================================
 from data_processing.MUSE_data_utils import CN2_BINNING

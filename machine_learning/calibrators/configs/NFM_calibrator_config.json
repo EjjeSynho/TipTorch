@@ -60,9 +60,7 @@
       "wing_width_t",
       "wing_angle"
     ],
-    "Cn2_mix": "fixed",
-    "Cn2_targets": "fits",
-    "Cn2_offset": false
+    "Cn2_targets": "fits"
   },
   "trainer": {
     "lr": 0.01,

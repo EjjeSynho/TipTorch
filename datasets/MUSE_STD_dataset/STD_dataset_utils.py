@@ -767,32 +767,34 @@ def AOF_Cn2_profiles_stats(STD_stars_df):
     return (median_Cn2_alts, median_Cn2_fracs), (p16_Cn2_alts, p84_Cn2_fracs), (p16_Cn2_fracs, p84_Cn2_alts)
 
 
-DEFAULT_CN2_BOUNDARIES_KM = (4.0, 13.0)
-
-def store_Cn2_grid(STD_stars_df, boundaries_km=None, pin_ground_layer=None, store=True, verbose=True):
+def store_Cn2_grid(STD_stars_df, median_Cn2_profile, nodes_km=None, N_layers=3, pin_ground_layer=None, store=True, verbose=True):
     """
-    Fixed Cn2 grid of the dataset (data_processing.Cn2_profile.Cn2Grid): nodes = median AOF layer altitudes, model-layer boundaries
-    in [km], median grid profile. The working copy is stored in the STD folder (NFM_bundle.STD_RESOURCES_FOLDER / AOF_Cn2_grid.json); the
-    calibrator bundle (with the 'grid' binning), the dataset cache and the trained bundles carry a copy. The boundaries are chosen with
-    machine_learning/analysis/analyze_Cn2_binning.py; None keeps the ones of the stored grid (DEFAULT_CN2_BOUNDARIES_KM if there is none yet).
+    Fixed Cn2 grid of the dataset (data_processing.Cn2_profile.Cn2Grid): the altitudes of the N_layers PSF-model layers in [km], the same
+    for all samples, and the median profile reprojected onto them. The altitudes are nodes_km if given, otherwise the dataset medians of
+    the per-sample K-means altitudes (the 'kmeans' binning, with median_Cn2_profile = (median_Cn2_alts, median_Cn2_fracs) of
+    AOF_Cn2_profiles_stats as its fallback). The working copy is stored in the STD folder (NFM_bundle.STD_RESOURCES_FOLDER / AOF_Cn2_grid.json);
+    the calibrator bundle (with the 'grid' binning), the dataset cache and the trained bundles carry a copy. pin_ground_layer None keeps
+    the one of the stored grid (True if there is none yet).
     """
-    from data_processing.Cn2_profile import Cn2Grid, fit_Cn2_grid, ALT_COLS, FRAC_COLS
+    import json
+    from data_processing.Cn2_profile import fit_Cn2_grid, ALT_COLS, FRAC_COLS
     from data_processing.NFM_bundle import STD_RESOURCES_FOLDER, CN2_GRID_FILE
 
     grid_path = STD_RESOURCES_FOLDER / CN2_GRID_FILE
-    stored = Cn2Grid.load(grid_path) if grid_path.exists() else None
-    
-    if boundaries_km is None:
-        boundaries_km = stored.boundaries if stored is not None else DEFAULT_CN2_BOUNDARIES_KM
-    
-    if pin_ground_layer is None:
-        pin_ground_layer = stored.pin_ground_layer if stored is not None else True
-   
-    grid = fit_Cn2_grid(STD_stars_df[ALT_COLS].to_numpy(float), STD_stars_df[FRAC_COLS].to_numpy(float), boundaries_km, pin_ground_layer=pin_ground_layer)
-    
+
+    if pin_ground_layer is None: # read from the file directly: the stored grid may be in the legacy format
+        pin_ground_layer = json.loads(grid_path.read_text()).get('pin_ground_layer', True) if grid_path.exists() else True
+
+    if nodes_km is None:
+        median_alts, median_fracs = median_Cn2_profile
+        kmeans = recompute_simplified_Cn2(STD_stars_df[ALT_COLS + FRAC_COLS].copy(), n_layers=N_layers,
+                                          median_Cn2_profile={'median_Cn2_alts': median_alts, 'median_Cn2_fracs': median_fracs})
+        nodes_km = [0.0] + [float(np.nanmedian(kmeans[f'Cn2_alt_binned_{k}'])) for k in range(2, N_layers+1)]
+
+    grid = fit_Cn2_grid(STD_stars_df[ALT_COLS].to_numpy(float), STD_stars_df[FRAC_COLS].to_numpy(float), nodes_km, pin_ground_layer=pin_ground_layer)
+
     if verbose:
-        w, h = grid.default_layers()
-        print(f'{grid} | median grid profile {np.round(grid.median_fracs, 3).tolist()} | median layers: weights {np.round(w, 3).tolist()}, heights {np.round(h, 2).tolist()} km')
+        print(f'{grid} | median profile {np.round(grid.median_fracs, 3).tolist()} | ground layer {"pinned" if grid.pin_ground_layer else "split"}')
     
     if store:
         grid_path.parent.mkdir(parents=True, exist_ok=True)

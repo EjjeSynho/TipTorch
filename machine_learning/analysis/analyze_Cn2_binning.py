@@ -2,17 +2,16 @@
 """
 Cn2 binning analysis for the MUSE NFM PSF model: how well 3-layer reductions of the AOF Cn2 profile reproduce the PSF computed with
 the full (repaired) 8-layer profile, for the fitted parameters of validation samples with a recorded profile. Compared reductions:
-the current weighted K-means with free altitudes (the configs of the dataset cache), the profile projected on the fixed 8-node grid
-(projection error alone), the median profile (no information) and fixed altitude boundaries between the grid nodes, with per-sample
-(5/3)-moment layer heights or dataset-level heights. The best boundaries go into the working copy of the grid in the STD folder
-(NFM_bundle.STD_RESOURCES_FOLDER / AOF_Cn2_grid.json), from which create_STD_dataset.py packs it into the calibrator bundle.
+the weighted K-means with free per-sample altitudes ('kmeans' binning), the fixed 3-layer grid ('grid' binning: the dataset medians of
+the K-means altitudes, the same for all samples, with the (5/3)-moment reprojection of Cn2Grid), the same grid with the linear
+(mean-altitude) reprojection and with the other projection of the AOF ground layer, and the median profile (no information).
+The grid is fitted from muse_df as create_STD_dataset.py does (store_Cn2_grid), without storing it.
 
-    python machine_learning/analysis/analyze_Cn2_binning.py [--device cuda:1] [--n-samples 64] [--batch 8] [--store]
+    python machine_learning/analysis/analyze_Cn2_binning.py [--device cuda:1] [--n-samples 64] [--batch 8]
 
 Outputs: data/analysis/NFM_calibrator/Cn2_binning.csv / .png. Needs the dataset cache and muse_df.pickle; ~5 min on a GPU.
 """
 import sys
-import json
 import pickle
 import argparse
 import numpy as np
@@ -30,15 +29,15 @@ from tiptorch.tools.utils import BalancedPSFLoss
 from tiptorch.PSF_models.NFM_wrapper import PSFModelNFM
 from tiptorch.managers.config_manager import MultipleTargetsInDifferentObservations
 from calibrators.NFM_calibrator import NFMDataset, release_gpu_memory, load_STD_dataset # first: adds the repo root to sys.path
-from data_processing.Cn2_profile import Cn2Grid
-from data_processing.MUSE_data_utils import raw_Cn2_profiles
-from data_processing.NFM_bundle import STD_RESOURCES_FOLDER, CN2_GRID_FILE
+from data_processing.Cn2_profile import Cn2Grid, ALT_COLS, FRAC_COLS
+from data_processing.MUSE_data_utils import raw_Cn2_profiles, recompute_simplified_Cn2
+sys.path.insert(0, str(next(p for p in (_here, *_here.parents) if (p / 'datasets' / 'MUSE_STD_dataset').is_dir()) / 'datasets' / 'MUSE_STD_dataset'))
+from STD_dataset_utils import store_Cn2_grid, AOF_Cn2_profiles_stats
 
 _parser = argparse.ArgumentParser(description="Cn2 binning analysis")
 _parser.add_argument('--device',    type=str, default=None)
 _parser.add_argument('--n-samples', type=int, default=64)
 _parser.add_argument('--batch',     type=int, default=8)
-_parser.add_argument('--store',     action='store_true', help='store the best boundaries in AOF_Cn2_grid.json')
 _parser.add_argument('--derotated', action='store_true', help='use the derotated dataset cache (default: raw frames, as the calibrator configs)')
 try:
     _args = _parser.parse_args()
@@ -52,17 +51,19 @@ OUT_FOLDER.mkdir(parents=True, exist_ok=True)
 
 MODEL_CFG = dict(LO_NCPAs=True, chrom_defocus=False, use_Moffat=False, retain_PSDs=False, N_spline_nodes=5, Z_mode_max=9)
 LOSS_CFG  = dict(radial_power=2.0, r_max=40.0, asinh_k=3.0, huber_delta=0.1, scale=3.0, match_background=False)
-CANDIDATE_BOUNDARIES = [(1.0, 13.0), (4.0, 9.0), (4.0, 13.0), (4.0, 16.5), (8.0, 16.5)] # between the grid nodes (2.1 / 6.6 / 11.3 / 14.9 / 18.6 km)
 
 #%%
 dataset = load_STD_dataset(_args.derotated)
 with open(STD_FOLDER / 'muse_df.pickle', 'rb') as f:
     muse_df = pickle.load(f)
+    muse_df = pickle.load(f)
 
-grid = Cn2Grid.load(STD_RESOURCES_FOLDER / CN2_GRID_FILE) # the working copy (store_Cn2_grid), also with the K-means binning
+(median_alts, median_fracs), _, _ = AOF_Cn2_profiles_stats(muse_df)
+median_profile = {'median_Cn2_alts': median_alts, 'median_Cn2_fracs': median_fracs}
+grid = store_Cn2_grid(muse_df, median_Cn2_profile=(median_alts, median_fracs), store=False) # as create_STD_dataset.py, not stored
+
 alts_raw, fracs_raw = raw_Cn2_profiles(muse_df.loc[dataset.sample_ids])
 alts, fracs, n_repaired, valid = grid.repair(alts_raw, fracs_raw)
-grid_fracs = grid.to_grid(alts, fracs)
 
 val_idx = np.asarray(dataset.val_idx if dataset.val_idx is not None else np.arange(len(dataset)), dtype=int)
 val_idx = val_idx[valid[val_idx]]
@@ -71,37 +72,39 @@ samples = np.sort(rng.choice(val_idx, size=min(_args.n_samples, len(val_idx)), r
 print(f'{grid} | {valid.sum()} / {len(dataset)} samples with a profile, {(n_repaired > 0).sum()} repaired | {len(samples)} validation samples analysed')
 
 #%%
-# Layer schemes: name -> (heights [N, L] in km, weights [N, L]) for the analysed samples
-def bins_scheme(boundaries, fixed_heights=False):
-    g = Cn2Grid(grid.nodes, boundaries, median_fracs=grid.median_fracs, layer_altitudes_km=grid.layer_altitudes)
-    w, h = g.to_layers(grid_fracs[samples])
-    if fixed_heights:
-        h = np.tile(g._median_heights, (len(samples), 1))
-    return h, w
+def linear_split(grid, alts, fracs):
+    """The reprojection of Cn2Grid.to_grid with the linear split (mass and mean altitude preserved) instead of the (5/3)-moment one."""
+    a = alts.copy()
+    if grid.pin_ground_layer:
+        a[:, 0] = 0.0
+    h = np.clip(a, grid.nodes[0], grid.nodes[-1])
+    k = np.clip(np.searchsorted(grid.nodes, h, side='right') - 1, 0, grid.N_layers - 2)
+    t = (h - grid.nodes[k]) / (grid.nodes[k+1] - grid.nodes[k])
+    w = np.zeros((len(a), grid.N_layers))
+    rows = np.repeat(np.arange(len(a)), a.shape[1])
+    np.add.at(w, (rows, k.ravel()),   ((1.0 - t) * fracs).ravel())
+    np.add.at(w, (rows, k.ravel()+1), (t * fracs).ravel())
+    return w
 
-kmeans_h = np.array([np.asarray(dataset.configs[i]['atmosphere']['Cn2Heights'], dtype=float).ravel() / 1e3 for i in samples])
-kmeans_w = np.array([np.asarray(dataset.configs[i]['atmosphere']['Cn2Weights'], dtype=float).ravel() for i in samples])
-w_med, h_med = grid.default_layers()
+
+# Layer schemes: name -> (heights [N, L] in km, weights [N, L]) for the analysed samples
+fixed_h = lambda: np.tile(grid.nodes, (len(samples), 1))
+km = recompute_simplified_Cn2(muse_df.loc[dataset.sample_ids[samples], ALT_COLS + FRAC_COLS].copy(), n_layers=3, median_Cn2_profile=median_profile)
+f2, f3 = km['Cn2_frac_binned_2'].to_numpy(float), km['Cn2_frac_binned_3'].to_numpy(float)
+kmeans_h = np.column_stack([np.zeros(len(samples)), km['Cn2_alt_binned_2'].to_numpy(float), km['Cn2_alt_binned_3'].to_numpy(float)])
+kmeans_w = np.column_stack([1.0 - f2 - f3, f2, f3])
+
+_alt_grid = Cn2Grid(grid.nodes, grid.layer_altitudes, median_fracs=grid.median_fracs, pin_ground_layer=not grid.pin_ground_layer)
+_alt_name = 'GL pinned' if _alt_grid.pin_ground_layer else 'GL split'
 
 schemes = {
-    'reference (8 AOF layers)': (alts[samples], fracs[samples]),
-    'grid (8 fixed nodes)':     (np.tile(grid.nodes, (len(samples), 1)), grid_fracs[samples]),
-    'K-means (current)':        (kmeans_h, kmeans_w),
-    'median profile':           (np.tile(h_med, (len(samples), 1)), np.tile(w_med, (len(samples), 1))),
+    'reference (8 AOF layers)':         (alts[samples], fracs[samples]),
+    'K-means (per-sample altitudes)':   (kmeans_h, kmeans_w),
+    'fixed grid':                       (fixed_h(), grid.to_grid(alts[samples], fracs[samples])),
+    'fixed grid, linear split':         (fixed_h(), linear_split(grid, alts[samples], fracs[samples])),
+    f'fixed grid, {_alt_name}':         (fixed_h(), _alt_grid.to_grid(alts[samples], fracs[samples])),
+    'median profile':                   (fixed_h(), np.tile(grid.median_fracs, (len(samples), 1))),
 }
-for b in CANDIDATE_BOUNDARIES:
-    schemes[f'bins {b[0]:g}-{b[1]:g} km']         = bins_scheme(b)
-    schemes[f'bins {b[0]:g}-{b[1]:g} km, fixed h'] = bins_scheme(b, fixed_heights=True)
-
-# The other projection of the AOF ground layer onto the grid (pinned to the 0 km node vs. split linearly with the 2 km node)
-_alt_grid = Cn2Grid(grid.nodes, grid.boundaries, median_fracs=grid.median_fracs, layer_altitudes_km=grid.layer_altitudes, pin_ground_layer=not grid.pin_ground_layer)
-_alt_fracs = _alt_grid.to_grid(alts, fracs)
-_alt_name  = 'GL pinned' if _alt_grid.pin_ground_layer else 'GL split'
-schemes[f'grid (8 fixed nodes, {_alt_name})'] = (np.tile(grid.nodes, (len(samples), 1)), _alt_fracs[samples])
-for b in CANDIDATE_BOUNDARIES:
-    _g = Cn2Grid(grid.nodes, b, median_fracs=grid.median_fracs, layer_altitudes_km=grid.layer_altitudes, pin_ground_layer=_alt_grid.pin_ground_layer)
-    _w, _h = _g.to_layers(_alt_fracs[samples])
-    schemes[f'bins {b[0]:g}-{b[1]:g} km, {_alt_name}'] = (_h, _w)
 
 #%%
 def fitted_x_dict(ids):
@@ -208,25 +211,16 @@ table.to_csv(OUT_FOLDER / 'Cn2_binning.csv')
 print('\n' + table.round(4).to_string())
 
 #%%
-# Best fixed boundaries (per-sample heights) by the median balanced loss
-bins_rows = table[[s.startswith('bins') and not s.endswith('fixed h') for s in table.index]]
-best_name = bins_rows['balanced_loss_median'].idxmin()
-best_b    = CANDIDATE_BOUNDARIES[[f'bins {b[0]:g}-{b[1]:g} km' in best_name for b in CANDIDATE_BOUNDARIES].index(True)]
-best_pin  = (_alt_grid.pin_ground_layer if best_name.endswith(_alt_name) else grid.pin_ground_layer)
-print(f'\nBest boundaries: {best_name} (K-means: {table.loc["K-means (current)", "balanced_loss_median"]:.5f}, '
-      f'grid: {table.loc["grid (8 fixed nodes)", "balanced_loss_median"]:.5f}, median profile: {table.loc["median profile", "balanced_loss_median"]:.5f})')
-
-#%%
 fig, axes = plt.subplots(1, 2, figsize=(15, 6), gridspec_kw={'width_ratios': [1, 1.6]})
 ax = axes[0]
+hg, wg = schemes['fixed grid']
 for n, i in enumerate(samples[:4]):
     color = f'C{n}'
     ax.plot(fracs[i], alts[i], 'o-', color=color, alpha=0.8, label='AOF profile' if n == 0 else None)
-    ax.plot(grid_fracs[i], grid.nodes, 's:', color=color, alpha=0.6, label='fixed grid' if n == 0 else None)
-    hb, wb = schemes[best_name]
-    ax.plot(wb[n], hb[n], 'D--', color=color, alpha=0.9, markersize=8, label=f'{best_name}' if n == 0 else None)
-for b in best_b:
-    ax.axhline(b, color='gray', alpha=0.4)
+    ax.plot(kmeans_w[n], kmeans_h[n], 's:', color=color, alpha=0.6, label='K-means' if n == 0 else None)
+    ax.plot(wg[n], hg[n], 'D--', color=color, alpha=0.9, markersize=8, label='fixed grid' if n == 0 else None)
+for h in grid.nodes:
+    ax.axhline(h, color='gray', alpha=0.4)
 ax.set_xlabel('Cn2 fraction'); ax.set_ylabel('altitude [km]'); ax.set_ylim(-0.5, 30); ax.legend(); ax.set_title('Profiles of 4 samples')
 
 ax = axes[1]
@@ -241,10 +235,3 @@ ax.set_title(f'3-layer reductions vs the full profile ({len(samples)} validation
 plt.tight_layout()
 plt.savefig(OUT_FOLDER / 'Cn2_binning.png', dpi=130)
 print(f'Saved -> {OUT_FOLDER / "Cn2_binning.csv"} / .png')
-
-#%%
-if _args.store:
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'datasets' / 'MUSE_STD_dataset'))
-    from STD_dataset_utils import store_Cn2_grid
-    store_Cn2_grid(muse_df, boundaries_km=best_b, pin_ground_layer=best_pin)
-    print(f'Stored the grid with the boundaries {best_b} km, ground layer {"pinned" if best_pin else "split"}')
