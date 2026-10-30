@@ -102,6 +102,7 @@ def telemetry_base_params(telemetry_physical, features: list, L0_const: float | 
     }
     if L0_const is not None:
         base['L0'] = torch.full((len(T),), float(L0_const), dtype=T.dtype, device=T.device)
+    
     return base
 
 
@@ -146,8 +147,10 @@ class KcGroupBatchSampler(torch.utils.data.Sampler):
             if self.shuffle:
                 pos = pos[torch.randperm(len(pos)).numpy()]
             batches += [pos[i:i + self.batch_size].tolist() for i in range(0, len(pos), self.batch_size)]
+            
         if self.shuffle:
             batches = [batches[i] for i in torch.randperm(len(batches)).tolist()]
+            
         return iter(batches)
 
     def __len__(self):
@@ -196,7 +199,8 @@ class NFMDataset(Dataset):
     def __getitem__(self, idx):
         PSFs = torch.from_numpy(self.PSF_cubes[idx].astype(np.float32)).permute(2, 0, 1)
         tel  = torch.from_numpy(np.array(list(self.telemetry[idx].values()), dtype=np.float32))
-        fit  = {k: torch.tensor(v, dtype=torch.float32) for k, v in self.fitted_vals[idx].items()}
+        fit  = { k: torch.tensor(v, dtype=torch.float32) for k, v in self.fitted_vals[idx].items() }
+        
         return PSFs, tel, fit, self.configs[idx], idx
 
     @staticmethod
@@ -210,6 +214,7 @@ class NFMDataset(Dataset):
         batch_config = MultipleTargetsInDifferentObservations(configs, device=device)
         batch_config['PathPupil'] = str(DATA_FOLDER / 'calibrations/VLT_CALIBRATION/VLT_PUPIL/ut4pupil320.fits')
         batch_config['DM']['NumberReconstructedLayers'] = torch.tensor(batch_config['atmosphere']['Cn2Heights'].shape[-1], device=device)
+        
         return PSF_cubes, telemetry_vecs, fitted_vals, batch_config, idxs
 
 
@@ -224,6 +229,7 @@ def dataset_cache_path() -> Path:
 def load_STD_dataset(derotated: bool | None = None) -> NFMDataset:
     """ Loads the STD-star dataset cache; with `derotated` given, checks that the stored cache is of that regime """
     dataset = NFMDataset(dataset_cache_path())
+    
     if derotated is not None and dataset.derotated != bool(derotated):
         raise ValueError(f"The dataset cache {dataset_cache_path().name} is {'derotated' if dataset.derotated else 'raw'} "
                          f"but derotated_PSFs = {derotated} was requested; rebuild it with create_STD_dataset.py")
@@ -309,6 +315,7 @@ class NFMCalibrator:
         state = {**self._bundle_state, 'net_state_dict': self.net.state_dict(), 'telemetry_preprocessor': self.telemetry_preprocessor.state_dict()}
         if metadata:
             state['fine_tuning'] = metadata
+            
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(_to_cpu(state), path)
@@ -341,6 +348,7 @@ class NFMCalibrator:
         x = self._params_from_pred(self.net(tel), tel)
         if 'LO_coefs' in x: # the phase bump is not predicted
             x['LO_coefs'] = torch.cat([torch.zeros_like(x['LO_coefs'][:, :1]), x['LO_coefs']], dim=-1)
+            
         return x
 
 
@@ -379,6 +387,7 @@ class NFMCalibrator:
                 cur = PSF_model.inputs_manager[key]
                 v   = torch.as_tensor(val, dtype=cur.dtype, device=cur.device).reshape(1, -1)
                 x_dict[key] = (v.reshape(-1)[:1].expand(cur.shape[0]) if cur.dim() == 1 else v.expand(cur.shape[0], -1).reshape(cur.shape)).clone()
+                
         PSF_model.update_manager_params(x_dict)
         _ = PSF_model()
 
@@ -415,6 +424,7 @@ class NFMCalibrator:
         in [0, 1]) and LO_coefs (phase bump included) cropped or zero-padded to its number of modes."""
         x_dict = dict(x_dict) # shallow copy, tensors are not cloned
         n_from, n_to = self.N_spline_nodes, getattr(PSF_model, 'N_wvl_ctrl', None)
+            
         if n_from is not None and n_to is not None and n_from != n_to:
             for key, val in x_dict.items():
                 if key.endswith('_ctrl') and torch.is_tensor(val) and val.dim() == 2 and val.shape[-1] == n_from:
@@ -425,6 +435,7 @@ class NFMCalibrator:
             coefs, n_model = x_dict['LO_coefs'], PSF_model.Z_mode_max - 1 # the modes the model needs, phase bump included
             pad = torch.zeros(coefs.shape[0], max(n_model - coefs.shape[-1], 0), device=coefs.device, dtype=coefs.dtype)
             x_dict['LO_coefs'] = torch.hstack((coefs[:, :n_model], pad))
+            
         return x_dict
 
 
@@ -600,7 +611,8 @@ class NFMCalibratorTrainer:
     calibrator_type = 'direct'
 
     def __init__(self, PSF_model, calibrator, dataset, outputs_transformer, device, *, batch_size=16, lr=1e-2, lambda_step=2, fitted_keys=(),
-                 fitted_shared_keys=(), weights_dir=None, train_idx=None, val_idx=None, loss_cfg: dict | None = None):
+                 fitted_shared_keys=(), weights_dir=None, train_idx=None, val_idx=None, loss_cfg: dict | None = None)
+        
         self.PSF_model           = PSF_model
         self.calibrator          = calibrator
         self.dataset             = dataset
@@ -623,16 +635,20 @@ class NFMCalibratorTrainer:
         loss_cfg = dict(loss_cfg or {})
         if removed := {k: v for k in ('fit_reg_weight', 'shrink_weight') if (v := loss_cfg.pop(k, 0.0))}: # still in the configs of older runs
             warnings.warn(f'The parameter-space regularization was removed on 2026-10-30, {removed} ignored')
+        
         loss_type               = loss_cfg.pop('type', 'legacy')
         self.LO_sign_penalty    = loss_cfg.pop('LO_sign_penalty', True)
         self.legacy_loss_weight = loss_cfg.pop('legacy_weight', 0.0)
+        
         if loss_type not in ('legacy', 'balanced'):
             raise ValueError(f"Unknown loss type '{loss_type}', expected 'legacy' or 'balanced'")
+        
         self.balanced_loss = BalancedPSFLoss(self.H, self.W, device, **loss_cfg) if loss_type == 'balanced' else None
 
         # Train / val split (by default the one of the dataset cache, grouped by acquisition time) and loaders
         if train_idx is None or val_idx is None:
             train_idx, val_idx = dataset.train_idx, dataset.val_idx
+        
         self.train_idx, self.val_idx = np.asarray(train_idx, dtype=int), np.asarray(val_idx, dtype=int)
         self.train_loader = self._make_loader(self.train_idx, shuffle=True)
         self.val_loader   = self._make_loader(self.val_idx,   shuffle=False)
@@ -643,6 +659,7 @@ class NFMCalibratorTrainer:
             self.lambda_id_sets = [list(range(dataset.C))]
         else:
             last, self.lambda_id_sets = dataset.C - 1, []
+            
             for offset in range(lambda_step):
                 ids = list(range(offset, last + 1, lambda_step))
                 if ids[0] > lambda_step // 2:         ids.insert(0, 0)
@@ -672,6 +689,7 @@ class NFMCalibratorTrainer:
         groups = np.asarray(self.dataset.kc_group)
         if len(np.unique(groups)) == 1:
             return 'k_c groups: none (single k_c)'
+        
         fraction = np.asarray(self.dataset.kc_fraction)
         return 'k_c groups (train+val): ' + ', '.join(f"{g}: {np.sum(groups[self.train_idx] == g)}+{np.sum(groups[self.val_idx] == g)} @ k_c "
                                                       f"{100 * fraction[groups == g].mean():.1f}%" for g in np.unique(groups))
@@ -784,19 +802,23 @@ class NFMCalibratorTrainer:
             if key in x_dict:
                 val = x_dict[key]
                 y[:, sl] = self.outputs_transformer.transforms[key](val.unsqueeze(-1) if val.dim() == 1 else val)
+                
         return y
 
 
     def _calibrator_friendly_fit_dict(self, fitted_vals):
         """The fits in the layout of the calibrator outputs, in the order of outputs_transformer.slices: LO_coefs without the phase bump (not
         predicted), the Cn2 weights with the ground layer (the dataset stores the upper layers only)."""
-        x = {k: fitted_vals[k] for k in self.outputs_transformer.slices if k in fitted_vals}
+        x = { k: fitted_vals[k] for k in self.outputs_transformer.slices if k in fitted_vals }
+        
         if 'LO_coefs' in x:
             x['LO_coefs'] = x['LO_coefs'][:, 1:]
+            
         if 'Cn2_weights' in x:
             # Clamped at 1e-3: log(1e-6) targets of the inverse-softmax transform are extreme outliers for a negligible weight
             cn2 = x['Cn2_weights'].clamp(min=1e-3)
             x['Cn2_weights'] = torch.hstack(((1.0 - cn2.sum(-1, keepdim=True)).clamp(min=1e-3), cn2))
+            
         return x
 
 
@@ -828,11 +850,13 @@ class NFMCalibratorTrainer:
         if 'LO_coefs' in x_dict_pred:
             c  = x_dict_pred['LO_coefs'] # the modes without the phase bump: [defocus, astig., astig., coma, ...]
             LO = c.pow(2).sum(-1) * 1e-7
+            
             if self.LO_sign_penalty:
                 # Legacy sign penalties on defocus (c[:, 0]) and the first astigmatism (c[:, 2]). Note that the phase bump makes the sign of
                 # defocus identifiable, so forcing it positive biases the solution (flipping the sign of negative fitted defocus values
                 # increases the PSF loss by ~20%).
                 LO = LO + torch.clamp(-c[:, 0], min=0).pow(2) * 5e-5 + torch.clamp(-c[:, 2], min=0).pow(2) * 1e-7
+                
             loss = loss + LO
         return loss
 
@@ -842,8 +866,10 @@ class NFMCalibratorTrainer:
         per = self._loss_per_sample(PSF_data, PSF_pred, x_dict_pred)
         if return_per_sample:
             return per
+        
         if sample_weights is None:
             return per.mean()
+        
         w = sample_weights.to(dtype=per.dtype, device=per.device).view(-1)
         return (w * per).sum() / (w.sum() + 1e-12)
 
@@ -891,6 +917,7 @@ class NFMCalibratorTrainer:
         fit, tel = self._train_fit_dict()
         with torch.no_grad():
             inv_var = 1.0 / self._pretrain_target_vector(fit, tel).var(dim=0).clamp(min=1e-4)
+            
         criterion = lambda tel_b, fit_b: ((self.calibrator(tel_b) - self._pretrain_target_vector(fit_b, tel_b)).pow(2) * inv_var).mean()
 
         opt = optim.AdamW(self.calibrator.parameters(), lr=lr or self.lr, weight_decay=5e-4)
@@ -900,6 +927,7 @@ class NFMCalibratorTrainer:
         for epoch in range(num_epochs):
             self.calibrator.train()
             train_loss = 0.0
+            
             for _, tel_b, fit_b, _, _ in self.train_loader:
                 opt.zero_grad()
                 loss = criterion(tel_b, fit_b)
@@ -958,6 +986,7 @@ class NFMCalibratorTrainer:
                 PSF_pred_b   = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
                 total_loss  += self.loss_fn(PSF_data_b[:, lambda_ids], PSF_pred_b, x_dict).item() * len(idxs_b) # every sample counts equally
                 total_count += len(idxs_b)
+                
                 if return_cubes:
                     PSFs_pred[pos[:, None], lambda_ids] = PSF_pred_b.cpu()
                     PSFs_data[pos[:, None], lambda_ids] = PSF_data_b[:, lambda_ids].cpu()
@@ -1051,6 +1080,7 @@ class NFMCalibratorTrainer:
 
             if epoch % 5 == 0:
                 self.save_checkpoint(self.weights_dir / f'checkpoint_epoch_{epoch}.pth', epoch, avg_train, val_loss)
+                
             if patience_counter >= patience:
                 logger.info(f"Early stopping at epoch {epoch}")
                 break
@@ -1122,13 +1152,17 @@ class NFMCalibratorTrainer:
         self.calibrator.eval()
         global_ids = np.asarray(loader.dataset.indices if isinstance(loader.dataset, Subset) else range(len(loader.dataset)), dtype=int)
         losses     = {int(i): [] for i in global_ids}
+        
         for PSF_data_b, tel_b, _, config_b, idxs_b in loader:
             x_pred, x_dict = self._predict(tel_b)
+            
             for lambda_ids in self.lambda_id_sets:
                 PSF_pred_b = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
                 per = self.loss_fn(PSF_data_b[:, lambda_ids], PSF_pred_b, x_dict, return_per_sample=True)
+                
                 for i, loss in zip(idxs_b.tolist(), per.tolist()):
                     losses[i].append(loss)
+                    
         return global_ids, np.array([np.mean(losses[int(i)]) for i in global_ids], dtype=np.float32)
 
 
@@ -1141,11 +1175,13 @@ class NFMCalibratorTrainer:
         slices = self.net_slices()
         if skipped := [k for k in tuned_params if k not in slices]:
             warnings.warn(f"tune_calibrator: {skipped} are not predicted by the network, skipped")
+            
         if not (tuned_params := [k for k in tuned_params if k in slices]):
             raise ValueError(f"tune_calibrator: none of the tuned parameters is predicted by the network ({list(slices)})")
 
         ref   = deepcopy(self.calibrator).eval().requires_grad_(False)
         tuned = torch.zeros(self.N_net_outputs, dtype=torch.bool, device=self.device)
+        
         for k in tuned_params:
             tuned[slices[k]] = True
 
@@ -1155,10 +1191,12 @@ class NFMCalibratorTrainer:
 
         for epoch in range(num_epochs):
             self.calibrator.train()
+            
             for PSF_data_b, tel_b, _, config_b, idxs_b in self.train_loader:
                 opt.zero_grad()
                 with torch.no_grad():
                     x_ref = ref(tel_b)
+                    
                 if not tuned.all(): # soft fix: the untuned outputs are kept close to the frozen reference
                     (self.calibrator(tel_b)[:, ~tuned] - x_ref[:, ~tuned]).pow(2).mean().mul(100.0).backward()
 
@@ -1167,6 +1205,7 @@ class NFMCalibratorTrainer:
                     PSF_pred_b = self.run_model(x_dict, config_b, idxs_b, lambda_ids)
                     self.loss_fn(PSF_data_b[:, lambda_ids], PSF_pred_b, x_dict).backward()
                     del PSF_pred_b, x_dict
+                    
                 opt.step()
 
             val_loss = self.validate()
@@ -1278,8 +1317,10 @@ class FactorParameterization:
         """log(fit / base) of the factor entries, [B, N_outputs] (zero elsewhere)."""
         B = next(iter(base.values())).shape[0]
         r = torch.zeros(B, self.N_outputs, device=self.Y_median.device)
+        
         for k in self.factor_keys:
             r[:, self.slices[k]] = torch.log(fit_phys[k].reshape(B, -1).clamp(min=1e-4) / base[k].reshape(B, -1).clamp(min=1e-4))
+            
         return r
 
 
@@ -1287,9 +1328,11 @@ class FactorParameterization:
         """Network outputs reproducing the fits [B, N_net]: y_fit - median (predicted keys), log(fit / base) - mean log-ratio (factor keys)."""
         delta = y_fit - self.Y_median
         r     = self.log_ratios(fit_phys, base)
+        
         for k in self.factor_keys:
             sl = self.slices[k]
             delta[:, sl] = r[:, sl] - self.log_ratio_mean[sl]
+            
         return delta[:, self.pred_index]
 
 
@@ -1306,8 +1349,10 @@ class FactorParameterization:
             sl  = self.slices[k]
             val = base[k].reshape(B, -1) * torch.exp(delta[:, sl] + self.log_ratio_mean[sl])
             x[k] = flat(k, val / val.sum(dim=-1, keepdim=True) if k == 'Cn2_weights' else val)
+            
         for k in self.optimized_shared_keys:
             x[k] = flat(k, consts[k].expand(B, -1))
+            
         return x
 
 
