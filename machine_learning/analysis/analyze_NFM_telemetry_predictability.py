@@ -128,18 +128,18 @@ if not _args.skip_psf:
     lambda_nm = trainer.lambda_full.cpu().numpy().ravel() * 1e9
 
     with torch.no_grad():
-        Y_train = torch.cat([trainer._pretrain_target_vector(fit_b, device) for _, _, fit_b, _, _ in trainer.train_loader])
+        Y_train = torch.cat([trainer._pretrain_target_vector(fit_b) for _, _, fit_b, _, _ in trainer.train_loader])
         Y_med   = Y_train.median(dim=0).values
 
     def fits_with_median(group):
         def predict(tel_b, fit_b, idxs_b):
-            y = trainer._pretrain_target_vector(fit_b, device)
+            y = trainer._pretrain_target_vector(fit_b)
             for key in ([group] if group else list(outputs_transformer.slices)):
                 y[:, outputs_transformer.slices[key]] = Y_med[outputs_transformer.slices[key]]
             return outputs_transformer.unstack(y)
         return predict
 
-    runs = {'fits (oracle)': lambda tel_b, fit_b, idxs_b: outputs_transformer.unstack(trainer._pretrain_target_vector(fit_b, device))}
+    runs = {'fits (oracle)': lambda tel_b, fit_b, idxs_b: outputs_transformer.unstack(trainer._pretrain_target_vector(fit_b))}
     runs.update({f'median {key}': fits_with_median(key) for key in outputs_transformer.slices})
     runs['median all'] = fits_with_median(None)
 

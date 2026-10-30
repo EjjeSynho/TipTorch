@@ -81,9 +81,9 @@ for run in _args.runs:
     evaluate(name, lambda tel_b, fit_b, idxs_b: trainer._predict(tel_b)[1])
 
 # The per-sample fits: directly (the floor of the PSF model), and through the parameterization (direct: normalized fits, factor: the
-# corrections reproducing them; with Cn2_targets = prior the Cn2 profile is the telemetry prior instead of the fitted one)
+# corrections reproducing them)
 evaluate('fits (oracle)', lambda tel_b, fit_b, idxs_b: trainer._calibrator_friendly_fit_dict(fit_b))
-evaluate('fits via parameterization', lambda tel_b, fit_b, idxs_b: trainer._params_from_pred(trainer._pretrain_target_vector(fit_b, device, tel=tel_b), tel_b))
+evaluate('fits via parameterization', lambda tel_b, fit_b, idxs_b: trainer._params_from_pred(trainer._pretrain_target_vector(fit_b, tel=tel_b), tel_b))
 
 print('\n' + metrics_table(results))
 

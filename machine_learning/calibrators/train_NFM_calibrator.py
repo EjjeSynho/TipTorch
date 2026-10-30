@@ -50,14 +50,14 @@ from data_processing.NFM_bundle import install_calibrator
 #                             fitted_shared_keys     one value for all samples set in the PSF model, the median of the training fits, not
 #                                                    optimized (e.g. the wing shape wing_width / wing_width_t / wing_angle)
 #                             Every other input is left to the PSF model: its own values, from the config of the batch or its defaults.
-#                             Factor calibrator: Cn2_targets, the pretraining targets of the Cn2 corrections ("fits" or "prior")
-#   trainer                   learning rate, epochs / patience of the pretraining and the training, NaN recovery
+#   trainer                   learning rate, epochs / patience of the pretraining (on the standardized fits) and the training, NaN recovery
 #   loss                      PSF loss, see NFMCalibratorTrainer / BalancedPSFLoss. "balanced" (asinh-compressed, radially weighted, with the linear
 #                             MSE term mse_weight restoring the peak and the per-wavelength peak_weight term) is also the fitter's loss: keep its
 #                             parameters equal to PSF_LOSS_CFG in STD_fitter.py. r_max = 40: beyond it the model's seeing halo is systematically
 #                             25-35 % fainter than the data (ratio 0.74 at 40-60 px, 0.64 at 60-85 px) and fitting it there degrades the AO-corrected
-#                             halo and the core (analysis/analyze_halo_deficit.py, 2026-10-14). "legacy" is the linear MSE + MAE loss used before.
-#                             fit_reg_weight: parameter-space distance to the per-sample fits; shrink_weight (factor only): shrinkage to the prior
+#                             halo and the core (analysis/analyze_halo_deficit.py, 2026-10-14). "legacy" is the linear MSE + MAE loss used before,
+#                             without parameters: the BalancedPSFLoss parameters and legacy_weight (the legacy term added to it) are "balanced" only.
+#                             Both: LO_sign_penalty
 
 #   tune, kfold*, difficulty* optional fine-tuning of a few parameters and the k-fold difficulty weighting; max_train_samples: data ablation
 
@@ -194,7 +194,6 @@ else:
     trainer.pretrain(
         num_epochs  = cfg["trainer"]["pretrain_epochs"],
         patience    = cfg["trainer"]["pretrain_patience"],
-        standardize = cfg["trainer"]["pretrain_standardize"],
         save_path   = pretrain_path,
     )
 

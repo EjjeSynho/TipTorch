@@ -40,8 +40,7 @@
     "factor_keys": [ "r0", "L0", "wind_speed_single", "Cn2_weights" ],
     "optimized_shared_keys": [ "F_ctrl", "LO_coefs", "wing_frac_ctrl" ],
     "fitted_keys": [ "dx_ctrl", "dy_ctrl" ],
-    "fitted_shared_keys": [ "J_angle", "wing_width", "wing_width_t", "wing_angle" ],
-    "Cn2_targets": "fits"
+    "fitted_shared_keys": [ "J_angle", "wing_width", "wing_width_t", "wing_angle" ]
   },
   "trainer": {
     "lr": 0.01,
@@ -52,14 +51,11 @@
     "nan_recovery": true,
     "max_nan_recoveries": 10,
     "pretrain_epochs": 100,
-    "pretrain_patience": 15,
-    "pretrain_standardize": true
+    "pretrain_patience": 15
   },
   "loss": {
     "type": "legacy",
-    "LO_sign_penalty": true,
-    "fit_reg_weight": 0.0,
-    "shrink_weight": 0.0
+    "LO_sign_penalty": true
   },
   "weights_subdir": "NFM_factor_calibrator_legacy",
   "max_train_samples": null

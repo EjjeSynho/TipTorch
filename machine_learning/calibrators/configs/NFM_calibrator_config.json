@@ -59,8 +59,7 @@
       "wing_width",
       "wing_width_t",
       "wing_angle"
-    ],
-    "Cn2_targets": "fits"
+    ]
   },
   "trainer": {
     "lr": 0.01,
@@ -71,22 +70,11 @@
     "nan_recovery": true,
     "max_nan_recoveries": 10,
     "pretrain_epochs": 100,
-    "pretrain_patience": 15,
-    "pretrain_standardize": true
+    "pretrain_patience": 15
   },
   "loss": {
     "type": "legacy",
-    "radial_power": 2.0,
-    "r_max": 40.0,
-    "asinh_k": 3.0,
-    "huber_delta": 0.1,
-    "scale": 3.0,
-    "match_background": false,
-    "mse_weight": 18000000.0,
-    "peak_weight": 3.0,
-    "legacy_weight": 0.0,
-    "LO_sign_penalty": false,
-    "fit_reg_weight": 0.0
+    "LO_sign_penalty": false
   },
   "weights_subdir": "NFM_calibrator",
   "max_train_samples": null,

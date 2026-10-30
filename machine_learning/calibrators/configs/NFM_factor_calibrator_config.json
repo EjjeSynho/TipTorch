@@ -48,19 +48,18 @@
       "F_ctrl",
       "LO_coefs",
       "wing_frac_ctrl",
-      "J_aniso",
-      "J_angle"
+      "J_aniso"
     ],
     "fitted_keys": [
       "dx_ctrl",
       "dy_ctrl"
     ],
     "fitted_shared_keys": [
+      "J_angle",
       "wing_width",
       "wing_width_t",
       "wing_angle"
-    ],
-    "Cn2_targets": "fits"
+    ]
   },
   "trainer": {
     "lr": 0.01,
@@ -71,8 +70,7 @@
     "nan_recovery": true,
     "max_nan_recoveries": 10,
     "pretrain_epochs": 100,
-    "pretrain_patience": 15,
-    "pretrain_standardize": true
+    "pretrain_patience": 15
   },
   "loss": {
     "type": "balanced",
@@ -85,9 +83,7 @@
     "mse_weight": 18000000.0,
     "peak_weight": 3.0,
     "legacy_weight": 0.0,
-    "LO_sign_penalty": false,
-    "shrink_weight": 0.0,
-    "fit_reg_weight": 0.0
+    "LO_sign_penalty": false
   },
   "weights_subdir": "NFM_factor_calibrator",
   "max_train_samples": null

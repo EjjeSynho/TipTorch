@@ -46,14 +46,12 @@
   "trainer": {
     "lr": 0.01,
     "lambda_step": 1,
-    "random_state": 43,
     "num_epochs": 300,
     "patience": 25,
     "nan_recovery": true,
     "max_nan_recoveries": 10,
     "pretrain_epochs": 150,
-    "pretrain_patience": 20,
-    "pretrain_standardize": true
+    "pretrain_patience": 20
   },
   "loss": {
     "type": "balanced",

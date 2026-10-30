@@ -47,7 +47,7 @@ from datetime import datetime
 _here = Path(__file__).resolve().parent if '__file__' in dir() else Path.cwd().resolve()
 sys.path.insert(0, str(next((p for p in (_here, *_here.parents) if (p / 'calibrators').is_dir()), _here / 'machine_learning')))
 from tiptorch._config import *
-from calibrators.NFM_calibrator import NFMDataset, default_split, build_NFM_trainer, release_gpu_memory, load_STD_dataset, CONFIGS_FOLDER
+from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, release_gpu_memory, load_STD_dataset, CONFIGS_FOLDER
 
 # ── Training config ───────────────────────────────────────────────────────────
 # The training config of the calibrator, used as is (default: the direct one). Its "ablation" section sets the study; the configs
@@ -126,7 +126,7 @@ logger.info(f"Calibrator ({cfg['calibrator']['type']}): {N_features} → {N_outp
 #%% ── 3. Compute fixed train / val split ─────────────────────────────────────
 # All ablation runs share the same validation set for fair comparison.
 # It's the split stored in the dataset cache (grouped by acquisition time)
-full_train_idx, val_idx = default_split(dataset)
+full_train_idx, val_idx = np.asarray(dataset.train_idx, dtype=int), np.asarray(dataset.val_idx, dtype=int)
 logger.info(f"Fixed split: {len(full_train_idx)} train / {len(val_idx)} val")
 
 # Save the fixed split so the evaluation script can verify it
@@ -177,7 +177,6 @@ for n_samples in sample_counts:
             num_epochs  = cfg["trainer"]["pretrain_epochs"],
             patience    = cfg["trainer"]["pretrain_patience"],
             save_path   = pretrain_path,
-            standardize = cfg["trainer"]["pretrain_standardize"],
         )
         release_gpu_memory(sync=True)
         logger.info(f"  Pretrain done | post-pretrain val = {trainer.validate():.6f}")

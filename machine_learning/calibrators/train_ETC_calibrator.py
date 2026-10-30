@@ -34,7 +34,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT / 'machine_learning'))
 
 from tiptorch._config import WEIGHTS_FOLDER, default_device
-from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, fitted_shared_values, fits_median, model_flags, release_gpu_memory, load_STD_dataset
+from calibrators.NFM_calibrator import NFMDataset, build_NFM_trainer, fitted_shared_values, fitted_values, model_flags, release_gpu_memory, load_STD_dataset
 from calibrators.ETC_calibrator import ETCDataset, ETC_INPUTS, dataset_cache_path, donor_keys
 
 # The ETC calibrator config lives with the other calibrator configs in machine_learning/calibrators/configs/
@@ -66,7 +66,7 @@ def fits_median_inputs(dataset, idx, cfg):
     as build_NFM_trainer sets them (used when the direct network is not retrained) """
     out = {}
     for key in cfg['calibrator']['fitted_shared_keys']:
-        median   = fits_median(dataset, idx, key) # [n_values]
+        median   = torch.as_tensor(fitted_values(dataset, key, idx)).median(dim=0).values # [n_values]
         out[key] = median if median.numel() == 1 else median.view(1, -1)
     return out
 
@@ -78,8 +78,7 @@ def train_direct_net(dataset, cfg, weights_dir, median_heights, train_idx, val_i
                                                              train_idx=train_idx, val_idx=val_idx)
     logger.info(f'Direct network: {len(ETC_INPUTS)} ETC inputs -> {transformer.get_stacked_size()} outputs {list(transformer.slices)}')
     t = cfg['trainer']
-    trainer.pretrain(num_epochs=t['pretrain_epochs'], patience=t['pretrain_patience'], standardize=t['pretrain_standardize'],
-                     save_path=weights_dir / 'direct_net_pretrain.pth')
+    trainer.pretrain(num_epochs=t['pretrain_epochs'], patience=t['pretrain_patience'], save_path=weights_dir / 'direct_net_pretrain.pth')
     train_losses, val_losses = trainer.train(num_epochs=t['num_epochs'], patience=t['patience'], nan_recovery=t['nan_recovery'],
                                              max_nan_recoveries=t['max_nan_recoveries'], checkpoint_path=weights_dir / 'direct_net_checkpoint.pth')
 

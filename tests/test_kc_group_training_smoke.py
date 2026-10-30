@@ -80,10 +80,9 @@ check('the grids are rebuilt exactly when the k_c changes' if n_sets == 1 else '
 trainer.calibrator.train()
 for PSF_data_b, tel_b, fit_b, config_b, idxs_b in trainer._make_loader(np.flatnonzero(groups == groups.max()), shuffle=False):
     x_pred, x_dict = trainer._predict(tel_b)
-    reg = trainer._regularization(x_pred, x_dict, fit_b, tel_b)
     lambda_ids = trainer.lambda_id_sets[0]
     PSF_pred_b = trainer.run_model(x_dict, config_b, idxs_b, lambda_ids)
-    loss = trainer.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict, reg=reg)
+    loss = trainer.loss_fn(PSF_data_b[:, lambda_ids, ...], PSF_pred_b, x_dict)
     loss = loss.mean() if loss.dim() > 0 else loss
     trainer.calibrator.zero_grad(); loss.backward()
     grads_ok = all(torch.isfinite(p.grad).all().item() for p in trainer.calibrator.parameters() if p.grad is not None)
